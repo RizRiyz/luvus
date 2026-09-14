@@ -78,6 +78,20 @@ mod tests {
     }
 
     #[test]
+    fn task_start_request_contract_can_preserve_focus() {
+        let bundle = schema_bundle();
+        let params = &bundle["request"]["$defs"]["taskStartParams"];
+
+        assert_eq!(params["additionalProperties"], false);
+        assert_eq!(params["properties"]["focus"]["type"], "boolean");
+        assert!(!params["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "focus"));
+    }
+
+    #[test]
     fn schema_bundle_publishes_one_uhp_contract_with_terminal_components() {
         let bundle = schema_bundle();
         assert_eq!(bundle["protocol"]["name"], "luvus-uhp");

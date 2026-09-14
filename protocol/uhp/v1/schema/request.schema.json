@@ -218,7 +218,8 @@
         "branch": { "type": "string", "minLength": 1, "maxLength": 255 },
         "agent": { "type": "string", "minLength": 1, "maxLength": 4096 },
         "mode": { "enum": ["worktree", "workspace"] },
-        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 }
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "focus": { "type": "boolean" }
       },
       "allOf": [
         { "if": { "properties": { "mode": { "const": "workspace" } }, "required": ["mode"] },

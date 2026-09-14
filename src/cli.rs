@@ -281,8 +281,8 @@ orchestration (multiple agents on one project, docs/22):
   task claim <id>            claim a task for this pane (deps must be done)
   task next [--start] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              claim the next ready task (--start creates a worker)
-  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
-                             start a worker (worktree default; workspace shares checkout)
+  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>] [--no-focus]
+                             start a worker (worktree default; --no-focus preserves the view)
   task heartbeat <id> --context-used <0..1>
                              report model context-window use, not task progress
                              (>85% blocks done; --context remains accepted)
@@ -3915,6 +3915,9 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if let Some(workspace_id) = flag(args, "--workspace-id") {
                 obj.insert("workspace_id".into(), json!(workspace_id));
             }
+            if args.iter().any(|arg| arg == "--no-focus") {
+                obj.insert("focus".into(), json!(false));
+            }
             ("task.start".into(), Value::Object(obj))
         }
         ("task", "claim") => {
@@ -5327,6 +5330,10 @@ mod tests {
             p.get("workspace_id").and_then(|v| v.as_str()),
             Some("workspace-a")
         );
+
+        let (m, p) = parse(&argv("luvus task start t2 --no-focus")).unwrap();
+        assert_eq!(m, "task.start");
+        assert_eq!(p.get("focus").and_then(|v| v.as_bool()), Some(false));
 
         let (m, p) = parse(&argv("luvus task next --start --agent claude")).unwrap();
         assert_eq!(m, "task.next");

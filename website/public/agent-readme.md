@@ -153,7 +153,9 @@ compatibility alias; UHP keeps the stable `context` field.
 `mode=workspace` creates a dedicated task tab in an existing shared checkout;
 it has no task branch or merge action. If start returns `lease_conflict`,
 resolve or release the named holder before retrying. Leases coordinate declared
-task paths but do not sandbox a workspace-mode agent.
+task paths but do not sandbox a workspace-mode agent. Use `task start
+... --no-focus` to stage the worker without changing the operator's current
+workspace, tab, pane focus, or zoom state.
 
 Tab positions are 1-based. Workspace indexes shown by the CLI are 0-based.
 Pane IDs and agent names are discovery results. Never convert between these

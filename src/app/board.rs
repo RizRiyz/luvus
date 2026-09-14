@@ -145,6 +145,25 @@ impl App {
         self.task_start_impl(id, branch, agent, mode, workspace_id, None)
     }
 
+    /// Start a manual task while optionally preserving the operator's current
+    /// workspace, tab, pane focus, and zoom state.
+    pub fn task_start_with_focus(
+        &mut self,
+        id: &str,
+        branch: Option<String>,
+        agent: Option<String>,
+        mode: TaskWorkerMode,
+        workspace_id: Option<String>,
+        focus: bool,
+    ) -> Result<TaskStartResult, (String, String)> {
+        let previous = (!focus).then(|| self.task_start_selection()).flatten();
+        let result = self.task_start_impl(id, branch, agent, mode, workspace_id, None);
+        if !focus {
+            self.restore_task_start_selection(&previous);
+        }
+        result
+    }
+
     /// Start a scheduled worker with the adapter's reviewed headless command.
     /// This stays separate from interactive ORCH starts so automation policy
     /// never changes the behavior of an explicit `task start`.
@@ -2948,6 +2967,59 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn task_start_without_focus_preserves_the_view_while_opening_a_worktree() {
+        let _env = crate::persist::test_env("orch-start-no-focus");
+        let base = crate::persist::config_dir().join("no-focus-repo");
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&base)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(base));
+        let original_workspace = app.ws().id.clone();
+        let original_tab = app.ws().tabs[app.ws().active_tab].id.clone();
+        let original_pane = app.layout().focus;
+        app.zoomed = true;
+        app.orch
+            .add_task("background".into(), vec![], vec![], None)
+            .unwrap();
+
+        let started = app
+            .task_start_with_focus("t1", None, None, TaskWorkerMode::Worktree, None, false)
+            .unwrap();
+
+        assert_ne!(started.workspace_id, original_workspace);
+        assert_eq!(app.ws().id, original_workspace);
+        assert_eq!(app.ws().tabs[app.ws().active_tab].id, original_tab);
+        assert_eq!(app.layout().focus, original_pane);
+        assert!(app.zoomed);
+        assert!(app
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == started.workspace_id));
+        assert_eq!(app.orch.task("t1").unwrap().assignee, Some(started.pane.0));
     }
 
     #[test]

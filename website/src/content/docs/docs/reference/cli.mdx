@@ -226,8 +226,8 @@ orchestration (multiple agents on one project, docs/22):
   task claim <id>            claim a task for this pane (deps must be done)
   task next [--start] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
                              claim the next ready task (--start creates a worker)
-  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>]
-                             start a worker (worktree default; workspace shares checkout)
+  task start <id> [--branch <b>] [--agent <cmd>] [--mode worktree|workspace] [--workspace-id <id>] [--no-focus]
+                             start a worker (worktree default; --no-focus preserves the view)
   task heartbeat <id> --context-used <0..1>
                              report model context-window use, not task progress
                              (>85% blocks done; --context remains accepted)

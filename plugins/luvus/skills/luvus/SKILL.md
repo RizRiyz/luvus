@@ -459,6 +459,8 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  Use `task start ... --no-focus` when staging a worker should preserve the
+  operator's current workspace, tab, pane focus, and zoom state.
   `task retry <id>` is the explicit fresh-attempt operation for `done`,
   `failed`, `review`, or `blocked` work. It preserves the old pane, worktree,
   branch, output, and notes. Inspect dependents first because retry is rejected
