@@ -1,7 +1,7 @@
 //! Bounded native conversation reads, separate from token usage accounting.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -26,13 +26,24 @@ pub fn session_transcript(
             {
                 return Err("not_found");
             }
-            let path = claude_path(&super::claude::sessions::base(), cwd, session_id);
+            let path = transcript_path(&super::claude::sessions::base(), cwd, session_id)?;
             read_transcript(&path, limit, cursor)
         }
         _ => Err("unsupported_agent"),
     }
 }
 
+/// Resolve a transcript only when its parent remains the bound project directory.
+fn transcript_path(base: &Path, cwd: &Path, session_id: &str) -> Result<PathBuf, &'static str> {
+    let project_dir = super::claude::sessions::project_dir(base, cwd);
+    let path = claude_path(base, cwd, session_id);
+    if path.parent() != Some(project_dir.as_path()) {
+        return Err("not_found");
+    }
+    Ok(path)
+}
+
+/// Extract a bounded page of text turns, retaining pagination and truncation metadata.
 fn read_transcript(
     path: &Path,
     limit: usize,
@@ -158,18 +169,39 @@ mod tests {
     use serde_json::json;
     struct Fixture(std::path::PathBuf);
 
+    /// Keep ordinary and Unix colon names local; reject Windows drive prefixes and escapes.
+    #[test]
+    fn transcript_path_keeps_colon_session_within_project() {
+        let base = std::env::temp_dir().join("luvus-transcript-path");
+        let cwd = Path::new("project");
+        let project_dir = super::super::claude::sessions::project_dir(&base, cwd);
+        assert_eq!(
+            transcript_path(&base, cwd, "sess-1"),
+            Ok(project_dir.join("sess-1.jsonl"))
+        );
+        assert_eq!(transcript_path(&base, cwd, "../escaped"), Err("not_found"));
+        let colon_path = transcript_path(&base, cwd, "C:foo");
+        #[cfg(windows)]
+        assert_eq!(colon_path, Err("not_found"));
+        #[cfg(not(windows))]
+        assert_eq!(colon_path, Ok(project_dir.join("C:foo.jsonl")));
+    }
+
     impl Fixture {
+        /// Borrow the fixture path for bounded reader tests.
         fn path(&self) -> &std::path::Path {
             &self.0
         }
     }
 
     impl Drop for Fixture {
+        /// Remove the temporary JSONL file after each test.
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
     }
 
+    /// Write uniquely named JSONL bytes and return an automatically cleaned fixture.
     fn fixture(contents: &[u8]) -> Fixture {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
@@ -182,6 +214,7 @@ mod tests {
     }
 
     #[test]
+    /// Extract supported roles, joined text parts, and numeric timestamps.
     fn transcript_extracts_roles_text_parts_and_numeric_ts() {
         let file = fixture(concat!(
             "{\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"timestamp\":1710000000}\n",
@@ -202,6 +235,7 @@ mod tests {
     }
 
     #[test]
+    /// Omit non-text records and emit each native message ID only once.
     fn transcript_omits_tools_nonroles_and_deduplicates_message_ids() {
         let file = fixture(concat!(
             "{\"message\":{\"id\":\"m1\",\"role\":\"assistant\",\"content\":\"first\"}}\n",
@@ -223,6 +257,7 @@ mod tests {
     }
 
     #[test]
+    /// Page forward from returned cursors and default to the latest bounded turns.
     fn transcript_cursor_round_trip_and_latest_default() {
         let file = fixture(b"{\"role\":\"user\",\"content\":\"a\"}\n{\"role\":\"assistant\",\"content\":\"b\"}\n{\"role\":\"system\",\"content\":\"c\"}\n");
         let first = read_transcript(file.path(), 1, Some(0)).unwrap();
@@ -243,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    /// Skip oversized JSONL records while reporting the lost history as truncated.
     fn transcript_skips_oversized_jsonl_line_and_marks_truncation() {
         let mut bytes =
             serde_json::to_vec(&json!({"role":"user","content":"x".repeat(2 * 1024 * 1024)}))
@@ -255,6 +291,7 @@ mod tests {
     }
 
     #[test]
+    /// Retain a capped turn without splitting a UTF-8 character.
     fn transcript_caps_nine_kib_text_at_utf8_boundary() {
         let file = fixture(
             &serde_json::to_vec(&json!({"role":"user","content":"界".repeat(3072)})).unwrap(),
@@ -266,6 +303,7 @@ mod tests {
     }
 
     #[test]
+    /// Read only the bounded tail and discard its incomplete leading record.
     fn transcript_reads_only_eight_mib_tail_and_skips_partial_first_row() {
         let mut bytes = vec![b'x'; 8 * 1024 * 1024 + 99];
         bytes.extend_from_slice(b"\n{\"role\":\"user\",\"content\":\"tail\"}\n");
@@ -276,6 +314,7 @@ mod tests {
     }
 
     #[test]
+    /// Distinguish missing files, empty histories, and invalid explicit cursors.
     fn transcript_missing_file_and_empty_window() {
         let file = fixture(b"");
         let out = read_transcript(file.path(), 50, None).unwrap();
@@ -293,6 +332,7 @@ mod tests {
     }
 
     #[test]
+    /// Reject unsafe native session IDs before constructing or opening a store path.
     fn transcript_rejects_unsafe_bound_session_before_path_construction() {
         for session in ["", "../other", "/absolute", "nested/session"] {
             assert_eq!(
@@ -303,6 +343,7 @@ mod tests {
     }
 
     #[test]
+    /// Prefer nested message content and skip records without supported text content.
     fn transcript_ignores_invalid_content_and_prefers_nested_message() {
         let file = fixture(concat!(
             "{\"role\":\"system\",\"content\":\"outer\",\"message\":{\"role\":\"user\",\"content\":\"inner\"},\"ts\":true}\n",
@@ -321,6 +362,7 @@ mod tests {
     }
 
     #[test]
+    /// Retain explicit empty text turns while omitting tool-only content arrays.
     fn transcript_preserves_empty_text_turns_without_emitting_tool_only_rows() {
         let file = fixture(
             concat!(

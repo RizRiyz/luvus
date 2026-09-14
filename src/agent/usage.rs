@@ -84,6 +84,7 @@ fn for_each_json_line(path: &Path, mut visit: impl FnMut(&Value)) -> Option<()> 
     }
 }
 
+/// Read at most `limit` bytes from a clamped file offset, returning `None` on I/O failure.
 pub(in crate::agent) fn read_window(path: &Path, start: u64, limit: u64) -> Option<Vec<u8>> {
     let mut file = File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
@@ -94,6 +95,7 @@ pub(in crate::agent) fn read_window(path: &Path, start: u64, limit: u64) -> Opti
     Some(bytes)
 }
 
+/// Visit valid bounded JSONL records, optionally discarding a partial first line.
 pub(in crate::agent) fn for_each_json_slice(
     bytes: &[u8],
     skip_partial_first: bool,
@@ -221,6 +223,7 @@ fn canonical(agent: &str) -> &str {
     registry::find(agent).map_or(agent, |descriptor| descriptor.id)
 }
 
+/// Construct the native Claude JSONL path; callers must validate the session identifier.
 pub(in crate::agent) fn claude_path(base: &Path, cwd: &Path, session_id: &str) -> PathBuf {
     claude::sessions::project_dir(base, cwd).join(format!("{session_id}.jsonl"))
 }

@@ -441,6 +441,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// Verify transcript discovery, agent scope, and the existing read-only Access bit.
     fn agent_transcript_is_in_read_only_catalog() {
         assert!(all_methods().any(|method| method == "agent.transcript"));
         assert!(is_read_only("agent.transcript"));
