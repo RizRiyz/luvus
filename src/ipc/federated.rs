@@ -237,6 +237,9 @@ enum MachinePopup {
 }
 
 struct DockState {
+    /// Cached host capability. Remote machine endpoints remain text-only until
+    /// their image namespaces can be isolated from the local endpoint.
+    graphics: bool,
     local_session: String,
     scroll: usize,
     rect: Option<ShellDockRect>,
@@ -300,6 +303,7 @@ struct DockState {
 impl Default for DockState {
     fn default() -> Self {
         Self {
+            graphics: false,
             local_session: crate::session::display_name(),
             scroll: 0,
             rect: None,
@@ -483,7 +487,7 @@ fn negotiate_local(
     writer: &mut crate::ipc::transport::Conn,
     (cols, rows): (u16, u16),
     generation: u64,
-    probe_terminal_colors: impl FnOnce() -> crate::terminal::theme_probe::ProbeResult,
+    probe_terminal: impl FnOnce(bool) -> crate::terminal::theme_probe::ProbeResult,
 ) -> Result<LocalNegotiation> {
     protocol::write_message(
         writer,
@@ -503,20 +507,16 @@ fn negotiate_local(
     // EndpointIdentity after Ready, so read it before sending negotiation data.
     let (events_tx, events_rx) = mpsc::sync_channel(8);
     start_local_reader(reader, events_tx.clone(), generation)?;
-    let probe = if probe_colors {
-        probe_terminal_colors()
-    } else {
-        crate::terminal::theme_probe::ProbeResult::default()
-    };
-    // The reply is not optional: the server reads one probe from every client
-    // before it serves frames. This shell carries no images for its endpoints,
-    // so it answers the graphics question with a plain no.
+    // The probe always runs: the palette is only read for the Terminal theme,
+    // but whether this terminal draws images describes the terminal itself, and
+    // the local endpoint's panes are shown through it.
+    let probe = probe_terminal(probe_colors);
     protocol::write_message(
         writer,
         &ClientMessage::TerminalProbe {
             colors: probe.colors.clone(),
-            graphics: Some(false),
-            cell_size: None,
+            graphics: probe.graphics,
+            cell_size: probe.cell_size,
         },
     )?;
     protocol::write_message(writer, &super::client::cell_pixels_message())?;
@@ -545,7 +545,7 @@ fn run_inner(
         &mut writer,
         (size.width, size.height),
         local_generation,
-        || crate::terminal::theme_probe::probe(true),
+        crate::terminal::theme_probe::probe,
     )?;
 
     let mut machines = profiles
@@ -586,6 +586,7 @@ fn run_inner(
     let mut initial_local_frame_painted = false;
     let labels = crate::i18n::by_code(&crate::config::load().language);
     let mut dock = DockState {
+        graphics: probe.graphics.unwrap_or(false),
         heading: labels.workspaces,
         close_label: labels.act_close,
         workspace_label: labels.open_workspace,
@@ -1782,7 +1783,10 @@ fn handle_surface_message(
                     terminal,
                     &super::client::frame_cells(
                         &frame,
-                        super::client::HostTerminal::text_only(truecolor),
+                        super::client::HostTerminal {
+                            truecolor,
+                            graphics: dock.graphics && endpoint == Endpoint::Local,
+                        },
                     ),
                     frame.cursor,
                     frame.cursor_visible,
@@ -1847,7 +1851,10 @@ fn handle_surface_message(
                 terminal,
                 &super::client::diff_cells(
                     &diff,
-                    super::client::HostTerminal::text_only(truecolor),
+                    super::client::HostTerminal {
+                        truecolor,
+                        graphics: dock.graphics && endpoint == Endpoint::Local,
+                    },
                 ),
                 diff.cursor,
                 diff.cursor_visible,
@@ -1864,6 +1871,9 @@ fn handle_surface_message(
             if dock_changed {
                 dock.dirty = true;
             }
+        }
+        ServerMessage::Graphics(commands) if endpoint == Endpoint::Local && dock.graphics => {
+            crate::emit_graphics(&commands);
         }
         ServerMessage::Notify(message) if endpoint == *active => crate::emit_notification(&message),
         ServerMessage::Sound(signal) if endpoint == *active => crate::emit_sound(signal),
@@ -1970,7 +1980,10 @@ fn cache_dock_projection(
             cell.fg,
             cell.bg,
             cell.mods,
-            super::client::HostTerminal::text_only(truecolor),
+            super::client::HostTerminal {
+                truecolor,
+                graphics: false,
+            },
         );
         if owner_local {
             dock.owner_base = Some(dock.base.clone());
@@ -5620,7 +5633,7 @@ mod tests {
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut writer = client.clone();
-                let result = negotiate_local(client, &mut writer, (80, 24), 0, || {
+                let result = negotiate_local(client, &mut writer, (80, 24), 0, |_| {
                     crate::terminal::theme_probe::ProbeResult::default()
                 });
                 let result = result.map(|_| ()).map_err(|error| error.to_string());

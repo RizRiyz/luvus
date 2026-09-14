@@ -768,21 +768,12 @@ pub(super) fn sync_end() {
 #[derive(Clone, Copy)]
 pub(super) struct HostTerminal {
     /// Whether 24-bit color reaches the terminal intact.
-    truecolor: bool,
+    pub(super) truecolor: bool,
     /// Whether it draws kitty graphics.
-    graphics: bool,
+    pub(super) graphics: bool,
 }
 
 impl HostTerminal {
-    /// A display that carries no images, so image cells paint as blanks rather
-    /// than as the private-use glyph that stands in for them.
-    pub(super) fn text_only(truecolor: bool) -> Self {
-        Self {
-            truecolor,
-            graphics: false,
-        }
-    }
-
     /// A terminal with nothing in the way of what the server sends, so a test
     /// asserting on frame content sees the cells exactly as they arrived.
     #[cfg(test)]

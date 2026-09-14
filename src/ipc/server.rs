@@ -354,6 +354,7 @@ struct RenderScratch {
 }
 
 impl ClientState {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         sender: ClientSender,
         cols: u16,
