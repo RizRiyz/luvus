@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 use super::super::types::IntegrationOperations;
 use crate::integration;
@@ -137,6 +138,17 @@ fn current_installed() -> bool {
 }
 
 const TUI_PLUGIN: &str = include_str!("luvus-tui.js");
+// Fingerprints of Luvus-distributed legacy assets. Some pre-V2 assets no
+// longer have source files in the binary, so content hashes let migration
+// recognize them without embedding obsolete JavaScript.
+const KNOWN_TUI_PLUGIN_HASHES: &[&str] =
+    &["69fc86ec3236e3a6a4c44c34fa2f14d0a0251c09a71e30d65fa364555088315f"];
+const KNOWN_LUVUS_PLUGIN_HASHES: &[&str] = &[
+    "3ca150463012cc71a6ba4de2d47ebb098cd7376e6d505e2ba1518ad71c7497fa",
+    "d4f737189fb7b3b098bf4120edee09699cebb48126bfeabf6489631131507fb8",
+];
+const KNOWN_BOHAY_PLUGIN_HASHES: &[&str] =
+    &["50b68a32e135c77bbc7b5f9ebfda72650c941578c7330fb072cba237868ea0fc"];
 
 fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
@@ -180,6 +192,34 @@ fn restore(path: &Path, previous: Option<&[u8]>) {
     }
 }
 
+fn remove_known_asset(path: &Path, known_hashes: &[&str]) -> Result<bool> {
+    let Ok(contents) = fs::read(path) else {
+        return Ok(false);
+    };
+    let fingerprint = format!("{:x}", Sha256::digest(&contents));
+    if !known_hashes.contains(&fingerprint.as_str()) {
+        return Ok(false);
+    }
+    fs::remove_file(path).with_context(|| format!("remove {}", path.display()))?;
+    Ok(true)
+}
+
+fn remove_obsolete_legacy_assets(config_path: &Path) -> Result<()> {
+    remove_known_asset(
+        &legacy_plugin_dir().join("luvus.js"),
+        KNOWN_LUVUS_PLUGIN_HASHES,
+    )?;
+    remove_known_asset(
+        &legacy_plugin_dir().join("bohay.js"),
+        KNOWN_BOHAY_PLUGIN_HASHES,
+    )?;
+    remove_known_asset(
+        &config_path.with_file_name("luvus-tui.js"),
+        KNOWN_TUI_PLUGIN_HASHES,
+    )?;
+    Ok(())
+}
+
 fn install_legacy() -> Result<()> {
     let config_path = tui_config_path();
     if let Some(parent) = config_path
@@ -213,9 +253,7 @@ fn install_legacy() -> Result<()> {
 
     // Remove only obsolete Luvus-owned assets after the new TUI integration is
     // complete. Server-wide session events cannot prove this pane's selection.
-    let _ = fs::remove_file(legacy_plugin_dir().join("luvus.js"));
-    let _ = fs::remove_file(legacy_plugin_dir().join("bohay.js"));
-    let _ = fs::remove_file(config_path.with_file_name("luvus-tui.js"));
+    let _ = remove_obsolete_legacy_assets(&config_path);
     Ok(())
 }
 
@@ -231,10 +269,8 @@ fn uninstall_legacy() -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let _ = fs::remove_file(tui_plugin_path());
-    let _ = fs::remove_file(legacy_plugin_dir().join("luvus.js"));
-    let _ = fs::remove_file(legacy_plugin_dir().join("bohay.js"));
-    let _ = fs::remove_file(config_path.with_file_name("luvus-tui.js"));
+    remove_known_asset(&tui_plugin_path(), KNOWN_TUI_PLUGIN_HASHES)?;
+    remove_obsolete_legacy_assets(&config_path)?;
     Ok(())
 }
 
@@ -319,6 +355,7 @@ mod tests {
         assert!(removed.contains("// user setting"));
         assert!(removed.contains("other"));
         assert!(!removed.contains(super::super::config::TUI_PLUGIN_SPEC));
+        assert!(!tui_plugin_path().exists());
 
         match old {
             Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
@@ -329,6 +366,62 @@ mod tests {
             None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uninstall_preserves_modified_legacy_assets() {
+        let _lock = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let root = fixture("modified-assets");
+        let old = std::env::var_os("XDG_CONFIG_HOME");
+        let old_tui = std::env::var_os("OPENCODE_TUI_CONFIG");
+        std::env::set_var("XDG_CONFIG_HOME", &root);
+        std::env::remove_var("OPENCODE_TUI_CONFIG");
+
+        let config = root.join("opencode/tui.json");
+        fs::create_dir_all(legacy_plugin_dir()).unwrap();
+        fs::write(
+            &config,
+            format!(
+                "{{\"plugin\":[\"{}\"]}}\n",
+                super::super::config::TUI_PLUGIN_SPEC
+            ),
+        )
+        .unwrap();
+        let paths = [
+            tui_plugin_path(),
+            legacy_plugin_dir().join("luvus.js"),
+            legacy_plugin_dir().join("bohay.js"),
+            config.with_file_name("luvus-tui.js"),
+        ];
+        for path in &paths {
+            fs::write(path, "// user-modified\n").unwrap();
+        }
+
+        uninstall_legacy().unwrap();
+        assert!(!fs::read_to_string(&config)
+            .unwrap()
+            .contains(super::super::config::TUI_PLUGIN_SPEC));
+        for path in &paths {
+            assert_eq!(fs::read_to_string(path).unwrap(), "// user-modified\n");
+        }
+
+        match old {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_tui {
+            Some(value) => std::env::set_var("OPENCODE_TUI_CONFIG", value),
+            None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_asset_fingerprint_tracks_embedded_plugin() {
+        let fingerprint = format!("{:x}", Sha256::digest(TUI_PLUGIN.as_bytes()));
+        assert!(KNOWN_TUI_PLUGIN_HASHES.contains(&fingerprint.as_str()));
     }
 
     #[test]
