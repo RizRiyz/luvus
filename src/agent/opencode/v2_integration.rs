@@ -163,13 +163,14 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn reporter_retries_releases_and_prefers_the_newest_session() {
+    /// Run one Node harness against the exact installed plugin asset. Returns
+    /// without asserting when Node is absent, so the suite stays portable.
+    fn run_plugin_harness(label: &str, script: &str) {
         let Some(node) = node() else {
             return;
         };
         let root =
-            std::env::temp_dir().join(format!("luvus-opencode-v2-reporter-{}", std::process::id()));
+            std::env::temp_dir().join(format!("luvus-opencode-v2-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("node_modules/solid-js")).unwrap();
         fs::write(root.join("plugin.mjs"), TUI).unwrap();
@@ -183,8 +184,25 @@ mod tests {
             "export const createEffect = (callback) => callback();\n",
         )
         .unwrap();
-        fs::write(
-            root.join("harness.mjs"),
+        fs::write(root.join("harness.mjs"), script).unwrap();
+
+        let output = std::process::Command::new(node)
+            .arg(root.join("harness.mjs"))
+            .arg(root.join("plugin.mjs"))
+            .output()
+            .expect("OpenCode plugin harness should spawn");
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "OpenCode {label} harness failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn reporter_retries_releases_and_prefers_the_newest_session() {
+        run_plugin_harness(
+            "reporter",
             r#"
 import assert from "node:assert/strict"
 import { pathToFileURL } from "node:url"
@@ -274,19 +292,63 @@ const session = (id) => ({ pane: "7", agent: "opencode", session_id: id })
   reporter.dispose()
 }
 "#,
-        )
-        .unwrap();
+        );
+    }
 
-        let output = std::process::Command::new(node)
-            .arg(root.join("harness.mjs"))
-            .arg(root.join("plugin.mjs"))
-            .output()
-            .expect("OpenCode reporter harness should spawn");
-        let _ = fs::remove_dir_all(&root);
-        assert!(
-            output.status.success(),
-            "OpenCode reporter harness failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+    /// OpenCode 2.0.3 moved a session's own directory from `info.directory` to
+    /// `info.location.directory`. Reading only the flat field made `reportFor`
+    /// reject every session, so an installed plugin silently stopped reporting
+    /// after that upgrade. Pin both shapes, and keep child and foreign-directory
+    /// sessions unreportable in either one.
+    #[test]
+    fn report_for_accepts_both_session_directory_shapes() {
+        run_plugin_harness(
+            "report-for",
+            r#"
+import assert from "node:assert/strict"
+import { pathToFileURL } from "node:url"
+
+const { reportFor } = await import(pathToFileURL(process.argv[2]).href)
+process.env.LUVUS_PANE_ID = "7"
+
+const HERE = "/tmp/luvus-report-for"
+const context = (info) => ({
+  ui: { router: { current: () => ({ type: "session", sessionID: info.id }) } },
+  data: {
+    session: { get: (id) => (id === info.id ? info : undefined) },
+    location: { default: () => ({ directory: HERE }) },
+  },
+})
+
+// 2.0.3 nests the directory; 2.0.2 keeps it flat. Both are this pane's session.
+for (const info of [
+  { id: "ses_nested", location: { directory: HERE } },
+  { id: "ses_flat", directory: HERE },
+]) {
+  assert.deepEqual(reportFor(context(info)), {
+    pane: "7",
+    agent: "opencode",
+    session_id: info.id,
+  })
+}
+
+// A child session never claims the pane, whichever shape carries its directory.
+for (const info of [
+  { id: "ses_child", parentID: "ses_root", location: { directory: HERE } },
+  { id: "ses_child_flat", parentID: "ses_root", directory: HERE },
+]) {
+  assert.equal(reportFor(context(info)), undefined)
+}
+
+// Neither does a root session opened somewhere else.
+for (const info of [
+  { id: "ses_elsewhere", location: { directory: "/tmp/other-project" } },
+  { id: "ses_elsewhere_flat", directory: "/tmp/other-project" },
+  { id: "ses_unknown_directory" },
+]) {
+  assert.equal(reportFor(context(info)), undefined)
+}
+"#,
         );
     }
 }

@@ -23,7 +23,10 @@ export function reportFor(context) {
   const info = context.data.session.get(route.sessionID)
   if (!info || info.id !== route.sessionID || info.parentID) return
   const location = context.location ?? context.data.location.default()
-  if (!samePath(info.directory, location?.directory)) return
+  // 2.0.3 publishes the session's own directory under `location`; 2.0.2 kept it
+  // flat. Accept both so an installed plugin keeps matching across upgrades.
+  const directory = info.location?.directory ?? info.directory
+  if (!samePath(directory, location?.directory)) return
   return { pane: process.env.LUVUS_PANE_ID, agent: "opencode", session_id: info.id }
 }
 
