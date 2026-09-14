@@ -117,10 +117,12 @@ def session_name(value):
 
 
 def transcript_cursor(value):
+    """Accept only the contract's one-to-ten ASCII decimal cursor digits."""
     return isinstance(value, str) and re.fullmatch(r"[0-9]{1,10}", value) is not None
 
 
 def valid_agent_transcript_params(params):
+    """Validate the target, bounded limit, optional cursor, and exact parameter keys."""
     if not isinstance(params, dict) or not set(params) <= FIELDS["agent.transcript"]:
         return False
     if not isinstance(params.get("target"), str) or not params["target"]:
@@ -133,6 +135,7 @@ def valid_agent_transcript_params(params):
 
 
 def valid_agent_transcript_result(result):
+    """Validate required Claude transcript coordinates, bounded text turns, and paging."""
     if not RESULT_FIELDS["agent_transcript"] <= set(result):
         return False
     if not (
