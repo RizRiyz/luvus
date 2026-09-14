@@ -8,6 +8,7 @@ struct TranscriptStore {
 }
 
 impl TranscriptStore {
+    /// Install an isolated Claude session fixture for the active pane's working directory.
     fn new(app: &App, contents: &str) -> Self {
         let dir = std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap())
             .join("transcript-fixture");
@@ -27,6 +28,7 @@ impl TranscriptStore {
 }
 
 impl Drop for TranscriptStore {
+    /// Restore the prior Claude configuration directory and remove the fixture store.
     fn drop(&mut self) {
         match &self.previous {
             Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
@@ -36,6 +38,7 @@ impl Drop for TranscriptStore {
     }
 }
 
+/// Bind a native session to the active pane without invoking an external agent.
 fn bind_transcript(app: &mut App, agent: &str, session: &str) {
     let pane = app.layout().focus;
     let status = app.status.get_mut(&pane).unwrap();
@@ -47,6 +50,7 @@ fn bind_transcript(app: &mut App, agent: &str, session: &str) {
 }
 
 #[test]
+/// Exercise transcript targeting and paging while preserving every agent.read source.
 fn agent_transcript_happy_path_targets_limits_cursor_and_grid_regression() {
     let (_env, mut app) = super::support::app("transcript-happy");
     let _store = TranscriptStore::new(
@@ -115,6 +119,7 @@ fn agent_transcript_happy_path_targets_limits_cursor_and_grid_regression() {
 }
 
 #[test]
+/// Reject unresolved or unbound panes even when a discoverable transcript exists.
 fn agent_transcript_unbound_and_missing_target_do_not_read_store() {
     let (_env, mut app) = super::support::app("transcript-unbound");
     // A valid on-disk transcript must never substitute for a native binding.
@@ -147,6 +152,7 @@ fn agent_transcript_unbound_and_missing_target_do_not_read_store() {
 }
 
 #[test]
+/// Reject unsupported bound kinds without falling back to the detected Claude identity.
 fn agent_transcript_rejects_nonclaude_bound_kind_without_io() {
     let (_env, mut app) = super::support::app("transcript-unsupported");
     let pane = app.layout().focus;
@@ -167,6 +173,7 @@ fn agent_transcript_rejects_nonclaude_bound_kind_without_io() {
 }
 
 #[test]
+/// Preserve the native binding when its exact transcript file is absent.
 fn agent_transcript_missing_jsonl_is_not_found_and_keeps_binding() {
     let (_env, mut app) = super::support::app("transcript-missing");
     let _store = TranscriptStore::new(&app, "");
@@ -186,6 +193,7 @@ fn agent_transcript_missing_jsonl_is_not_found_and_keeps_binding() {
 }
 
 #[test]
+/// Reject traversal in a bound session ID despite an existing file outside its project.
 fn agent_transcript_cannot_read_outside_bound_project() {
     let (_env, mut app) = super::support::app("transcript-path-boundary");
     let store = TranscriptStore::new(&app, "");
@@ -205,6 +213,7 @@ fn agent_transcript_cannot_read_outside_bound_project() {
 }
 
 #[test]
+/// Bound escaped JSON pages to protocol frames without losing turns across cursors.
 fn agent_transcript_escape_heavy_pages_fit_protocol_frames() {
     let (_env, mut app) = super::support::app("transcript-frame-budget");
     let mut contents = String::new();
@@ -264,6 +273,7 @@ fn agent_transcript_escape_heavy_pages_fit_protocol_frames() {
 }
 
 #[test]
+/// Reject malformed parameters and out-of-range cursors without changing pane state.
 fn agent_transcript_invalid_params_and_cursor_leave_state_untouched() {
     let (_env, mut app) = super::support::app("transcript-invalid");
     let _store = TranscriptStore::new(&app, "{\"role\":\"user\",\"content\":\"one\"}\n");
@@ -322,6 +332,7 @@ fn agent_transcript_invalid_params_and_cursor_leave_state_untouched() {
 }
 
 #[test]
+/// Keep the existing target resolver's ambiguity response for transcript requests.
 fn agent_transcript_preserves_ambiguous_target() {
     let (_env, mut app) = super::support::app("transcript-ambiguous");
     bind_transcript(&mut app, "claude", "sess-1");
