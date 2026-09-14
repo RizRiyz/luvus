@@ -813,11 +813,31 @@ pub(crate) struct Placement {
 /// text carries the image with them.
 fn classify(control: &ControlData, payload: &[u8], cell_size: Option<CellSize>) -> Handling {
     match control.action {
-        b'T' | b'p' if control.virtual_placement => Handling::Forward,
+        b'T' | b'p' if control.virtual_placement => forward_virtual(control),
         b'T' | b'p' => virtualize(control, payload, cell_size),
         // Transmit without displaying, and delete, place nothing by themselves.
         b't' | b'd' => Handling::Forward,
         _ => Handling::Drop,
+    }
+}
+
+/// Pass on a placement the sender already made virtual, once its rectangle is
+/// one the placeholder cells can name.
+///
+/// The cells that refer to this image carry their row and column as
+/// diacritics, so a rectangle named here has to meet the same bounds
+/// [`virtualize`] applies to one Luvus derives: a side of zero covers no cell
+/// at all, and a side past [`placeholder::MAX_EXTENT`] has no coordinate to be
+/// written with. A sender that names neither side leaves the rectangle to the
+/// image's own size, which the cells it writes still bound.
+fn forward_virtual(control: &ControlData) -> Handling {
+    let addressable = |extent: Option<u32>| {
+        extent.is_none_or(|extent| extent != 0 && extent as usize <= placeholder::MAX_EXTENT)
+    };
+    if addressable(control.columns) && addressable(control.rows) {
+        Handling::Forward
+    } else {
+        Handling::Drop
     }
 }
 
@@ -1252,6 +1272,37 @@ mod tests {
         // Transmit-only and delete place nothing by themselves.
         assert_eq!(queued(&["a=t,i=1,f=100;AAAA"]).len(), 1);
         assert_eq!(queued(&["a=d,d=I,i=1"]).len(), 1);
+    }
+
+    #[test]
+    fn a_virtual_rectangle_the_cells_cannot_name_is_refused() {
+        // The cells address their rectangle in diacritics, so the bounds hold
+        // whether Luvus derived the rectangle or the sender named it: a side
+        // of zero covers nothing, and 298 is past the table's last coordinate.
+        for payload in [
+            "a=T,U=1,i=1,c=0,r=1,f=100;AAAA",
+            "a=T,U=1,i=1,c=1,r=0,f=100;AAAA",
+            "a=p,U=1,i=1,c=298,r=1",
+            "a=p,U=1,i=1,c=1,r=298",
+        ] {
+            assert!(
+                queued(&[payload]).is_empty(),
+                "must not forward {payload:?}"
+            );
+        }
+        // The last coordinate the table holds still fits, and a sender that
+        // names no rectangle leaves the size to the image.
+        assert_eq!(queued(&["a=p,U=1,i=1,c=297,r=297"]).len(), 1);
+        assert_eq!(queued(&["a=T,U=1,i=1,f=100;AAAA"]).len(), 1);
+    }
+
+    #[test]
+    fn the_chunks_of_a_refused_virtual_placement_do_not_escape_on_their_own() {
+        // A continuation repeats none of the keys the decision was made on, so
+        // it has to follow the opening chunk that was refused.
+        assert!(
+            queued(&["a=T,U=1,i=1,c=0,r=1,f=100,m=1;AAAA", "m=1;BBBB", "m=0;CCCC",]).is_empty()
+        );
     }
 
     #[test]
