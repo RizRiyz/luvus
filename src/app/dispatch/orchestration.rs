@@ -622,6 +622,7 @@ impl App {
                         }))
                     } else {
                         let pane = self.orch_pane(p)?;
+                        self.bind_task_to_pane_workspace(&id, pane)?;
                         let task = self.orch.claim(&id, pane).map_err(orch_err)?;
                         self.orch.save();
                         self.emit_event("task.claimed", task_json(&task));

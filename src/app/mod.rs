@@ -13598,6 +13598,16 @@ mod tests {
         );
         assert_eq!(wrong_project["error"]["code"], "workspace_mismatch");
 
+        // `task.next` must validate its focused-pane fallback against the
+        // selected workspace before claiming the next task.
+        app.active_ws = 0;
+        let mismatched_next = call(&mut app, "task.next", json!({"workspace_id":workspace_b}));
+        assert_eq!(mismatched_next["error"]["code"], "workspace_mismatch");
+        assert_eq!(
+            app.orch.task("t2").unwrap().status,
+            crate::orch::TaskStatus::Queued
+        );
+
         let next_b = call(
             &mut app,
             "task.next",
