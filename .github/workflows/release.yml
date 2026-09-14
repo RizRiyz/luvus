@@ -263,6 +263,7 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" \
+              --draft \
               --notes-file notes.md
           else
             gh release create "$GITHUB_REF_NAME" \
@@ -272,13 +273,50 @@ jobs:
               --title "$GITHUB_REF_NAME" \
               --notes-file notes.md
           fi
-      - name: Upload complete release set
+      - name: Synchronize complete release set
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          expected_names="$(
+            for asset_path in dist/*; do
+              basename "$asset_path"
+            done | LC_ALL=C sort
+          )"
+
+          while IFS= read -r asset; do
+            [[ -n "$asset" ]] || continue
+            if ! grep -Fqx -- "$asset" <<< "$expected_names"; then
+              gh release delete-asset "$GITHUB_REF_NAME" "$asset" \
+                --repo "$GITHUB_REPOSITORY" \
+                --yes
+            fi
+          done < <(
+            gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name'
+          )
+
           gh release upload "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+          actual_names="$(
+            gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name' |
+              LC_ALL=C sort
+          )"
+          if [[ "$actual_names" != "$expected_names" ]]; then
+            echo "draft release assets do not match the verified manifest" >&2
+            diff -u \
+              <(printf '%s\n' "$expected_names") \
+              <(printf '%s\n' "$actual_names") >&2 || true
+            exit 1
+          fi
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
