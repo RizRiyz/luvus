@@ -250,6 +250,7 @@ impl App {
             "agent.keys" => self.api_agent_keys(method, p),
             // Read a target agent's output, addressed by name or pane id.
             "agent.read" => self.api_agent_read(method, p),
+            "agent.transcript" => self.api_agent_transcript(p),
             // One agent's live info, resolved by name / pane id / kind — what to
             // check before deciding how to answer a blocked agent.
             "agent.get" => self.api_agent_get(method, p),

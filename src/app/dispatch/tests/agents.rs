@@ -186,6 +186,84 @@ fn agent_transcript_missing_jsonl_is_not_found_and_keeps_binding() {
 }
 
 #[test]
+fn agent_transcript_cannot_read_outside_bound_project() {
+    let (_env, mut app) = super::support::app("transcript-path-boundary");
+    let store = TranscriptStore::new(&app, "");
+    std::fs::write(
+        store.dir.join("projects/escaped.jsonl"),
+        "{\"role\":\"user\",\"content\":\"other project\"}\n",
+    )
+    .unwrap();
+    bind_transcript(&mut app, "claude", "../escaped");
+    let pane = app.layout().focus;
+    assert_eq!(
+        app.dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+            .unwrap_err()
+            .0,
+        "not_found"
+    );
+}
+
+#[test]
+fn agent_transcript_escape_heavy_pages_fit_protocol_frames() {
+    let (_env, mut app) = super::support::app("transcript-frame-budget");
+    let mut contents = String::new();
+    for index in 0..50 {
+        contents.push_str(
+            &json!({"role":"user","content":format!("{index:02}{}", "\0".repeat(8190))})
+                .to_string(),
+        );
+        contents.push('\n');
+    }
+    let _store = TranscriptStore::new(&app, &contents);
+    bind_transcript(&mut app, "claude", "sess-1");
+    let target = app.layout().focus.0.to_string();
+    let latest = app
+        .dispatch("agent.transcript", &json!({"target":target}))
+        .unwrap();
+    assert!(
+        serde_json::to_vec(&json!({"id":"latest","result":latest}))
+            .unwrap()
+            .len()
+            < crate::terminal::backend::MAX_FRAME_BYTES
+    );
+    assert_eq!(
+        &latest["turns"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()[..2],
+        "49"
+    );
+    assert_eq!(latest["truncated"], true);
+    let mut cursor = json!("0");
+    let mut count = 0;
+    loop {
+        let out = app
+            .dispatch(
+                "agent.transcript",
+                &json!({"target":target,"cursor":cursor}),
+            )
+            .unwrap();
+        assert!(
+            serde_json::to_vec(&json!({"id":"page","result":out}))
+                .unwrap()
+                .len()
+                < crate::terminal::backend::MAX_FRAME_BYTES
+        );
+        let turns = out["turns"].as_array().unwrap();
+        assert!(!turns.is_empty());
+        for turn in turns {
+            assert_eq!(&turn["text"].as_str().unwrap()[..2], format!("{count:02}"));
+            count += 1;
+        }
+        cursor = out["next_cursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(count, 50);
+}
+
+#[test]
 fn agent_transcript_invalid_params_and_cursor_leave_state_untouched() {
     let (_env, mut app) = super::support::app("transcript-invalid");
     let _store = TranscriptStore::new(&app, "{\"role\":\"user\",\"content\":\"one\"}\n");
