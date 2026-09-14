@@ -36,3 +36,13 @@
 {"id":"bad-keys-fence-terminal-only","method":"agent.keys","params":{"target":"7","keys":["enter"],"terminal_id":"0123456789abcdef0123456789abcdef"}}
 {"id":"bad-task-retry-missing-id","method":"task.retry","params":{}}
 {"id":"bad-task-retry-extra","method":"task.retry","params":{"id":"t1","extra":true}}
+{"id":"transcript-bad-0","method":"agent.transcript","params":{}}
+{"id":"transcript-bad-1","method":"agent.transcript","params":{"target":"7","limit":0}}
+{"id":"transcript-bad-2","method":"agent.transcript","params":{"target":"7","limit":51}}
+{"id":"transcript-bad-3","method":"agent.transcript","params":{"target":"7","limit":"x"}}
+{"id":"transcript-bad-4","method":"agent.transcript","params":{"target":"7","limit":true}}
+{"id":"transcript-bad-5","method":"agent.transcript","params":{"target":"7","cursor":"1\n"}}
+{"id":"transcript-bad-6","method":"agent.transcript","params":{"target":"7","cursor":"12345678901"}}
+{"id":"transcript-bad-7","method":"agent.transcript","params":{"target":"7","cursor":0}}
+{"id":"transcript-bad-8","method":"agent.transcript","params":{"target":"7","source":"visible"}}
+{"id":"transcript-bad-9","method":"agent.transcript","params":{"target":"7","path":"/tmp/x"}}

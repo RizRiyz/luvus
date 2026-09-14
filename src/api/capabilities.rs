@@ -439,6 +439,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agent_transcript_is_in_read_only_catalog() {
+        assert!(all_methods().any(|method| method == "agent.transcript"));
+        assert!(is_read_only("agent.transcript"));
+        assert!(is_idempotent("agent.transcript"));
+        assert_eq!(required_scope("agent.transcript"), "agent");
+        assert!(!is_read_only("agent.keys"));
+    }
+
+    #[test]
     fn registry_has_no_duplicates_and_contains_required_surface() {
         let methods = all_methods().collect::<Vec<_>>();
         let unique: std::collections::BTreeSet<_> = methods.iter().copied().collect();

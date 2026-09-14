@@ -42,6 +42,9 @@ pub(crate) mod types;
 mod usage;
 pub use usage::{session_mtime, session_usage};
 
+#[cfg(test)]
+mod transcript;
+
 /// A resumable agent session discovered on disk.
 #[derive(Clone)]
 pub struct SessionInfo {
