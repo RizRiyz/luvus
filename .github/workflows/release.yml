@@ -39,11 +39,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # Builds (cross-compiling musl/aarch64 via `cross` automatically) and
       # packages `luvus-<tag>-<target>.{tar.gz,zip}` plus its checksum.
       - id: package
-        uses: taiki-e/upload-rust-binary-action@v1
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
         env:
           # Keep official macOS archives tied to the SDK library even when a
           # runner also has a Homebrew SQLite pkg-config entry.
@@ -92,7 +92,7 @@ jobs:
           mkdir -p dist
           cp -- "$archive" "$CHECKSUM_SHA256" dist/
       - name: Save release archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-binary-${{ matrix.target }}
           path: dist/
@@ -133,7 +133,7 @@ jobs:
             mkdir -p dist
             mv "$archive" "$checksum" dist/
       - name: Save FreeBSD archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-binary-x86_64-unknown-freebsd
           path: dist/
@@ -160,11 +160,11 @@ jobs:
           - target: aarch64-unknown-linux-musl
             arch: arm64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
       - name: Install cross + cargo-deb (prebuilt)
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cross,cargo-deb
       # cargo-generate-rpm isn't in install-action's catalog, so build it
@@ -195,7 +195,7 @@ jobs:
           mkdir -p dist
           cp -- luvus_*.deb luvus-*.rpm dist/
       - name: Save native packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-packages-${{ matrix.target }}
           path: dist/
@@ -210,11 +210,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0 # full history + tags so the changelog can diff versions
       - name: Download complete release set
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           path: dist
