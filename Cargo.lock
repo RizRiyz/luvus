@@ -835,6 +835,7 @@ version = "0.14.1"
 dependencies = [
  "anyhow",
  "bincode",
+ "bitflags 2.13.0",
  "crossterm",
  "fs2",
  "getrandom 0.3.4",

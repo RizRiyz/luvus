@@ -18,6 +18,7 @@ use super::{
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
+use crate::terminal::keyboard::{KeyboardProtocol, KittyKeyboardFlags};
 use crate::terminal::pty::{InputAction, InputSender};
 
 #[derive(Default)]
@@ -1102,12 +1103,25 @@ impl VtEngine for AlacrittyEngine {
         self.term.mode().contains(TermMode::APP_CURSOR)
     }
 
-    fn disambiguate_escape_codes(&self) -> bool {
-        self.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES)
-    }
-
-    fn report_all_keys_as_escape_codes(&self) -> bool {
-        self.term.mode().contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+    fn keyboard_protocol(&self) -> KeyboardProtocol {
+        let mode = self.term.mode();
+        let mut flags = KittyKeyboardFlags::empty();
+        if mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+            flags.insert(KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES);
+        }
+        if mode.contains(TermMode::REPORT_EVENT_TYPES) {
+            flags.insert(KittyKeyboardFlags::REPORT_EVENT_TYPES);
+        }
+        if mode.contains(TermMode::REPORT_ALTERNATE_KEYS) {
+            flags.insert(KittyKeyboardFlags::REPORT_ALTERNATE_KEYS);
+        }
+        if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+            flags.insert(KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES);
+        }
+        if mode.contains(TermMode::REPORT_ASSOCIATED_TEXT) {
+            flags.insert(KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT);
+        }
+        KeyboardProtocol::from_kitty_flags(flags)
     }
 
     fn mouse_drag(&self) -> bool {
@@ -1281,6 +1295,8 @@ mod tests {
     use std::sync::mpsc::channel;
 
     use crate::terminal::appearance::ColorScheme;
+    use crate::terminal::keyboard::{KeyboardProtocol, KittyKeyboardFlags};
+    use crate::terminal::pty::KeyEncodingModes;
 
     fn feed_lines(e: &mut AlacrittyEngine, n: usize) {
         for i in 0..n {
@@ -2338,26 +2354,49 @@ mod tests {
     fn nested_keyboard_modes_are_tracked_across_config_updates() {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
-        assert!(!e.disambiguate_escape_codes());
-        assert!(!e.report_all_keys_as_escape_codes());
+        assert_eq!(e.keyboard_protocol(), KeyboardProtocol::Legacy);
+
+        e.advance(b"\x1b[=31u");
+        let all_flags = KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KittyKeyboardFlags::REPORT_EVENT_TYPES
+            | KittyKeyboardFlags::REPORT_ALTERNATE_KEYS
+            | KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            | KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT;
+        let expected_protocol = KeyboardProtocol::Kitty { flags: all_flags };
+        assert_eq!(e.keyboard_protocol(), expected_protocol);
+        assert_eq!(
+            KeyEncodingModes::from_engine(&e).protocol,
+            expected_protocol,
+            "pane key mode projection must retain every Kitty flag"
+        );
 
         e.advance(b"\x1b[>1u");
-        assert!(e.disambiguate_escape_codes());
-        assert!(!e.report_all_keys_as_escape_codes());
+        assert_eq!(
+            e.keyboard_protocol(),
+            KeyboardProtocol::Kitty {
+                flags: KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES,
+            }
+        );
 
         e.advance(b"\x1b[=8u");
-        assert!(!e.disambiguate_escape_codes());
-        assert!(e.report_all_keys_as_escape_codes());
+        assert_eq!(
+            e.keyboard_protocol(),
+            KeyboardProtocol::Kitty {
+                flags: KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            }
+        );
 
         e.set_history_budget(budget_for_rows(20, 1_000));
-        assert!(
-            e.report_all_keys_as_escape_codes(),
+        assert_eq!(
+            e.keyboard_protocol(),
+            KeyboardProtocol::Kitty {
+                flags: KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            },
             "changing scrollback settings must not disable the child keyboard protocol"
         );
 
         e.advance(b"\x1b[<u");
-        assert!(!e.disambiguate_escape_codes());
-        assert!(!e.report_all_keys_as_escape_codes());
+        assert_eq!(e.keyboard_protocol(), KeyboardProtocol::Legacy);
     }
 
     #[test]

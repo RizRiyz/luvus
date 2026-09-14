@@ -55,6 +55,7 @@ dev-tools = []
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["serde"] }
 portable-pty = "0.9"
+bitflags = "=2.13.0"
 alacritty_terminal = { package = "luvus-alacritty-terminal", version = "0.26" }
 unicode-width = "0.2"
 # Explicit terminal-native document previews. The parser is pure Rust and only
