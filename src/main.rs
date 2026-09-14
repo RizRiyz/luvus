@@ -257,6 +257,13 @@ pub(crate) fn emit_graphics(commands: &[Vec<u8>]) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
     for command in commands {
+        // These bytes reach the terminal unchanged, so they are checked at the
+        // display boundary rather than trusted for having arrived over the
+        // socket — see [`terminal::graphics::is_wellformed_command`]. A refused
+        // command costs one missing image, never an escape the terminal obeys.
+        if !terminal::graphics::is_wellformed_command(command) {
+            continue;
+        }
         let _ = out.write_all(command);
     }
     let _ = out.flush();
@@ -1525,11 +1532,6 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     };
     app.events = events.clone();
     app.set_color_mode(ipc::protocol::truecolor_supported());
-    // This process owns the terminal here, so measure cells once at startup the
-    // way an attaching client reports them after its handshake. Without this a
-    // local session that never resizes would split on the fallback aspect.
-    let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
-    app.set_client_cell_pixels(cell_width_px, cell_height_px);
     // One process is both client and server here, so it asks its own terminal
     // the same questions the split path asks over the socket: the palette only
     // when the Terminal theme reads it, graphics support always.
@@ -1539,6 +1541,13 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     }
     app.set_host_graphics(probe.graphics.unwrap_or(false));
     app.set_host_cell_size(probe.cell_size);
+    // This process owns the terminal here, so measure cells once at startup the
+    // way an attaching client reports them after its handshake. Without this a
+    // local session that never resizes would split on the fallback aspect. It
+    // comes after the probe for the same reason it does on the server path: a
+    // live measurement supersedes the one taken once at attach.
+    let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
+    app.set_client_cell_pixels(cell_width_px, cell_height_px);
     let pending = probe.pending;
     // Match the client path: query colors before enabling input protocols, so
     // any interleaved bytes are ordinary keys that can be replayed losslessly.
