@@ -1208,6 +1208,9 @@ console.log(JSON.stringify(calls));
         use std::os::unix::fs::PermissionsExt;
         use std::process::{Command, Stdio};
 
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let have = |bin: &str| {
             Command::new("sh")
                 .args(["-c", &format!("command -v {bin} >/dev/null 2>&1")])
