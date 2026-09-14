@@ -315,6 +315,25 @@ impl App {
         self.task_start_impl(id, branch, agent, mode, workspace_id, None)
     }
 
+    /// Start a manual task while optionally preserving the operator's current
+    /// workspace, tab, pane focus, and zoom state.
+    pub fn task_start_with_focus(
+        &mut self,
+        id: &str,
+        branch: Option<String>,
+        agent: Option<String>,
+        mode: TaskWorkerMode,
+        workspace_id: Option<String>,
+        focus: bool,
+    ) -> Result<TaskStartResult, (String, String)> {
+        let previous = (!focus).then(|| self.task_start_selection()).flatten();
+        let result = self.task_start_impl(id, branch, agent, mode, workspace_id, None);
+        if !focus {
+            self.restore_task_start_selection(&previous);
+        }
+        result
+    }
+
     /// Start a scheduled worker with the adapter's reviewed headless command.
     /// This stays separate from interactive ORCH starts so automation policy
     /// never changes the behavior of an explicit `task start`.
@@ -3140,6 +3159,66 @@ mod tests {
     }
 
     #[test]
+    fn task_start_without_focus_preserves_the_view_while_opening_a_worktree() {
+        let _env = crate::persist::test_env("orch-start-no-focus");
+        let base = crate::persist::config_dir().join("no-focus-repo");
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&base)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(base));
+        let original_workspace = app.ws().id.clone();
+        let original_tab = app.ws().tabs[app.ws().active_tab].id.clone();
+        let original_pane = app.layout().focus;
+        app.zoomed = true;
+        app.orch
+            .add_task("background".into(), vec![], vec![], None)
+            .unwrap();
+
+        let started = app
+            .task_start_with_focus(
+                "t1",
+                None,
+                None,
+                TaskWorkerMode::Worktree,
+                Some(original_workspace.clone()),
+                false,
+            )
+            .unwrap();
+
+        assert_ne!(started.workspace_id, original_workspace);
+        assert_eq!(app.ws().id, original_workspace);
+        assert_eq!(app.ws().tabs[app.ws().active_tab].id, original_tab);
+        assert_eq!(app.layout().focus, original_pane);
+        assert!(app.zoomed);
+        assert!(app
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == started.workspace_id));
+        assert_eq!(app.orch.task("t1").unwrap().assignee, Some(started.pane.0));
+    }
+
+    #[test]
     fn task_start_rejects_a_lease_conflict_before_spawning() {
         let _env = crate::persist::test_env("orch-start-conflict");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -4187,10 +4266,10 @@ mod tests {
             ("kimi", "kimi --prompt"),
             ("kilo", "kilo --prompt"),
             ("kiro", "kiro-cli"),
+            ("letta", "letta -p"),
             ("muse", "muse"),
             ("omp", "omp"),
             ("opencode", "opencode --prompt"),
-            ("opencode2", "opencode2 --prompt"),
             ("pi", "pi"),
             ("qwen", "qwen --prompt-interactive"),
         ];
@@ -4225,7 +4304,7 @@ mod tests {
         assert!(agent_automation_command("kilo", AutomationAccess::Workspace).is_err());
         assert_eq!(
             agent_automation_command("opencode2", AutomationAccess::FullAccess).unwrap(),
-            "opencode2 run --auto"
+            "opencode run --auto"
         );
         assert!(agent_automation_command("opencode2", AutomationAccess::ReadOnly).is_err());
         assert!(agent_automation_command("opencode2", AutomationAccess::Workspace).is_err());
@@ -4654,7 +4733,7 @@ mod tests {
     fn automation_agent_picker_keeps_all_launch_capable_agents_visible() {
         use crate::automation::AutomationAccess;
 
-        assert_eq!(automation_agent_choices().len(), 19);
+        assert_eq!(automation_agent_choices().len(), 18);
         assert!(automation_agent_choices().contains(&"kilo"));
         assert!(automation_agent_choices().contains(&"pi"));
         assert!(!automation_agent_choices().contains(&"antigravity"));
@@ -4666,11 +4745,11 @@ mod tests {
         form.field = crate::app::OrchFormField::Agent;
         form.cycle_choice(false);
 
-        assert_eq!(form.agent, "opencode2");
+        assert_eq!(form.agent, "copilot");
         assert_eq!(form.access, AutomationAccess::ReadOnly);
-        assert!(!automation_agent_supports(&form.agent, form.access));
+        assert!(automation_agent_supports(&form.agent, form.access));
         assert!(automation_agent_supports(
-            &form.agent,
+            "opencode2",
             AutomationAccess::FullAccess
         ));
     }
@@ -4683,9 +4762,9 @@ mod tests {
         app.open_orch_board();
         app.orch_form = Some(crate::app::OrchForm {
             kind: crate::app::OrchFormKind::Automation,
-            title: "OpenCode 2 review".into(),
+            title: "OpenCode review".into(),
             prompt: "Review the workspace.".into(),
-            agent: "opencode2".into(),
+            agent: "opencode".into(),
             access: crate::automation::AutomationAccess::ReadOnly,
             start: crate::app::OrchFormStart::Daily,
             schedule: "08:00".into(),

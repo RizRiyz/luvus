@@ -217,6 +217,9 @@ luvus task update t1 --status running --note "learning: …"
 luvus task start t1 --agent "claude"
 luvus task next --start --agent "claude" --workspace-id workspace_example
 
+# stage a worker without leaving the workspace, tab, or pane you are viewing
+luvus task start t3 --agent "codex" --workspace-id workspace_example --no-focus
+
 # run directly in an existing checkout (no branch or merge step)
 luvus task start t2 --mode workspace --agent "codex"
 

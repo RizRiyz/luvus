@@ -423,11 +423,17 @@ fn install_direct_release(version: &str, destination: &Path) -> Result<()> {
 
 #[cfg(not(windows))]
 fn release_target() -> Result<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    release_target_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+#[cfg(not(windows))]
+fn release_target_for(os: &str, arch: &str) -> Result<&'static str> {
+    match (os, arch) {
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
         ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
         ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
+        ("freebsd", "x86_64") => Ok("x86_64-unknown-freebsd"),
         (os, arch) => bail!("no prebuilt Luvus release exists for {os}/{arch}"),
     }
 }
@@ -676,6 +682,33 @@ fn try_cmd(prog: &str, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn release_targets_cover_published_unix_archives() {
+        assert_eq!(
+            release_target_for("macos", "aarch64").unwrap(),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            release_target_for("macos", "x86_64").unwrap(),
+            "x86_64-apple-darwin"
+        );
+        assert_eq!(
+            release_target_for("linux", "aarch64").unwrap(),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            release_target_for("linux", "x86_64").unwrap(),
+            "x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            release_target_for("freebsd", "x86_64").unwrap(),
+            "x86_64-unknown-freebsd"
+        );
+        assert!(release_target_for("freebsd", "aarch64").is_err());
+        assert!(release_target_for("openbsd", "x86_64").is_err());
+    }
 
     #[test]
     fn newer_compares_semver_with_optional_v() {

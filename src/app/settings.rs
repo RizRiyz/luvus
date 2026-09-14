@@ -2197,8 +2197,9 @@ mod tests {
         );
     }
 
-    /// The General tab's Shift+Enter chooser cycles through the known sequences
-    /// and drives the bytes `encode_key` forwards.
+    /// The General tab's modified-Enter fallback chooser cycles through the
+    /// known legacy sequences and drives the bytes `encode_key` forwards when
+    /// no Kitty keyboard mode is active.
     #[test]
     fn general_shift_enter_cycles_and_drives_the_bytes() {
         let _env = crate::persist::test_env("shift-enter-cycle");

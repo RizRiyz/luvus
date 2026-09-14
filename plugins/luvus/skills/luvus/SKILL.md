@@ -461,6 +461,8 @@ surface:
   retrying. Leases coordinate declared paths but do not sandbox a shared
   checkout. `task release` requeues an
   active task and releases its path leases; it does not stop the worker pane.
+  Use `task start ... --no-focus` when staging a worker should preserve the
+  operator's current workspace, tab, pane focus, and zoom state.
   `task retry <id>` is the explicit fresh-attempt operation for `done`,
   `failed`, `review`, or `blocked` work. It preserves the old pane, worktree,
   branch, output, and notes. Inspect dependents first because retry is rejected
@@ -521,10 +523,11 @@ surface:
 - For Antigravity CLI, `luvus integration install antigravity` adds exact
   conversation identity for restore. It is session-only; native screen
   detection remains authoritative for agent state.
-- For OpenCode, `luvus integration install opencode` adds exact TUI-local root
-  session ownership and structured usage. Without it, usage stays unavailable.
-- OpenCode 2 Preview is a separate `opencode2` agent. Do not install the
-  OpenCode V1 integration for it or infer session IDs from its live database.
+- For OpenCode, `luvus integration install opencode` detects V1 or V2 and adds
+  exact TUI-local root session ownership through the matching integration
+  contract.
+  `opencode2` is a compatibility alias for the canonical `opencode` agent.
+  Never infer V2 session IDs from its live database.
 - Devin has native detection and exact-ID resume only. Do not infer session
   IDs from its private database; `luvus agent resume <id>` cannot find Devin
   sessions, so bind a pane with `luvus pane report --agent devin --session
@@ -532,6 +535,10 @@ surface:
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not
   scan Hermes's private history store.
+- For Letta Code, `luvus integration install letta` adds one quiet session-start
+  hook that reports only the exact conversation ID. Detection remains native.
+  Luvus does not inspect Letta memory, credentials, conversations, or cloud
+  state, and does not advertise native fork or scheduled automation for Letta.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
 

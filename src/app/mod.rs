@@ -10196,6 +10196,92 @@ mod tests {
     }
 
     #[test]
+    fn reported_session_release_is_idempotent_identity_fenced_and_persistent() {
+        let _env = crate::persist::test_env("reported-session-release");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let report = |session: &str| {
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": session,
+                "usage": {
+                    "model": "openai/gpt-5",
+                    "tokens_in": 10,
+                    "tokens_out": 5,
+                    "cache_read": 2,
+                    "cache_write": 1,
+                    "cost": 0.01,
+                    "updated_at": 100
+                }
+            })
+        };
+        let release = |agent: &str, session: &str| {
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": agent,
+                "session_id": session,
+            })
+        };
+
+        assert_eq!(
+            api_call(&mut app, "pane.report_session", report("ses_a"))["result"]["type"],
+            "ok"
+        );
+        let stale = api_call(
+            &mut app,
+            "pane.release_session",
+            release("opencode", "ses_old"),
+        );
+        assert_eq!(stale["error"]["code"], "ownership_conflict");
+        assert_eq!(
+            app.status[&pane].agent_session.as_ref().unwrap().session_id,
+            "ses_a"
+        );
+
+        assert_eq!(
+            api_call(&mut app, "pane.report_session", report("ses_b"))["result"]["type"],
+            "ok"
+        );
+        let delayed = api_call(
+            &mut app,
+            "pane.release_session",
+            release("opencode", "ses_a"),
+        );
+        assert_eq!(delayed["error"]["code"], "ownership_conflict");
+        assert_eq!(
+            app.status[&pane].agent_session.as_ref().unwrap().session_id,
+            "ses_b"
+        );
+
+        let released = api_call(
+            &mut app,
+            "pane.release_session",
+            release("opencode2", "ses_b"),
+        );
+        assert_eq!(released["result"]["released"], true);
+        assert!(app.status[&pane].agent_session.is_none());
+        assert!(!app
+            .reported_usage
+            .contains_key(&crate::mission::UsageKey::new("opencode", "ses_b")));
+
+        let repeated = api_call(
+            &mut app,
+            "pane.release_session",
+            release("opencode", "ses_b"),
+        );
+        assert_eq!(repeated["result"]["released"], false);
+
+        let snapshot = persist::snapshot(&app);
+        let (restored_tx, _restored_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restored_tx).unwrap();
+        assert!(restored.status[&restored.layout().focus]
+            .agent_session
+            .is_none());
+    }
+
+    #[test]
     fn reported_session_has_one_owner_and_closing_that_pane_prunes_its_usage() {
         let _env = crate::persist::test_env("reported-session-owner");
         let (tx, _rx) = std::sync::mpsc::channel();

@@ -2378,15 +2378,15 @@ static HELP: &[Translation] = &[
         "준비된 다음 작업 할당 (--start로 워커 생성)"
     ),
     tr!(
-        "start a worker (worktree default; workspace shares checkout)",
-        "iniciar un trabajador (worktree predeterminado; workspace comparte el checkout)",
-        "iniciar um worker (worktree padrão; workspace compartilha o checkout)",
-        "démarrer un worker (worktree par défaut ; workspace partage le checkout)",
-        "Worker starten (Worktree ist Standard; Workspace teilt den Checkout)",
-        "jalankan worker (default worktree; workspace berbagi checkout)",
-        "启动工作进程（默认 worktree；workspace 共享检出目录）",
-        "ワーカーを起動（既定は worktree、workspace はチェックアウトを共有）",
-        "워커 시작 (기본값 worktree, workspace는 체크아웃 공유)"
+        "start a worker (worktree default; --no-focus preserves the view)",
+        "iniciar un trabajador (worktree predeterminado; --no-focus conserva la vista)",
+        "iniciar um worker (worktree padrão; --no-focus mantém a vista)",
+        "démarrer un worker (worktree par défaut ; --no-focus conserve la vue)",
+        "Worker starten (Worktree ist Standard; --no-focus behält die Ansicht bei)",
+        "jalankan worker (default worktree; --no-focus mempertahankan tampilan)",
+        "启动工作进程（默认 worktree；--no-focus 保留当前视图）",
+        "ワーカーを起動（既定は worktree、--no-focus で現在の表示を維持）",
+        "워커 시작 (기본값 worktree, --no-focus로 현재 보기 유지)"
     ),
     tr!(
         "report model context-window use, not task progress",

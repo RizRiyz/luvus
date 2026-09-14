@@ -10,7 +10,7 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-OpenCode 2 Preview, Kimi, Grok, Hermes CLI, Muse Code, Pi, Oh My Pi (OMP),
+Kimi, Grok, Hermes CLI, Letta Code, Muse Code, Pi, Oh My Pi (OMP),
 Cursor, Gemini, Qwen, Kilo Code, Kiro, Aider, Amp, Droid, Devin, or fx) appears
 in the sidebar with a live state:
 
@@ -77,8 +77,7 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Claude Code | project transcript |
 | Codex | rollout token counters |
 | GitHub Copilot CLI | session shutdown metrics |
-| opencode | selected-session integration events |
-| OpenCode 2 Preview | unavailable until an exact structured counter is exposed |
+| opencode | V1 selected-session integration events; V2 usage is unavailable |
 | Kimi | session status records |
 | Grok | completed-turn usage records |
 | Pi | assistant message usage |
@@ -86,8 +85,8 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Gemini and Qwen | project chat records |
 | fx | session usage snapshot |
 
-Aider, OpenCode 2 Preview, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, Devin,
-and manifest-defined agents still receive live identity and state detection,
+Aider, OpenCode V2, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, Devin, Letta Code, and
+manifest-defined agents still receive live identity and state detection,
 but show `—` for usage until they expose a stable per-session counter or report
 one through an integration. Luvus never estimates tokens from transcript text.
 
@@ -141,11 +140,11 @@ not sufficient, and Luvus runs the agent's own resume command:
 | GitHub Copilot CLI | its session-state store |
 | Codex | its rollout files |
 | Antigravity CLI | its workspace conversation cache (`~/.gemini/antigravity-cli/cache/last_conversations.json`) |
-| opencode | its session storage, plus exact live ownership from the optional integration |
-| OpenCode 2 Preview | `opencode2 --session <id>` when the exact ID is already known |
+| opencode | legacy session storage, plus exact live ownership from the optional integration |
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
 | Hermes CLI | its exact session report from the optional integration |
+| Letta Code | its exact conversation report from the optional integration, resumed with `letta --conversation <id>` |
 | Pi | its session store (`~/.pi/agent/sessions`) |
 | Oh My Pi (OMP) | its profile-, XDG-, and override-aware native session store |
 | Muse Code | its XDG data store (`$XDG_DATA_HOME/muse/sessions`) |
@@ -156,10 +155,13 @@ not sufficient, and Luvus runs the agent's own resume command:
 | Kilo Code | `kilo --session <id>` (when the exact session id is known) |
 | Devin | `devin --resume <id>` (when the exact session id is known) |
 
-OpenCode 2 Preview runs beside OpenCode V1 under the distinct `opencode2`
-executable. Luvus does not scan the V2 service's live SQLite database or reuse
-the V1 TUI plugin. Exact-ID resume remains available, and scheduled V2 work is
-offered only for explicit **Full access** through `opencode2 run --auto`.
+OpenCode V2 now runs under the canonical `opencode` executable; the former
+`opencode2` preview name is accepted as an alias. The optional integration
+selects the installed generation and uses V2's CLI-only plugin contract when
+appropriate. It reports and releases the exact root session selected in this
+pane, while Luvus leaves the shared service and its live SQLite database alone.
+Exact-ID resume uses `opencode --session <id>`, and scheduled work is offered
+only for explicit **Full access** through `opencode run --auto`.
 
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
 (toggle *All*): click one to reopen it into a new pane, even sessions from
@@ -228,6 +230,12 @@ exact identity was reported and persisted by its integration, but Hermes
 exposes `/branch` and `/fork` only inside the active TUI, so it is not listed as
 a native pane-fork target.
 
+Letta Code reports its exact selected conversation through an optional quiet
+`SessionStart` hook. Luvus persists that pane binding and resumes it with
+`letta --conversation <id>`, but does not inspect Letta memory, conversations,
+credentials, or cloud state. Letta does not currently expose a reviewed
+external conversation-fork command, so **Fork to New Pane** stays unavailable.
+
 ## Precise events: the integration hook
 
 Screen-based detection needs no setup and works for everything. The optional
@@ -235,7 +243,7 @@ Screen-based detection needs no setup and works for everything. The optional
 where its hook contract supports them safely, lifecycle events into luvus:
 
 ```sh
-luvus integration install claude    # or: copilot · codex · antigravity · opencode · kimi · grok · hermes · omp
+luvus integration install claude    # or: copilot · codex · antigravity · letta · opencode · kimi · grok · hermes · omp
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
@@ -246,6 +254,10 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   `~/.gemini/config/hooks.json`. It reports only the exact conversation id for
   `agy --conversation <id>` restore; screen detection continues to own agent
   state, and every other named Antigravity hook is preserved.
+- **letta**: adds one quiet `SessionStart` entry to
+  `~/.letta/settings.json` and one small platform-specific hook script. It
+  reports only the exact conversation ID for restart resume. Detection and
+  state remain native and work without the integration.
 - **opencode**: installs a TUI-local plugin and registers it in the effective
   `tui.json`, `tui.jsonc`, or `OPENCODE_TUI_CONFIG` file
   without removing comments or unrelated plugins. It reports only the root

@@ -70,6 +70,67 @@ fn task_start_api_supports_explicit_workspace_mode() {
 }
 
 #[test]
+fn task_start_api_can_preserve_the_operator_selection() {
+    let (_env, mut app) = app("socket-task-no-focus");
+    let original_workspace = app.ws().id.clone();
+    let original_tab = app.ws().tabs[app.ws().active_tab].id.clone();
+    let original_pane = app.layout().focus;
+    let target_root = crate::persist::config_dir().join("task-no-focus-target");
+    std::fs::create_dir_all(&target_root).unwrap();
+    assert!(app.create_workspace_at(target_root));
+    let target_workspace = app.ws().id.clone();
+    app.active_ws = app
+        .workspaces
+        .iter()
+        .position(|workspace| workspace.id == original_workspace)
+        .unwrap();
+    app.zoomed = true;
+    app.orch
+        .add_task("background".into(), vec![], vec![], None)
+        .unwrap();
+
+    let result = app
+        .dispatch(
+            "task.start",
+            &json!({
+                "id":"t1",
+                "mode":"workspace",
+                "workspace_id":target_workspace,
+                "focus":false
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(result["workspace_id"], target_workspace);
+    assert_eq!(app.ws().id, original_workspace);
+    assert_eq!(app.ws().tabs[app.ws().active_tab].id, original_tab);
+    assert_eq!(app.layout().focus, original_pane);
+    assert!(app.zoomed);
+    let target = app
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == target_workspace)
+        .unwrap();
+    assert!(target.tabs.iter().any(|tab| tab.id == result["tab_id"]));
+}
+
+#[test]
+fn task_start_api_rejects_a_non_boolean_focus() {
+    let (_env, mut app) = app("socket-task-focus-type");
+    app.orch
+        .add_task("invalid focus".into(), vec![], vec![], None)
+        .unwrap();
+
+    let error = app
+        .dispatch("task.start", &json!({"id":"t1", "focus":"no"}))
+        .unwrap_err();
+
+    assert_eq!(error.0, "invalid_request");
+    assert_eq!(error.1, "focus must be a boolean");
+    assert!(app.orch.task("t1").unwrap().assignee.is_none());
+}
+
+#[test]
 fn automation_api_validates_targets_and_is_idempotent() {
     let (_env, mut app) = app("socket-automation");
     let workspace_id = app.workspaces[0].id.clone();

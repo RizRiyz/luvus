@@ -632,7 +632,9 @@ def valid_global_request(value, methods):
         )
     if value["method"] == "task.start":
         params = value["params"]
-        if not set(params) <= {"id", "branch", "agent", "mode", "workspace_id"}:
+        if not set(params) <= {
+            "id", "branch", "agent", "mode", "workspace_id", "focus"
+        }:
             return False
         if not bounded_string(params.get("id"), 128, allow_empty=False):
             return False
@@ -643,6 +645,8 @@ def valid_global_request(value, methods):
         if "workspace_id" in params and not bounded_string(
             params["workspace_id"], 128, allow_empty=False
         ):
+            return False
+        if "focus" in params and type(params["focus"]) is not bool:
             return False
         mode = params.get("mode")
         if mode is not None and (not isinstance(mode, str) or mode not in {"worktree", "workspace"}):

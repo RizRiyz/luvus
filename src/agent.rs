@@ -31,10 +31,10 @@ pub(crate) mod hermes;
 pub(crate) mod kilo;
 pub(crate) mod kimi;
 pub(crate) mod kiro;
+pub(crate) mod letta;
 pub(crate) mod muse;
 pub(crate) mod omp;
 pub(crate) mod opencode;
-pub(crate) mod opencode2;
 pub(crate) mod pi;
 pub(crate) mod qwen;
 pub(crate) mod registry;
@@ -128,6 +128,7 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     const STANDALONE: &[&str] = &["--continue", "--fork-session", "--print", "-p"];
 
     let mut i = 0;
+    let is_letta = registry::find(agent).is_some_and(|descriptor| descriptor.id == letta::NAME);
     // Codex and Muse select sessions with positional subcommands rather than
     // flags. Drop them when they lead captured argv so a restored pane gets
     // exactly one fresh session selector. A restored Codex fork must resume its
@@ -147,6 +148,28 @@ fn filter_launch_flags(agent: &str, launch: &[String]) -> Vec<String> {
     while i < launch.len() {
         let t = launch[i].as_str();
         let head = t.split('=').next().unwrap_or(t);
+        // Letta conversation restore is exact. Drop every selector that could
+        // override or conflict with the reported conversation, plus the UI-only
+        // resume/new-session switches. Other model and permission flags remain.
+        if is_letta {
+            if matches!(
+                head,
+                "--conversation" | "--conv" | "-C" | "--agent" | "-a" | "--name" | "-n"
+            ) {
+                i += 1;
+                if !t.contains('=') && launch.get(i).is_some_and(|value| !value.starts_with('-')) {
+                    i += 1;
+                }
+                continue;
+            }
+            if matches!(
+                head,
+                "--resume" | "-r" | "--new" | "--new-agent" | "--default"
+            ) {
+                i += 1;
+                continue;
+            }
+        }
         // Antigravity resumes by conversation id and uses `-c` for the newest
         // conversation. Neither selector may survive beside the exact id Luvus
         // is restoring.
@@ -379,7 +402,7 @@ mod tests {
             .contains("opencode --session"));
         assert_eq!(
             resume_command("opencode2", "ses_2").as_deref(),
-            Some("opencode2 --session 'ses_2'\r")
+            Some("opencode --session 'ses_2'\r")
         );
         // Aliases + resume-only agents resolve through the registry.
         assert!(resume_command("codex", "c1")
@@ -442,6 +465,11 @@ mod tests {
             Some("devin --resume 'quiet-meadow'\r")
         );
         assert!(is_resumable("devin"));
+        assert_eq!(
+            resume_command("letta-code", "conversation-123").as_deref(),
+            Some("letta --conversation 'conversation-123'\r")
+        );
+        assert!(is_resumable("letta"));
         assert!(resume_command("unknown", "x").is_none());
         assert!(resume_command("claude", "").is_none()); // empty id
         assert!(resume_command("claude", "a b").is_none()); // unsafe char
@@ -769,6 +797,29 @@ mod tests {
             f("antigravity", &["--conversation=old-id", "-c", "--sandbox"]),
             vec!["--sandbox"]
         );
+        assert_eq!(
+            f(
+                "letta-code",
+                &[
+                    "--conversation",
+                    "old-conversation",
+                    "--agent=old-agent",
+                    "--name",
+                    "Memo",
+                    "--resume",
+                    "--model",
+                    "sonnet"
+                ]
+            ),
+            vec!["--model", "sonnet"]
+        );
+        assert_eq!(
+            f(
+                "letta",
+                &["--conv=old", "-C", "other", "--new", "--default", "--yolo",],
+            ),
+            vec!["--yolo"]
+        );
         // A kept flag keeps its value.
         assert_eq!(
             f("claude", &["--permission-mode", "bypassPermissions"]),
@@ -799,7 +850,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             resume_command_with_flags("opencode2", "ses_2", &opencode2_launch).as_deref(),
-            Some("opencode2 --session 'ses_2' '--standalone'\r")
+            Some("opencode --session 'ses_2' '--standalone'\r")
         );
 
         // Devin keeps its option but never the `-- <briefing>` it was launched with.
@@ -913,6 +964,7 @@ mod tests {
         assert!(!can_fork("copilot"));
         assert!(!can_fork("cursor"));
         assert!(!can_fork("devin"));
+        assert!(!can_fork("letta"));
         // Unknown agent / unsafe / empty id all refuse.
         assert!(fork_command("unknown", "x").is_none());
         assert!(fork_command("claude", "a b").is_none());

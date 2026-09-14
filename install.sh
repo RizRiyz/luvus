@@ -36,6 +36,11 @@ case "$os" in
       aarch64|arm64) target="aarch64-unknown-linux-musl" ;;
       *) err "unsupported Linux arch: $arch" ;;
     esac ;;
+  FreeBSD)
+    case "$arch" in
+      amd64|x86_64) target="x86_64-unknown-freebsd" ;;
+      *) err "unsupported FreeBSD arch: $arch" ;;
+    esac ;;
   *) err "unsupported OS: $os (on Windows, download the .zip from the releases page)" ;;
 esac
 

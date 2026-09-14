@@ -9,6 +9,7 @@
 {"id":"unicode-é","method":"uhp.capabilities","params":{}}
 {"id":"unicode-auth","method":"uhp.capabilities","auth":"luv_tok_é","params":{}}
 {"id":"bad-task-mode","method":"task.start","params":{"id":"t1","mode":"workspace","branch":"feat/t1"}}
+{"id":"bad-task-focus","method":"task.start","params":{"id":"t1","focus":"no"}}
 {"id":"bad-host-confirm","method":"host.update.install","params":{"confirm":false}}
 {"id":"bad-host-empty","method":"host.info","params":{"extra":true}}
 {"id":"bad-session-missing","method":"session.start","params":{}}

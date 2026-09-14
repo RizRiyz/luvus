@@ -429,12 +429,23 @@ impl App {
             let id = req_str(p, "id")?.to_string();
             let mode = task_worker_mode(p, self.orch.task(&id).and_then(|task| task.worker_mode))?;
             let requested = self.task_workspace_id_from_request(p, false)?;
-            let started = self.task_start(
+            let focus = match p.get("focus") {
+                None => true,
+                Some(Value::Bool(focus)) => *focus,
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "focus must be a boolean".to_string(),
+                    ))
+                }
+            };
+            let started = self.task_start_with_focus(
                 &id,
                 opt_str(p, "branch"),
                 opt_str(p, "agent"),
                 mode,
                 requested,
+                focus,
             )?;
             let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
             Ok(json!({

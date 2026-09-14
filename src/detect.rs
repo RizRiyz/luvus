@@ -2981,18 +2981,18 @@ Would you like to proceed?
     }
 
     #[test]
-    fn opencode_versions_have_distinct_process_identity() {
+    fn opencode_v2_preview_name_normalizes_to_the_canonical_agent() {
         let manifests = Manifests::builtin();
 
         assert_eq!(
             manifests.agent_in_processes(&["/Users/me/.opencode/bin/opencode2 --auto".into()]),
-            Some("opencode2".into())
+            Some("opencode".into())
         );
         assert_eq!(
             manifests.agent_in_processes(&[
                 r#"C:\Users\me\.opencode\bin\opencode2.exe --session ses_123"#.into()
             ]),
-            Some("opencode2".into())
+            Some("opencode".into())
         );
         assert_eq!(
             manifests.agent_in_processes(&["/usr/local/bin/opencode --session ses_v1".into()]),
@@ -3001,7 +3001,7 @@ Would you like to proceed?
         assert_eq!(
             manifests.launch_args_for(
                 &["/Users/me/.opencode/bin/opencode2 --session ses_2".into()],
-                "opencode2"
+                "opencode"
             ),
             Some(vec!["--session".into(), "ses_2".into()])
         );
@@ -3017,6 +3017,58 @@ Would you like to proceed?
             &manifests,
         );
         assert_eq!(prose.agent, "zsh");
+    }
+
+    #[test]
+    fn letta_identity_uses_the_binary_or_exact_scoped_package() {
+        let manifests = Manifests::builtin();
+        for command in [
+            "/usr/local/bin/letta --conversation conversation-123",
+            "node /usr/local/lib/node_modules/@letta-ai/letta-code/letta.js --new",
+            "npx @letta-ai/letta-code --resume",
+            r#""C:\Program Files\nodejs\node.exe" "C:\Users\me\AppData\Roaming\npm\node_modules\@letta-ai\letta-code\letta.js" --resume"#,
+            "bun /home/me/.bun/install/global/node_modules/@letta-ai/letta-code/letta.js",
+        ] {
+            assert_eq!(
+                manifests.agent_in_processes(&[command.to_string()]),
+                Some("letta".to_string()),
+                "failed to recognize {command}"
+            );
+        }
+
+        let prose = classify(
+            Some("zsh"),
+            "Read the Letta documentation before continuing\n",
+            true,
+            false,
+            "zsh",
+            "",
+            &["-zsh".into()],
+            &manifests,
+        );
+        assert_eq!(prose.agent, "zsh");
+    }
+
+    #[test]
+    fn letta_state_uses_its_documented_terminal_title_contract() {
+        let manifests = Manifests::builtin();
+        let detect = |title: &str| {
+            classify(
+                Some(title),
+                "",
+                false,
+                false,
+                "letta",
+                "letta",
+                &["/usr/local/bin/letta".to_string()],
+                &manifests,
+            )
+            .state
+        };
+
+        assert_eq!(detect("⠹ Memo"), State::Working);
+        assert_eq!(detect("[ ! ] Action Required | Memo"), State::Blocked);
+        assert_eq!(detect("Memo"), State::Idle);
     }
 
     #[test]

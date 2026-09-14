@@ -94,8 +94,8 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | GitHub Copilot CLI | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ |
 | Antigravity CLI | ✓ | ✓ | session only |
+| Letta Code | ✓ | ✓ with integration | session only |
 | opencode | ✓ | ✓ | ✓ |
-| OpenCode 2 Preview | ✓ | exact-ID resume | No |
 | Kimi | ✓ | ✓ | ✓ |
 | Grok | ✓ | ✓ | ✓ |
 | Hermes CLI | ✓ | ✓ with integration | session only |

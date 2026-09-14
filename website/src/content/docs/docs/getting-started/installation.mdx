@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Install luvus on macOS, Linux, or Windows, and keep it up to date.
+description: Install luvus on macOS, Linux, FreeBSD, or Windows, and keep it up to date.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -9,13 +9,14 @@ luvus ships as a **single static binary** (~3 MB) with no runtime dependencies.
 Pick whichever channel you prefer:
 
 <Tabs syncKey="install">
-  <TabItem label="macOS / Linux">
+  <TabItem label="macOS / Linux / FreeBSD">
     ```sh
     curl -fsSL https://luvus.dev/install.sh | sh
     ```
     Downloads the right prebuilt binary for your OS/arch from GitHub releases and
     puts it on your `PATH` (`/usr/local/bin` or `~/.local/bin`). macOS builds ship
-    for both **Apple silicon and Intel**; Linux for x86_64 and arm64.
+    for both **Apple silicon and Intel**, Linux for x86_64 and arm64, and FreeBSD
+    for amd64.
   </TabItem>
   <TabItem label="Homebrew">
     ```sh
