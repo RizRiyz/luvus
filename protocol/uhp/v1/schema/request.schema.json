@@ -21,7 +21,7 @@
         "tab.list", "tab.get", "tab.new", "tab.focus", "tab.move", "tab.swap", "tab.rename", "tab.close",
         "pane.list", "pane.get", "pane.current", "pane.layout", "pane.neighbor", "pane.edges", "pane.split", "pane.move", "pane.swap", "pane.focus", "pane.focus_direction", "pane.resize", "pane.zoom", "pane.rename", "pane.run", "pane.send_input", "pane.read", "pane.status", "pane.processes", "pane.report_session", "pane.release_session", "pane.report_event", "pane.close", "attach.pane",
         "layout.export", "layout.apply", "layout.set_split_ratio",
-        "agent.list", "agent.get", "agent.explain", "agent.report", "agent.release", "agent.start", "agent.prompt", "agent.wait", "agent.name", "agent.fork", "agent.send", "agent.keys", "agent.read", "agent.sessions", "agent.resume",
+        "agent.list", "agent.get", "agent.explain", "agent.report", "agent.release", "agent.start", "agent.prompt", "agent.wait", "agent.name", "agent.fork", "agent.send", "agent.keys", "agent.read", "agent.transcript", "agent.sessions", "agent.resume",
         "search", "search.capabilities", "search.query", "search.activate",
         "files.tree", "files.open", "files.reveal", "files.refresh",
         "git.status", "git.branches", "git.log", "git.open",
@@ -94,6 +94,14 @@
         "where": { "type": "object", "maxProperties": 16 },
         "timeout_s": { "type": "number", "minimum": 0, "maximum": 3600 },
         "after_sequence": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "agentTranscriptParams": {
+      "type": "object", "additionalProperties": false, "required": ["target"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 50 },
+        "cursor": { "type": "string", "pattern": "^[0-9]{1,10}$", "not": { "pattern": "[^0-9]" } }
       }
     },
     "agentWaitParams": {
@@ -354,6 +362,7 @@
     }
   },
   "allOf": [
+    { "if": { "properties": { "method": { "const": "agent.transcript" } }, "required": ["method"] }, "then": { "properties": { "params": { "$ref": "#/$defs/agentTranscriptParams" } } } },
     { "if": { "properties": { "method": { "enum": ["host.capabilities", "host.info", "host.doctor", "host.update.check", "skill.status", "integration.status", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
     { "if": { "properties": { "method": { "const": "machine.list" } } },

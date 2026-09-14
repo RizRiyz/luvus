@@ -38,6 +38,7 @@ RESULT_TYPES = {
     "agent_start",
     "agent_prompt",
     "agent_wait",
+    "agent_transcript",
     "subscription_started",
 }
 RESULT_FIELDS = {
@@ -60,6 +61,7 @@ RESULT_FIELDS = {
         "content_revision", "evidence",
     },
     "agent_wait": {"matched", "pane", "status"},
+    "agent_transcript": {"pane", "agent", "session_id", "turns", "next_cursor", "truncated"},
     "subscription_started": {"sequence", "queue_capacity", "loss_behavior"},
 }
 FIELDS = {
@@ -75,6 +77,7 @@ FIELDS = {
     "agent.start": {"name", "kind", "pane", "anchor", "direction", "args", "timeout_s"},
     "agent.prompt": {"target", "text", "wait", "until", "timeout_s"},
     "agent.wait": {"pane", "status", "statuses", "timeout_s"},
+    "agent.transcript": {"target", "limit", "cursor"},
     "agent.keys": {"target", "keys", "if_content_revision", "terminal_id"},
     "events.subscribe": set(),
 }
@@ -111,6 +114,51 @@ def session_name(value):
         and value not in {".", ".."}
         and SESSION_NAME.fullmatch(value) is not None
     )
+
+
+def transcript_cursor(value):
+    """Accept only the contract's one-to-ten ASCII decimal cursor digits."""
+    return isinstance(value, str) and re.fullmatch(r"[0-9]{1,10}", value) is not None
+
+
+def valid_agent_transcript_params(params):
+    """Validate the target, bounded limit, optional cursor, and exact parameter keys."""
+    if not isinstance(params, dict) or not set(params) <= FIELDS["agent.transcript"]:
+        return False
+    if not isinstance(params.get("target"), str) or not params["target"]:
+        return False
+    limit = params.get("limit", 50)
+    return (
+        integer(limit) and 1 <= limit <= 50
+        and ("cursor" not in params or transcript_cursor(params["cursor"]))
+    )
+
+
+def valid_agent_transcript_result(result):
+    """Validate required Claude transcript coordinates, bounded text turns, and paging."""
+    if not RESULT_FIELDS["agent_transcript"] <= set(result):
+        return False
+    if not (
+        pane(result["pane"]) and result["agent"] == "claude"
+        and isinstance(result["session_id"], str) and result["session_id"]
+        and isinstance(result["turns"], list) and len(result["turns"]) <= 50
+        and (result["next_cursor"] is None or transcript_cursor(result["next_cursor"]))
+        and type(result["truncated"]) is bool
+    ):
+        return False
+    for turn in result["turns"]:
+        if not isinstance(turn, dict) or not {"role", "text"} <= set(turn) <= {"role", "text", "ts"}:
+            return False
+        if turn["role"] not in ("user", "assistant", "system") or not isinstance(turn["text"], str):
+            return False
+        try:
+            if len(turn["text"].encode("utf-8")) > 8192:
+                return False
+        except UnicodeEncodeError:
+            return False
+        if "ts" in turn and type(turn["ts"]) not in (int, float):
+            return False
+    return True
 
 
 def valid_agent_wait_params(params):
@@ -401,6 +449,8 @@ def valid_request(value):
         return type(timeout) in {int, float} and 0 <= timeout <= 3600
     if method == "agent.wait":
         return valid_agent_wait_params(params)
+    if method == "agent.transcript":
+        return valid_agent_transcript_params(params)
     if method == "agent.keys":
         return valid_agent_keys_params(params)
     return False
@@ -464,6 +514,8 @@ def valid_response(value):
         if not required <= set(result):
             return False
         kind = result["type"]
+        if kind == "agent_transcript":
+            return valid_agent_transcript_result(result)
         if kind in {"uhp_capabilities", "session_snapshot"}:
             protocol = result["protocol"]
             if protocol != {"name": "luvus-uhp", "major": 1, "minor": 0}:
@@ -606,6 +658,8 @@ def valid_global_request(value, methods):
         return integer(after) and after >= 0
     if value["method"] == "agent.wait":
         return valid_agent_wait_params(value["params"])
+    if value["method"] == "agent.transcript":
+        return valid_agent_transcript_params(value["params"])
     if value["method"] == "agent.keys":
         return valid_agent_keys_params(value["params"])
     if value["method"] in EMPTY_HOST_METHODS:
@@ -763,7 +817,7 @@ def valid_global_response(value):
         )
     if isinstance(result, dict) and result.get("type") == "session_snapshot":
         return valid_response(value)
-    if isinstance(result, dict) and result.get("type") == "agent_wait":
+    if isinstance(result, dict) and result.get("type") in ("agent_wait", "agent_transcript"):
         return valid_response(value)
     return True
 

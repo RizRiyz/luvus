@@ -85,6 +85,7 @@ pub const METHODS: &[&str] = &[
     "agent.send",
     "agent.keys",
     "agent.read",
+    "agent.transcript",
     "agent.sessions",
     "agent.resume",
     "search",
@@ -240,6 +241,7 @@ const READ_ONLY_METHODS: &[&str] = &[
     "agent.explain",
     "agent.wait",
     "agent.read",
+    "agent.transcript",
     "agent.sessions",
     "search",
     "search.capabilities",
@@ -437,6 +439,16 @@ pub fn capabilities(event_sequence: u64) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    /// Verify transcript discovery, agent scope, and the existing read-only Access bit.
+    fn agent_transcript_is_in_read_only_catalog() {
+        assert!(all_methods().any(|method| method == "agent.transcript"));
+        assert!(is_read_only("agent.transcript"));
+        assert!(is_idempotent("agent.transcript"));
+        assert_eq!(required_scope("agent.transcript"), "agent");
+        assert!(!is_read_only("agent.keys"));
+    }
 
     #[test]
     fn registry_has_no_duplicates_and_contains_required_surface() {

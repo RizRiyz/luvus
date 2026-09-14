@@ -2,6 +2,355 @@ use super::super::params::*;
 use super::super::*;
 use crate::app::App;
 
+struct TranscriptStore {
+    previous: Option<std::ffi::OsString>,
+    dir: std::path::PathBuf,
+}
+
+impl TranscriptStore {
+    /// Install an isolated Claude session fixture for the active pane's working directory.
+    fn new(app: &App, contents: &str) -> Self {
+        let dir = std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap())
+            .join("transcript-fixture");
+        let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        let encoded: String = app.panes[&app.layout().focus]
+            .cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let project = dir.join("projects").join(encoded);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("sess-1.jsonl"), contents).unwrap();
+        Self { previous, dir }
+    }
+}
+
+impl Drop for TranscriptStore {
+    /// Restore the prior Claude configuration directory and remove the fixture store.
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Bind a native session to the active pane without invoking an external agent.
+fn bind_transcript(app: &mut App, agent: &str, session: &str) {
+    let pane = app.layout().focus;
+    let status = app.status.get_mut(&pane).unwrap();
+    status.agent = agent.into();
+    status.agent_session = Some(crate::app::AgentSession {
+        agent: agent.into(),
+        session_id: session.into(),
+    });
+}
+
+#[test]
+/// Exercise transcript targeting and paging while preserving every agent.read source.
+fn agent_transcript_happy_path_targets_limits_cursor_and_grid_regression() {
+    let (_env, mut app) = super::support::app("transcript-happy");
+    let _store = TranscriptStore::new(
+        &app,
+        concat!(
+            "{\"message\":{\"role\":\"user\",\"content\":\"history-only-user\"}}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"history-only-answer\"}}\n"
+        ),
+    );
+    bind_transcript(&mut app, "claude", "sess-1");
+    let pane = app.layout().focus;
+    app.set_agent_name(pane, Some("reviewer"));
+    let before = super::support::layout_state_bytes(&app);
+    for target in [pane.0.to_string(), "reviewer".into(), "claude".into()] {
+        let out = app
+            .dispatch("agent.transcript", &json!({"target":target}))
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({"type":"agent_transcript","pane":pane.0.to_string(),
+            "agent":"claude","session_id":"sess-1","turns":[
+                {"role":"user","text":"history-only-user"},
+                {"role":"assistant","text":"history-only-answer"}],
+            "next_cursor":null,"truncated":false})
+        );
+    }
+    for limit in [1, 50] {
+        let out = app
+            .dispatch(
+                "agent.transcript",
+                &json!({"target":"reviewer","limit":limit}),
+            )
+            .unwrap();
+        assert_eq!(
+            out["turns"].as_array().unwrap().len(),
+            if limit == 1 { 1 } else { 2 }
+        );
+    }
+    let first = app
+        .dispatch(
+            "agent.transcript",
+            &json!({"target":"reviewer","limit":1,"cursor":"0"}),
+        )
+        .unwrap();
+    assert_eq!(first["next_cursor"], "1");
+    let next = app
+        .dispatch(
+            "agent.transcript",
+            &json!({"target":"reviewer","cursor":first["next_cursor"]}),
+        )
+        .unwrap();
+    assert_eq!(next["turns"][0]["role"], "assistant");
+    assert_eq!(next["next_cursor"], json!(null));
+    for source in ["visible", "recent", "transcript"] {
+        let grid = app
+            .dispatch("agent.read", &json!({"target":"reviewer","source":source}))
+            .unwrap();
+        assert_eq!(grid["type"], "agent_read");
+        assert!(grid["text"].is_string());
+        assert!(!grid["text"].as_str().unwrap().contains("history-only"));
+        assert!(grid.get("content_revision").is_some());
+        assert!(grid.get("terminal_id").is_some());
+        assert!(grid.get("turns").is_none());
+    }
+    assert_eq!(super::support::layout_state_bytes(&app), before);
+}
+
+#[test]
+/// Reject unresolved or unbound panes even when a discoverable transcript exists.
+fn agent_transcript_unbound_and_missing_target_do_not_read_store() {
+    let (_env, mut app) = super::support::app("transcript-unbound");
+    // A valid on-disk transcript must never substitute for a native binding.
+    let _store = TranscriptStore::new(&app, "{\"role\":\"user\",\"content\":\"secret\"}\n");
+    let pane = app.layout().focus;
+    let before = super::support::layout_state_bytes(&app);
+    let err = app
+        .dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+        .unwrap_err();
+    assert_eq!(
+        err,
+        (
+            "not_found".into(),
+            "target pane has no bound native session".into()
+        )
+    );
+    for params in [
+        json!({}),
+        json!({"target":"missing"}),
+        json!({"target":7}),
+        json!({"target":""}),
+    ] {
+        assert_eq!(
+            app.dispatch("agent.transcript", &params).unwrap_err().0,
+            "not_found"
+        );
+    }
+    assert!(app.status[&pane].agent_session.is_none());
+    assert_eq!(super::support::layout_state_bytes(&app), before);
+}
+
+#[test]
+/// Reject unsupported bound kinds without falling back to the detected Claude identity.
+fn agent_transcript_rejects_nonclaude_bound_kind_without_io() {
+    let (_env, mut app) = super::support::app("transcript-unsupported");
+    let pane = app.layout().focus;
+    let before = super::support::layout_state_bytes(&app);
+    for agent in ["codex", "grok", "claude-extra"] {
+        bind_transcript(&mut app, agent, "missing-session");
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let err = app
+            .dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+            .unwrap_err();
+        assert_eq!(err.0, "unsupported_agent", "bound kind {agent}");
+        assert_eq!(
+            app.status[&pane].agent_session.as_ref().unwrap().agent,
+            agent
+        );
+    }
+    assert_eq!(super::support::layout_state_bytes(&app), before);
+}
+
+#[test]
+/// Preserve the native binding when its exact transcript file is absent.
+fn agent_transcript_missing_jsonl_is_not_found_and_keeps_binding() {
+    let (_env, mut app) = super::support::app("transcript-missing");
+    let _store = TranscriptStore::new(&app, "");
+    bind_transcript(&mut app, "claude", "missing-session");
+    let pane = app.layout().focus;
+    let err = app
+        .dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+        .unwrap_err();
+    assert_eq!(
+        err,
+        ("not_found".into(), "native transcript not available".into())
+    );
+    assert_eq!(
+        app.status[&pane].agent_session.as_ref().unwrap().session_id,
+        "missing-session"
+    );
+}
+
+#[test]
+/// Reject traversal in a bound session ID despite an existing file outside its project.
+fn agent_transcript_cannot_read_outside_bound_project() {
+    let (_env, mut app) = super::support::app("transcript-path-boundary");
+    let store = TranscriptStore::new(&app, "");
+    std::fs::write(
+        store.dir.join("projects/escaped.jsonl"),
+        "{\"role\":\"user\",\"content\":\"other project\"}\n",
+    )
+    .unwrap();
+    bind_transcript(&mut app, "claude", "../escaped");
+    let pane = app.layout().focus;
+    assert_eq!(
+        app.dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+            .unwrap_err()
+            .0,
+        "not_found"
+    );
+}
+
+#[test]
+/// Bound escaped JSON pages to protocol frames without losing turns across cursors.
+fn agent_transcript_escape_heavy_pages_fit_protocol_frames() {
+    let (_env, mut app) = super::support::app("transcript-frame-budget");
+    let mut contents = String::new();
+    for index in 0..50 {
+        contents.push_str(
+            &json!({"role":"user","content":format!("{index:02}{}", "\0".repeat(8190))})
+                .to_string(),
+        );
+        contents.push('\n');
+    }
+    let _store = TranscriptStore::new(&app, &contents);
+    bind_transcript(&mut app, "claude", "sess-1");
+    let target = app.layout().focus.0.to_string();
+    let latest = app
+        .dispatch("agent.transcript", &json!({"target":target}))
+        .unwrap();
+    assert!(
+        serde_json::to_vec(&json!({"id":"latest","result":latest}))
+            .unwrap()
+            .len()
+            < crate::terminal::backend::MAX_FRAME_BYTES
+    );
+    assert_eq!(
+        &latest["turns"].as_array().unwrap().last().unwrap()["text"]
+            .as_str()
+            .unwrap()[..2],
+        "49"
+    );
+    assert_eq!(latest["truncated"], true);
+    let mut cursor = json!("0");
+    let mut count = 0;
+    loop {
+        let out = app
+            .dispatch(
+                "agent.transcript",
+                &json!({"target":target,"cursor":cursor}),
+            )
+            .unwrap();
+        assert!(
+            serde_json::to_vec(&json!({"id":"page","result":out}))
+                .unwrap()
+                .len()
+                < crate::terminal::backend::MAX_FRAME_BYTES
+        );
+        let turns = out["turns"].as_array().unwrap();
+        assert!(!turns.is_empty());
+        for turn in turns {
+            assert_eq!(&turn["text"].as_str().unwrap()[..2], format!("{count:02}"));
+            count += 1;
+        }
+        cursor = out["next_cursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    assert_eq!(count, 50);
+}
+
+#[test]
+/// Reject malformed parameters and out-of-range cursors without changing pane state.
+fn agent_transcript_invalid_params_and_cursor_leave_state_untouched() {
+    let (_env, mut app) = super::support::app("transcript-invalid");
+    let _store = TranscriptStore::new(&app, "{\"role\":\"user\",\"content\":\"one\"}\n");
+    bind_transcript(&mut app, "claude", "sess-1");
+    let pane = app.layout().focus;
+    let before = super::support::layout_state_bytes(&app);
+    let mut cases = vec![json!(null), json!([])];
+    for limit in [
+        json!(0),
+        json!(51),
+        json!("x"),
+        json!(true),
+        json!(null),
+        json!(1.5),
+        json!(-1),
+    ] {
+        cases.push(json!({"target":pane.0.to_string(),"limit":limit}));
+    }
+    for cursor in [
+        json!(""),
+        json!("-1"),
+        json!("+1"),
+        json!("1x"),
+        json!(" 1"),
+        json!("1\n"),
+        json!("١"),
+        json!("00000000000"),
+        json!(1),
+        json!(null),
+        json!("1"),
+        json!("9999999999"),
+    ] {
+        cases.push(json!({"target":pane.0.to_string(),"cursor":cursor}));
+    }
+    for field in ["source", "path", "session_id", "ansi", "lines"] {
+        cases.push(json!({"target":pane.0.to_string(),field:"forbidden"}));
+    }
+    for params in cases {
+        assert_eq!(
+            app.dispatch("agent.transcript", &params).unwrap_err().0,
+            "invalid_request",
+            "{params}"
+        );
+        assert_eq!(super::support::layout_state_bytes(&app), before);
+        assert_eq!(
+            app.status[&pane].agent_session.as_ref().unwrap().session_id,
+            "sess-1"
+        );
+    }
+    assert!(app
+        .dispatch(
+            "agent.transcript",
+            &json!({"target":pane.0.to_string(),"cursor":"0000000000"})
+        )
+        .is_ok());
+}
+
+#[test]
+/// Keep the existing target resolver's ambiguity response for transcript requests.
+fn agent_transcript_preserves_ambiguous_target() {
+    let (_env, mut app) = super::support::app("transcript-ambiguous");
+    bind_transcript(&mut app, "claude", "sess-1");
+    app.split(crate::layout::Axis::Col);
+    bind_transcript(&mut app, "claude", "sess-2");
+    let before = super::support::layout_state_bytes(&app);
+    let expected = app
+        .dispatch("agent.read", &json!({"target":"claude"}))
+        .unwrap_err();
+    assert_eq!(expected.0, "ambiguous_target");
+    assert_eq!(
+        app.dispatch("agent.transcript", &json!({"target":"claude"}))
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(super::support::layout_state_bytes(&app), before);
+}
+
 fn mark_codex_prompt_ready(app: &mut App, pane: PaneId) {
     let generation = app.panes[&pane].engine.lock().unwrap().output_generation();
     let status = app.status.get_mut(&pane).unwrap();
