@@ -12,8 +12,7 @@ if (
 
 $luvus = if ([string]::IsNullOrWhiteSpace($env:LUVUS_BIN_PATH)) { "luvus" } else { $env:LUVUS_BIN_PATH }
 try {
-    $payload = [Console]::In.ReadToEnd()
-    $payload | & $luvus integration hook letta *> $null
+    & $luvus integration hook letta *> $null
 } catch {
     # Hooks are optional telemetry into the local Luvus server. Never interrupt
     # Letta startup when the server or installed binary is unavailable.

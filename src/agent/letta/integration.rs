@@ -88,6 +88,17 @@ fn group_mentions_script(group: &Value) -> bool {
         })
 }
 
+fn hook_uses_command(hook: &Value, command: &str) -> bool {
+    hook.get("command").and_then(Value::as_str) == Some(command)
+}
+
+fn group_uses_command(group: &Value, command: &str) -> bool {
+    group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| hooks.iter().any(|hook| hook_uses_command(hook, command)))
+}
+
 fn read_config(path: &Path) -> Result<Value> {
     match fs::read_to_string(path) {
         Ok(contents) => serde_json::from_str(&contents).map_err(Into::into),
@@ -124,12 +135,15 @@ fn register_managed_group(value: &mut Value, command: &str) -> Result<()> {
 }
 
 fn managed_group_present(value: &Value, command: &str) -> bool {
-    let expected = managed_group(command);
     value
         .get("hooks")
         .and_then(|hooks| hooks.get("SessionStart"))
         .and_then(Value::as_array)
-        .is_some_and(|groups| groups.iter().any(|group| group == &expected))
+        .is_some_and(|groups| {
+            groups
+                .iter()
+                .any(|group| group_uses_command(group, command))
+        })
 }
 
 fn restore_script(path: &Path, previous: Option<&[u8]>) {
@@ -182,7 +196,6 @@ fn uninstall() -> Result<()> {
     let script = script_path();
     let command = hook_command(&script)?;
     let mut value = read_config(&config)?;
-    let expected = managed_group(&command);
     let Some(groups) = value
         .get_mut("hooks")
         .and_then(|hooks| hooks.get_mut("SessionStart"))
@@ -190,10 +203,20 @@ fn uninstall() -> Result<()> {
     else {
         return Ok(());
     };
-    if !groups.iter().any(|group| group == &expected) {
+    let mut removed = false;
+    groups.retain_mut(|group| {
+        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            return true;
+        };
+        let before = hooks.len();
+        hooks.retain(|hook| !hook_uses_command(hook, &command));
+        let changed = hooks.len() != before;
+        removed |= changed;
+        !changed || !hooks.is_empty()
+    });
+    if !removed {
         return Ok(());
     }
-    groups.retain(|group| group != &expected);
     integration::write_json_atomic(&config, &value)?;
     if fs::read(&script).ok().as_deref() == Some(SCRIPT.as_bytes()) {
         let _ = fs::remove_file(script);
@@ -327,7 +350,8 @@ mod tests {
         assert_eq!(groups[1]["hooks"][0]["timeout"], HOOK_TIMEOUT_MS);
         assert_eq!(groups[1]["hooks"][0]["quiet"], true);
         assert!(SHELL_SCRIPT.contains("integration hook letta"));
-        assert!(POWERSHELL_SCRIPT.contains("integration hook letta"));
+        assert!(POWERSHELL_SCRIPT.contains("& $luvus integration hook letta *> $null"));
+        assert!(!POWERSHELL_SCRIPT.contains("ReadToEnd"));
 
         uninstall().unwrap();
         assert!(!is_installed());
@@ -339,6 +363,33 @@ mod tests {
             value["hooks"]["Stop"][0]["hooks"][0]["command"],
             "echo done"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uninstall_removes_owned_command_after_mutable_hook_edits() {
+        let (_lock, _home, root) = isolated_home("edited");
+        install().unwrap();
+
+        let config = config_path();
+        let mut value = read_config(&config).unwrap();
+        let managed = &mut value["hooks"]["SessionStart"][0]["hooks"];
+        managed[0]["timeout"] = json!(12_000);
+        managed[0]["quiet"] = json!(false);
+        managed
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "command", "command": "echo keep-me"}));
+        integration::write_json_atomic(&config, &value).unwrap();
+
+        assert!(is_installed());
+        uninstall().unwrap();
+        assert!(!script_path().exists());
+        let value = read_config(&config).unwrap();
+        let groups = value["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(groups[0]["hooks"][0]["command"], "echo keep-me");
         let _ = fs::remove_dir_all(root);
     }
 

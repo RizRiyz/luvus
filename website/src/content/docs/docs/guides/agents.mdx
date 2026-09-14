@@ -144,7 +144,7 @@ not sufficient, and Luvus runs the agent's own resume command:
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
 | Hermes CLI | its exact session report from the optional integration |
-| Letta Code | its exact conversation report from the optional integration |
+| Letta Code | its exact conversation report from the optional integration, resumed with `letta --conversation <id>` |
 | Pi | its session store (`~/.pi/agent/sessions`) |
 | Oh My Pi (OMP) | its profile-, XDG-, and override-aware native session store |
 | Muse Code | its XDG data store (`$XDG_DATA_HOME/muse/sessions`) |
@@ -154,7 +154,6 @@ not sufficient, and Luvus runs the agent's own resume command:
 | Cursor | resume command (when the session id is known) |
 | Kilo Code | `kilo --session <id>` (when the exact session id is known) |
 | Devin | `devin --resume <id>` (when the exact session id is known) |
-| Letta Code | `letta --conversation <id>` (when the exact conversation id is known) |
 
 OpenCode V2 now runs under the canonical `opencode` executable; the former
 `opencode2` preview name is accepted as an alias. The optional integration
