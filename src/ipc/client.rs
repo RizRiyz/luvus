@@ -250,7 +250,6 @@ struct ClientInput {
     /// Cached beside `colors`: a reattach reports the first probe's answer
     /// rather than querying a stdin the input loop already owns.
     graphics: Option<bool>,
-    cell_size: Option<crate::terminal::theme_probe::CellSize>,
     #[cfg(windows)]
     windows_input_mode: Option<crate::terminal::host_input::WindowsInputModeGuard>,
 }
@@ -334,7 +333,6 @@ where
             &ClientMessage::TerminalProbe {
                 colors: input.colors.clone(),
                 graphics: input.graphics,
-                cell_size: input.cell_size,
             },
         )?;
         Vec::new()
@@ -342,13 +340,14 @@ where
         let probe = crate::terminal::theme_probe::probe(probe_colors);
         input.colors = probe.colors;
         input.graphics = probe.graphics;
-        input.cell_size = probe.cell_size;
+        // The measured cell rides the window size this client already reports,
+        // rather than a second field naming the same pixels.
+        protocol::set_probed_cell_pixels(probe.cell_size);
         protocol::write_message(
             &mut writer,
             &ClientMessage::TerminalProbe {
                 colors: input.colors.clone(),
                 graphics: input.graphics,
-                cell_size: input.cell_size,
             },
         )?;
         probe.pending
@@ -1346,7 +1345,6 @@ mod tests {
             &ClientMessage::TerminalProbe {
                 colors: Some(colors),
                 graphics: None,
-                cell_size: None,
             },
         )
         .unwrap();

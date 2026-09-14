@@ -1540,14 +1540,17 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         app.apply_terminal_colors(colors);
     }
     app.set_host_graphics(probe.graphics.unwrap_or(false));
-    app.set_host_cell_size(probe.cell_size);
+    ipc::protocol::set_probed_cell_pixels(probe.cell_size);
     // This process owns the terminal here, so measure cells once at startup the
     // way an attaching client reports them after its handshake. Without this a
-    // local session that never resizes would split on the fallback aspect. It
-    // comes after the probe for the same reason it does on the server path: a
-    // live measurement supersedes the one taken once at attach.
+    // local session that never resizes would split on the fallback aspect, and
+    // its panes would report no pixel size to a child drawing in them.
     let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
     app.set_client_cell_pixels(cell_width_px, cell_height_px);
+    app.set_host_cell_size(terminal::theme_probe::CellSize::from_pixels(
+        cell_width_px,
+        cell_height_px,
+    ));
     let pending = probe.pending;
     // Match the client path: query colors before enabling input protocols, so
     // any interleaved bytes are ordinary keys that can be replayed losslessly.

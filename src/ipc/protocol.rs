@@ -21,9 +21,32 @@ pub const PROTOCOL_VERSION: u32 = 19;
 const V0141_PROTOCOL_VERSION: u32 = 17;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
+/// What the terminal answered when the probe asked how big a cell is. Written
+/// once per process, before any window size is reported.
+static PROBED_CELL_PIXELS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Remember the probe's measurement as the fallback for [`local_cell_pixels`].
+pub fn set_probed_cell_pixels(cell_size: Option<CellSize>) {
+    PROBED_CELL_PIXELS.store(
+        cell_size.map_or(0, CellSize::pack),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
+///
+/// The kernel's window size is preferred because it stays current when the user
+/// changes font size, but a terminal is not obliged to fill it, and a multiplexer
+/// between Luvus and the display usually does not. What the terminal answered
+/// when asked directly stands in for those, so a pane still reports a pixel size
+/// to the program drawing in it.
 pub fn local_cell_pixels() -> (u16, u16) {
-    crate::platform::terminal_cell_pixels().unwrap_or((0, 0))
+    crate::platform::terminal_cell_pixels()
+        .or_else(|| {
+            CellSize::unpack(PROBED_CELL_PIXELS.load(std::sync::atomic::Ordering::Relaxed))
+                .map(|cell| (cell.width, cell.height))
+        })
+        .unwrap_or((0, 0))
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -79,9 +102,6 @@ pub enum ClientMessage {
     TerminalProbe {
         colors: Option<TerminalColors>,
         graphics: Option<bool>,
-        /// Pixel size of one cell on the client's terminal, when it reported
-        /// one. A pane's window size carries it to programs that draw images.
-        cell_size: Option<CellSize>,
     },
     /// Display geometry reported after the version-checked handshake.
     CellPixels {

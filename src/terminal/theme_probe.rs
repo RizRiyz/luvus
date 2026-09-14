@@ -43,6 +43,12 @@ impl CellSize {
         Self::checked(packed >> 16, packed & 0xffff)
     }
 
+    /// The pair a display reports in its window size, when it describes a cell.
+    /// Zero is how a terminal says it has no pixel geometry to report.
+    pub(crate) fn from_pixels(width: u16, height: u16) -> Option<Self> {
+        Self::checked(u32::from(width), u32::from(height))
+    }
+
     /// Reject a reply that cannot describe a real cell. A terminal that does
     /// not implement the query sometimes answers zero rather than staying
     /// silent, and a cell that large is a parse gone wrong.

@@ -511,12 +511,12 @@ fn negotiate_local(
     // but whether this terminal draws images describes the terminal itself, and
     // the local endpoint's panes are shown through it.
     let probe = probe_terminal(probe_colors);
+    protocol::set_probed_cell_pixels(probe.cell_size);
     protocol::write_message(
         writer,
         &ClientMessage::TerminalProbe {
             colors: probe.colors.clone(),
             graphics: probe.graphics,
-            cell_size: probe.cell_size,
         },
     )?;
     protocol::write_message(writer, &super::client::cell_pixels_message())?;
@@ -1548,7 +1548,6 @@ fn handle_surface_message(
                     control.send(&ClientMessage::TerminalProbe {
                         colors: None,
                         graphics: Some(false),
-                        cell_size: None,
                     })?;
                     control.send(&super::client::cell_pixels_message())?;
                     control.send(&ClientMessage::ShellDockLayout(layout))?;

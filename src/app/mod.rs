@@ -5121,16 +5121,6 @@ impl App {
     pub(crate) fn set_client_cell_pixels(&mut self, width: u16, height: u16) {
         self.cell_width_px = width;
         self.cell_height_px = height;
-        // The display that decides split geometry is the same one a pane
-        // reports its pixel size against, so `Resize` and `CellPixels` keep
-        // that figure current too. A terminal that reports no pixel geometry
-        // sends zeroes, and the attach-time probe measurement stands instead.
-        if width > 0 && height > 0 {
-            self.set_host_cell_size(Some(crate::terminal::theme_probe::CellSize {
-                width,
-                height,
-            }));
-        }
     }
 
     fn painted_cell_aspect(&self) -> f32 {

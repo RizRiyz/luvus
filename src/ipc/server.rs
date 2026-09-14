@@ -325,7 +325,6 @@ struct ClientState {
     /// because its backlog overflowed. Held until a frame carrying them is
     /// accepted: a refused frame must not consume the repair.
     graphics_resync: bool,
-    cell_size: Option<crate::terminal::theme_probe::CellSize>,
     render_buf: Buffer,
     last_frame: Option<protocol::FrameData>,
     behind: bool,
@@ -354,6 +353,11 @@ struct RenderScratch {
 }
 
 impl ClientState {
+    /// How big one cell is on this display, when it reports pixel geometry.
+    fn cell_size(&self) -> Option<crate::terminal::theme_probe::CellSize> {
+        crate::terminal::theme_probe::CellSize::from_pixels(self.cell_width_px, self.cell_height_px)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         sender: ClientSender,
@@ -363,7 +367,6 @@ impl ClientState {
         cell_height_px: u16,
         terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
         graphics: bool,
-        cell_size: Option<crate::terminal::theme_probe::CellSize>,
         last_activity: u64,
     ) -> Self {
         let size = (cols.max(1), rows.max(1));
@@ -376,7 +379,6 @@ impl ClientState {
             graphics,
             graphics_backlog: crate::terminal::graphics::GraphicsBacklog::default(),
             graphics_resync: false,
-            cell_size,
             render_buf: Buffer::empty(Rect::new(0, 0, size.0, size.1)),
             last_frame: None,
             behind: false,
@@ -920,7 +922,6 @@ fn apply(
             rows,
             terminal_colors,
             terminal_graphics,
-            terminal_cell_size,
         } => {
             crate::logging::event(
                 crate::logging::EventKind::ServerClientAttach,
@@ -950,7 +951,6 @@ fn apply(
                     0,
                     terminal_colors,
                     terminal_graphics.unwrap_or(false),
-                    terminal_cell_size,
                     activity,
                 ),
             );
@@ -1160,6 +1160,10 @@ fn apply(
             // the geometry shared state uses, and it never forces a repaint.
             if *foreground == Some(id) {
                 app.set_client_cell_pixels(cell_width_px, cell_height_px);
+                app.set_host_cell_size(crate::terminal::theme_probe::CellSize::from_pixels(
+                    cell_width_px,
+                    cell_height_px,
+                ));
             }
             false
         }
@@ -1220,6 +1224,13 @@ fn apply(
                 client.cell_height_px = cell_height_px;
                 if *foreground == Some(id) {
                     app.set_client_cell_pixels(cell_width_px, cell_height_px);
+                    // Changing font size moves the cell without changing the
+                    // client set, and a pane reports its pixel size from this,
+                    // so the figure follows the geometry it arrived with.
+                    app.set_host_cell_size(crate::terminal::theme_probe::CellSize::from_pixels(
+                        cell_width_px,
+                        cell_height_px,
+                    ));
                 }
                 // Resize/focus repair is local to this terminal. Its next frame
                 // must be complete, but other clients keep their diff baselines.
@@ -1384,7 +1395,9 @@ fn apply_client_state(app: &mut App, clients: &Clients, foreground: Option<u64>)
     );
     // Prefer foreground, otherwise the most recently active client. An existing
     // foreground with unknown pixel size must not borrow another display's size.
-    app.set_host_cell_size(display.and_then(|client| client.cell_size));
+    // This is the same window size that decides split geometry: one display, one
+    // measurement, whether it came from the kernel or from the terminal's reply.
+    app.set_host_cell_size(display.and_then(ClientState::cell_size));
 
     // Cell pixels drive automatic split geometry; the palette only matters for
     // the `terminal` theme. Both are per-display, so they follow the foreground.
@@ -2278,13 +2291,9 @@ pub(super) fn handle_client(
     {
         return;
     }
-    let (terminal_colors, terminal_graphics, terminal_cell_size) =
+    let (terminal_colors, terminal_graphics) =
         match protocol::read_message::<_, ClientMessage>(&mut reader) {
-            Ok(ClientMessage::TerminalProbe {
-                colors,
-                graphics,
-                cell_size,
-            }) => (colors, graphics, cell_size),
+            Ok(ClientMessage::TerminalProbe { colors, graphics }) => (colors, graphics),
             _ => return,
         };
 
@@ -2347,7 +2356,6 @@ pub(super) fn handle_client(
             rows,
             terminal_colors,
             terminal_graphics,
-            terminal_cell_size,
         })
         .is_err()
     {
@@ -2862,7 +2870,6 @@ mod tests {
                 0,
                 None,
                 graphics,
-                None,
                 activity,
             ),
             rx,
@@ -2994,7 +3001,6 @@ mod tests {
                 rows: 30,
                 terminal_colors: None,
                 terminal_graphics: Some(graphics),
-                terminal_cell_size: None,
             }));
             rx
         }
@@ -3221,7 +3227,9 @@ mod tests {
             height: 27,
         };
         drawing.clients.get_mut(&latest).unwrap().last_activity = 100;
-        drawing.clients.get_mut(&latest).unwrap().cell_size = Some(cell_size);
+        let latest_client = drawing.clients.get_mut(&latest).unwrap();
+        latest_client.cell_width_px = cell_size.width;
+        latest_client.cell_height_px = cell_size.height;
         super::apply_client_state(&mut drawing.app, &drawing.clients, None);
         assert_eq!(
             drawing.app.host_graphics_for_test().cell_size(),
@@ -4508,7 +4516,6 @@ mod tests {
             0,
             None,
             false,
-            None,
             1,
         );
         let frame = || {
