@@ -86,7 +86,7 @@ skill into detected native skill locations without overwriting external or
 modified content. The shared `~/.agents/skills/luvus/` copy serves Codex,
 GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, Kilo Code, and
 Devin. Dedicated adapters serve Claude Code, OpenCode,
-Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, and Kiro. Aider has no
+Kimi Code CLI, Grok Build, Hermes CLI, Letta Code, Qwen Code, and Kiro. Aider has no
 native Agent Skills installation surface, so use `luvus skill show` when an
 Aider conversation needs the instructions.
 
@@ -353,6 +353,10 @@ discovery rather than inferring support from an agent name.
 - `luvus integration install hermes` adds exact per-pane session ownership for
   restart resume. Hermes detection still works without it, but Luvus does not
   scan Hermes's private history database or guess a session.
+- `luvus integration install letta` adds one quiet `SessionStart` hook that
+  reports only the exact Letta conversation ID selected in that pane. Detection
+  remains native, and Luvus does not inspect Letta memory, credentials,
+  conversations, or cloud state.
 
 Do not claim every shell command resumes after restart. Do not guess native
 session IDs. List sessions and use the exact returned identifier.

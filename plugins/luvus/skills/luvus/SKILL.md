@@ -524,6 +524,10 @@ surface:
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not
   scan Hermes's private history store.
+- For Letta Code, `luvus integration install letta` adds one quiet session-start
+  hook that reports only the exact conversation ID. Detection remains native.
+  Luvus does not inspect Letta memory, credentials, conversations, or cloud
+  state, and does not advertise native fork or scheduled automation for Letta.
 - Subscribe to events only for a live monitoring request. Stop when its
   condition is satisfied and never retain an unbounded stream.
 

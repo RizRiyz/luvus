@@ -3020,6 +3020,58 @@ Would you like to proceed?
     }
 
     #[test]
+    fn letta_identity_uses_the_binary_or_exact_scoped_package() {
+        let manifests = Manifests::builtin();
+        for command in [
+            "/usr/local/bin/letta --conversation conversation-123",
+            "node /usr/local/lib/node_modules/@letta-ai/letta-code/letta.js --new",
+            "npx @letta-ai/letta-code --resume",
+            r#""C:\Program Files\nodejs\node.exe" "C:\Users\me\AppData\Roaming\npm\node_modules\@letta-ai\letta-code\letta.js" --resume"#,
+            "bun /home/me/.bun/install/global/node_modules/@letta-ai/letta-code/letta.js",
+        ] {
+            assert_eq!(
+                manifests.agent_in_processes(&[command.to_string()]),
+                Some("letta".to_string()),
+                "failed to recognize {command}"
+            );
+        }
+
+        let prose = classify(
+            Some("zsh"),
+            "Read the Letta documentation before continuing\n",
+            true,
+            false,
+            "zsh",
+            "",
+            &["-zsh".into()],
+            &manifests,
+        );
+        assert_eq!(prose.agent, "zsh");
+    }
+
+    #[test]
+    fn letta_state_uses_its_documented_terminal_title_contract() {
+        let manifests = Manifests::builtin();
+        let detect = |title: &str| {
+            classify(
+                Some(title),
+                "",
+                false,
+                false,
+                "letta",
+                "letta",
+                &["/usr/local/bin/letta".to_string()],
+                &manifests,
+            )
+            .state
+        };
+
+        assert_eq!(detect("⠹ Memo"), State::Working);
+        assert_eq!(detect("[ ! ] Action Required | Memo"), State::Blocked);
+        assert_eq!(detect("Memo"), State::Idle);
+    }
+
+    #[test]
     fn devin_identity_needs_deliberate_evidence() {
         let manifests = Manifests::builtin();
         for command in [

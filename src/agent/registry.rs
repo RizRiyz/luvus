@@ -5,6 +5,7 @@ pub(crate) static BUILTINS: &[&AgentDescriptor] = &[
     &super::codex::DESCRIPTOR,
     &super::gemini::DESCRIPTOR,
     &super::antigravity::DESCRIPTOR,
+    &super::letta::DESCRIPTOR,
     &super::aider::DESCRIPTOR,
     &super::opencode::DESCRIPTOR,
     &super::copilot::DESCRIPTOR,
@@ -31,6 +32,7 @@ static INTEGRATIONS: &[&AgentDescriptor] = &[
     &super::copilot::DESCRIPTOR,
     &super::codex::DESCRIPTOR,
     &super::antigravity::DESCRIPTOR,
+    &super::letta::DESCRIPTOR,
     &super::opencode::DESCRIPTOR,
     &super::kimi::DESCRIPTOR,
     &super::grok::DESCRIPTOR,
@@ -142,6 +144,7 @@ mod tests {
         assert!(find("antigravity").unwrap().automation.is_none());
         assert!(find("amp").unwrap().automation.is_none());
         assert!(find("devin").unwrap().automation.is_none());
+        assert!(find("letta").unwrap().automation.is_none());
 
         let pi = find("pi").unwrap().automation.unwrap();
         assert!(pi.supports(AutomationAccess::ReadOnly));
@@ -196,6 +199,7 @@ mod tests {
         assert_eq!(find("CURSOR").map(|agent| agent.id), Some("cursor"));
         assert_eq!(find("agy").map(|agent| agent.id), Some("antigravity"));
         assert_eq!(find("KILOCODE").map(|agent| agent.id), Some("kilo"));
+        assert_eq!(find("LETTA-CODE").map(|agent| agent.id), Some("letta"));
         assert_eq!(
             find("ANTIGRAVITY-CLI").map(|agent| agent.id),
             Some("antigravity")
@@ -220,6 +224,7 @@ mod tests {
             ("codex", &["codex"][..], &[][..]),
             ("gemini", &["gemini"][..], &[][..]),
             ("antigravity", &["antigravity-cli"][..], &["agy"][..]),
+            ("letta", &["letta-code"][..], &["letta"][..]),
             ("aider", &["aider"][..], &[][..]),
             ("opencode", &["opencode", "opencode2"][..], &[][..]),
             ("copilot", &["copilot"][..], &[][..]),
@@ -268,6 +273,7 @@ mod tests {
                 "codex",
                 "gemini",
                 "antigravity",
+                "letta",
                 "opencode",
                 "copilot",
                 "kimi",
@@ -337,6 +343,7 @@ mod tests {
                 "copilot",
                 "codex",
                 "antigravity",
+                "letta",
                 "opencode",
                 "kimi",
                 "grok",

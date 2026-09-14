@@ -3983,6 +3983,7 @@ mod tests {
             ("kimi", "kimi --prompt"),
             ("kilo", "kilo --prompt"),
             ("kiro", "kiro-cli"),
+            ("letta", "letta -p"),
             ("muse", "muse"),
             ("omp", "omp"),
             ("opencode", "opencode --prompt"),

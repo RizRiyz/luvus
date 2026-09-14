@@ -9,6 +9,7 @@ description: What luvus supports per agent, covering live status, session resume
 | GitHub Copilot CLI | ✓ | ✓ | no | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ |
 | Antigravity CLI (`agy`) | ✓ | ✓ | no | session only |
+| Letta Code | ✓ | ✓ with integration | no | session only |
 | opencode | ✓ | ✓ | no | ✓ |
 | Kimi Code CLI | ✓ | ✓ | no | ✓ |
 | Grok Build | ✓ | ✓ | ✓ | ✓ |
@@ -65,6 +66,16 @@ description: What luvus supports per agent, covering live status, session resume
   remains responsible for idle/working/blocked state, and uninstall preserves
   every other named hook.
 
+  Letta Code is detected through its `letta` executable and exact
+  `@letta-ai/letta-code` package identity. `luvus integration install letta`
+  adds one quiet `SessionStart` hook to `~/.letta/settings.json`. The hook
+  reports only the exact `conversation_id` selected by that pane, which Luvus
+  restores with `letta --conversation <id>`. Luvus does not open Letta's
+  memory, conversation, credential, or cloud stores. Other settings and hooks
+  remain untouched, and uninstall removes only Luvus's exact entry and script.
+  Letta currently has no reviewed external conversation-fork command or Luvus
+  automation access mapping.
+
   OpenCode V2 is the canonical `opencode` executable. Its former preview name,
   `opencode2`, remains accepted as a compatibility alias and is normalized to
   the same agent. `luvus integration install opencode` detects the installed
@@ -120,7 +131,7 @@ Print the release-matched instructions for one conversation with
 The shared `~/.agents/skills/luvus/` destination is understood by Codex,
 GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, Kilo Code, and
 Devin. Luvus uses dedicated native destinations for Claude Code, OpenCode,
-Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, Oh My Pi
+Kimi Code CLI, Grok Build, Hermes CLI, Letta Code, Qwen Code, Oh My Pi
 (omp), and Kiro. Aider does not expose a native Agent Skills installation
 directory, so use `luvus skill show` when an Aider conversation needs the
 instructions.

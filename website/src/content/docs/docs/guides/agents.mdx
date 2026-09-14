@@ -10,7 +10,7 @@ back after a restart, all without wrapping or modifying the agents themselves.
 ## The AGENTS sidebar
 
 Every pane running a recognized agent (Claude Code, Copilot, Codex, opencode,
-Kimi, Grok, Hermes CLI, Muse Code, Pi, Oh My Pi (OMP),
+Kimi, Grok, Hermes CLI, Letta Code, Muse Code, Pi, Oh My Pi (OMP),
 Cursor, Gemini, Qwen, Kilo Code, Kiro, Aider, Amp, Droid, Devin, or fx) appears
 in the sidebar with a live state:
 
@@ -85,7 +85,7 @@ Click a session row to select it and update the Selected Agent panel. Use
 | Gemini and Qwen | project chat records |
 | fx | session usage snapshot |
 
-Aider, OpenCode V2, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, Devin, and
+Aider, OpenCode V2, Kilo Code, Kiro, Cursor, Amp, Droid, Muse, Devin, Letta Code, and
 manifest-defined agents still receive live identity and state detection,
 but show `—` for usage until they expose a stable per-session counter or report
 one through an integration. Luvus never estimates tokens from transcript text.
@@ -144,6 +144,7 @@ not sufficient, and Luvus runs the agent's own resume command:
 | Kimi | its session index (`~/.kimi-code/session_index.jsonl`) |
 | Grok | its session directory (`~/.grok/sessions`) |
 | Hermes CLI | its exact session report from the optional integration |
+| Letta Code | its exact conversation report from the optional integration |
 | Pi | its session store (`~/.pi/agent/sessions`) |
 | Oh My Pi (OMP) | its profile-, XDG-, and override-aware native session store |
 | Muse Code | its XDG data store (`$XDG_DATA_HOME/muse/sessions`) |
@@ -153,6 +154,7 @@ not sufficient, and Luvus runs the agent's own resume command:
 | Cursor | resume command (when the session id is known) |
 | Kilo Code | `kilo --session <id>` (when the exact session id is known) |
 | Devin | `devin --resume <id>` (when the exact session id is known) |
+| Letta Code | `letta --conversation <id>` (when the exact conversation id is known) |
 
 OpenCode V2 now runs under the canonical `opencode` executable; the former
 `opencode2` preview name is accepted as an alias. The optional integration
@@ -229,6 +231,12 @@ exact identity was reported and persisted by its integration, but Hermes
 exposes `/branch` and `/fork` only inside the active TUI, so it is not listed as
 a native pane-fork target.
 
+Letta Code reports its exact selected conversation through an optional quiet
+`SessionStart` hook. Luvus persists that pane binding and resumes it with
+`letta --conversation <id>`, but does not inspect Letta memory, conversations,
+credentials, or cloud state. Letta does not currently expose a reviewed
+external conversation-fork command, so **Fork to New Pane** stays unavailable.
+
 ## Precise events: the integration hook
 
 Screen-based detection needs no setup and works for everything. The optional
@@ -236,7 +244,7 @@ Screen-based detection needs no setup and works for everything. The optional
 where its hook contract supports them safely, lifecycle events into luvus:
 
 ```sh
-luvus integration install claude    # or: copilot · codex · antigravity · opencode · kimi · grok · hermes · omp
+luvus integration install claude    # or: copilot · codex · antigravity · letta · opencode · kimi · grok · hermes · omp
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
@@ -247,6 +255,10 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   `~/.gemini/config/hooks.json`. It reports only the exact conversation id for
   `agy --conversation <id>` restore; screen detection continues to own agent
   state, and every other named Antigravity hook is preserved.
+- **letta**: adds one quiet `SessionStart` entry to
+  `~/.letta/settings.json` and one small platform-specific hook script. It
+  reports only the exact conversation ID for restart resume. Detection and
+  state remain native and work without the integration.
 - **opencode**: installs a TUI-local plugin and registers it in the effective
   `tui.json`, `tui.jsonc`, or `OPENCODE_TUI_CONFIG` file
   without removing comments or unrelated plugins. It reports only the root
