@@ -32,13 +32,7 @@ fn major_version(output: &str) -> Option<u64> {
         .find_map(|part| part.trim_start_matches('v').split('.').next()?.parse().ok())
 }
 
-/// Probe only during an explicit integration install. `is_installed` remains a
-/// filesystem-only query so opening Settings never spawns an agent process.
-fn installed_generation() -> Generation {
-    if std::env::var_os("OPENCODE_TUI_CONFIG").is_some_and(|value| !value.is_empty()) {
-        return Generation::V1;
-    }
-
+fn probe_generation() -> Option<Generation> {
     let mut command = Command::new("opencode");
     command
         .arg("--version")
@@ -71,26 +65,50 @@ fn installed_generation() -> Generation {
             }) {
                 let version = String::from_utf8_lossy(&bytes);
                 if let Some(major) = major_version(&version) {
-                    return if major >= 2 {
+                    return Some(if major >= 2 {
                         Generation::V2
                     } else {
                         Generation::V1
-                    };
+                    });
                 }
             }
         }
     }
 
-    // Installation remains useful before the agent binary is on PATH. Prefer
-    // explicit config evidence, then the current released generation.
-    let directory = config_dir();
-    if (directory.join("tui.json").is_file() || directory.join("tui.jsonc").is_file())
-        && !directory.join("cli.json").is_file()
-    {
+    None
+}
+
+fn select_generation(
+    probed: Option<Generation>,
+    explicit_legacy_config: bool,
+    legacy_config_exists: bool,
+    cli_config_exists: bool,
+) -> Generation {
+    if let Some(generation) = probed {
+        return generation;
+    }
+    if explicit_legacy_config || (legacy_config_exists && !cli_config_exists) {
         Generation::V1
     } else {
         Generation::V2
     }
+}
+
+/// Probe only during an explicit integration install. A successful executable
+/// version is authoritative, so a stale V1 config override cannot downgrade an
+/// upgraded V2 client. `is_installed` remains filesystem-only so opening
+/// Settings never spawns an agent process.
+fn installed_generation() -> Generation {
+    let probed = probe_generation();
+    // Installation remains useful before the agent binary is on PATH. Prefer
+    // explicit config evidence, then the current released generation.
+    let directory = config_dir();
+    select_generation(
+        probed,
+        std::env::var_os("OPENCODE_TUI_CONFIG").is_some_and(|value| !value.is_empty()),
+        directory.join("tui.json").is_file() || directory.join("tui.jsonc").is_file(),
+        directory.join("cli.json").is_file(),
+    )
 }
 
 fn install_current() -> Result<()> {
@@ -237,6 +255,21 @@ mod tests {
         assert_eq!(major_version("1.18.30"), Some(1));
         assert_eq!(major_version("opencode2 v0.0.0-beta-18219"), Some(0));
         assert_eq!(major_version("unknown"), None);
+    }
+
+    #[test]
+    fn executable_generation_outranks_stale_legacy_config() {
+        assert_eq!(
+            select_generation(Some(Generation::V2), true, true, false),
+            Generation::V2
+        );
+        assert_eq!(
+            select_generation(Some(Generation::V1), false, false, true),
+            Generation::V1
+        );
+        assert_eq!(select_generation(None, true, false, true), Generation::V1);
+        assert_eq!(select_generation(None, false, true, false), Generation::V1);
+        assert_eq!(select_generation(None, false, false, false), Generation::V2);
     }
 
     fn fixture(tag: &str) -> PathBuf {
