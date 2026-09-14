@@ -140,6 +140,14 @@ or clear its prompt through `task.update` with a string or `null`; prompt edits
 fail closed after the task starts. Capability limits publish the exact UTF-8
 byte budgets as `task_title_bytes` and `task_prompt_bytes`.
 
+`task.add` binds the task to the selected workspace's project and returns a
+`project` object containing its preferred `workspace_id` and durable root.
+Include `workspace_id` when more than one project is open. A request originating
+inside a Luvus pane may instead include its stable `pane` id. `task.next` filters
+the ready queue to that project, and path leases collide only between tasks in
+the same project. Git worktrees share the repository common directory, so they
+still coordinate with each other while unrelated repositories do not.
+
 For `task.heartbeat`, the canonical UHP `context` field is the fraction of the
 model context window already consumed. `0.6` means 60% of that window has been
 used, not 60% task progress. Send work progress through the `note` field of
@@ -177,7 +185,8 @@ also published by `workspace.list` and `workspace.get`. Filter or correlate on
 `mode: "workspace"`; omitted mode means worktree. Either mode may include a
 stable `workspace_id`; worktree mode creates its branch from that workspace's
 repository, while workspace mode creates a dedicated branchless task tab there.
-`branch` is valid only in worktree mode, and `task.merge` returns
+The workspace must belong to the task's recorded project. `branch` is valid
+only in worktree mode, and `task.merge` returns
 `merge_unavailable` for a workspace worker.
 
 `task.retry` accepts `{"id":"t1"}` for terminal `done`, `failed`, `review`, or

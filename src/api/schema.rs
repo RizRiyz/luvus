@@ -129,6 +129,13 @@ mod tests {
             .get("maxLength")
             .is_none());
         assert_eq!(
+            definitions["taskAddParams"]["properties"]["workspace_id"]["type"],
+            "string"
+        );
+        assert!(definitions["taskAddParams"]["properties"]
+            .get("pane")
+            .is_some());
+        assert_eq!(
             definitions["taskUpdateParams"]["properties"]["prompt"]["type"],
             json!(["string", "null"])
         );
@@ -338,6 +345,7 @@ mod tests {
         assert!(!task_required.contains("prompt"));
         assert!(!task_required.contains("mode"));
         assert!(!task_required.contains("workspace_worker"));
+        assert!(!task_required.contains("project"));
         assert!(task_required.contains("attempt"));
         assert!(task_required.contains("previous_attempts"));
         assert_eq!(
@@ -347,6 +355,10 @@ mod tests {
         assert_eq!(
             task["properties"]["workspace_worker"]["$ref"],
             "#/$defs/workspace_worker"
+        );
+        assert_eq!(
+            task["properties"]["project"]["$ref"],
+            "#/$defs/task_project"
         );
         assert_eq!(
             task["properties"]["prompt"]["type"],

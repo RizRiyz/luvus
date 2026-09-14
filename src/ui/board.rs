@@ -2483,6 +2483,9 @@ pub(super) fn draw_detail(
     if let Some(binding) = &task.workspace_worker {
         kv("workspace", binding.workspace_id.clone(), &mut lines);
         kv("directory", binding.root.clone(), &mut lines);
+    } else if let Some(project) = &task.project {
+        kv("workspace", project.workspace_id.clone(), &mut lines);
+        kv("project", project.root.clone(), &mut lines);
     }
     kv(
         "pane",

@@ -55,6 +55,17 @@ pub struct WorkspaceWorkerBinding {
     pub root: String,
 }
 
+/// Durable project ownership captured when a task enters the ledger.
+///
+/// `workspace_id` is the preferred routing target. `root` is the collision
+/// scope: Git worktrees share their repository common directory, while a
+/// non-Git workspace uses its stored root.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskProject {
+    pub workspace_id: String,
+    pub root: String,
+}
+
 /// Durable link from one concrete ORCH task to the automation occurrence that
 /// created it. The run id is unique, so restart reconciliation can never create
 /// a second task for the same occurrence.
@@ -154,6 +165,10 @@ pub struct Task {
     pub outputs: Vec<String>,
     /// Learnings persisted for the next agent (pushed live on the bus).
     pub notes: Vec<String>,
+    /// Ledgers written before project-aware orchestration leave this unset and
+    /// are bound conservatively on first use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<TaskProject>,
     /// Worktree path the task's worker runs in (ORCH-3), once started.
     #[serde(default)]
     pub worktree: Option<String>,
@@ -333,6 +348,19 @@ impl OrchState {
         deps: Vec<TaskId>,
         gate: Option<String>,
     ) -> OrchResult<Task> {
+        self.add_task_with_prompt_in_project(title, prompt, paths, deps, gate, None)
+    }
+
+    /// Add a task and bind its owning project in the same mutation.
+    pub fn add_task_with_prompt_in_project(
+        &mut self,
+        title: String,
+        prompt: Option<String>,
+        paths: Vec<String>,
+        deps: Vec<TaskId>,
+        gate: Option<String>,
+        project: Option<TaskProject>,
+    ) -> OrchResult<Task> {
         if title.trim().is_empty() {
             return Err(Reject::new("bad_request", "task title is required"));
         }
@@ -365,6 +393,7 @@ impl OrchState {
             gate,
             outputs: Vec::new(),
             notes: Vec::new(),
+            project,
             worktree: None,
             branch: None,
             worker_mode: None,
@@ -381,6 +410,28 @@ impl OrchState {
         };
         self.tasks.push(task.clone());
         Ok(task)
+    }
+
+    /// Bind a legacy task to a project, or verify an existing binding. Another
+    /// workspace is accepted only when it resolves to the same project root.
+    pub fn bind_project(&mut self, id: &str, project: TaskProject) -> OrchResult<Task> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if let Some(existing) = task.project.as_ref() {
+            if !same_project(existing, &project) {
+                return Err(Reject::new(
+                    "workspace_mismatch",
+                    format!("{id} belongs to another project"),
+                ));
+            }
+            return Ok(task.clone());
+        }
+        task.project = Some(project);
+        task.updated = unix_now();
+        Ok(task.clone())
     }
 
     /// Attach the immutable automation briefing and occurrence provenance to a
@@ -468,11 +519,29 @@ impl OrchState {
 
     /// The next claimable task — queued with all deps done, earliest first
     /// (ORCH-4 scheduler: `task next` for an agent loop to drain the queue).
+    #[cfg(test)]
     pub fn next_ready(&self) -> Option<TaskId> {
         self.tasks
             .iter()
             .find(|t| t.status == TaskStatus::Queued && self.ready(&t.id))
             .map(|t| t.id.clone())
+    }
+
+    /// The next claimable task for one project. Projectless legacy tasks remain
+    /// eligible only so the app can bind them after an explicit, unambiguous
+    /// workspace resolution.
+    pub fn next_ready_in_project(&self, project: &TaskProject) -> Option<TaskId> {
+        self.tasks
+            .iter()
+            .find(|task| {
+                task.status == TaskStatus::Queued
+                    && self.ready(&task.id)
+                    && task
+                        .project
+                        .as_ref()
+                        .is_none_or(|owned| same_project(owned, project))
+            })
+            .map(|task| task.id.clone())
     }
 
     /// Record a worker's context-window usage (ORCH-5 compaction gate). Returns
@@ -858,11 +927,11 @@ impl OrchState {
                 format!("ledger is at its {MAX_LEASES}-lease cap"),
             ));
         }
-        if let Some(holder) = self
-            .leases
-            .iter()
-            .find(|lease| lease.task != task && leases_overlap(&lease.paths, &paths))
-        {
+        if let Some(holder) = self.leases.iter().find(|lease| {
+            lease.task != task
+                && tasks_share_lease_scope(&self.tasks, task, &lease.task)
+                && leases_overlap(&lease.paths, &paths)
+        }) {
             return Err(lease_conflict(holder));
         }
         Ok(())
@@ -929,7 +998,9 @@ impl OrchState {
             lease.paths = paths;
             if leases.len() >= MAX_LEASES
                 || leases.iter().any(|held| {
-                    held.task != lease.task && leases_overlap(&held.paths, &lease.paths)
+                    held.task != lease.task
+                        && tasks_share_lease_scope(&self.tasks, &held.task, &lease.task)
+                        && leases_overlap(&held.paths, &lease.paths)
                 })
             {
                 changed = true;
@@ -977,11 +1048,11 @@ impl OrchState {
             ));
         }
         let paths = validate_paths(paths, false)?;
-        if let Some(holder) = self
-            .leases
-            .iter()
-            .find(|lease| lease.task != task && leases_overlap(&lease.paths, &paths))
-        {
+        if let Some(holder) = self.leases.iter().find(|lease| {
+            lease.task != task
+                && tasks_share_lease_scope(&self.tasks, &task, &lease.task)
+                && leases_overlap(&lease.paths, &paths)
+        }) {
             return Err(lease_conflict(holder));
         }
         self.next_lease += 1;
@@ -1145,6 +1216,32 @@ fn push_log(log: &mut Vec<String>, mut entry: String) {
     if log.len() > MAX_TASK_LOG {
         let excess = log.len() - MAX_TASK_LOG;
         log.drain(..excess);
+    }
+}
+
+fn same_project(first: &TaskProject, second: &TaskProject) -> bool {
+    first.workspace_id == second.workspace_id
+        || crate::platform::same_path(
+            std::path::Path::new(&first.root),
+            std::path::Path::new(&second.root),
+        )
+}
+
+/// Legacy projectless tasks keep the old global collision behavior. That is a
+/// fail-closed migration rule: old ledgers never become less safe merely
+/// because their tasks predate project ownership.
+fn tasks_share_lease_scope(tasks: &[Task], first: &str, second: &str) -> bool {
+    let first = tasks
+        .iter()
+        .find(|task| task.id == first)
+        .and_then(|task| task.project.as_ref());
+    let second = tasks
+        .iter()
+        .find(|task| task.id == second)
+        .and_then(|task| task.project.as_ref());
+    match (first, second) {
+        (Some(first), Some(second)) => same_project(first, second),
+        _ => true,
     }
 }
 
@@ -1649,6 +1746,7 @@ mod tests {
         let task: Task = serde_json::from_value(value).unwrap();
         assert_eq!(task.attempt, 1);
         assert!(task.previous_attempts.is_empty());
+        assert!(task.project.is_none());
     }
 
     #[test]
@@ -1695,6 +1793,86 @@ mod tests {
         s.set_status("t1", TaskStatus::Done).unwrap();
         // Now t2 (dep satisfied) and t3 are ready; earliest = t2.
         assert_eq!(s.next_ready().as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn next_ready_is_scoped_to_the_requested_project() {
+        let mut state = OrchState::default();
+        let project_a = TaskProject {
+            workspace_id: "workspace-a".into(),
+            root: "/repos/a/.git".into(),
+        };
+        let project_b = TaskProject {
+            workspace_id: "workspace-b".into(),
+            root: "/repos/b/.git".into(),
+        };
+        state
+            .add_task_with_prompt_in_project(
+                "A".into(),
+                None,
+                vec![],
+                vec![],
+                None,
+                Some(project_a.clone()),
+            )
+            .unwrap();
+        state
+            .add_task_with_prompt_in_project(
+                "B".into(),
+                None,
+                vec![],
+                vec![],
+                None,
+                Some(project_b.clone()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.next_ready_in_project(&project_b).as_deref(),
+            Some("t2")
+        );
+        assert_eq!(
+            state.next_ready_in_project(&project_a).as_deref(),
+            Some("t1")
+        );
+    }
+
+    #[test]
+    fn path_leases_conflict_within_a_project_not_across_projects() {
+        let mut state = OrchState::default();
+        for (workspace, root) in [
+            ("workspace-a", "/repos/a/.git"),
+            ("workspace-b", "/repos/b/.git"),
+            ("workspace-a-worktree", "/repos/a/.git"),
+        ] {
+            state
+                .add_task_with_prompt_in_project(
+                    workspace.into(),
+                    None,
+                    vec![],
+                    vec![],
+                    None,
+                    Some(TaskProject {
+                        workspace_id: workspace.into(),
+                        root: root.into(),
+                    }),
+                )
+                .unwrap();
+        }
+        state
+            .acquire_lease(1, "t1".into(), vec!["src/**".into()])
+            .unwrap();
+        state
+            .acquire_lease(2, "t2".into(), vec!["src/lib.rs".into()])
+            .expect("another project has an independent path namespace");
+        assert_eq!(
+            state
+                .acquire_lease(3, "t3".into(), vec!["src/lib.rs".into()])
+                .unwrap_err()
+                .code,
+            "lease_conflict",
+            "worktrees of one repository must still coordinate"
+        );
     }
 
     #[test]

@@ -37,8 +37,9 @@
 - **Git and GitHub:** View status, branches, commits, contributors, pull
   requests, issues, and repository activity without leaving Luvus.
 - **Worktrees and orchestration:** Create worktrees, coordinate dependent tasks,
-  reserve file paths, assign agents, schedule timezone-aware recurring work,
-  run quality gates, and merge completed work.
+  keep task queues and path leases scoped to their projects, assign agents,
+  schedule timezone-aware recurring work, run quality gates, and merge completed
+  work.
 - **Remote and multi-machine use:** Attach over SSH, save persistent machine
   profiles, switch complete remote sessions from one TUI, connect several
   clients with independent viewports, and use the compact mobile selector.

@@ -34,7 +34,8 @@ then finish as `merged` or return to `blocked` on conflict. Only one task
 integrates at a time. An interrupted integration restores its prior `done` or
 `blocked` state after restart. Branch-backed dependents wait for `merged`, so
 they never start before their dependency is available in the integration
-history. The ledger lives in `~/.luvus/orch.json`, separate from your session.
+history. Each named server session owns its own `orch.json` ledger inside that
+session's Luvus directory.
 
 Automation definitions and bounded run history live in the selected server
 session's `automations.json`. The detached server owns their deadlines, so
@@ -51,13 +52,24 @@ instead of sending its prompt to a restored or unrelated pane.
 For schedule syntax, access profiles, missed-run policies, UHP requests, and a
 copyable example, see [Agent Automation](/docs/guides/automation/).
 
+Every new task is bound to the project of the selected workspace. Git
+worktrees from one repository share a project identity, while unrelated
+repositories have independent task queues and path leases. `task next` only
+selects work from its workspace's project, so changing the focused workspace
+cannot launch an older task in the wrong repository. Commands run inside a
+Luvus pane infer its workspace. With multiple projects, callers outside a pane
+must pass `--workspace-id`; use `luvus workspace list` to discover the stable
+id. Legacy tasks without project metadata require an explicit workspace when
+the session contains more than one project.
+
 `task start` validates the task's path lease before it creates a worktree or
 workspace worker pane. If another task already holds an overlapping path, start
 returns `lease_conflict` and leaves the queued task untouched. After a server
 restart, leases follow workers that were restored to new pane IDs; leases with
 no live task owner are discarded so stale reservations cannot block the queue.
-If older persisted state contains two already-running workers with overlapping
-paths, Luvus keeps the existing holder and marks the unprotected task blocked.
+Overlapping paths conflict only inside the same project. If older persisted
+state contains two already-running workers with overlapping paths, Luvus keeps
+the existing holder and marks the unprotected task blocked.
 
 When an agent is selected, Luvus queues a short private-runner command and Enter
 as one submission before it marks the task running. The runner reloads the
@@ -193,14 +205,15 @@ can run the whole loop itself:
 # create + inspect
 luvus task add "OAuth module" \
   --prompt "Implement the token parser and cover rollback behavior." \
-  --paths "src/auth/**" --gate "cargo test auth"
+  --paths "src/auth/**" --gate "cargo test auth" \
+  --workspace-id workspace_example
 luvus task list · get t1
 luvus task update t1 --prompt-file ./task-brief.md # editable until the task starts
 luvus task update t1 --status running --note "learning: …"
 
 # start workers (worktree remains the default)
 luvus task start t1 --agent "claude"
-luvus task next --start --agent "claude"   # claim + start the next ready task
+luvus task next --start --agent "claude" --workspace-id workspace_example
 
 # run directly in an existing checkout (no branch or merge step)
 luvus task start t2 --mode workspace --agent "codex"

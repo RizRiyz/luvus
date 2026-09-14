@@ -13458,6 +13458,83 @@ mod tests {
     }
 
     #[test]
+    fn orchestration_routes_tasks_and_leases_by_project() {
+        let _env = crate::persist::test_env("orch-project-scope");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspace_a = app.ws().id.clone();
+        let other_root = crate::persist::config_dir().join("other-project");
+        std::fs::create_dir_all(&other_root).unwrap();
+        assert!(app.create_workspace_at(other_root));
+        let workspace_b = app.ws().id.clone();
+        let pane_b = app.layout().focus;
+
+        fn call(app: &mut App, method: &str, params: Value) -> Value {
+            let (reply, _rx) = mpsc::channel();
+            let response = app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: method.into(),
+                params,
+                reply,
+            });
+            serde_json::from_str(&response).unwrap()
+        }
+
+        let ambiguous = call(&mut app, "task.add", json!({"title":"ambiguous"}));
+        assert_eq!(ambiguous["error"]["code"], "workspace_required");
+
+        let task_a = call(
+            &mut app,
+            "task.add",
+            json!({"title":"A", "paths":["src/**"], "workspace_id":workspace_a}),
+        );
+        let task_b = call(
+            &mut app,
+            "task.add",
+            json!({"title":"B", "paths":["src/**"], "workspace_id":workspace_b}),
+        );
+        assert_eq!(
+            task_a["result"]["task"]["project"]["workspace_id"],
+            workspace_a
+        );
+        assert_eq!(
+            task_b["result"]["task"]["project"]["workspace_id"],
+            workspace_b
+        );
+
+        let wrong_project = call(
+            &mut app,
+            "task.start",
+            json!({"id":"t1", "mode":"workspace", "workspace_id":workspace_b}),
+        );
+        assert_eq!(wrong_project["error"]["code"], "workspace_mismatch");
+
+        let next_b = call(
+            &mut app,
+            "task.next",
+            json!({"workspace_id":workspace_b, "pane":pane_b.0.to_string()}),
+        );
+        assert_eq!(next_b["result"]["task"]["id"], "t2");
+        let lease_b = call(
+            &mut app,
+            "lease.acquire",
+            json!({"task":"t2", "paths":["src/**"], "pane":pane_b.0.to_string()}),
+        );
+        assert!(lease_b.get("result").is_some(), "{lease_b}");
+
+        let start_a = call(
+            &mut app,
+            "task.start",
+            json!({"id":"t1", "mode":"workspace"}),
+        );
+        assert_eq!(start_a["result"]["workspace_id"], workspace_a);
+        assert_eq!(start_a["result"]["task"]["status"], "running");
+        assert_eq!(app.orch.leases.len(), 2);
+        assert!(app.orch.leases.iter().any(|lease| lease.pane == pane_b.0));
+        assert!(app.orch.leases.iter().any(|lease| lease.pane != pane_b.0));
+    }
+
+    #[test]
     fn task_update_rejects_all_fields_after_merge_starts() {
         let _env = crate::persist::test_env("orch-update-complete");
         let (tx, _rx) = std::sync::mpsc::channel();

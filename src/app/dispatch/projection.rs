@@ -81,6 +81,9 @@ pub(crate) fn task_json(t: &crate::orch::Task) -> Value {
     if let Some(workspace) = &t.workspace_worker {
         value["workspace_worker"] = json!(workspace);
     }
+    if let Some(project) = &t.project {
+        value["project"] = json!(project);
+    }
     value
 }
 

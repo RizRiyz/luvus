@@ -220,7 +220,7 @@ worktrees:
   worktree remove <path>     remove a worktree (its branch is kept)
 
 orchestration (multiple agents on one project, docs/22):
-  task add "<title>" [--prompt <text>|--prompt-file <path>] [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
+  task add "<title>" [--prompt <text>|--prompt-file <path>] [--paths <glob>...] [--dep <id>...] [--gate <cmd>] [--workspace-id <id>]
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)

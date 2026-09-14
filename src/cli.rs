@@ -275,7 +275,7 @@ worktrees:
   worktree remove <path>     remove a worktree (its branch is kept)
 
 orchestration (multiple agents on one project, docs/22):
-  task add \"<title>\" [--prompt <text>|--prompt-file <path>] [--paths <glob>...] [--dep <id>...] [--gate <cmd>]
+  task add \"<title>\" [--prompt <text>|--prompt-file <path>] [--paths <glob>...] [--dep <id>...] [--gate <cmd>] [--workspace-id <id>]
   task list                  list all tasks + their status/assignee
   task get <id>              show one task
   task claim <id>            claim a task for this pane (deps must be done)
@@ -3858,6 +3858,13 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if let Some(g) = flag(args, "--gate") {
                 obj.insert("gate".into(), json!(g));
             }
+            if let Some(workspace_id) = flag(args, "--workspace-id") {
+                obj.insert("workspace_id".into(), json!(workspace_id));
+            }
+            let pv = pane();
+            if !pv.is_null() {
+                obj.insert("pane".into(), pv);
+            }
             ("task.add".into(), Value::Object(obj))
         }
         ("task", "get") => ("task.get".into(), one("id", arg0())),
@@ -5232,6 +5239,11 @@ mod tests {
             Some(1)
         );
         assert_eq!(p.get("gate").and_then(|v| v.as_str()), Some("cargo"));
+
+        let (method, params) =
+            parse(&argv("luvus task add scoped --workspace-id workspace-a")).unwrap();
+        assert_eq!(method, "task.add");
+        assert_eq!(params["workspace_id"], "workspace-a");
 
         let prompt_args = [
             "luvus",

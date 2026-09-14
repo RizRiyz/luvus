@@ -1306,14 +1306,32 @@ impl App {
             return Ok(task_id);
         }
 
+        let workspace = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == run.task.workspace_id)
+            .ok_or_else(|| {
+                (
+                    "workspace_not_found".to_string(),
+                    format!("workspace id {} not found", run.task.workspace_id),
+                )
+            })?;
+        let project = self.task_project_at(workspace).ok_or_else(|| {
+            (
+                "workspace_not_found".to_string(),
+                "automation workspace is unavailable".to_string(),
+            )
+        })?;
         let before = self.orch.clone();
         let task = self
             .orch
-            .add_task(
+            .add_task_with_prompt_in_project(
                 run.task.title.clone(),
+                None,
                 run.task.paths.clone(),
                 Vec::new(),
                 run.task.gate.clone(),
+                Some(project),
             )
             .map_err(|reject| (reject.code.to_string(), reject.message))?;
         let task = self

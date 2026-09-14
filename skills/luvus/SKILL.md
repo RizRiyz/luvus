@@ -467,6 +467,11 @@ surface:
   `task add --prompt <text>` or `--prompt-file <path>` stores a detailed worker
   briefing; `task update` may replace it only while a manual task is still
   queued and unassigned. Inspect the stored prompt before starting the worker.
+  A task is bound to the selected workspace's project when it is created.
+  Commands inside a Luvus pane supply that workspace automatically. Outside a
+  pane, pass `--workspace-id` when multiple projects are open. `task next` stays
+  inside that project, and leases collide only inside the same project,
+  including across its Git worktrees.
   Report work progress only with `task update --note`. `task heartbeat
   --context-used <0..1>` means the fraction of the model context window already
   consumed, never task-completion progress; `0.6` means 60% consumed. Omit the

@@ -359,17 +359,30 @@ impl App {
     pub(super) fn api_task_add(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
-            reject_api_fields(p, &["title", "prompt", "paths", "deps", "gate"])?;
+            reject_api_fields(
+                p,
+                &[
+                    "title",
+                    "prompt",
+                    "paths",
+                    "deps",
+                    "gate",
+                    "workspace_id",
+                    "pane",
+                ],
+            )?;
             let title = req_str(p, "title")?.to_string();
             let prompt = optional_task_prompt(p)?;
+            let project = self.task_project_from_request(p, true)?;
             let task = self
                 .orch
-                .add_task_with_prompt(
+                .add_task_with_prompt_in_project(
                     title,
                     prompt,
                     str_array(p, "paths"),
                     str_array(p, "deps"),
                     opt_str(p, "gate"),
+                    project,
                 )
                 .map_err(orch_err)?;
             self.orch.save();
@@ -402,6 +415,7 @@ impl App {
         {
             let id = req_str(p, "id")?.to_string();
             let pane = self.orch_pane(p)?;
+            self.bind_task_to_pane_workspace(&id, pane)?;
             let task = self.orch.claim(&id, pane).map_err(orch_err)?;
             self.orch.save();
             self.emit_event("task.claimed", task_json(&task));
@@ -414,12 +428,13 @@ impl App {
         {
             let id = req_str(p, "id")?.to_string();
             let mode = task_worker_mode(p, self.orch.task(&id).and_then(|task| task.worker_mode))?;
+            let requested = self.task_workspace_id_from_request(p, false)?;
             let started = self.task_start(
                 &id,
                 opt_str(p, "branch"),
                 opt_str(p, "agent"),
                 mode,
-                opt_str(p, "workspace_id"),
+                requested,
             )?;
             let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
             Ok(json!({
@@ -543,9 +558,34 @@ impl App {
         {
             // ORCH-4 scheduler: hand out the next ready task. `--start`
             // spawns the requested worker mode; otherwise claim it here.
-            match self.orch.next_ready() {
+            let workspace_id = self
+                .task_workspace_id_from_request(p, true)?
+                .ok_or_else(|| {
+                    (
+                        "workspace_not_found".to_string(),
+                        "no workspace is available for task next".to_string(),
+                    )
+                })?;
+            let workspace = self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == workspace_id)
+                .ok_or_else(|| {
+                    (
+                        "workspace_not_found".to_string(),
+                        format!("workspace id {workspace_id} not found"),
+                    )
+                })?;
+            let project = self.task_project_at(workspace).ok_or_else(|| {
+                (
+                    "workspace_not_found".to_string(),
+                    "task workspace is unavailable".to_string(),
+                )
+            })?;
+            match self.orch.next_ready_in_project(&project) {
                 None => Ok(json!({ "type": "none", "message": "no ready tasks" })),
                 Some(id) => {
+                    self.orch.bind_project(&id, project).map_err(orch_err)?;
                     if p.get("start").and_then(|v| v.as_bool()).unwrap_or(false) {
                         let mode = task_worker_mode(
                             p,
@@ -556,7 +596,7 @@ impl App {
                             None,
                             opt_str(p, "agent"),
                             mode,
-                            opt_str(p, "workspace_id"),
+                            Some(workspace_id),
                         )?;
                         let task = self.orch.task(&id).map(task_json).unwrap_or(Value::Null);
                         Ok(json!({
@@ -636,6 +676,7 @@ impl App {
         {
             let task = req_str(p, "task")?.to_string();
             let pane = self.orch_pane(p)?;
+            self.bind_task_to_pane_workspace(&task, pane)?;
             let lease = self
                 .orch
                 .acquire_lease(pane, task, str_array(p, "paths"))
@@ -1040,6 +1081,140 @@ pub(in crate::app::dispatch) fn optional_task_prompt(
 }
 
 impl App {
+    fn task_workspace_id_from_request(
+        &self,
+        p: &Value,
+        fallback_when_unambiguous: bool,
+    ) -> Result<Option<String>, (String, String)> {
+        let requested = opt_str(p, "workspace_id");
+        let requested_index = requested
+            .as_deref()
+            .map(|id| {
+                self.workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == id)
+                    .ok_or_else(|| {
+                        (
+                            "workspace_not_found".to_string(),
+                            format!("workspace id {id} not found"),
+                        )
+                    })
+            })
+            .transpose()?;
+        let pane_index = if p.get("pane").is_some_and(|pane| !pane.is_null()) {
+            self.resolve_optional_pane(p)?
+                .map(|pane| {
+                    self.workspaces
+                        .iter()
+                        .position(|workspace| {
+                            workspace.tabs.iter().any(|tab| tab.layout.contains(pane))
+                        })
+                        .ok_or_else(|| {
+                            (
+                                "workspace_not_found".to_string(),
+                                format!("pane {} is not in an open workspace", pane.0),
+                            )
+                        })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        if let (Some(requested), Some(pane)) = (requested_index, pane_index) {
+            if requested != pane {
+                return Err((
+                    "workspace_mismatch".to_string(),
+                    "workspace_id and pane belong to different workspaces".to_string(),
+                ));
+            }
+        }
+        if let Some(index) = requested_index.or(pane_index) {
+            return Ok(Some(self.workspaces[index].id.clone()));
+        }
+        if !fallback_when_unambiguous || self.workspaces.is_empty() {
+            return Ok(None);
+        }
+
+        let mut project_roots: Vec<&std::path::Path> = Vec::new();
+        for workspace in &self.workspaces {
+            let root = workspace
+                .worktree
+                .as_ref()
+                .map(|membership| membership.common_dir.as_path())
+                .unwrap_or(workspace.cwd.as_path());
+            if !project_roots
+                .iter()
+                .any(|known| crate::platform::same_path(known, root))
+            {
+                project_roots.push(root);
+            }
+        }
+        if project_roots.len() > 1 {
+            return Err((
+                "workspace_required".to_string(),
+                "multiple projects are open; pass --workspace-id or run from a Luvus pane"
+                    .to_string(),
+            ));
+        }
+        Ok(self
+            .workspaces
+            .get(self.active_ws)
+            .map(|workspace| workspace.id.clone()))
+    }
+
+    fn task_project_from_request(
+        &self,
+        p: &Value,
+        allow_no_workspace: bool,
+    ) -> Result<Option<crate::orch::TaskProject>, (String, String)> {
+        let Some(workspace_id) = self.task_workspace_id_from_request(p, true)? else {
+            if allow_no_workspace {
+                return Ok(None);
+            }
+            return Err((
+                "workspace_not_found".to_string(),
+                "no workspace is available".to_string(),
+            ));
+        };
+        let index = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| {
+                (
+                    "workspace_not_found".to_string(),
+                    format!("workspace id {workspace_id} not found"),
+                )
+            })?;
+        Ok(self.task_project_at(index))
+    }
+
+    fn bind_task_to_pane_workspace(
+        &mut self,
+        task: &str,
+        pane: u32,
+    ) -> Result<(), (String, String)> {
+        let pane = crate::ids::PaneId(pane);
+        let workspace = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.tabs.iter().any(|tab| tab.layout.contains(pane)))
+            .ok_or_else(|| {
+                (
+                    "workspace_not_found".to_string(),
+                    format!("pane {} is not in an open workspace", pane.0),
+                )
+            })?;
+        let project = self.task_project_at(workspace).ok_or_else(|| {
+            (
+                "workspace_not_found".to_string(),
+                "task workspace is unavailable".to_string(),
+            )
+        })?;
+        self.orch.bind_project(task, project).map_err(orch_err)?;
+        Ok(())
+    }
+
     /// The pane a task/lease call acts for: the passed `pane`, else the caller's
     /// `$LUVUS_PANE_ID`. Orchestration is pane-keyed, so this is required.
     pub(in crate::app::dispatch) fn orch_pane(&self, p: &Value) -> Result<u32, (String, String)> {

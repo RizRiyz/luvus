@@ -192,7 +192,9 @@
         "prompt": { "type": "string", "$comment": "Consumers must enforce a 32768-byte UTF-8 limit." },
         "paths": { "type": "array", "items": { "type": "string" } },
         "deps": { "type": "array", "items": { "type": "string" } },
-        "gate": { "type": "string" }
+        "gate": { "type": "string" },
+        "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "pane": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 0 }] }
       }
     },
     "taskUpdateParams": {

@@ -411,6 +411,7 @@
         "branch": { "type": ["string", "null"] },
         "mode": { "enum": ["worktree", "workspace"] },
         "workspace_worker": { "$ref": "#/$defs/workspace_worker" },
+        "project": { "$ref": "#/$defs/task_project" },
         "context": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "attempt": { "type": "integer", "minimum": 1 },
         "previous_attempts": {
@@ -443,6 +444,15 @@
       "properties": {
         "workspace_id": { "type": "string" },
         "tab_id": { "type": "string" },
+        "root": { "type": "string" }
+      }
+    },
+    "task_project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_id", "root"],
+      "properties": {
+        "workspace_id": { "type": "string" },
         "root": { "type": "string" }
       }
     },
