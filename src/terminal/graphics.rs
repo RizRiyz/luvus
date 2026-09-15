@@ -242,7 +242,13 @@ impl GraphicsQueue {
         cursor: (i32, usize),
         cell_size: Option<CellSize>,
     ) -> Option<Vec<u8>> {
-        let control = ControlData::parse(payload)?;
+        let Some(control) = ControlData::parse(payload) else {
+            // A broken command is not a continuation and not a replacement.
+            // Leave the in-flight transfer standing and later `m=0` would
+            // complete it with a hole, so the transfer is abandoned instead.
+            self.abandon_incomplete_transfer();
+            return None;
+        };
 
         if control.is_continuation {
             // Chunks belong to the transfer that opened them, which already
@@ -265,18 +271,7 @@ impl GraphicsQueue {
         // the continuations that follow it occupy one run, so whole images
         // queued before it, and the placements a resize appended after it, are
         // still owed to the terminal.
-        if self.forwarding_transfer {
-            let (commands_from, placements_from) = self.transfer_start.unwrap_or_default();
-            let commands_to = self.continuation_index.unwrap_or(self.commands.len());
-            self.commands.drain(commands_from..commands_to);
-            self.placements.truncate(placements_from);
-            self.bytes = self.commands.iter().map(Vec::len).sum();
-            self.continuation_index = None;
-            self.transfer_start = None;
-            if let Some(id) = self.retaining {
-                self.forget(id);
-            }
-        }
+        self.abandon_incomplete_transfer();
         let transfer_start = (self.commands.len(), self.placements.len());
         let handling = classify(&control, payload, cell_size);
         // A rewritten opening chunk still opens the transfer its later chunks
@@ -315,6 +310,25 @@ impl GraphicsQueue {
         self.continuation_index = self.forwarding_transfer.then_some(self.commands.len());
         self.transfer_start = self.forwarding_transfer.then_some(transfer_start);
         reply
+    }
+
+    /// Drop an in-flight chunked transfer without touching commands queued
+    /// around it. A later continuation then has nothing to complete.
+    fn abandon_incomplete_transfer(&mut self) {
+        if !self.forwarding_transfer {
+            return;
+        }
+        let (commands_from, placements_from) = self.transfer_start.unwrap_or_default();
+        let commands_to = self.continuation_index.unwrap_or(self.commands.len());
+        self.commands.drain(commands_from..commands_to);
+        self.placements.truncate(placements_from);
+        self.bytes = self.commands.iter().map(Vec::len).sum();
+        self.continuation_index = None;
+        self.transfer_start = None;
+        self.forwarding_transfer = false;
+        if let Some(id) = self.retaining.take() {
+            self.forget(id);
+        }
     }
 
     /// Delete a terminal's placements of an image whose virtual rectangle is
@@ -1619,6 +1633,26 @@ mod tests {
         assert!(
             queued(&["a=T,i=1,f=100,m=1;AAAA", "m=1;BBBB", "m=0;CCCC"]).is_empty(),
             "a refused transfer must not leak its chunks"
+        );
+    }
+
+    #[test]
+    fn a_malformed_command_does_not_let_the_open_transfer_complete() {
+        // Parse failure used to return before abandoning, so a later `m=0`
+        // completed the opening chunk with a hole where the bad command was.
+        let mut queue = GraphicsQueue::default();
+        queue.push(b"a=T,U=1,i=1,c=2,r=2,f=100,m=1;AAAA", (0, 0), Some(CELL));
+        queue.push(b"a=T,i", (0, 0), Some(CELL));
+        queue.push(b"m=0;CCCC", (0, 0), Some(CELL));
+        assert!(
+            queue.drain().is_empty(),
+            "the broken transfer must not reach a renderer incomplete"
+        );
+
+        queue.push(b"a=T,U=1,i=2,c=1,r=1,f=100;BBBB", (0, 0), Some(CELL));
+        assert_eq!(
+            queue.drain(),
+            vec![wrapped("a=T,U=1,i=2,c=1,r=1,f=100;BBBB")]
         );
     }
 
