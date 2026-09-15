@@ -574,7 +574,7 @@ pub fn run() -> Result<()> {
             app.detach_requested = false;
             if let Some(id) = foreground.take() {
                 if let Some(c) = clients.remove(&id) {
-                    app.forget_client_key_presses(id);
+                    app.release_client_key_presses(id);
                     let _ = c.send_control(ServerMessage::Detach);
                 }
                 foreground = latest_client(&clients);
@@ -825,7 +825,7 @@ fn apply(
             );
             let was_foreground = *foreground == Some(id);
             clients.remove(&id);
-            app.forget_client_key_presses(id);
+            app.release_client_key_presses(id);
             app.client_files_visible = client_files_visible(clients);
             if was_foreground {
                 *foreground = latest_client(clients);
@@ -845,7 +845,7 @@ fn apply(
             client.prepare_ticket = Some(ticket);
             client.size = (cols.max(1), rows.max(1));
             client.interest = SurfaceInterest::Prepared;
-            app.forget_client_key_presses(id);
+            app.release_client_key_presses(id);
             client.force_full = true;
             client.retained_ready = false;
             client.retained_pane_content.clear();
@@ -864,7 +864,7 @@ fn apply(
             }
             client.interest = interest;
             if interest != SurfaceInterest::Active {
-                app.forget_client_key_presses(id);
+                app.release_client_key_presses(id);
             }
             client.prepare_ticket = None;
             client.force_full = true;
@@ -1097,7 +1097,7 @@ fn apply(
                 });
                 if disconnected {
                     clients.remove(&id);
-                    app.forget_client_key_presses(id);
+                    app.release_client_key_presses(id);
                     *foreground = latest_client(clients);
                     apply_foreground_client(app, clients, *foreground);
                     discard_client_input(input);
@@ -1363,7 +1363,7 @@ fn render_clients(
     }
     for id in scratch.dead.drain(..) {
         clients.remove(&id);
-        app.forget_client_key_presses(id);
+        app.release_client_key_presses(id);
     }
     if foreground.is_some_and(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);

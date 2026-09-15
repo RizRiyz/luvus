@@ -2254,6 +2254,12 @@ impl MenuScroll {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ForwardedKeyPress {
+    pane: PaneId,
+    press: KeyEvent,
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// One random value for this server lifetime. Harness runtimes from an old
@@ -2318,9 +2324,9 @@ pub struct App {
     pub direct_keymap: keys::DirectKeymap,
     /// Presses forwarded to a pane. The client id is part of the identity
     /// because multiple active displays may hold the same key concurrently;
-    /// local monolithic input uses `None`. Legacy panes use the route for
-    /// Repeat ownership even though their Release encodes no bytes.
-    forwarded_key_presses: HashMap<(Option<u64>, KeyCode, bool), PaneId>,
+    /// local monolithic input uses `None`. The original event lets client
+    /// teardown release Kitty keys; Legacy releases encode no bytes.
+    forwarded_key_presses: HashMap<(Option<u64>, KeyCode, bool), ForwardedKeyPress>,
     /// Transient source for one server-routed input event. Never persisted or
     /// exposed on the wire; reset immediately after dispatch.
     input_client_id: Option<u64>,
@@ -7885,6 +7891,7 @@ impl App {
             self.agent_usage.remove(&key);
             self.usage_mtimes.remove(&key);
         }
+        self.forwarded_key_presses.retain(|_, held| held.pane != id);
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);

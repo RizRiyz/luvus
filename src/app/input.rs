@@ -429,9 +429,24 @@ impl App {
         changed
     }
 
-    pub(crate) fn forget_client_key_presses(&mut self, client_id: u64) {
-        self.forwarded_key_presses
-            .retain(|(source, _, _), _| *source != Some(client_id));
+    pub(crate) fn release_client_key_presses(&mut self, client_id: u64) {
+        let releases = self
+            .forwarded_key_presses
+            .iter()
+            .filter_map(|(identity, held)| {
+                (identity.0 == Some(client_id)).then_some((*identity, *held))
+            })
+            .collect::<Vec<_>>();
+        for (identity, held) in releases {
+            self.forwarded_key_presses.remove(&identity);
+            let release = KeyEvent::new_with_kind_and_state(
+                held.press.code,
+                held.press.modifiers,
+                KeyEventKind::Release,
+                held.press.state,
+            );
+            self.forward_key_to_pane_preserving_scroll(held.pane, release);
+        }
     }
 
     /// Apply an event; returns whether it changed the rendered UI (→ the loop
@@ -3799,20 +3814,25 @@ impl App {
         // the pane did not negotiate event reporting. Legacy panes still need
         // held-key repeats; their unencodable Release only clears this route.
         if key.kind == KeyEventKind::Press {
-            self.forwarded_key_presses
-                .insert(key_identity(self.input_client_id, key), id);
+            self.forwarded_key_presses.insert(
+                key_identity(self.input_client_id, key),
+                ForwardedKeyPress {
+                    pane: id,
+                    press: key,
+                },
+            );
         }
         true
     }
 
     fn forward_key_release(&mut self, key: KeyEvent) -> bool {
-        let Some(id) = self
+        let Some(held) = self
             .forwarded_key_presses
             .remove(&key_identity(self.input_client_id, key))
         else {
             return false;
         };
-        self.forward_key_to_pane_preserving_scroll(id, key);
+        self.forward_key_to_pane_preserving_scroll(held.pane, key);
         false
     }
 
@@ -3825,14 +3845,14 @@ impl App {
         match key.kind {
             KeyEventKind::Release => return self.forward_key_release(key),
             KeyEventKind::Repeat => {
-                if let Some(&pane) = self.forwarded_key_presses.get(&identity) {
+                if let Some(held) = self.forwarded_key_presses.get(&identity).copied() {
                     // A held pane key remains pane-owned, but a newly opened
                     // modal, copy mode, or scroll mode takes precedence until
                     // release completes the original key pairing.
                     if self.focused_pane_accepts_image_paste()
-                        && self.forward_key_to_pane_preserving_scroll(pane, key)
+                        && self.forward_key_to_pane_preserving_scroll(held.pane, key)
                     {
-                        self.mark_input_for(pane);
+                        self.mark_input_for(held.pane);
                     }
                     return false;
                 }
@@ -5384,18 +5404,18 @@ mod tests {
 
         app.handle_client_event(1, AppEvent::Key(key(KeyEventKind::Press)));
         app.handle_client_event(2, AppEvent::Key(key(KeyEventKind::Press)));
-        app.forget_client_key_presses(1);
+        app.release_client_key_presses(1);
         app.handle_client_event(1, AppEvent::Key(key(KeyEventKind::Release)));
         app.handle_client_event(2, AppEvent::Key(key(KeyEventKind::Release)));
         let mut tail = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             let crate::terminal::pty::InputAction::Bytes(part) = input_rx.try_recv().unwrap()
             else {
                 panic!("remaining phases must use ordinary PTY byte batches");
             };
             tail.extend(part);
         }
-        assert_eq!(tail, b"\x1b[A\x1b[A\x1b[1;1:3A");
+        assert_eq!(tail, b"\x1b[A\x1b[A\x1b[1;1:3A\x1b[1;1:3A");
         assert!(input_rx.try_recv().is_err());
     }
 
@@ -5469,6 +5489,58 @@ mod tests {
             input_rx.try_recv().is_err(),
             "legacy release emits no bytes"
         );
+        assert!(app.forwarded_key_presses.is_empty());
+
+        app.handle_client_event(7, key(KeyEventKind::Press));
+        let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.try_recv().unwrap() else {
+            panic!("legacy client press must use ordinary PTY bytes");
+        };
+        assert_eq!(bytes, b"a");
+        app.release_client_key_presses(7);
+        assert!(
+            input_rx.try_recv().is_err(),
+            "legacy client teardown emits no release bytes"
+        );
+        assert!(app.forwarded_key_presses.is_empty());
+    }
+
+    #[test]
+    fn modifier_changes_before_release_keep_the_semantic_key_owned() {
+        let _env = crate::persist::test_env("modifier-release-ownership");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let target = app.panes.get_mut(&pane).unwrap();
+        target.replace_input_sender_for_test(input_tx);
+        target.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        app.handle_client_event(
+            7,
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press,
+            )),
+        );
+        app.handle_client_event(
+            7,
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )),
+        );
+
+        let mut bytes = Vec::new();
+        for _ in 0..2 {
+            let crate::terminal::pty::InputAction::Bytes(part) = input_rx.try_recv().unwrap()
+            else {
+                panic!("press and release must use ordinary PTY byte batches");
+            };
+            bytes.extend(part);
+        }
+        assert_eq!(bytes, b"\x1b[1;5A\x1b[1;1:3A");
         assert!(app.forwarded_key_presses.is_empty());
     }
 
