@@ -439,13 +439,7 @@ impl App {
             .collect::<Vec<_>>();
         for (identity, held) in releases {
             self.forwarded_key_presses.remove(&identity);
-            let release = KeyEvent::new_with_kind_and_state(
-                held.press.code,
-                held.press.modifiers,
-                KeyEventKind::Release,
-                held.press.state,
-            );
-            self.forward_key_to_pane_preserving_scroll(held.pane, release);
+            self.release_forwarded_key_press(held);
         }
     }
 
@@ -3836,6 +3830,16 @@ impl App {
         false
     }
 
+    fn release_forwarded_key_press(&mut self, held: ForwardedKeyPress) {
+        let release = KeyEvent::new_with_kind_and_state(
+            held.press.code,
+            held.press.modifiers,
+            KeyEventKind::Release,
+            held.press.state,
+        );
+        self.forward_key_to_pane_preserving_scroll(held.pane, release);
+    }
+
     /// Returns whether this key changed the **luvus UI** (so the server should
     /// render). Plain input forwarded to a pane returns `false`: the pane's echo
     /// arrives as a separate `PtyData` event and renders then, so we don't burn a
@@ -3856,12 +3860,23 @@ impl App {
                     }
                     return false;
                 }
+                if self.scroll_pane.is_some() && is_scroll_navigation_repeat(key) {
+                    return self.handle_scroll_mode_key(key);
+                }
+                if self.copy_mode.is_some() && is_copy_navigation_repeat(key) {
+                    return self.handle_copy_mode_key(key);
+                }
+                if self.mode == Mode::Resize && is_resize_navigation_repeat(key) {
+                    return self.handle_resize_mode_key(key);
+                }
                 return self.handle_safe_ui_navigation_repeat(key);
             }
             KeyEventKind::Press => {
-                // A missing host release must not leave ownership attached to a
-                // later physical press of the same semantic key.
-                self.forwarded_key_presses.remove(&identity);
+                // A missing host release must not leave the old pane believing
+                // this semantic key is still held when a later Press replaces it.
+                if let Some(held) = self.forwarded_key_presses.remove(&identity) {
+                    self.release_forwarded_key_press(held);
+                }
             }
         }
         if self.bar.overflow.take().is_some() {
@@ -4287,6 +4302,48 @@ impl App {
 
 fn key_identity(source: Option<u64>, key: KeyEvent) -> (Option<u64>, KeyCode, bool) {
     (source, key.code, key.state.contains(KeyEventState::KEYPAD))
+}
+
+fn is_scroll_navigation_repeat(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::Char('j' | 'k' | 'b' | 'f' | 'g' | ' ')
+    )
+}
+
+fn is_copy_navigation_repeat(key: KeyEvent) -> bool {
+    let ctrl = keys::is_ctrl_chord(key.modifiers);
+    matches!(key.code, KeyCode::Char('d' | 'u') if ctrl)
+        || matches!(
+            key.code,
+            KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Char(
+                    'h' | 'j' | 'k' | 'l' | 'b' | 'f' | 'g' | 'G' | ' ' | '$' | 'w' | 'e' | 'B'
+                )
+        )
+}
+
+fn is_resize_navigation_repeat(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'H' | 'J' | 'K' | 'L')
+    )
 }
 
 fn log_worker_failed(worker: crate::logging::Worker, error_code: &'static str) {
@@ -5420,6 +5477,56 @@ mod tests {
     }
 
     #[test]
+    fn replacing_stale_ownership_releases_the_old_pane_before_the_new_press() {
+        let _env = crate::persist::test_env("kitty-stale-ownership-replacement");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let old_pane = app.layout().focus;
+        let (old_tx, old_rx) = std::sync::mpsc::channel();
+        let old = app.panes.get_mut(&old_pane).unwrap();
+        old.replace_input_sender_for_test(old_tx);
+        old.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let new_pane = app.layout().focus;
+        let (new_tx, new_rx) = std::sync::mpsc::channel();
+        let new = app.panes.get_mut(&new_pane).unwrap();
+        new.replace_input_sender_for_test(new_tx);
+        new.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        let press = || {
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            ))
+        };
+        app.layout_mut().focus = old_pane;
+        app.handle_client_event(7, press());
+        app.layout_mut().focus = new_pane;
+        app.handle_client_event(7, press());
+
+        let crate::terminal::pty::InputAction::Bytes(old_press) = old_rx.try_recv().unwrap() else {
+            panic!("old press must use ordinary PTY bytes");
+        };
+        let crate::terminal::pty::InputAction::Bytes(old_release) = old_rx.try_recv().unwrap()
+        else {
+            panic!("stale route must receive a synthetic release");
+        };
+        let crate::terminal::pty::InputAction::Bytes(new_press) = new_rx.try_recv().unwrap() else {
+            panic!("replacement press must reach the newly focused pane");
+        };
+        assert_eq!(old_press, b"\x1b[A");
+        assert_eq!(old_release, b"\x1b[1;1:3A");
+        assert_eq!(new_press, b"\x1b[A");
+        assert_eq!(app.forwarded_key_presses.len(), 1);
+        assert_eq!(
+            app.forwarded_key_presses.values().next().unwrap().pane,
+            new_pane
+        );
+    }
+
+    #[test]
     fn workspace_and_switcher_lists_repeat_navigation_but_not_activation() {
         let _env = crate::persist::test_env("safe-ui-navigation-repeat");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -5453,6 +5560,68 @@ mod tests {
         assert!(app.switcher, "navigation repeat keeps the switcher open");
         assert!(!app.handle_event(repeat(KeyCode::Enter)));
         assert!(app.switcher, "activation repeat cannot select and close");
+    }
+
+    #[test]
+    fn unowned_repeats_continue_scroll_copy_and_resize_navigation_only() {
+        let _env = crate::persist::test_env("mode-navigation-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let transcript = (0..80)
+            .map(|line| format!("line-{line}\r\n"))
+            .collect::<String>();
+        app.panes[&pane]
+            .engine
+            .lock()
+            .expect("engine")
+            .advance(transcript.as_bytes());
+        let key =
+            |code, kind| AppEvent::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind));
+
+        assert!(app.enter_scroll_mode(10));
+        let before = app.panes[&pane].scroll_state().0;
+        assert!(app.handle_event(key(KeyCode::Up, KeyEventKind::Press)));
+        let after_press = app.panes[&pane].scroll_state().0;
+        assert!(after_press > before);
+        assert!(app.handle_event(key(KeyCode::Up, KeyEventKind::Repeat)));
+        assert!(app.panes[&pane].scroll_state().0 > after_press);
+        assert!(!app.handle_event(key(KeyCode::Enter, KeyEventKind::Repeat)));
+        assert_eq!(
+            app.scroll_pane,
+            Some(pane),
+            "action repeat cannot exit scroll mode"
+        );
+
+        app.scroll_pane = None;
+        assert!(app.begin_copy_mode());
+        let before = app.copy_mode.unwrap().cursor;
+        assert!(app.handle_event(key(KeyCode::Down, KeyEventKind::Press)));
+        let after_press = app.copy_mode.unwrap().cursor;
+        assert!(after_press.0 > before.0);
+        assert!(app.handle_event(key(KeyCode::Down, KeyEventKind::Repeat)));
+        assert!(app.copy_mode.unwrap().cursor.0 > after_press.0);
+        assert!(!app.handle_event(key(KeyCode::Enter, KeyEventKind::Repeat)));
+        assert!(app.copy_mode.is_some(), "confirmation repeat cannot copy");
+
+        app.copy_mode = None;
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        app.last_pane_area = Rect::new(0, 0, 80, 24);
+        app.mode = Mode::Resize;
+        let focus = app.layout().focus;
+        let before = app.layout().pane_rect(app.last_pane_area, focus).unwrap();
+        assert!(app.handle_event(key(KeyCode::Left, KeyEventKind::Press)));
+        let after_press = app.layout().pane_rect(app.last_pane_area, focus).unwrap();
+        assert_ne!(after_press, before);
+        assert!(app.handle_event(key(KeyCode::Left, KeyEventKind::Repeat)));
+        let after_repeat = app.layout().pane_rect(app.last_pane_area, focus).unwrap();
+        assert_ne!(after_repeat, after_press);
+        assert!(!app.handle_event(key(KeyCode::Enter, KeyEventKind::Repeat)));
+        assert_eq!(
+            app.mode,
+            Mode::Resize,
+            "action repeat cannot exit resize mode"
+        );
     }
 
     #[test]
