@@ -1062,7 +1062,7 @@ impl App {
         }
     }
 
-    pub fn search_key(&mut self, key: KeyEvent) {
+    pub fn search_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let ctrl = super::keys::is_ctrl_chord(key.modifiers); // not AltGr
         match key.code {
             KeyCode::Esc => {
@@ -1076,12 +1076,30 @@ impl App {
                 }
             }
             KeyCode::Enter => self.search_activate(),
-            KeyCode::Up => self.search_move(-1),
-            KeyCode::Down => self.search_move(1),
-            KeyCode::PageUp => self.search_move(-10),
-            KeyCode::PageDown => self.search_move(10),
-            KeyCode::Char('p') if ctrl => self.search_move(-1),
-            KeyCode::Char('n') if ctrl => self.search_move(1),
+            KeyCode::Up => {
+                self.search_move(-1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Down => {
+                self.search_move(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::PageUp => {
+                self.search_move(-10);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::PageDown => {
+                self.search_move(10);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Char('p') if ctrl => {
+                self.search_move(-1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Char('n') if ctrl => {
+                self.search_move(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 if let Some(scope) = self.search.as_ref().map(|s| s.scope.previous()) {
                     self.search_set_scope(scope);
@@ -1107,15 +1125,20 @@ impl App {
                     search.query.pop();
                 }
                 self.search_recompute();
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char(ch) if !ctrl => {
                 if let Some(search) = self.search.as_mut() {
                     search.query.push(ch);
                 }
                 self.search_recompute();
+                if !ch.is_control() {
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Append pasted text to the fuzzy query and recompute once. Replaying a

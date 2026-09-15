@@ -428,9 +428,9 @@ impl App {
     }
 
     /// Keyboard navigation for a DIFF row action menu.
-    pub fn handle_diff_menu_key(&mut self, key: KeyEvent) {
+    pub fn handle_diff_menu_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         if self.diff_menu.is_none() {
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         let items = DiffMenu::ITEMS;
         match key.code {
@@ -447,6 +447,7 @@ impl App {
                 if let Some(menu) = self.diff_menu.as_mut() {
                     menu.selected = Some(next);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Enter => {
                 let selected = self.diff_menu.as_ref().and_then(|menu| menu.selected);
@@ -456,6 +457,7 @@ impl App {
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     fn move_diff_list_cursor(&mut self, delta: isize) {
@@ -511,25 +513,51 @@ impl App {
 
     /// Navigate the DIFF list while the shared FILES/DIFF dock owns keyboard
     /// focus. Opening a review returns normal keys to the new native view.
-    pub fn handle_diff_list_key(&mut self, key: KeyEvent) -> bool {
+    pub fn handle_diff_list_key(&mut self, key: KeyEvent) -> crate::app::KeyDispatch {
         let page = self.diff.viewport.max(1) as isize;
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
-            KeyCode::Up | KeyCode::Char('k') => self.move_diff_list_cursor(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_diff_list_cursor(1),
-            KeyCode::PageUp => self.move_diff_list_page(-page),
-            KeyCode::PageDown => self.move_diff_list_page(page),
-            KeyCode::Home | KeyCode::Char('g') => self.move_diff_list_to_edge(false),
-            KeyCode::End | KeyCode::Char('G') => self.move_diff_list_to_edge(true),
-            KeyCode::Char('a') => self.open_diff_menu_for_keyboard(),
+        let repeat_safe = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.files_focused = false;
+                false
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_diff_list_cursor(-1);
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_diff_list_cursor(1);
+                true
+            }
+            KeyCode::PageUp => {
+                self.move_diff_list_page(-page);
+                true
+            }
+            KeyCode::PageDown => {
+                self.move_diff_list_page(page);
+                true
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.move_diff_list_to_edge(false);
+                true
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.move_diff_list_to_edge(true);
+                true
+            }
+            KeyCode::Char('a') => {
+                self.open_diff_menu_for_keyboard();
+                false
+            }
             KeyCode::Char('f') => {
                 self.diff.filter = self.diff.filter.cycle();
                 self.diff.rebuild_rows();
+                false
             }
             KeyCode::Char('r') => {
                 if !self.workspaces.is_empty() {
                     self.refresh_diff_status(true);
                 }
+                false
             }
             KeyCode::Enter if self.diff.selected_file().is_some() => {
                 let target = if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -540,10 +568,14 @@ impl App {
                 let row = self.diff.cursor;
                 self.files_focused = false;
                 self.diff_row_activate(row, target);
+                false
             }
-            _ => {}
+            _ => false,
+        };
+        if repeat_safe {
+            return crate::app::KeyDispatch::reprocess(true);
         }
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 
     pub fn diff_row_activate(&mut self, row: usize, target: OpenTarget) {
@@ -1638,8 +1670,16 @@ impl App {
     }
 
     pub fn handle_diff_key(&mut self, id: PaneId, key: KeyEvent) -> bool {
+        self.handle_diff_key_dispatch(id, key).changed
+    }
+
+    pub(super) fn handle_diff_key_dispatch(
+        &mut self,
+        id: PaneId,
+        key: KeyEvent,
+    ) -> crate::app::KeyDispatch {
         if self.diff_agent_picker.is_some() {
-            return self.handle_diff_agent_picker_key(key);
+            return crate::app::KeyDispatch::suppress(self.handle_diff_agent_picker_key(key));
         }
         let current_anchor = self
             .selected_diff_source(id)
@@ -1659,7 +1699,7 @@ impl App {
         let marker_style = self.config.layout.diff_marker_style;
         let (is_split, wraps_lines) = {
             let Some(ViewKind::Diff(view)) = self.views.get(&id) else {
-                return false;
+                return crate::app::KeyDispatch::suppress(false);
             };
             (
                 view.effective_split(pane_width),
@@ -1684,9 +1724,10 @@ impl App {
             Close,
         }
         let mut deferred = Deferred::None;
+        let mut repeat_safe = false;
         {
             let Some(ViewKind::Diff(view)) = self.views.get_mut(&id) else {
-                return false;
+                return crate::app::KeyDispatch::suppress(false);
             };
             if view.note_draft.is_some() {
                 match key.code {
@@ -1694,11 +1735,13 @@ impl App {
                         if let Some(draft) = view.note_draft.as_mut() {
                             draft.push(c);
                         }
+                        repeat_safe = !super::keys::is_ctrl_chord(key.modifiers) && !c.is_control();
                     }
                     KeyCode::Backspace => {
                         if let Some(draft) = view.note_draft.as_mut() {
                             draft.pop();
                         }
+                        repeat_safe = true;
                     }
                     KeyCode::Enter
                         if key
@@ -1723,27 +1766,43 @@ impl App {
                             view.range_anchor = None;
                         }
                     }
-                    _ => return false,
+                    _ => return crate::app::KeyDispatch::suppress(false),
                 }
             } else if view.note_selecting {
                 let max = view.stack_rows.len().saturating_sub(1);
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
-                        view.selected = (view.selected + 1).min(max)
+                        view.selected = (view.selected + 1).min(max);
+                        repeat_safe = true;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        view.selected = view.selected.saturating_sub(1)
+                        view.selected = view.selected.saturating_sub(1);
+                        repeat_safe = true;
                     }
                     KeyCode::Char('d') | KeyCode::PageDown => {
-                        view.selected = (view.selected + viewport / 2).min(max)
+                        view.selected = (view.selected + viewport / 2).min(max);
+                        repeat_safe = true;
                     }
                     KeyCode::Char('u') | KeyCode::PageUp => {
-                        view.selected = view.selected.saturating_sub(viewport / 2)
+                        view.selected = view.selected.saturating_sub(viewport / 2);
+                        repeat_safe = true;
                     }
-                    KeyCode::Char('g') | KeyCode::Home => view.selected = 0,
-                    KeyCode::Char('G') | KeyCode::End => view.selected = max,
-                    KeyCode::Left => view.selected_side = crate::diff::DiffSide::Old,
-                    KeyCode::Right => view.selected_side = crate::diff::DiffSide::New,
+                    KeyCode::Char('g') | KeyCode::Home => {
+                        view.selected = 0;
+                        repeat_safe = true;
+                    }
+                    KeyCode::Char('G') | KeyCode::End => {
+                        view.selected = max;
+                        repeat_safe = true;
+                    }
+                    KeyCode::Left => {
+                        view.selected_side = crate::diff::DiffSide::Old;
+                        repeat_safe = true;
+                    }
+                    KeyCode::Right => {
+                        view.selected_side = crate::diff::DiffSide::New;
+                        repeat_safe = true;
+                    }
                     KeyCode::Enter => {
                         if selected_view_anchor(view).is_some() {
                             view.note_selecting = false;
@@ -1755,7 +1814,7 @@ impl App {
                         view.note_selecting = false;
                         view.range_anchor = None;
                     }
-                    _ => return false,
+                    _ => return crate::app::KeyDispatch::suppress(false),
                 }
                 if view.selected < view.scroll {
                     view.scroll = view.selected;
@@ -1765,9 +1824,13 @@ impl App {
                 view.ensure_horizontal_visible(pane_width, marker_style, is_split);
             } else if view.search_editing {
                 match key.code {
-                    KeyCode::Char(c) => view.search.get_or_insert_with(String::new).push(c),
+                    KeyCode::Char(c) => {
+                        view.search.get_or_insert_with(String::new).push(c);
+                        repeat_safe = !super::keys::is_ctrl_chord(key.modifiers) && !c.is_control();
+                    }
                     KeyCode::Backspace => {
                         view.search.get_or_insert_with(String::new).pop();
+                        repeat_safe = true;
                     }
                     KeyCode::Enter => {
                         view.search_editing = false;
@@ -1789,7 +1852,7 @@ impl App {
                         view.search = None;
                         view.search_editing = false;
                     }
-                    _ => return false,
+                    _ => return crate::app::KeyDispatch::suppress(false),
                 }
             } else {
                 let row_count = view.stack_rows.len();
@@ -1797,28 +1860,48 @@ impl App {
                 let old_selected = view.selected;
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
-                        view.selected = (view.selected + 1).min(max)
+                        view.selected = (view.selected + 1).min(max);
+                        repeat_safe = true;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        view.selected = view.selected.saturating_sub(1)
+                        view.selected = view.selected.saturating_sub(1);
+                        repeat_safe = true;
                     }
                     KeyCode::Char('d') | KeyCode::PageDown => {
-                        view.selected = (view.selected + viewport / 2).min(max)
+                        view.selected = (view.selected + viewport / 2).min(max);
+                        repeat_safe = true;
                     }
                     KeyCode::Char('u') | KeyCode::PageUp => {
-                        view.selected = view.selected.saturating_sub(viewport / 2)
+                        view.selected = view.selected.saturating_sub(viewport / 2);
+                        repeat_safe = true;
                     }
-                    KeyCode::Char('g') | KeyCode::Home => view.selected = 0,
-                    KeyCode::Char('G') | KeyCode::End => view.selected = max,
-                    KeyCode::Left => view.selected_side = crate::diff::DiffSide::Old,
-                    KeyCode::Right => view.selected_side = crate::diff::DiffSide::New,
+                    KeyCode::Char('g') | KeyCode::Home => {
+                        view.selected = 0;
+                        repeat_safe = true;
+                    }
+                    KeyCode::Char('G') | KeyCode::End => {
+                        view.selected = max;
+                        repeat_safe = true;
+                    }
+                    KeyCode::Left => {
+                        view.selected_side = crate::diff::DiffSide::Old;
+                        repeat_safe = true;
+                    }
+                    KeyCode::Right => {
+                        view.selected_side = crate::diff::DiffSide::New;
+                        repeat_safe = true;
+                    }
                     KeyCode::Char('h') if !is_split && !wraps_lines => {
-                        view.horizontal = view.horizontal.saturating_sub(8)
+                        view.horizontal = view.horizontal.saturating_sub(8);
+                        repeat_safe = true;
                     }
                     KeyCode::Char('l') if !is_split && !wraps_lines => {
-                        view.horizontal = view.horizontal.saturating_add(8)
+                        view.horizontal = view.horizontal.saturating_add(8);
+                        repeat_safe = true;
                     }
-                    KeyCode::Char('h' | 'l') => {}
+                    KeyCode::Char('h' | 'l') => {
+                        repeat_safe = true;
+                    }
                     KeyCode::Char('s') => {
                         // When Auto resolves to Split at this viewport width,
                         // skip directly to Stack so the user doesn't need to
@@ -1901,7 +1984,7 @@ impl App {
                             deferred = Deferred::Close;
                         }
                     }
-                    _ => return false,
+                    _ => return crate::app::KeyDispatch::suppress(false),
                 }
                 if view.selected < view.scroll {
                     view.scroll = view.selected;
@@ -1918,6 +2001,9 @@ impl App {
                     view.ensure_horizontal_visible(pane_width, marker_style, now_split);
                 }
             }
+        }
+        if repeat_safe {
+            return crate::app::KeyDispatch::reprocess(true);
         }
         match deferred {
             Deferred::None => {}
@@ -1945,7 +2031,7 @@ impl App {
             Deferred::Note(delta) => self.navigate_diff_note(id, delta),
             Deferred::Close => self.close_pane(id),
         }
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 }
 

@@ -1242,19 +1242,20 @@ impl App {
             }
             return true;
         }
-        let handler: fn(&mut Self, KeyEvent) = if self.worktree_prompt.is_some() {
-            Self::handle_worktree_prompt_key
-        } else if self.tab_rename.is_some() {
-            Self::handle_tab_rename_key
-        } else if self.file_prompt.is_some() {
-            Self::file_prompt_key
-        } else if self.ws_rename.is_some() {
-            Self::handle_ws_rename_key
-        } else if self.pane_rename.is_some() {
-            Self::handle_pane_rename_key
-        } else {
-            return false;
-        };
+        let handler: fn(&mut Self, KeyEvent) -> UiRepeatDisposition =
+            if self.worktree_prompt.is_some() {
+                Self::handle_worktree_prompt_key
+            } else if self.tab_rename.is_some() {
+                Self::handle_tab_rename_key
+            } else if self.file_prompt.is_some() {
+                Self::file_prompt_key
+            } else if self.ws_rename.is_some() {
+                Self::handle_ws_rename_key
+            } else if self.pane_rename.is_some() {
+                Self::handle_pane_rename_key
+            } else {
+                return false;
+            };
         for c in s.chars().filter(|c| !c.is_control()) {
             handler(self, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
@@ -1780,7 +1781,7 @@ impl App {
                         Some(PickerHit::RemoteMachineTab) => self.picker_open_remote_machine(),
                         Some(PickerHit::Row(i)) => self.picker_click(i),
                         Some(PickerHit::Hint(k)) => {
-                            self.handle_picker_key(KeyEvent::new(k, KeyModifiers::NONE))
+                            self.handle_picker_key(KeyEvent::new(k, KeyModifiers::NONE));
                         }
                         Some(PickerHit::Modal) => {}
                         None => self.close_folder_picker(), // click outside cancels
@@ -1977,10 +1978,10 @@ impl App {
                     }
                 }
                 MouseEventKind::ScrollUp => {
-                    self.handle_worktree_open_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+                    self.handle_worktree_open_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
                 }
                 MouseEventKind::ScrollDown => {
-                    self.handle_worktree_open_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                    self.handle_worktree_open_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
                 }
                 _ => {}
             }
@@ -2949,7 +2950,7 @@ impl App {
     /// back to live. See [`App::scroll_pane`].
     /// Keyboard resize mode (docs/27, RESIZE-3): arrows / `hjkl` resize the
     /// focused pane, `=`/`0` equalize, anything else (`Esc`/`Enter`/`q`/…) exits.
-    fn handle_resize_mode_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_resize_mode_key(&mut self, key: KeyEvent) -> crate::app::KeyDispatch {
         use ratatui::crossterm::event::KeyModifiers;
         const STEP: i16 = 3;
         let big = key.modifiers.contains(KeyModifiers::SHIFT)
@@ -2965,31 +2966,47 @@ impl App {
         if let Some(dir) = dir {
             let area = self.last_pane_area;
             self.layout_mut().resize_focused(area, dir, step);
-            return true;
+            return KeyDispatch::reprocess(true);
         }
         if matches!(key.code, KeyCode::Char('=' | '+' | '0')) {
             self.layout_mut().equalize();
-            return true;
+            return crate::app::KeyDispatch::suppress(true);
         }
         // Esc / Enter / q / the prefix / any other key leaves resize mode.
         self.mode = Mode::Normal;
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 
-    fn handle_scroll_mode_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_scroll_mode_key(&mut self, key: KeyEvent) -> crate::app::KeyDispatch {
         let Some(id) = self.scroll_pane else {
-            return false;
+            return crate::app::KeyDispatch::suppress(false);
         };
         let page = self.focused_page();
         let mut forward = false;
         let mut exit = false;
+        let mut repeat_safe = false;
         if let Some(pane) = self.panes.get(&id) {
             match key.code {
-                KeyCode::Char('k') | KeyCode::Up => pane.scroll(1),
-                KeyCode::Char('j') | KeyCode::Down => pane.scroll(-1),
-                KeyCode::Char('b') | KeyCode::PageUp => pane.scroll(page),
-                KeyCode::Char('f') | KeyCode::Char(' ') | KeyCode::PageDown => pane.scroll(-page),
-                KeyCode::Char('g') | KeyCode::Home => pane.scroll_to_top(),
+                KeyCode::Char('k') | KeyCode::Up => {
+                    pane.scroll(1);
+                    repeat_safe = true;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    pane.scroll(-1);
+                    repeat_safe = true;
+                }
+                KeyCode::Char('b') | KeyCode::PageUp => {
+                    pane.scroll(page);
+                    repeat_safe = true;
+                }
+                KeyCode::Char('f') | KeyCode::Char(' ') | KeyCode::PageDown => {
+                    pane.scroll(-page);
+                    repeat_safe = true;
+                }
+                KeyCode::Char('g') | KeyCode::Home => {
+                    pane.scroll_to_top();
+                    repeat_safe = true;
+                }
                 KeyCode::Char('G') | KeyCode::End => {
                     pane.scroll_to_bottom();
                     exit = true;
@@ -3023,13 +3040,16 @@ impl App {
         } else {
             exit = true; // the pane vanished
         }
+        if repeat_safe {
+            return crate::app::KeyDispatch::reprocess(true);
+        }
         if exit {
             self.scroll_pane = None;
         }
         if forward {
             self.forward_key_to_pane(id, key);
         }
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 
     /// Begin keyboard copy mode at the visible viewport's top-left cell. The
@@ -3121,32 +3141,32 @@ impl App {
     /// Motions take vim's count prefix (`12j`), `e` jumps to a word end, and
     /// `Ctrl+D`/`Ctrl+U` move by half a page. Anything unrecognised is swallowed
     /// rather than forwarded, so a stray key can never reach the selected program.
-    fn handle_copy_mode_key(&mut self, key: KeyEvent) -> bool {
+    fn handle_copy_mode_key(&mut self, key: KeyEvent) -> crate::app::KeyDispatch {
         let Some(mut copy) = self.copy_mode else {
-            return false;
+            return KeyDispatch::suppress(false);
         };
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
             self.cancel_copy_mode();
-            return true;
+            return crate::app::KeyDispatch::suppress(true);
         }
         if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
             self.finish_copy_mode();
-            return true;
+            return crate::app::KeyDispatch::suppress(true);
         }
         if matches!(key.code, KeyCode::Char('v') | KeyCode::Char('V')) {
             copy.anchor = copy.cursor;
             copy.pending_count = 0;
             self.copy_mode = Some(copy);
-            return true;
+            return crate::app::KeyDispatch::suppress(true);
         }
         let Some(pane) = self.panes.get(&copy.pane) else {
             self.cancel_copy_mode();
-            return true;
+            return crate::app::KeyDispatch::suppress(true);
         };
         let row_count = pane.retained_row_count();
         if row_count == 0 {
             self.cancel_copy_mode();
-            return true;
+            return crate::app::KeyDispatch::suppress(true);
         }
         // Vim's count prefix, after the pane checks above: a digit must not keep
         // copy mode alive on a pane that has gone away. `0` joins a count already
@@ -3157,7 +3177,7 @@ impl App {
             if digit != 0 || copy.pending_count > 0 {
                 copy.push_count_digit(digit);
                 self.copy_mode = Some(copy);
-                return true;
+                return crate::app::KeyDispatch::suppress(true);
             }
         }
         let last_row = row_count.saturating_sub(1);
@@ -3171,71 +3191,92 @@ impl App {
         let explicit = copy.pending_count;
         let counted_row = |n: usize| n.saturating_sub(1).min(last_row);
         let ctrl = super::keys::is_ctrl_chord(key.modifiers);
-        match key.code {
+        let repeat_safe = match key.code {
             // The only chords copy mode reads. Guarded so bare `d`/`u` stay unbound
             // instead of silently becoming half-page motions.
             KeyCode::Char('d') if ctrl => {
-                copy.cursor.0 = copy.cursor.0.saturating_add(rows(half_page)).min(last_row)
+                copy.cursor.0 = copy.cursor.0.saturating_add(rows(half_page)).min(last_row);
+                true
             }
             KeyCode::Char('u') if ctrl => {
-                copy.cursor.0 = copy.cursor.0.saturating_sub(rows(half_page))
+                copy.cursor.0 = copy.cursor.0.saturating_sub(rows(half_page));
+                true
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                copy.cursor.1 = copy.cursor.1.saturating_sub(count)
+                copy.cursor.1 = copy.cursor.1.saturating_sub(count);
+                true
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 let last = pane
                     .retained_row_layout(copy.cursor.0)
                     .map_or(0, |layout| layout.last_column());
                 copy.cursor.1 = copy.cursor.1.saturating_add(count).min(last);
+                true
             }
-            KeyCode::Up | KeyCode::Char('k') => copy.cursor.0 = copy.cursor.0.saturating_sub(count),
+            KeyCode::Up | KeyCode::Char('k') => {
+                copy.cursor.0 = copy.cursor.0.saturating_sub(count);
+                true
+            }
             KeyCode::Down | KeyCode::Char('j') => {
-                copy.cursor.0 = copy.cursor.0.saturating_add(count).min(last_row)
+                copy.cursor.0 = copy.cursor.0.saturating_add(count).min(last_row);
+                true
             }
             KeyCode::PageUp | KeyCode::Char('b') => {
-                copy.cursor.0 = copy.cursor.0.saturating_sub(rows(page))
+                copy.cursor.0 = copy.cursor.0.saturating_sub(rows(page));
+                true
             }
             KeyCode::PageDown | KeyCode::Char(' ') | KeyCode::Char('f') => {
-                copy.cursor.0 = copy.cursor.0.saturating_add(rows(page)).min(last_row)
+                copy.cursor.0 = copy.cursor.0.saturating_add(rows(page)).min(last_row);
+                true
             }
-            KeyCode::Home | KeyCode::Char('g') => copy.cursor.0 = counted_row(explicit),
+            KeyCode::Home | KeyCode::Char('g') => {
+                copy.cursor.0 = counted_row(explicit);
+                true
+            }
             KeyCode::End | KeyCode::Char('G') => {
                 copy.cursor.0 = if explicit > 0 {
                     counted_row(explicit)
                 } else {
                     last_row
-                }
+                };
+                true
             }
-            KeyCode::Char('0') => copy.cursor.1 = 0,
+            KeyCode::Char('0') => {
+                copy.cursor.1 = 0;
+                true
+            }
             KeyCode::Char('$') => {
                 copy.cursor.1 = pane
                     .retained_row_layout(copy.cursor.0)
-                    .map_or(0, |layout| layout.last_column())
+                    .map_or(0, |layout| layout.last_column());
+                true
             }
             KeyCode::Char('w') => {
                 copy.cursor = repeat_motion(count, copy.cursor, |at| {
                     copy_word_forward(row_count, |row| pane.retained_row_layout(row), at)
-                })
+                });
+                true
             }
             KeyCode::Char('e') => {
                 copy.cursor = repeat_motion(count, copy.cursor, |at| {
                     copy_word_end(row_count, |row| pane.retained_row_layout(row), at)
-                })
+                });
+                true
             }
             KeyCode::Char('B') => {
                 copy.cursor = repeat_motion(count, copy.cursor, |at| {
                     copy_word_back(|row| pane.retained_row_layout(row), at)
-                })
+                });
+                true
             }
             _ => {
                 // An unrecognised key aborts the pending count the way vim does, so
                 // a mistyped chord cannot silently multiply the next motion.
                 copy.pending_count = 0;
                 self.copy_mode = Some(copy);
-                return true;
+                return crate::app::KeyDispatch::suppress(true);
             }
-        }
+        };
         copy.pending_count = 0;
         copy.cursor.1 = copy.cursor.1.min(
             pane.retained_row_layout(copy.cursor.0)
@@ -3243,7 +3284,10 @@ impl App {
         );
         self.copy_mode = Some(copy);
         self.reveal_copy_cursor();
-        true
+        if repeat_safe {
+            return crate::app::KeyDispatch::reprocess(true);
+        }
+        crate::app::KeyDispatch::suppress(true)
     }
 
     /// The pane whose **content** rect covers terminal cell `(x, y)`.
@@ -3839,13 +3883,10 @@ impl App {
     }
 
     fn release_forwarded_key_press(&mut self, held: ForwardedKeyPress) {
-        let release = KeyEvent::new_with_kind_and_state(
-            held.press.code,
-            held.press.modifiers,
-            KeyEventKind::Release,
-            held.press.state,
+        self.forward_key_to_pane_preserving_scroll(
+            held.pane,
+            forwarded_key_phase(held.press, KeyEventKind::Release),
         );
-        self.forward_key_to_pane_preserving_scroll(held.pane, release);
     }
 
     /// Returns whether this key changed the **luvus UI** (so the server should
@@ -3871,16 +3912,28 @@ impl App {
                     }
                     return false;
                 }
-                let Some(context) = self.ui_repeat_leases.get(&identity).copied() else {
+                let Some(lease) = self.ui_repeat_leases.get(&identity).copied() else {
                     return false;
                 };
-                if self.ui_repeat_receiver() != Some(context)
-                    || !self.ui_repeat_allowed(context, key)
-                {
+                if self.ui_repeat_receiver() != Some(lease.context) {
                     self.ui_repeat_leases.remove(&identity);
                     return false;
                 }
-                return self.dispatch_key_press(key);
+                let repeat = KeyEvent::new_with_kind_and_state(
+                    lease.press.code,
+                    lease.press.modifiers,
+                    KeyEventKind::Repeat,
+                    lease.press.state,
+                );
+                let dispatch = self.dispatch_key_press(repeat);
+                if self.ui_repeat_receiver() != Some(lease.context)
+                    || dispatch.repeat == UiRepeatDisposition::Suppress
+                {
+                    // Reprocessing may itself transition or mutate the shared UI.
+                    // Fail closed for every client-held UI key, just like Press.
+                    self.ui_repeat_leases.clear();
+                }
+                return dispatch.changed;
             }
             KeyEventKind::Press => {
                 // A missing host release must not leave the old pane believing
@@ -3893,23 +3946,32 @@ impl App {
         }
 
         let initial_context = self.ui_repeat_receiver();
-        let changed = self.dispatch_key_press(key);
+        let dispatch = self.dispatch_key_press(key);
         let resulting_context = self.ui_repeat_receiver();
         if initial_context != resulting_context {
             // A modal/view transition invalidates every held UI key. This also
             // prevents a key leased to an old instance from attaching to a
             // later instance of the same receiver kind after close + reopen.
             self.ui_repeat_leases.clear();
-        } else if let Some(context) = initial_context {
-            if self.ui_repeat_allowed(context, key) {
+        } else if dispatch.repeat == UiRepeatDisposition::Reprocess {
+            if let Some(context) = initial_context {
                 if !self.forwarded_key_presses.contains_key(&identity) {
-                    self.ui_repeat_leases.insert(identity, context);
+                    self.ui_repeat_leases.insert(
+                        identity,
+                        UiRepeatLease {
+                            context,
+                            press: key,
+                        },
+                    );
                 }
-            } else {
-                self.ui_repeat_leases.clear();
             }
+        } else {
+            // An action Press is a lifecycle boundary even when it leaves the
+            // same receiver active. This keeps older held motions from acting
+            // on state changed by confirmation, deletion, install, or mutation.
+            self.ui_repeat_leases.clear();
         }
-        changed
+        dispatch.changed
     }
 
     fn ui_repeat_receiver(&self) -> Option<UiRepeatContext> {
@@ -4079,105 +4141,10 @@ impl App {
         None
     }
 
-    fn ui_repeat_allowed(&self, context: UiRepeatContext, key: KeyEvent) -> bool {
-        let below_shortcuts = matches!(
-            context,
-            UiRepeatContext::Sidebar(_)
-                | UiRepeatContext::Files(_)
-                | UiRepeatContext::GitFilter
-                | UiRepeatContext::GitDetail
-                | UiRepeatContext::Git
-                | UiRepeatContext::Orch
-                | UiRepeatContext::MissionAnswer
-                | UiRepeatContext::Mission
-                | UiRepeatContext::FileView(_)
-                | UiRepeatContext::FileSearch(_)
-                | UiRepeatContext::DiffView(_)
-                | UiRepeatContext::DiffNoteSelect(_)
-                | UiRepeatContext::DiffText(_)
-                | UiRepeatContext::Preview(_)
-                | UiRepeatContext::PreviewSearch(_)
-        );
-        if below_shortcuts
-            && self.mode == Mode::Normal
-            && (self.prefix.matches(&key)
-                || keys::direct_command(&self.direct_keymap, &key).is_some())
-        {
-            return false;
-        }
-        match context {
-            UiRepeatContext::ModuleSetting
-            | UiRepeatContext::NamedSessionPrompt
-            | UiRepeatContext::PickerText
-            | UiRepeatContext::WorktreePrompt
-            | UiRepeatContext::TabRename
-            | UiRepeatContext::FilePrompt
-            | UiRepeatContext::PaneRename
-            | UiRepeatContext::WorkspaceRename
-            | UiRepeatContext::GitFilter
-            | UiRepeatContext::MissionAnswer
-            | UiRepeatContext::FileSearch(_)
-            | UiRepeatContext::DiffText(_)
-            | UiRepeatContext::PreviewSearch(_) => is_text_edit_repeat(key),
-            UiRepeatContext::Search(_) => {
-                is_text_edit_repeat(key)
-                    || is_vertical_navigation_repeat(key)
-                    || matches!(key.code, KeyCode::Char('p' | 'n') if keys::is_ctrl_chord(key.modifiers))
-            }
-            UiRepeatContext::Switcher => {
-                is_text_edit_repeat(key) || is_vertical_navigation_repeat(key)
-            }
-            UiRepeatContext::OrchForm(field) => {
-                matches!(
-                    field,
-                    OrchFormField::Title
-                        | OrchFormField::Paths
-                        | OrchFormField::Deps
-                        | OrchFormField::Gate
-                        | OrchFormField::Prompt
-                        | OrchFormField::Agent
-                        | OrchFormField::Schedule
-                ) && is_text_edit_repeat(key)
-            }
-            UiRepeatContext::Scroll(_) => is_scroll_navigation_repeat(key),
-            UiRepeatContext::Copy(_) => is_copy_navigation_repeat(key),
-            UiRepeatContext::Resize(_) => is_resize_navigation_repeat(key),
-            UiRepeatContext::Files(_) => is_list_navigation_repeat(key),
-            UiRepeatContext::Git | UiRepeatContext::Orch | UiRepeatContext::Mission => {
-                is_dashboard_navigation_repeat(key)
-            }
-            UiRepeatContext::FileView(_) | UiRepeatContext::Preview(_) => {
-                is_native_view_navigation_repeat(key)
-                    || matches!(key.code, KeyCode::Char('n' | 'N'))
-            }
-            UiRepeatContext::DiffView(_) => {
-                is_native_view_navigation_repeat(key) && key.code != KeyCode::Char(' ')
-            }
-            UiRepeatContext::DiffNoteSelect(_) => is_native_view_navigation_repeat(key),
-            UiRepeatContext::CommandInspect
-            | UiRepeatContext::Help
-            | UiRepeatContext::Changelog
-            | UiRepeatContext::NamedSessions
-            | UiRepeatContext::SessionMenu
-            | UiRepeatContext::Settings
-            | UiRepeatContext::PickerList
-            | UiRepeatContext::WorktreeList
-            | UiRepeatContext::TabMenu
-            | UiRepeatContext::WorkspaceMenu
-            | UiRepeatContext::PaneMenu
-            | UiRepeatContext::AgentMenu
-            | UiRepeatContext::FileMenu
-            | UiRepeatContext::DiffMenu
-            | UiRepeatContext::OrchStart
-            | UiRepeatContext::OrchDetail
-            | UiRepeatContext::Sidebar(_)
-            | UiRepeatContext::GitDetail => is_vertical_navigation_repeat(key),
-        }
-    }
-
-    fn dispatch_key_press(&mut self, key: KeyEvent) -> bool {
+    fn dispatch_key_press(&mut self, key: KeyEvent) -> KeyDispatch {
+        let mut repeat = UiRepeatDisposition::Suppress;
         if self.bar.overflow.take().is_some() {
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // Scroll mode belongs to one pane, not to the whole tab. A focus change
         // must never let the next key snap and type into the previously scrolled
@@ -4205,16 +4172,18 @@ impl App {
                     if let Some(c) = self.cmd_inspect.as_mut() {
                         c.scroll += 1;
                     }
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     if let Some(c) = self.cmd_inspect.as_mut() {
                         c.scroll = c.scroll.saturating_sub(1);
                     }
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Char('r') => self.refresh_cmd_inspect(),
                 _ => self.close_cmd_inspect(),
             }
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // The help cheat-sheet is a complete, scrollable shortcut reference.
         // Unknown keys still dismiss it and are swallowed, preserving the old
@@ -4222,25 +4191,35 @@ impl App {
         if self.help_open {
             match key.code {
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.help_scroll = self.help_scroll.saturating_add(1)
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.help_scroll = self.help_scroll.min(self.help_scroll_max).saturating_sub(1)
+                    self.help_scroll = self.help_scroll.min(self.help_scroll_max).saturating_sub(1);
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::PageDown | KeyCode::Char(' ') => {
-                    self.help_scroll = self.help_scroll.saturating_add(10)
+                    self.help_scroll = self.help_scroll.saturating_add(10);
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::PageUp => {
                     self.help_scroll = self
                         .help_scroll
                         .min(self.help_scroll_max)
-                        .saturating_sub(10)
+                        .saturating_sub(10);
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
-                KeyCode::Home => self.help_scroll = 0,
-                KeyCode::End => self.help_scroll = self.help_scroll_max,
+                KeyCode::Home => {
+                    self.help_scroll = 0;
+                    repeat = UiRepeatDisposition::Reprocess;
+                }
+                KeyCode::End => {
+                    self.help_scroll = self.help_scroll_max;
+                    repeat = UiRepeatDisposition::Reprocess;
+                }
                 _ => self.help_open = false,
             }
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // The changelog modal captures keys: scroll with the arrows / j/k / page
         // keys, dismiss with esc / q / Enter.
@@ -4248,152 +4227,161 @@ impl App {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => self.changelog_open = false,
                 KeyCode::Down | KeyCode::Char('j') => {
-                    self.changelog_scroll = self.changelog_scroll.saturating_add(1)
+                    self.changelog_scroll = self.changelog_scroll.saturating_add(1);
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    self.changelog_scroll = self.changelog_scroll.saturating_sub(1)
+                    self.changelog_scroll = self.changelog_scroll.saturating_sub(1);
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::PageDown | KeyCode::Char(' ') => {
-                    self.changelog_scroll = self.changelog_scroll.saturating_add(10)
+                    self.changelog_scroll = self.changelog_scroll.saturating_add(10);
+                    repeat = UiRepeatDisposition::Reprocess;
                 }
-                KeyCode::PageUp => self.changelog_scroll = self.changelog_scroll.saturating_sub(10),
-                KeyCode::Home | KeyCode::Char('g') => self.changelog_scroll = 0,
+                KeyCode::PageUp => {
+                    self.changelog_scroll = self.changelog_scroll.saturating_sub(10);
+                    repeat = UiRepeatDisposition::Reprocess;
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    self.changelog_scroll = 0;
+                    repeat = UiRepeatDisposition::Reprocess;
+                }
                 _ => {}
             }
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // A module-setting prompt sits *inside* the Settings modal, so it must
         // take keys first (docs/13 §3.6).
         if self.module_setting_edit.is_some() {
-            self.handle_module_setting_key(key);
-            return true;
+            repeat = self.handle_module_setting_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         if self.session_delete_confirm.is_some() {
             self.session_delete_key(key);
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         if self.named_session_menu.is_some() {
             // Context menu Esc should close the menu before the session popup.
             if self.session_menu.is_some() && key.code == KeyCode::Esc {
                 self.session_menu = None;
-                return true;
+                return KeyDispatch::new(true, repeat);
             }
             if self.session_menu.is_some() {
-                self.handle_session_menu_key(key);
-                return true;
+                repeat = self.handle_session_menu_key(key);
+                return KeyDispatch::new(true, repeat);
             }
-            self.named_session_key(key);
-            return true;
+            repeat = self.named_session_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The Settings modal captures all input while open.
         if self.settings.is_some() {
-            self.handle_settings_key(key);
-            return true;
+            repeat = self.handle_settings_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The global-search overlay (docs/63) captures all input while open.
         if self.search.is_some() {
-            self.search_key(key);
-            return true;
+            repeat = self.search_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The folder picker captures all input while open.
         if self.picker.is_some() {
-            self.handle_picker_key(key);
-            return true;
+            repeat = self.handle_picker_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The new-worktree branch prompt captures all input while open.
         if self.worktree_prompt.is_some() {
-            self.handle_worktree_prompt_key(key);
-            return true;
+            repeat = self.handle_worktree_prompt_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The open-worktree list modal captures all input while open.
         if self.worktree_open.is_some() {
-            self.handle_worktree_open_key(key);
-            return true;
+            repeat = self.handle_worktree_open_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The tab-rename modal (docs/28) captures all input while open.
         if self.tab_rename.is_some() {
-            self.handle_tab_rename_key(key);
-            return true;
+            repeat = self.handle_tab_rename_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The tab context menu captures input while open.
         if self.tab_menu.is_some() {
             self.handle_tab_menu_key(key);
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // The workspace context menu / rename modal capture all input while open.
         if self.ws_menu.is_some() {
-            self.handle_ws_menu_key(key);
-            return true;
+            repeat = self.handle_ws_menu_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The pane context menu (docs/28) captures all input while open.
         if self.pane_menu.is_some() {
             self.handle_pane_menu_key(key);
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // The AGENTS-list context menu (docs/28) captures all input while open.
         if self.agent_menu.is_some() {
-            self.handle_agent_menu_key(key);
-            return true;
+            repeat = self.handle_agent_menu_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // FILES-dock menu / prompt / delete-confirm capture input while open (docs/38).
         if self.file_prompt.is_some() {
-            self.file_prompt_key(key);
-            return true;
+            repeat = self.file_prompt_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         if self.file_delete.is_some() {
             self.file_delete_key(key);
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         if self.worktree_delete.is_some() {
             self.worktree_delete_key(key);
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         if self.file_menu.is_some() {
-            self.handle_file_menu_key(key);
-            return true;
+            repeat = self.handle_file_menu_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         if self.diff_menu.is_some() {
-            self.handle_diff_menu_key(key);
-            return true;
+            repeat = self.handle_diff_menu_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         if self.orch_menu.is_some() {
             if key.code == KeyCode::Esc {
                 self.orch_menu = None;
             }
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         if self.dock_menu.is_some() {
             if key.code == KeyCode::Esc {
                 self.dock_menu = None;
             }
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // The touch switcher overlay (docs/18) owns input while open.
         if self.switcher {
-            self.switcher_key(key);
-            return true;
+            repeat = self.switcher_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         if self.pane_rename.is_some() {
-            self.handle_pane_rename_key(key);
-            return true;
+            repeat = self.handle_pane_rename_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         if self.ws_rename.is_some() {
-            self.handle_ws_rename_key(key);
-            return true;
+            repeat = self.handle_ws_rename_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // The board's new-task form captures all input while open (ORCH-7).
         if self.orch_form.is_some() {
-            self.handle_orch_form_key(key);
-            return true;
+            repeat = self.handle_orch_form_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // Likewise the board's start-worker picker and task detail overlay.
         if self.orch_start.is_some() {
-            self.handle_orch_start_key(key);
-            return true;
+            repeat = self.handle_orch_start_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         if self.orch_detail.is_some() {
-            self.handle_orch_detail_key(key);
-            return true;
+            repeat = self.handle_orch_detail_key(key);
+            return KeyDispatch::new(true, repeat);
         }
         // Keyboard scroll mode owns every key until it's left (`q`/`Esc`/typing);
         // no `Ctrl+Space` prefix involved — the Mac-friendly path.
@@ -4416,7 +4404,7 @@ impl App {
         if self.mode == Mode::Normal && !self.prefix.matches(&key) {
             if let Some(command) = keys::direct_command(&self.direct_keymap, &key) {
                 self.run_cmd(command);
-                return true;
+                return KeyDispatch::new(true, repeat);
             }
         }
         // WORKSPACES/AGENTS dock focus is explicit and separate from pane focus.
@@ -4425,12 +4413,12 @@ impl App {
                 self.sidebar_focus = None;
                 self.mode = Mode::Prefix;
             } else {
-                match focus {
+                return match focus {
                     SidebarListFocus::Workspaces => self.handle_workspaces_key(key),
                     SidebarListFocus::Agents => self.handle_agents_key(key),
                 };
             }
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // FILES/DIFF dock focus is explicit and separate from terminal-pane
         // focus. The prefix remains available for global commands; ordinary
@@ -4440,12 +4428,12 @@ impl App {
                 self.files_focused = false;
                 self.mode = Mode::Prefix;
             } else {
-                match self.files_mode {
+                return match self.files_mode {
                     crate::diff::FilesMode::Files => self.handle_file_tree_key(key),
                     crate::diff::FilesMode::Diff => self.handle_diff_list_key(key),
                 };
             }
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         // A focused dashboard tab (git / orch / mission) captures normal-mode keys
         // (its own j/k/⏎/…); the `Ctrl+Space` prefix still works for global ops.
@@ -4454,14 +4442,16 @@ impl App {
         {
             if self.prefix.matches(&key) {
                 self.mode = Mode::Prefix;
-            } else if self.active_is_orch() {
-                self.handle_orch_key(key);
-            } else if self.active_is_mission() {
-                self.handle_mission_key(key);
             } else {
-                self.handle_git_key(key);
+                repeat = if self.active_is_orch() {
+                    self.handle_orch_key(key)
+                } else if self.active_is_mission() {
+                    self.handle_mission_key(key)
+                } else {
+                    self.handle_git_key(key)
+                };
             }
-            return true;
+            return KeyDispatch::new(true, repeat);
         }
         match self.mode {
             Mode::Prefix => {
@@ -4474,7 +4464,7 @@ impl App {
                     if self.focused().is_some() {
                         self.forward_key_to_pane_preserving_scroll(self.layout().focus, prefix);
                     }
-                    return true; // left prefix mode → the status bar updates
+                    return KeyDispatch::new(true, repeat); // left prefix mode → the status bar updates
                 }
                 // Fixed convenience keys (not rebindable): unshifted `1`–`9`
                 // jump to a tab, and `?` opens the shortcut cheat-sheet. Shifted
@@ -4486,12 +4476,12 @@ impl App {
                         && !key.modifiers.contains(KeyModifiers::SHIFT)
                     {
                         self.switch_tab(c as usize - '1' as usize);
-                        return true;
+                        return KeyDispatch::new(true, repeat);
                     }
                     if c == '?' {
                         self.help_open = true;
                         self.help_scroll = 0;
-                        return true;
+                        return KeyDispatch::new(true, repeat);
                     }
                 }
                 // Fixed scrollback keys (like the digits above): scroll the
@@ -4508,7 +4498,7 @@ impl App {
                 };
                 if let Some(code) = scroll_code {
                     self.scroll_focused_pane(code);
-                    return true;
+                    return KeyDispatch::new(true, repeat);
                 }
                 // Everything else resolves through the keybinding registry
                 // (defaults + user overrides; see `app/keys.rs`). `key_string`
@@ -4518,19 +4508,21 @@ impl App {
                 {
                     self.run_cmd(cmd);
                 }
-                true // a prefix command (and leaving prefix mode) changes the UI
+                KeyDispatch::suppress(true) // a prefix command (and leaving prefix mode) changes the UI
             }
             Mode::Normal => {
                 if self.prefix.matches(&key) {
                     self.mode = Mode::Prefix;
-                    return true; // entered prefix mode → the status bar updates
+                    return KeyDispatch::new(true, repeat); // entered prefix mode → the status bar updates
                 }
                 // A focused file view (docs/38 FILE-3) consumes keys itself
                 // (scroll / wrap / close) — they never reach a PTY.
                 let focus = self.layout().focus;
                 match self.views.get(&focus) {
                     Some(crate::app::ViewKind::File(_)) => return self.handle_file_key(focus, key),
-                    Some(crate::app::ViewKind::Diff(_)) => return self.handle_diff_key(focus, key),
+                    Some(crate::app::ViewKind::Diff(_)) => {
+                        return self.handle_diff_key_dispatch(focus, key)
+                    }
                     Some(crate::app::ViewKind::Preview(_)) => {
                         return self.handle_preview_key(focus, key)
                     }
@@ -4546,7 +4538,7 @@ impl App {
                         self.focused_page()
                     };
                     if self.enter_scroll_mode(by) {
-                        return true;
+                        return KeyDispatch::new(true, repeat);
                     }
                 }
                 // Plain page keys are convenient host-scroll shortcuts for a
@@ -4558,12 +4550,12 @@ impl App {
                     && self.focused().is_some_and(|pane| pane.host_page_keys())
                 {
                     self.scroll_focused_pane(key.code);
-                    return true;
+                    return KeyDispatch::new(true, repeat);
                 }
                 if self.forward_key_to_pane(self.layout().focus, key) {
                     self.mark_user_input();
                 }
-                false // plain input → the pane; its echo (PtyData) renders it
+                KeyDispatch::suppress(false) // plain input → the pane; its echo (PtyData) renders it
             }
             // Intercepted above (before this match); handled here too for safety.
             Mode::Resize => self.handle_resize_mode_key(key),
@@ -4571,116 +4563,12 @@ impl App {
     }
 }
 
+fn forwarded_key_phase(press: KeyEvent, kind: KeyEventKind) -> KeyEvent {
+    KeyEvent::new_with_kind_and_state(press.code, press.modifiers, kind, press.state)
+}
+
 fn key_identity(source: Option<u64>, key: KeyEvent) -> (Option<u64>, KeyCode, bool) {
     (source, key.code, key.state.contains(KeyEventState::KEYPAD))
-}
-
-fn is_vertical_navigation_repeat(key: KeyEvent) -> bool {
-    matches!(
-        key.code,
-        KeyCode::Up
-            | KeyCode::Down
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-            | KeyCode::Home
-            | KeyCode::End
-            | KeyCode::Char('j' | 'k' | 'g' | 'G')
-    )
-}
-
-fn is_list_navigation_repeat(key: KeyEvent) -> bool {
-    matches!(
-        key.code,
-        KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Up
-            | KeyCode::Down
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-            | KeyCode::Home
-            | KeyCode::End
-            | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'g' | 'G')
-    )
-}
-
-fn is_dashboard_navigation_repeat(key: KeyEvent) -> bool {
-    matches!(
-        key.code,
-        KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Up
-            | KeyCode::Down
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-            | KeyCode::Home
-            | KeyCode::End
-            | KeyCode::Char('j' | 'k' | 'g' | 'G')
-    )
-}
-
-fn is_native_view_navigation_repeat(key: KeyEvent) -> bool {
-    matches!(
-        key.code,
-        KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Up
-            | KeyCode::Down
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-            | KeyCode::Home
-            | KeyCode::End
-            | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'g' | 'G' | 'd' | 'u' | ' ')
-    )
-}
-
-fn is_text_edit_repeat(key: KeyEvent) -> bool {
-    match key.code {
-        KeyCode::Backspace | KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => true,
-        KeyCode::Char(c) => !c.is_control() && !keys::is_ctrl_chord(key.modifiers),
-        _ => false,
-    }
-}
-
-fn is_scroll_navigation_repeat(key: KeyEvent) -> bool {
-    matches!(
-        key.code,
-        KeyCode::Up
-            | KeyCode::Down
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-            | KeyCode::Home
-            | KeyCode::Char('j' | 'k' | 'b' | 'f' | 'g' | ' ')
-    )
-}
-
-fn is_copy_navigation_repeat(key: KeyEvent) -> bool {
-    let ctrl = keys::is_ctrl_chord(key.modifiers);
-    matches!(key.code, KeyCode::Char('d' | 'u') if ctrl)
-        || matches!(
-            key.code,
-            KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-                | KeyCode::Home
-                | KeyCode::End
-                | KeyCode::Char(
-                    'h' | 'j' | 'k' | 'l' | 'b' | 'f' | 'g' | 'G' | ' ' | '$' | 'w' | 'e' | 'B'
-                )
-        )
-}
-
-fn is_resize_navigation_repeat(key: KeyEvent) -> bool {
-    matches!(
-        key.code,
-        KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Up
-            | KeyCode::Down
-            | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'H' | 'J' | 'K' | 'L')
-    )
 }
 
 fn log_worker_failed(worker: crate::logging::Worker, error_code: &'static str) {
@@ -5925,6 +5813,25 @@ mod tests {
             "xx",
             "client teardown clears UI leases"
         );
+
+        let plain_n = AppEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
+        let control_n_repeat = AppEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        ));
+        assert!(app.handle_client_event(7, plain_n));
+        assert!(app.handle_client_event(7, control_n_repeat));
+        assert_eq!(
+            app.search.as_ref().unwrap().query,
+            "xxnn",
+            "Search repeats replay the original Press instead of changed modifiers"
+        );
+        app.release_client_key_presses(7);
         app.close_search();
 
         let root = std::path::PathBuf::from("repeat-file-tree");
@@ -5952,6 +5859,31 @@ mod tests {
         assert_eq!(app.file_tree.cursor, 1);
         assert!(app.handle_event(event(KeyCode::Down, KeyEventKind::Repeat)));
         assert_eq!(app.file_tree.cursor, 2);
+
+        app.config.direct_keybindings.insert(
+            crate::app::keys::Cmd::NextTab.id().into(),
+            "alt+down".into(),
+        );
+        app.direct_keymap = crate::app::keys::build_direct_keymap(&app.config.direct_keybindings);
+        app.new_tab();
+        let active_tab = app.ws().active_tab;
+        app.file_tree.cursor = 0;
+        assert!(app.handle_event(event(KeyCode::Down, KeyEventKind::Press)));
+        let modified_repeat = AppEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Down,
+            KeyModifiers::ALT,
+            KeyEventKind::Repeat,
+        ));
+        assert!(app.handle_event(modified_repeat));
+        assert_eq!(
+            app.file_tree.cursor, 2,
+            "repeat reuses original Press modifiers"
+        );
+        assert_eq!(
+            app.ws().active_tab,
+            active_tab,
+            "changed modifiers cannot turn a UI lease into a direct shortcut"
+        );
 
         let cursor = app.file_tree.cursor;
         assert!(app.handle_event(event(KeyCode::Char('a'), KeyEventKind::Press)));
@@ -6104,19 +6036,27 @@ mod tests {
             AppEvent::Key(KeyEvent::new_with_kind(
                 KeyCode::Up,
                 KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+        );
+        app.handle_client_event(
+            7,
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::NONE,
                 KeyEventKind::Release,
             )),
         );
 
         let mut bytes = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             let crate::terminal::pty::InputAction::Bytes(part) = input_rx.try_recv().unwrap()
             else {
-                panic!("press and release must use ordinary PTY byte batches");
+                panic!("press, repeat, and release must use ordinary PTY byte batches");
             };
             bytes.extend(part);
         }
-        assert_eq!(bytes, b"\x1b[1;5A\x1b[1;1:3A");
+        assert_eq!(bytes, b"\x1b[1;5A\x1b[1;1:2A\x1b[1;1:3A");
         assert!(app.forwarded_key_presses.is_empty());
     }
 

@@ -486,7 +486,7 @@ impl App {
     }
 
     /// Key handling while a Mission Control tab is focused.
-    pub fn handle_mission_key(&mut self, key: KeyEvent) {
+    pub fn handle_mission_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         // The inline answer input (docs/54) captures keys while open.
         if let Some(text) = self.mission_answer.as_mut() {
             match key.code {
@@ -499,11 +499,17 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     text.pop();
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
-                KeyCode::Char(c) => text.push(c),
+                KeyCode::Char(c) => {
+                    text.push(c);
+                    if !super::keys::is_ctrl_chord(key.modifiers) && !c.is_control() {
+                        return crate::app::UiRepeatDisposition::Reprocess;
+                    }
+                }
                 _ => {}
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         // The detail overlay (MC-5) captures keys while open: any of esc/o/q/⏎
         // closes it, and nothing else acts until it's dismissed.
@@ -514,7 +520,7 @@ impl App {
             ) {
                 self.mission_detail = None;
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         let n = self.mission_rows.len();
         match key.code {
@@ -529,9 +535,11 @@ impl App {
                 if n > 0 {
                     self.mission_cursor = (self.mission_cursor + 1).min(n - 1);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.mission_cursor = self.mission_cursor.saturating_sub(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Enter => self.mission_activate(self.mission_cursor),
             // Open the detail overlay for the selected row.
@@ -557,6 +565,7 @@ impl App {
             KeyCode::Char('q') => self.close_mission_tab(),
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 }
 

@@ -614,7 +614,7 @@ impl App {
     }
 
     /// Key handling while the folder picker is open.
-    pub fn handle_picker_key(&mut self, key: KeyEvent) {
+    pub fn handle_picker_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         // New-folder name input sub-mode.
         if let Some(p) = self.picker.as_mut() {
             if let Some(buf) = p.creating.as_mut() {
@@ -630,13 +630,15 @@ impl App {
                     _ if is_word_delete_key(key) => delete_last_path_word(buf),
                     KeyCode::Backspace => {
                         buf.pop();
+                        return crate::app::UiRepeatDisposition::Reprocess;
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         buf.push(c);
+                        return crate::app::UiRepeatDisposition::Reprocess;
                     }
                     _ => {}
                 }
-                return;
+                return crate::app::UiRepeatDisposition::Suppress;
             }
         }
         if self.picker.as_ref().is_some_and(|p| p.going_to.is_some()) {
@@ -678,6 +680,7 @@ impl App {
                         p.error = None;
                     }
                     self.invalidate_go_to_completion();
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(p) = self.picker.as_mut() {
@@ -687,17 +690,24 @@ impl App {
                         p.error = None;
                     }
                     self.invalidate_go_to_completion();
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
                 _ => {}
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         match key.code {
             KeyCode::Tab | KeyCode::BackTab if self.client_machine_capable => {
                 self.picker_open_remote_machine()
             }
-            KeyCode::Char('j') | KeyCode::Down => self.picker_move(1),
-            KeyCode::Char('k') | KeyCode::Up => self.picker_move(-1),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.picker_move(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.picker_move(-1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
             KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => self.picker_up(),
             KeyCode::Right | KeyCode::Char('l') => self.picker_descend(),
             KeyCode::Enter => self.picker_activate(),
@@ -711,11 +721,16 @@ impl App {
             }
             KeyCode::Char('g') => self.picker_start_go_to(),
             KeyCode::Char('.') => self.picker_toggle_hidden(),
-            KeyCode::Home | KeyCode::Char('~') => self.picker_home(),
+            KeyCode::Home => {
+                self.picker_home();
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Char('~') => self.picker_home(),
             KeyCode::Char('w') => self.picker_make_worktree(),
             KeyCode::Esc | KeyCode::Char('q') => self.close_folder_picker(),
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     fn picker_move(&mut self, delta: i32) {
@@ -2029,10 +2044,10 @@ mod tests {
 
             match scenario {
                 "typed" => {
-                    app.handle_picker_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
                 }
                 "deleted" => {
-                    app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
                 }
                 // Row 3 outside a repo is the first entry: `other`.
                 "navigated" => {
@@ -2044,7 +2059,7 @@ mod tests {
                     app.picker_click(row);
                 }
                 "cancelled" => {
-                    app.handle_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
                 }
                 "closed" => app.close_folder_picker(),
                 _ => unreachable!(),

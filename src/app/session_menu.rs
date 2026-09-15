@@ -208,7 +208,7 @@ impl App {
         }
     }
 
-    pub fn named_session_key(&mut self, key: KeyEvent) {
+    pub fn named_session_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let prompt_open = self
             .named_session_menu
             .as_ref()
@@ -226,30 +226,40 @@ impl App {
                 }
                 KeyCode::Enter => self.submit_named_session_prompt(),
                 KeyCode::Backspace => {
+                    let mut accepted = false;
                     if let Some(menu) = self.named_session_menu.as_mut() {
                         if !menu.preparing {
                             menu.prompt.as_mut().map(String::pop);
                             menu.error = None;
+                            accepted = true;
                         }
+                    }
+                    if accepted {
+                        return crate::app::UiRepeatDisposition::Reprocess;
                     }
                 }
                 KeyCode::Char(character)
                     if !super::keys::is_ctrl_chord(key.modifiers) && !character.is_control() =>
                 {
+                    let mut accepted = false;
                     if let Some(menu) = self.named_session_menu.as_mut() {
                         if !menu.preparing {
                             if let Some(prompt) = menu.prompt.as_mut() {
                                 if prompt.len() < 64 && is_session_name_character(character) {
                                     prompt.push(character);
+                                    accepted = true;
                                 }
                             }
                             menu.error = None;
                         }
                     }
+                    if accepted {
+                        return crate::app::UiRepeatDisposition::Reprocess;
+                    }
                 }
                 _ => {}
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
 
         let count = self
@@ -262,6 +272,7 @@ impl App {
                 if let Some(menu) = self.named_session_menu.as_mut() {
                     menu.cursor = menu.cursor.saturating_sub(1);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(menu) = self.named_session_menu.as_mut() {
@@ -269,16 +280,19 @@ impl App {
                         menu.cursor = (menu.cursor + 1).min(count - 1);
                     }
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Home => {
                 if let Some(menu) = self.named_session_menu.as_mut() {
                     menu.cursor = 0;
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::End => {
                 if let Some(menu) = self.named_session_menu.as_mut() {
                     menu.cursor = count.saturating_sub(1);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Enter => {
                 let cursor = self
@@ -309,6 +323,7 @@ impl App {
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     pub fn paste_named_session_prompt(&mut self, text: &str) -> bool {

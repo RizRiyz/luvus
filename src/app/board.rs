@@ -1504,26 +1504,34 @@ impl App {
     /// action keys drive the selected task without touching the CLI:
     /// `s` start a worker · `d` done (runs its gate) · `m` merge · `⏎` jump to its
     /// pane · `x` release · `g/G` ends · `q` close.
-    pub fn handle_orch_key(&mut self, key: KeyEvent) {
+    pub fn handle_orch_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
             self.orch_view = match self.orch_view {
                 crate::app::OrchView::Tasks => crate::app::OrchView::Automations,
                 crate::app::OrchView::Automations => crate::app::OrchView::Tasks,
             };
             self.orch_scroll = 0;
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         if self.orch_view == crate::app::OrchView::Automations {
             let last = self.automation.automations.len().saturating_sub(1);
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
-                    self.orch_automation_cursor = (self.orch_automation_cursor + 1).min(last)
+                    self.orch_automation_cursor = (self.orch_automation_cursor + 1).min(last);
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    self.orch_automation_cursor = self.orch_automation_cursor.saturating_sub(1)
+                    self.orch_automation_cursor = self.orch_automation_cursor.saturating_sub(1);
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
-                KeyCode::Char('g') | KeyCode::Home => self.orch_automation_cursor = 0,
-                KeyCode::Char('G') | KeyCode::End => self.orch_automation_cursor = last,
+                KeyCode::Char('g') | KeyCode::Home => {
+                    self.orch_automation_cursor = 0;
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
+                KeyCode::Char('G') | KeyCode::End => {
+                    self.orch_automation_cursor = last;
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
                 KeyCode::Char('a') | KeyCode::Char('n') => self.open_orch_form(),
                 KeyCode::Char('e') => self.orch_automation_toggle(),
                 KeyCode::Char('r') => self.orch_automation_run(),
@@ -1532,18 +1540,26 @@ impl App {
                 KeyCode::Char('q') => self.close_orch_board(),
                 _ => {}
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         let last = self.orch.tasks.len().saturating_sub(1);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                self.orch_cursor = (self.orch_cursor + 1).min(last)
+                self.orch_cursor = (self.orch_cursor + 1).min(last);
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.orch_cursor = self.orch_cursor.saturating_sub(1)
+                self.orch_cursor = self.orch_cursor.saturating_sub(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
-            KeyCode::Char('g') | KeyCode::Home => self.orch_cursor = 0,
-            KeyCode::Char('G') | KeyCode::End => self.orch_cursor = last,
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.orch_cursor = 0;
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.orch_cursor = last;
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
             KeyCode::Char('a') | KeyCode::Char('n') => self.open_orch_form(),
             KeyCode::Char('s') => self.orch_action_start(),
             KeyCode::Char('d') => self.orch_action_done(),
@@ -1556,6 +1572,7 @@ impl App {
             KeyCode::Char('q') => self.close_orch_board(),
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     // ── in-TUI new-task form (ORCH-7) ──────────────────────────────────────
@@ -1604,7 +1621,7 @@ impl App {
     }
 
     /// Key handling while the new-task form is open.
-    pub fn handle_orch_form_key(&mut self, key: KeyEvent) {
+    pub fn handle_orch_form_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         if key.code == KeyCode::Enter
             && key
                 .modifiers
@@ -1617,28 +1634,42 @@ impl App {
             if let Some(form) = self.orch_form.as_mut() {
                 form.push_char('\n');
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         // Esc/Enter act on the whole form, so handle them before borrowing it.
         match key.code {
             KeyCode::Esc => {
                 self.orch_form = None;
-                return;
+                return crate::app::UiRepeatDisposition::Suppress;
             }
             KeyCode::Enter => {
                 self.submit_orch_form();
-                return;
+                return crate::app::UiRepeatDisposition::Suppress;
             }
             _ => {}
         }
         let Some(form) = self.orch_form.as_mut() else {
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         };
+        let text_field = matches!(
+            form.field,
+            crate::app::OrchFormField::Title
+                | crate::app::OrchFormField::Paths
+                | crate::app::OrchFormField::Deps
+                | crate::app::OrchFormField::Gate
+                | crate::app::OrchFormField::Prompt
+                | crate::app::OrchFormField::Agent
+                | crate::app::OrchFormField::Schedule
+        );
+        let mut repeat_safe = false;
         match key.code {
             KeyCode::Tab | KeyCode::BackTab => form.toggle_kind(),
             KeyCode::Down => form.cycle_field(false),
             KeyCode::Up => form.cycle_field(true),
-            KeyCode::Backspace => form.backspace(),
+            KeyCode::Backspace => {
+                form.backspace();
+                repeat_safe = text_field;
+            }
             KeyCode::Left
                 if matches!(
                     form.field,
@@ -1665,9 +1696,17 @@ impl App {
             {
                 form.cycle_choice(false)
             }
-            KeyCode::Char(c) => form.push_char(c),
+            KeyCode::Char(c) => {
+                form.push_char(c);
+                repeat_safe =
+                    text_field && !super::keys::is_ctrl_chord(key.modifiers) && !c.is_control();
+            }
             _ => {}
         }
+        if repeat_safe {
+            return crate::app::UiRepeatDisposition::Reprocess;
+        }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Create the task from the form (title required; paths/deps whitespace-split).
@@ -2007,7 +2046,7 @@ impl App {
             }
             crate::app::OrchHit::FlowMode(mode) => self.orch_flow_mode = mode,
             crate::app::OrchHit::StartCommit => {
-                self.handle_orch_start_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                self.handle_orch_start_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             }
             crate::app::OrchHit::StartCancel => self.orch_start = None,
             crate::app::OrchHit::DetailClose => self.orch_detail = None,
@@ -2326,7 +2365,7 @@ impl App {
 
     /// Key handling while the start-worker picker is open: `j/k` choose the
     /// agent, `⏎` starts the worker with it, `esc` cancels.
-    pub fn handle_orch_start_key(&mut self, key: KeyEvent) {
+    pub fn handle_orch_start_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         if self
             .orch_start
             .as_ref()
@@ -2354,7 +2393,7 @@ impl App {
                 }
                 _ => {}
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         let n = agent_choices().len();
         match key.code {
@@ -2364,12 +2403,24 @@ impl App {
                     start.step = crate::app::OrchStartStep::Mode;
                 }
             }
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => {
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(s) = self.orch_start.as_mut() {
+                    s.cursor = (s.cursor + 1) % n;
+                }
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(s) = self.orch_start.as_mut() {
+                    s.cursor = (s.cursor + n - 1) % n;
+                }
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Tab => {
                 if let Some(s) = self.orch_start.as_mut() {
                     s.cursor = (s.cursor + 1) % n;
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => {
+            KeyCode::BackTab => {
                 if let Some(s) = self.orch_start.as_mut() {
                     s.cursor = (s.cursor + n - 1) % n;
                 }
@@ -2383,6 +2434,7 @@ impl App {
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Start a worker from the board and **stay on the board**: the worker
@@ -2432,16 +2484,21 @@ impl App {
     }
 
     /// Key handling while a task or automation detail overlay is open.
-    pub fn handle_orch_detail_key(&mut self, key: KeyEvent) {
+    pub fn handle_orch_detail_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => self.orch_detail = None,
             KeyCode::Enter => self.open_automation_detail_target(),
-            KeyCode::Char('j') | KeyCode::Down => self.orch_detail_scroll += 1,
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.orch_detail_scroll += 1;
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.orch_detail_scroll = self.orch_detail_scroll.saturating_sub(1)
+                self.orch_detail_scroll = self.orch_detail_scroll.saturating_sub(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     fn open_automation_detail_target(&mut self) {

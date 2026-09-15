@@ -283,13 +283,13 @@ impl App {
         }
     }
 
-    pub fn handle_settings_key(&mut self, key: KeyEvent) {
+    pub fn handle_settings_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let Some((tab, cursor, capturing, prefix_candidate)) = self
             .settings
             .as_ref()
             .map(|ui| (ui.tab, ui.cursor, ui.capturing, ui.prefix_candidate.clone()))
         else {
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         };
         // Keys tab: while capturing, the next key press *is* the new binding
         // (Esc cancels). This must intercept before the normal handling so keys
@@ -301,11 +301,11 @@ impl App {
                         ui.capturing = false;
                         ui.prefix_candidate = None;
                     }
-                    return;
+                    return crate::app::UiRepeatDisposition::Suppress;
                 }
                 let Some(spec) = Self::prefix_spec_from_key(&key) else {
                     self.show_toast(self.catalog.settings.keys_invalid_prefix);
-                    return;
+                    return crate::app::UiRepeatDisposition::Suppress;
                 };
                 if prefix_candidate.as_deref() == Some(spec.as_str()) {
                     self.set_prefix(&spec);
@@ -327,7 +327,7 @@ impl App {
                             .replace("{key}", &label),
                     );
                 }
-                return;
+                return crate::app::UiRepeatDisposition::Suppress;
             }
             if key.code != KeyCode::Esc {
                 if let (Some(cmd), Some(s)) = (Self::keys_cmd_at(cursor), keys::key_string(&key)) {
@@ -338,7 +338,7 @@ impl App {
                 ui.capturing = false;
                 ui.prefix_candidate = None;
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         match key.code {
             KeyCode::Esc => self.close_settings(),
@@ -346,8 +346,14 @@ impl App {
             KeyCode::BackTab => self.settings_set_tab(SettingsTab::from_index(
                 tab.index() + SettingsTab::ALL.len() - 1,
             )),
-            KeyCode::Up => self.settings_move(-1),
-            KeyCode::Down => self.settings_move(1),
+            KeyCode::Up => {
+                self.settings_move(-1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Down => {
+                self.settings_move(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
             KeyCode::Left => self.settings_adjust(cursor, -1),
             KeyCode::Right => self.settings_adjust(cursor, 1),
             KeyCode::Enter if tab == SettingsTab::Theme => self.settings_enter_theme(cursor),
@@ -367,6 +373,7 @@ impl App {
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Route a click while the modal is open (close / switch tab / hit a control).
@@ -764,7 +771,7 @@ impl App {
 
     /// Key handling for the inline module-setting prompt (docs/13 §3.6).
     /// `Enter` saves, `Esc` cancels — the same contract as the rename modals.
-    pub fn handle_module_setting_key(&mut self, key: KeyEvent) {
+    pub fn handle_module_setting_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         match key.code {
             KeyCode::Esc => self.module_setting_edit = None,
             KeyCode::Enter => {
@@ -779,6 +786,7 @@ impl App {
                 if let Some(e) = self.module_setting_edit.as_mut() {
                     e.buffer.pop();
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char(c) => {
                 if let Some(e) = self.module_setting_edit.as_mut() {
@@ -786,9 +794,13 @@ impl App {
                         e.buffer.push(c);
                     }
                 }
+                if !super::keys::is_ctrl_chord(key.modifiers) && !c.is_control() {
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Keep the settings cursor inside the current tab's row count (rows can
