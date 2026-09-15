@@ -1842,6 +1842,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shrinking_height_keeps_rows_when_sigwinch_unsets_deccolm() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 24, tx, budget_for_rows(40, 200));
+        feed_lines(&mut engine, 40);
+        engine.resize(40, 10);
+        engine.advance(b"\x1b[?3l");
+        assert!(
+            visible_has_line(&engine),
+            "DECCOLM reset must not blank the shrunken pane: {:?}",
+            engine.visible_rows()
+        );
+    }
+
     // docs/07: agent detection must read the **live** screen, never the
     // scrolled-back viewport. Scrollback preserves the spinner/interrupt frames
     // an agent printed earlier, so a user scrolling up would otherwise drag a

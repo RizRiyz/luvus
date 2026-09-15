@@ -1766,6 +1766,11 @@ where
             },
             ('l', [b'?']) => {
                 for param in params_iter.map(|param| param[0]) {
+                    if self.state.sync_state.omit_screen_clears
+                        && param == NamedPrivateMode::ColumnMode as u16
+                    {
+                        continue;
+                    }
                     handler.unset_private_mode(PrivateMode::new(param))
                 }
             },
@@ -2179,6 +2184,7 @@ mod tests {
         clears: usize,
         line_clears: usize,
         linefeeds: usize,
+        deccolm: usize,
     }
 
     impl Handler for MockHandler {
@@ -2222,6 +2228,18 @@ mod tests {
         fn linefeed(&mut self) {
             self.linefeeds += 1;
         }
+
+        fn set_private_mode(&mut self, mode: PrivateMode) {
+            if matches!(mode, PrivateMode::Named(NamedPrivateMode::ColumnMode)) {
+                self.deccolm += 1;
+            }
+        }
+
+        fn unset_private_mode(&mut self, mode: PrivateMode) {
+            if matches!(mode, PrivateMode::Named(NamedPrivateMode::ColumnMode)) {
+                self.deccolm += 1;
+            }
+        }
     }
 
     impl Default for MockHandler {
@@ -2236,6 +2254,7 @@ mod tests {
                 clears: 0,
                 line_clears: 0,
                 linefeeds: 0,
+                deccolm: 0,
             }
         }
     }
@@ -2533,6 +2552,19 @@ mod tests {
         assert_eq!(handler.linefeeds, 1);
         parser.advance(&mut handler, b"\x1bc");
         assert!(handler.attr.is_none());
+    }
+
+    #[test]
+    fn omit_screen_clears_skips_deccolm_set_and_unset() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+
+        parser.omit_screen_clears();
+        parser.advance(&mut handler, b"\x1b[?3h\x1b[?3l");
+        assert_eq!(handler.deccolm, 0);
+
+        parser.advance(&mut handler, b"X\x1b[?3h\x1b[?3l");
+        assert_eq!(handler.deccolm, 2);
     }
 
     #[test]
