@@ -433,16 +433,15 @@ impl AlacrittyEngine {
         if notice.line < 0 || notice.line >= screen_lines {
             return;
         }
-        let mut column = notice.column;
         let text = format!("[luvus] {}", notice.text);
-        for ch in text.chars() {
+        for (offset, ch) in text.chars().enumerate() {
+            let column = notice.column.saturating_add(offset);
             if column >= columns {
                 break;
             }
             let cell = &mut grid[Line(notice.line)][Column(column)];
             *cell = alacritty_terminal::term::cell::Cell::default();
             cell.c = ch;
-            column += 1;
         }
         self.placement_damage = true;
     }
