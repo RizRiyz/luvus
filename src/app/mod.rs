@@ -2316,9 +2316,10 @@ pub struct App {
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
     /// authoritative unless the user opts a chord into Luvus handling.
     pub direct_keymap: keys::DirectKeymap,
-    /// Presses forwarded to a pane with Kitty event reporting enabled. The
-    /// client id is part of the identity because multiple active displays may
-    /// hold the same key concurrently; local monolithic input uses `None`.
+    /// Presses forwarded to a pane. The client id is part of the identity
+    /// because multiple active displays may hold the same key concurrently;
+    /// local monolithic input uses `None`. Legacy panes use the route for
+    /// Repeat ownership even though their Release encodes no bytes.
     forwarded_key_presses: HashMap<(Option<u64>, KeyCode, bool), PaneId>,
     /// Transient source for one server-routed input event. Never persisted or
     /// exposed on the wire; reset immediately after dispatch.

@@ -3795,19 +3795,12 @@ impl App {
         }
         pane.send(&bytes);
 
-        if key.kind == KeyEventKind::Press && modes.protocol.reports_event_types() {
-            let release = KeyEvent::new_with_kind_and_state(
-                key.code,
-                key.modifiers,
-                KeyEventKind::Release,
-                key.state,
-            );
-            if encode_key_with_modes(&release, &newline, modes.application_cursor, modes.protocol)
-                .is_some()
-            {
-                self.forwarded_key_presses
-                    .insert(key_identity(self.input_client_id, key), id);
-            }
+        // Every forwarded Press owns its later Repeat/Release phases, even when
+        // the pane did not negotiate event reporting. Legacy panes still need
+        // held-key repeats; their unencodable Release only clears this route.
+        if key.kind == KeyEventKind::Press {
+            self.forwarded_key_presses
+                .insert(key_identity(self.input_client_id, key), id);
         }
         true
     }
@@ -5440,6 +5433,43 @@ mod tests {
         assert!(app.switcher, "navigation repeat keeps the switcher open");
         assert!(!app.handle_event(repeat(KeyCode::Enter)));
         assert!(app.switcher, "activation repeat cannot select and close");
+    }
+
+    #[test]
+    fn legacy_pane_repeats_stay_owned_and_release_only_clears_the_route() {
+        let _env = crate::persist::test_env("legacy-pane-repeat-ownership");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        let key = |kind| {
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                kind,
+            ))
+        };
+        app.handle_event(key(KeyEventKind::Press));
+        app.handle_event(key(KeyEventKind::Repeat));
+        app.handle_event(key(KeyEventKind::Release));
+
+        for expected in [b"a".as_slice(), b"a".as_slice()] {
+            let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.try_recv().unwrap()
+            else {
+                panic!("legacy press and repeat must use ordinary PTY bytes");
+            };
+            assert_eq!(bytes, expected);
+        }
+        assert!(
+            input_rx.try_recv().is_err(),
+            "legacy release emits no bytes"
+        );
+        assert!(app.forwarded_key_presses.is_empty());
     }
 
     #[test]
