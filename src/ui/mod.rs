@@ -1711,6 +1711,22 @@ mod retained_render_tests {
             rect_contains(&after, original_rect, "line"),
             "horizontal split must keep the streaming pane's rows"
         );
+
+        {
+            let mut engine = engine.lock().expect("engine lock");
+            engine.advance(b"\x1b[H\x1b[2J\x1b[2K\n\n\x1b[S\x1bc");
+        }
+        after.reset();
+        render_into(&mut RenderTarget::new(&mut after, area), &mut app);
+        let original_rect = app
+            .pane_content_rects
+            .iter()
+            .find_map(|(id, rect)| (*id == original).then_some(*rect))
+            .expect("original pane still has a content rect");
+        assert!(
+            rect_contains(&after, original_rect, "line"),
+            "SIGWINCH erase after the split must not blank the streaming pane"
+        );
     }
 }
 
