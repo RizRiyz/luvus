@@ -2316,6 +2316,13 @@ pub struct App {
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
     /// authoritative unless the user opts a chord into Luvus handling.
     pub direct_keymap: keys::DirectKeymap,
+    /// Presses forwarded to a pane with Kitty event reporting enabled. The
+    /// client id is part of the identity because multiple active displays may
+    /// hold the same key concurrently; local monolithic input uses `None`.
+    forwarded_key_presses: HashMap<(Option<u64>, KeyCode, bool), PaneId>,
+    /// Transient source for one server-routed input event. Never persisted or
+    /// exposed on the wire; reset immediately after dispatch.
+    input_client_id: Option<u64>,
     /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
     pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
@@ -3100,6 +3107,8 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            forwarded_key_presses: HashMap::new(),
+            input_client_id: None,
             prefix,
             agent_names: HashMap::new(),
             settings: None,
@@ -3779,6 +3788,8 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            forwarded_key_presses: HashMap::new(),
+            input_client_id: None,
             prefix,
             agent_names,
             settings: None,

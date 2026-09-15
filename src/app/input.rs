@@ -6,6 +6,7 @@ use crate::files::view_text_w;
 use crate::terminal::keyboard::KeyboardProtocol;
 #[cfg(test)]
 use crate::terminal::keyboard::KittyKeyboardFlags;
+use ratatui::crossterm::event::KeyEventState;
 use unicode_width::UnicodeWidthChar;
 
 /// Keep the command overlay useful when a just-spawned child has not appeared
@@ -416,6 +417,21 @@ impl App {
             .to_string(),
         );
         true
+    }
+
+    /// Apply one display-client input with a transient source identity. This
+    /// keeps Kitty press/release ownership independent across simultaneously
+    /// active clients without changing the public IPC event shape.
+    pub(crate) fn handle_client_event(&mut self, client_id: u64, ev: AppEvent) -> bool {
+        let previous = self.input_client_id.replace(client_id);
+        let changed = self.handle_event(ev);
+        self.input_client_id = previous;
+        changed
+    }
+
+    pub(crate) fn forget_client_key_presses(&mut self, client_id: u64) {
+        self.forwarded_key_presses
+            .retain(|(source, _, _), _| *source != Some(client_id));
     }
 
     /// Apply an event; returns whether it changed the rendered UI (→ the loop
@@ -2948,7 +2964,7 @@ impl App {
             return false;
         };
         let page = self.focused_page();
-        let newline = self.config.shift_enter_bytes();
+        let mut forward = false;
         let mut exit = false;
         if let Some(pane) = self.panes.get(&id) {
             match key.code {
@@ -2984,15 +3000,7 @@ impl App {
                     // forwarded, so typing to the agent resumes with no lost key.
                     pane.scroll_to_bottom();
                     exit = true;
-                    let modes = pane.key_encoding_modes();
-                    if let Some(bytes) = encode_key_with_modes(
-                        &key,
-                        newline,
-                        modes.application_cursor,
-                        modes.protocol,
-                    ) {
-                        pane.send(&bytes);
-                    }
+                    forward = true;
                 }
             }
         } else {
@@ -3000,6 +3008,9 @@ impl App {
         }
         if exit {
             self.scroll_pane = None;
+        }
+        if forward {
+            self.forward_key_to_pane(id, key);
         }
         true
     }
@@ -3755,13 +3766,91 @@ impl App {
         }
     }
 
+    fn forward_key_to_pane(&mut self, id: PaneId, key: KeyEvent) -> bool {
+        self.forward_key_to_pane_with_scroll(id, key, true)
+    }
+
+    fn forward_key_to_pane_preserving_scroll(&mut self, id: PaneId, key: KeyEvent) -> bool {
+        self.forward_key_to_pane_with_scroll(id, key, false)
+    }
+
+    fn forward_key_to_pane_with_scroll(
+        &mut self,
+        id: PaneId,
+        key: KeyEvent,
+        scroll_to_bottom: bool,
+    ) -> bool {
+        let newline = self.config.shift_enter_bytes().to_vec();
+        let Some(pane) = self.panes.get(&id) else {
+            return false;
+        };
+        let modes = pane.key_encoding_modes();
+        let Some(bytes) =
+            encode_key_with_modes(&key, &newline, modes.application_cursor, modes.protocol)
+        else {
+            return false;
+        };
+        if scroll_to_bottom {
+            pane.scroll_to_bottom();
+        }
+        pane.send(&bytes);
+
+        if key.kind == KeyEventKind::Press && modes.protocol.reports_event_types() {
+            let release = KeyEvent::new_with_kind_and_state(
+                key.code,
+                key.modifiers,
+                KeyEventKind::Release,
+                key.state,
+            );
+            if encode_key_with_modes(&release, &newline, modes.application_cursor, modes.protocol)
+                .is_some()
+            {
+                self.forwarded_key_presses
+                    .insert(key_identity(self.input_client_id, key), id);
+            }
+        }
+        true
+    }
+
+    fn forward_key_release(&mut self, key: KeyEvent) -> bool {
+        let Some(id) = self
+            .forwarded_key_presses
+            .remove(&key_identity(self.input_client_id, key))
+        else {
+            return false;
+        };
+        self.forward_key_to_pane_preserving_scroll(id, key);
+        false
+    }
+
     /// Returns whether this key changed the **luvus UI** (so the server should
     /// render). Plain input forwarded to a pane returns `false`: the pane's echo
     /// arrives as a separate `PtyData` event and renders then, so we don't burn a
     /// full render on the keystroke itself.
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if key.kind == KeyEventKind::Release {
-            return false; // ignored — nothing changed
+        let identity = key_identity(self.input_client_id, key);
+        match key.kind {
+            KeyEventKind::Release => return self.forward_key_release(key),
+            KeyEventKind::Repeat => {
+                if let Some(&pane) = self.forwarded_key_presses.get(&identity) {
+                    // A held pane key remains pane-owned, but a newly opened
+                    // modal, copy mode, or scroll mode takes precedence until
+                    // release completes the original key pairing.
+                    if self.focused_pane_accepts_image_paste()
+                        && self.forward_key_to_pane_preserving_scroll(pane, key)
+                    {
+                        self.mark_input_for(pane);
+                    }
+                }
+                // Repeats never enter the Luvus command path: an orphan repeat
+                // must not re-run a prefix/direct shortcut or modal action.
+                return false;
+            }
+            KeyEventKind::Press => {
+                // A missing host release must not leave ownership attached to a
+                // later physical press of the same semantic key.
+                self.forwarded_key_presses.remove(&identity);
+            }
         }
         if self.bar.overflow.take().is_some() {
             return true;
@@ -4058,17 +4147,8 @@ impl App {
                 // same cross-platform escape sequence as ordinary input.
                 if self.prefix.matches(&key) {
                     let prefix = self.prefix.key_event();
-                    let newline = self.config.shift_enter_bytes().to_vec();
-                    if let Some(pane) = self.focused() {
-                        let modes = pane.key_encoding_modes();
-                        if let Some(bytes) = encode_key_with_modes(
-                            &prefix,
-                            &newline,
-                            modes.application_cursor,
-                            modes.protocol,
-                        ) {
-                            pane.send(&bytes);
-                        }
+                    if self.focused().is_some() {
+                        self.forward_key_to_pane_preserving_scroll(self.layout().focus, prefix);
                     }
                     return true; // left prefix mode → the status bar updates
                 }
@@ -4156,23 +4236,8 @@ impl App {
                     self.scroll_focused_pane(key.code);
                     return true;
                 }
-                let newline = self.config.shift_enter_bytes();
-                // Cursor keys follow the pane's DECCKM state: a `less` that
-                // turned application cursor mode on only recognizes SS3 codes.
-                let modes = self
-                    .focused()
-                    .map(|pane| pane.key_encoding_modes())
-                    .unwrap_or_default();
-                if let Some(bytes) =
-                    encode_key_with_modes(&key, newline, modes.application_cursor, modes.protocol)
-                {
-                    if let Some(p) = self.focused() {
-                        // Typing snaps the view back to the live bottom, so you
-                        // always see what you type (like every terminal).
-                        p.scroll_to_bottom();
-                        p.send(&bytes);
-                    }
-                    self.mark_user_input(); // detection: this is typing, not work
+                if self.forward_key_to_pane(self.layout().focus, key) {
+                    self.mark_user_input();
                 }
                 false // plain input → the pane; its echo (PtyData) renders it
             }
@@ -4180,6 +4245,10 @@ impl App {
             Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
+}
+
+fn key_identity(source: Option<u64>, key: KeyEvent) -> (Option<u64>, KeyCode, bool) {
+    (source, key.code, key.state.contains(KeyEventState::KEYPAD))
 }
 
 fn log_worker_failed(worker: crate::logging::Worker, error_code: &'static str) {
@@ -4316,12 +4385,28 @@ fn encode_key_with_modes(
     // Kitty's report-all mode implies disambiguation, even when the child did
     // not also set the dedicated disambiguation bit.
     let disambiguate = protocol.disambiguates_escape_codes();
+    let report_events = protocol.reports_event_types();
     let report_all = protocol.reports_all_keys();
     // True exactly when `is_ctrl_chord` refused a Ctrl+Alt press as AltGr. Only
     // the `Char` arm may act on it: every other key keeps both modifiers, so
     // `Ctrl+Alt+Enter` is still a modified Enter and sends the newline sequence.
     let altgr = alt && !ctrl && key.modifiers.contains(KeyModifiers::CONTROL);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    if key.kind == KeyEventKind::Release
+        && (!report_events
+            || !kitty_key_supports_event_types(
+                key,
+                disambiguate,
+                report_all,
+                ctrl,
+                alt,
+                altgr,
+                cfg!(windows),
+            ))
+    {
+        return None;
+    }
 
     let bytes: Vec<u8> = match key.code {
         KeyCode::Char(c) => {
@@ -4336,7 +4421,12 @@ fn encode_key_with_modes(
                 } else {
                     c
                 };
-                return Some(csi_u_char(codepoint, key.modifiers));
+                return Some(csi_u_char(
+                    codepoint,
+                    key.modifiers,
+                    key.kind,
+                    report_events,
+                ));
             } else if ctrl {
                 if disambiguate
                     && modified_char_has_canonical_identity(c, key.modifiers, cfg!(windows))
@@ -4360,7 +4450,12 @@ fn encode_key_with_modes(
                         }
                         _ => c,
                     };
-                    return Some(csi_u_char(codepoint, key.modifiers));
+                    return Some(csi_u_char(
+                        codepoint,
+                        key.modifiers,
+                        key.kind,
+                        report_events,
+                    ));
                 }
                 let b = legacy_control_byte(c)?;
                 if alt {
@@ -4383,7 +4478,12 @@ fn encode_key_with_modes(
                 } else {
                     c
                 };
-                return Some(csi_u_char(codepoint, key.modifiers));
+                return Some(csi_u_char(
+                    codepoint,
+                    key.modifiers,
+                    key.kind,
+                    report_events,
+                ));
             } else {
                 let mut s = c.to_string().into_bytes();
                 if alt && !altgr {
@@ -4399,8 +4499,10 @@ fn encode_key_with_modes(
         // disambiguation. Some agents assign Shift+Enter and Alt+Enter distinct
         // actions, so collapsing both to the configured newline would lose an
         // identity the protocol explicitly preserves.
-        KeyCode::Enter if disambiguate && (shift || alt) => csi_u_code(13, key.modifiers),
-        KeyCode::Enter if report_all => csi_u_code(13, key.modifiers),
+        KeyCode::Enter if disambiguate && (shift || alt) => {
+            csi_u_code(13, key.modifiers, key.kind, report_events)
+        }
+        KeyCode::Enter if report_all => csi_u_code(13, key.modifiers, key.kind, report_events),
         // Legacy input cannot reliably distinguish modified Enter variants.
         // Keep the configurable compatibility sequence for agents that use
         // either Shift+Enter or Alt+Enter as their newline chord.
@@ -4408,7 +4510,7 @@ fn encode_key_with_modes(
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => {
             if report_all {
-                csi_u_code(9, key.modifiers)
+                csi_u_code(9, key.modifiers, key.kind, report_events)
             } else {
                 vec![b'\t']
             }
@@ -4417,14 +4519,14 @@ fn encode_key_with_modes(
             if report_all {
                 let mut modifiers = key.modifiers;
                 modifiers.insert(KeyModifiers::SHIFT);
-                csi_u_code(9, modifiers)
+                csi_u_code(9, modifiers, key.kind, report_events)
             } else {
                 vec![0x1b, b'[', b'Z']
             }
         }
         KeyCode::Backspace => {
             if report_all {
-                csi_u_code(127, key.modifiers)
+                csi_u_code(127, key.modifiers, key.kind, report_events)
             } else if alt {
                 vec![0x1b, 0x7f]
             } else {
@@ -4432,8 +4534,8 @@ fn encode_key_with_modes(
             }
         }
         KeyCode::Esc => {
-            if disambiguate {
-                csi_u_code(27, key.modifiers)
+            if disambiguate || report_events && key.kind != KeyEventKind::Press {
+                csi_u_code(27, key.modifiers, key.kind, report_events)
             } else if alt {
                 vec![0x1b, 0x1b]
             } else {
@@ -4444,17 +4546,29 @@ fn encode_key_with_modes(
         // from Windows console records, while terminals on Unix report them via
         // xterm/Kitty escape sequences. Dropping the modifiers here turned
         // Alt+arrow and Ctrl+arrow into plain arrows in nested prompt editors.
-        KeyCode::Left => cursor_key(b'D', key.modifiers, app_cursor),
-        KeyCode::Right => cursor_key(b'C', key.modifiers, app_cursor),
-        KeyCode::Up => cursor_key(b'A', key.modifiers, app_cursor),
-        KeyCode::Down => cursor_key(b'B', key.modifiers, app_cursor),
-        KeyCode::Home => cursor_key(b'H', key.modifiers, app_cursor),
-        KeyCode::End => cursor_key(b'F', key.modifiers, app_cursor),
-        KeyCode::Delete => csi_tilde_key(3, key.modifiers),
-        KeyCode::Insert => csi_tilde_key(2, key.modifiers),
-        KeyCode::PageUp => csi_tilde_key(5, key.modifiers),
-        KeyCode::PageDown => csi_tilde_key(6, key.modifiers),
+        KeyCode::Left => cursor_key(b'D', key.modifiers, app_cursor, key.kind, report_events),
+        KeyCode::Right => cursor_key(b'C', key.modifiers, app_cursor, key.kind, report_events),
+        KeyCode::Up => cursor_key(b'A', key.modifiers, app_cursor, key.kind, report_events),
+        KeyCode::Down => cursor_key(b'B', key.modifiers, app_cursor, key.kind, report_events),
+        KeyCode::Home => cursor_key(b'H', key.modifiers, app_cursor, key.kind, report_events),
+        KeyCode::End => cursor_key(b'F', key.modifiers, app_cursor, key.kind, report_events),
+        KeyCode::Delete => csi_tilde_key(3, key.modifiers, key.kind, report_events),
+        KeyCode::Insert => csi_tilde_key(2, key.modifiers, key.kind, report_events),
+        KeyCode::PageUp => csi_tilde_key(5, key.modifiers, key.kind, report_events),
+        KeyCode::PageDown => csi_tilde_key(6, key.modifiers, key.kind, report_events),
         KeyCode::F(n) => {
+            if let Some(event) = kitty_event_type(key.kind, report_events) {
+                if let Some(final_byte) = b"PQRS".get(usize::from(n.saturating_sub(1))) {
+                    return Some(
+                        format!(
+                            "\x1b[1;{}:{event}{}",
+                            key_modifier_param(key.modifiers),
+                            *final_byte as char
+                        )
+                        .into_bytes(),
+                    );
+                }
+            }
             let code = match n {
                 1..=4 => n + 10, // 11..14
                 5 => 15,
@@ -4475,7 +4589,7 @@ fn encode_key_with_modes(
                 20 => 34,
                 _ => return None,
             };
-            csi_tilde_key(code, key.modifiers)
+            csi_tilde_key(code, key.modifiers, key.kind, report_events)
         }
         _ => return None,
     };
@@ -4525,16 +4639,74 @@ fn csi(final_byte: u8) -> Vec<u8> {
     vec![0x1b, b'[', final_byte]
 }
 
-fn csi_u_char(character: char, modifiers: KeyModifiers) -> Vec<u8> {
-    csi_u_code(u32::from(character), modifiers)
+fn csi_u_char(
+    character: char,
+    modifiers: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+) -> Vec<u8> {
+    csi_u_code(u32::from(character), modifiers, kind, report_events)
 }
 
-fn csi_u_code(codepoint: u32, modifiers: KeyModifiers) -> Vec<u8> {
+fn csi_u_code(
+    codepoint: u32,
+    modifiers: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+) -> Vec<u8> {
     let modifier = key_modifier_param(modifiers);
-    if modifier == 1 {
-        format!("\x1b[{codepoint}u").into_bytes()
-    } else {
-        format!("\x1b[{codepoint};{modifier}u").into_bytes()
+    match kitty_event_type(kind, report_events) {
+        Some(event) => format!("\x1b[{codepoint};{modifier}:{event}u").into_bytes(),
+        None if modifier == 1 => format!("\x1b[{codepoint}u").into_bytes(),
+        None => format!("\x1b[{codepoint};{modifier}u").into_bytes(),
+    }
+}
+
+fn kitty_event_type(kind: KeyEventKind, report_events: bool) -> Option<u8> {
+    if !report_events || kind == KeyEventKind::Press {
+        return None;
+    }
+    Some(if kind == KeyEventKind::Repeat { 2 } else { 3 })
+}
+
+fn kitty_key_supports_event_types(
+    key: &KeyEvent,
+    disambiguate: bool,
+    report_all: bool,
+    ctrl: bool,
+    alt: bool,
+    altgr: bool,
+    windows: bool,
+) -> bool {
+    match key.code {
+        KeyCode::Char(character) => {
+            !altgr
+                && modified_char_has_canonical_identity(character, key.modifiers, windows)
+                && (report_all
+                    || ctrl && disambiguate
+                    || disambiguate
+                        && (alt
+                            || key.modifiers.intersects(
+                                KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
+                            )))
+        }
+        KeyCode::Enter => {
+            report_all || disambiguate && (key.modifiers.contains(KeyModifiers::SHIFT) || alt)
+        }
+        KeyCode::Tab | KeyCode::BackTab | KeyCode::Backspace => report_all,
+        KeyCode::Esc => true,
+        KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Delete
+        | KeyCode::Insert
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::F(1..=20) => true,
+        _ => false,
     }
 }
 
@@ -4542,8 +4714,21 @@ fn csi_u_code(codepoint: u32, modifiers: KeyModifiers) -> Vec<u8> {
 /// (DECCKM, `ESC[?1h`) an unmodified key is SS3 (`ESC O <letter>`) — the exact
 /// bytes a real terminal sends after the app turned the mode on. Modified keys
 /// keep the CSI `1;<mod>` form, since SS3 carries no modifier parameter.
-fn cursor_key(final_byte: u8, modifiers: KeyModifiers, app_cursor: bool) -> Vec<u8> {
-    if app_cursor && key_modifier_param(modifiers) == 1 {
+fn cursor_key(
+    final_byte: u8,
+    modifiers: KeyModifiers,
+    app_cursor: bool,
+    kind: KeyEventKind,
+    report_events: bool,
+) -> Vec<u8> {
+    if let Some(event) = kitty_event_type(kind, report_events) {
+        format!(
+            "\x1b[1;{}:{event}{}",
+            key_modifier_param(modifiers),
+            final_byte as char
+        )
+        .into_bytes()
+    } else if app_cursor && key_modifier_param(modifiers) == 1 {
         vec![0x1b, b'O', final_byte]
     } else {
         csi_key(final_byte, modifiers)
@@ -4572,9 +4757,16 @@ fn csi_key(final_byte: u8, modifiers: KeyModifiers) -> Vec<u8> {
     }
 }
 
-fn csi_tilde_key(code: u8, modifiers: KeyModifiers) -> Vec<u8> {
+fn csi_tilde_key(
+    code: u8,
+    modifiers: KeyModifiers,
+    kind: KeyEventKind,
+    report_events: bool,
+) -> Vec<u8> {
     let modifier = key_modifier_param(modifiers);
-    if modifier == 1 {
+    if let Some(event) = kitty_event_type(kind, report_events) {
+        format!("\x1b[{code};{modifier}:{event}~").into_bytes()
+    } else if modifier == 1 {
         format!("\x1b[{code}~").into_bytes()
     } else {
         format!("\x1b[{code};{modifier}~").into_bytes()
@@ -5068,6 +5260,355 @@ mod tests {
             ),
             Some(b"\r".to_vec())
         );
+    }
+
+    #[test]
+    fn app_routes_function_key_phases_only_after_a_forwarded_press() {
+        let _env = crate::persist::test_env("kitty-event-routing");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let target = app.panes.get_mut(&pane).unwrap();
+        target.replace_input_sender_for_test(input_tx);
+        target.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        for kind in [
+            KeyEventKind::Press,
+            KeyEventKind::Repeat,
+            KeyEventKind::Release,
+        ] {
+            app.handle_event(AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                kind,
+            )));
+        }
+        let mut bytes = Vec::new();
+        for _ in 0..3 {
+            let crate::terminal::pty::InputAction::Bytes(part) = input_rx.try_recv().unwrap()
+            else {
+                panic!("key phases must use ordinary PTY byte batches");
+            };
+            bytes.extend(part);
+        }
+        assert_eq!(bytes, b"\x1b[A\x1b[1;1:2A\x1b[1;1:3A");
+
+        app.handle_event(AppEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "orphan release must be dropped"
+        );
+    }
+
+    #[test]
+    fn double_prefix_forwards_without_snapping_scrollback_to_bottom() {
+        let _env = crate::persist::test_env("double-prefix-preserves-scrollback");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let target = app.panes.get_mut(&pane).unwrap();
+        target.replace_input_sender_for_test(input_tx);
+        let transcript = (0..80)
+            .map(|line| format!("line-{line}\r\n"))
+            .collect::<String>();
+        target
+            .engine
+            .lock()
+            .expect("engine")
+            .advance(transcript.as_bytes());
+        target.scroll(10);
+        let offset = target.scroll_state().0;
+        assert!(offset > 0, "fixture must start above the live bottom");
+
+        let prefix = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+        app.handle_event(AppEvent::Key(prefix));
+        app.handle_event(AppEvent::Key(prefix));
+
+        let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.try_recv().unwrap() else {
+            panic!("double prefix must use ordinary PTY bytes");
+        };
+        assert_eq!(bytes, b"\0");
+        assert_eq!(app.panes[&pane].scroll_state().0, offset);
+    }
+
+    #[test]
+    fn concurrent_clients_keep_independent_key_release_ownership() {
+        let _env = crate::persist::test_env("kitty-event-client-ownership");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let target = app.panes.get_mut(&pane).unwrap();
+        target.replace_input_sender_for_test(input_tx);
+        target.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        let key = |kind| KeyEvent::new_with_kind(KeyCode::Up, KeyModifiers::NONE, kind);
+        app.handle_client_event(1, AppEvent::Key(key(KeyEventKind::Press)));
+        app.handle_client_event(2, AppEvent::Key(key(KeyEventKind::Press)));
+        app.handle_client_event(1, AppEvent::Key(key(KeyEventKind::Release)));
+        app.handle_client_event(2, AppEvent::Key(key(KeyEventKind::Release)));
+
+        let mut bytes = Vec::new();
+        for _ in 0..4 {
+            let crate::terminal::pty::InputAction::Bytes(part) = input_rx.try_recv().unwrap()
+            else {
+                panic!("key phases must use ordinary PTY byte batches");
+            };
+            bytes.extend(part);
+        }
+        assert_eq!(bytes, b"\x1b[A\x1b[A\x1b[1;1:3A\x1b[1;1:3A");
+
+        app.handle_client_event(1, AppEvent::Key(key(KeyEventKind::Press)));
+        app.handle_client_event(2, AppEvent::Key(key(KeyEventKind::Press)));
+        app.forget_client_key_presses(1);
+        app.handle_client_event(1, AppEvent::Key(key(KeyEventKind::Release)));
+        app.handle_client_event(2, AppEvent::Key(key(KeyEventKind::Release)));
+        let mut tail = Vec::new();
+        for _ in 0..3 {
+            let crate::terminal::pty::InputAction::Bytes(part) = input_rx.try_recv().unwrap()
+            else {
+                panic!("remaining phases must use ordinary PTY byte batches");
+            };
+            tail.extend(part);
+        }
+        assert_eq!(tail, b"\x1b[A\x1b[A\x1b[1;1:3A");
+        assert!(input_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn app_swallows_repeats_while_an_overlay_owns_input_but_pairs_release() {
+        let _env = crate::persist::test_env("kitty-event-overlay-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let target = app.panes.get_mut(&pane).unwrap();
+        target.replace_input_sender_for_test(input_tx);
+        target.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        app.handle_event(AppEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        )));
+        let crate::terminal::pty::InputAction::Bytes(press) = input_rx.try_recv().unwrap() else {
+            panic!("press must use ordinary PTY bytes");
+        };
+        assert_eq!(press, b"\x1b[A");
+
+        app.help_open = true;
+        app.handle_event(AppEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        )));
+        assert!(input_rx.try_recv().is_err(), "overlay owns held repeats");
+        assert!(app.help_open, "repeat must not activate the overlay");
+
+        app.handle_event(AppEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        )));
+        let crate::terminal::pty::InputAction::Bytes(release) = input_rx.try_recv().unwrap() else {
+            panic!("paired release must use ordinary PTY bytes");
+        };
+        assert_eq!(release, b"\x1b[1;1:3A");
+        assert!(app.help_open, "release must not activate the overlay");
+
+        app.mode = Mode::Normal;
+        app.handle_event(AppEvent::Key(KeyEvent::new_with_kind(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+        assert_eq!(app.mode, Mode::Normal, "orphan repeat is never a shortcut");
+    }
+
+    #[test]
+    fn app_never_leaks_text_or_luvus_shortcut_releases_to_the_pane() {
+        let _env = crate::persist::test_env("kitty-event-shortcut-release");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let target = app.panes.get_mut(&pane).unwrap();
+        target.replace_input_sender_for_test(input_tx);
+        target.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        for kind in [KeyEventKind::Press, KeyEventKind::Release] {
+            app.handle_event(AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(' '),
+                KeyModifiers::CONTROL,
+                kind,
+            )));
+        }
+        assert!(input_rx.try_recv().is_err(), "prefix phases stay UI-owned");
+        app.mode = Mode::Normal;
+
+        for kind in [KeyEventKind::Press, KeyEventKind::Release] {
+            app.handle_event(AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                kind,
+            )));
+        }
+        let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.try_recv().unwrap() else {
+            panic!("text press must use ordinary PTY bytes");
+        };
+        assert_eq!(bytes, b"a");
+        assert!(
+            input_rx.try_recv().is_err(),
+            "text release is not reportable"
+        );
+    }
+
+    #[test]
+    fn report_event_types_preserves_press_and_encodes_function_key_phases() {
+        let protocol = KeyboardProtocol::Kitty {
+            flags: KittyKeyboardFlags::REPORT_EVENT_TYPES,
+        };
+        let encode = |code, modifiers, kind| {
+            encode_key_with_modes(
+                &KeyEvent::new_with_kind(code, modifiers, kind),
+                b"\x1b\r",
+                false,
+                protocol,
+            )
+        };
+
+        assert_eq!(
+            encode(KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Press),
+            Some(b"\x1b[A".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Repeat),
+            Some(b"\x1b[1;1:2A".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Up, KeyModifiers::ALT, KeyEventKind::Release),
+            Some(b"\x1b[1;3:3A".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press),
+            Some(b"\x1b".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Repeat),
+            Some(b"\x1b[27;1:2u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Release),
+            Some(b"\x1b[27;1:3u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::F(1), KeyModifiers::NONE, KeyEventKind::Repeat),
+            Some(b"\x1b[1;1:2P".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::F(4), KeyModifiers::ALT, KeyEventKind::Release),
+            Some(b"\x1b[1;3:3S".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::F(5), KeyModifiers::NONE, KeyEventKind::Repeat),
+            Some(b"\x1b[15;1:2~".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::F(5), KeyModifiers::CONTROL, KeyEventKind::Release),
+            Some(b"\x1b[15;5:3~".to_vec())
+        );
+    }
+
+    #[test]
+    fn report_event_types_alone_keeps_text_and_legacy_editing_keys_compatible() {
+        let protocol = KeyboardProtocol::Kitty {
+            flags: KittyKeyboardFlags::REPORT_EVENT_TYPES,
+        };
+        let encode = |code, kind| {
+            encode_key_with_modes(
+                &KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind),
+                b"\x1b\r",
+                false,
+                protocol,
+            )
+        };
+
+        assert_eq!(
+            encode(KeyCode::Char('a'), KeyEventKind::Repeat),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(encode(KeyCode::Char('a'), KeyEventKind::Release), None);
+        for (code, bytes) in [
+            (KeyCode::Enter, b"\r".as_slice()),
+            (KeyCode::Tab, b"\t".as_slice()),
+            (KeyCode::Backspace, b"\x7f".as_slice()),
+        ] {
+            assert_eq!(encode(code, KeyEventKind::Repeat), Some(bytes.to_vec()));
+            assert_eq!(encode(code, KeyEventKind::Release), None);
+        }
+    }
+
+    #[test]
+    fn report_all_and_event_types_encode_csi_u_phases() {
+        let protocol = KeyboardProtocol::Kitty {
+            flags: KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KittyKeyboardFlags::REPORT_EVENT_TYPES,
+        };
+        let encode = |code, modifiers, kind| {
+            encode_key_with_modes(
+                &KeyEvent::new_with_kind(code, modifiers, kind),
+                b"\x1b\r",
+                false,
+                protocol,
+            )
+        };
+
+        assert_eq!(
+            encode(KeyCode::BackTab, KeyModifiers::NONE, KeyEventKind::Press),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::BackTab, KeyModifiers::NONE, KeyEventKind::Repeat),
+            Some(b"\x1b[9;2:2u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::BackTab, KeyModifiers::NONE, KeyEventKind::Release),
+            Some(b"\x1b[9;2:3u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat),
+            Some(b"\x1b[97;1:2u".to_vec())
+        );
+        assert_eq!(
+            encode(KeyCode::Enter, KeyModifiers::SHIFT, KeyEventKind::Release),
+            Some(b"\x1b[13;2:3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn flags_without_crossterm_payloads_do_not_change_encoding() {
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        let baseline = encode_key_with_modes(&key, b"\x1b\r", false, KeyboardProtocol::Legacy);
+        for flag in [
+            KittyKeyboardFlags::REPORT_ALTERNATE_KEYS,
+            KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT,
+        ] {
+            assert_eq!(
+                encode_key_with_modes(
+                    &key,
+                    b"\x1b\r",
+                    false,
+                    KeyboardProtocol::Kitty { flags: flag },
+                ),
+                baseline
+            );
+        }
     }
 
     #[test]

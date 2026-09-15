@@ -574,6 +574,7 @@ pub fn run() -> Result<()> {
             app.detach_requested = false;
             if let Some(id) = foreground.take() {
                 if let Some(c) = clients.remove(&id) {
+                    app.forget_client_key_presses(id);
                     let _ = c.send_control(ServerMessage::Detach);
                 }
                 foreground = latest_client(&clients);
@@ -824,6 +825,7 @@ fn apply(
             );
             let was_foreground = *foreground == Some(id);
             clients.remove(&id);
+            app.forget_client_key_presses(id);
             app.client_files_visible = client_files_visible(clients);
             if was_foreground {
                 *foreground = latest_client(clients);
@@ -843,6 +845,7 @@ fn apply(
             client.prepare_ticket = Some(ticket);
             client.size = (cols.max(1), rows.max(1));
             client.interest = SurfaceInterest::Prepared;
+            app.forget_client_key_presses(id);
             client.force_full = true;
             client.retained_ready = false;
             client.retained_pane_content.clear();
@@ -860,6 +863,9 @@ fn apply(
                 return false;
             }
             client.interest = interest;
+            if interest != SurfaceInterest::Active {
+                app.forget_client_key_presses(id);
+            }
             client.prepare_ticket = None;
             client.force_full = true;
             client.behind = false;
@@ -1068,21 +1074,30 @@ fn apply(
             }
 
             // Input ownership follows actual interaction, not background resize
-            // noise. Before hit-testing a newly active client, commit its view
-            // geometry and PTY dimensions synchronously.
-            let promoted = *foreground != Some(id);
+            // noise or trailing enhanced-key phases. Repeat/release still reach
+            // App for pane pairing, but only a press may adopt another client's
+            // viewport and PTY geometry.
+            let key_phase_promotes = !matches!(
+                &input,
+                ClientInput::Key(key)
+                    if key.kind != ratatui::crossterm::event::KeyEventKind::Press
+            );
+            let promoted = key_phase_promotes && *foreground != Some(id);
             if promoted {
                 *foreground = Some(id);
                 apply_foreground_client(app, clients, *foreground);
             }
             let target_size = clients.get(&id).map(|client| client.size);
-            if promoted || target_size.is_some_and(|size| size != *interactive_size) {
+            let adopts_input_view = key_phase_promotes
+                && (promoted || target_size.is_some_and(|size| size != *interactive_size));
+            if adopts_input_view {
                 let no_damage = HashMap::new();
                 let disconnected = clients.get_mut(&id).is_some_and(|client| {
                     render_client(app, client, true, false, false, &no_damage).disconnected
                 });
                 if disconnected {
                     clients.remove(&id);
+                    app.forget_client_key_presses(id);
                     *foreground = latest_client(clients);
                     apply_foreground_client(app, clients, *foreground);
                     discard_client_input(input);
@@ -1105,7 +1120,7 @@ fn apply(
                 .expect("input client remains registered");
             let scoped = client.machine_capable && client.shell_dock_layout.owns_workspaces;
             if !scoped {
-                return app.handle_event(event);
+                return app.handle_client_event(id, event);
             }
             let previous = app.sidebars.clone();
             let previous_workspace_paths = app.config.layout.workspace_paths;
@@ -1114,7 +1129,7 @@ fn apply(
                 app.config.layout.workspace_paths = state.workspace_paths;
             }
             app.client_sidebar_input = true;
-            let changed = app.handle_event(event);
+            let changed = app.handle_client_event(id, event);
             app.client_sidebar_input = false;
             let layout = app.sidebars.to_config();
             let workspace_paths = app.config.layout.workspace_paths;
@@ -1348,6 +1363,7 @@ fn render_clients(
     }
     for id in scratch.dead.drain(..) {
         clients.remove(&id);
+        app.forget_client_key_presses(id);
     }
     if foreground.is_some_and(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
@@ -3673,6 +3689,25 @@ mod tests {
         assert_eq!(foreground, Some(1), "background resize cannot steal input");
         assert_eq!(clients[&2].size, (46, 16));
         assert_eq!(interactive_size, (120, 40));
+
+        assert!(!apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Key(KeyEvent::new_with_kind(
+                    KeyCode::Up,
+                    KeyModifiers::NONE,
+                    ratatui::crossterm::event::KeyEventKind::Release,
+                )),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert_eq!(foreground, Some(1), "release cannot steal input ownership");
+        assert_eq!(interactive_size, (120, 40));
+        assert!(!app.compact, "release cannot adopt a background viewport");
 
         assert!(!apply(
             AppEvent::ClientInput {

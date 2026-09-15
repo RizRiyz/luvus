@@ -17,8 +17,8 @@ use anyhow::{anyhow, Result};
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
-    MouseEventKind,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
@@ -1970,6 +1970,12 @@ fn handle_dock_input(
     terminal: &mut DefaultTerminal,
     events: &Sender<ShellEvent>,
 ) -> Result<bool> {
+    // Enhanced host input includes repeat and release phases. They still belong
+    // to the selected server, but client-owned docks must remain press-only so
+    // one physical key cannot navigate twice or confirm an action twice.
+    if !client_owned_input_phase(message) {
+        return Ok(false);
+    }
     if dock.sidebars.is_some() && !dock.overlay_open() {
         if let ClientMessage::Mouse(mouse) = message {
             if dock.width_drag.is_some()
@@ -5571,6 +5577,10 @@ fn write_row(
     }
 }
 
+fn client_owned_input_phase(message: &ClientMessage) -> bool {
+    !matches!(message, ClientMessage::Key(key) if key.kind != KeyEventKind::Press)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5727,6 +5737,21 @@ mod tests {
         assert!(machine_can_disconnect(&MachineState::Reconnecting {
             at: Instant::now()
         }));
+    }
+
+    #[test]
+    fn federated_docks_ignore_non_press_key_phases() {
+        assert!(client_owned_input_phase(&ClientMessage::Key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        )));
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            assert!(!client_owned_input_phase(&ClientMessage::Key(
+                KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, kind)
+            )));
+        }
+        assert!(client_owned_input_phase(&ClientMessage::Paste(
+            "text".into()
+        )));
     }
 
     #[test]
