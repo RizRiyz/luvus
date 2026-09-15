@@ -1970,10 +1970,10 @@ fn handle_dock_input(
     terminal: &mut DefaultTerminal,
     events: &Sender<ShellEvent>,
 ) -> Result<bool> {
-    // Enhanced host input includes repeat and release phases. They still belong
-    // to the selected server, but client-owned docks must remain press-only so
-    // one physical key cannot navigate twice or confirm an action twice.
-    if !client_owned_input_phase(message) {
+    // Enhanced host input includes repeat and release phases. Releases still
+    // belong to the selected server; client-owned docks consume repeats only
+    // for safe list movement, never confirmation or mutation actions.
+    if !client_owned_input_phase(message, dock) {
         return Ok(false);
     }
     if dock.sidebars.is_some() && !dock.overlay_open() {
@@ -5577,8 +5577,27 @@ fn write_row(
     }
 }
 
-fn client_owned_input_phase(message: &ClientMessage) -> bool {
-    !matches!(message, ClientMessage::Key(key) if key.kind != KeyEventKind::Press)
+fn client_owned_input_phase(message: &ClientMessage, dock: &DockState) -> bool {
+    match message {
+        ClientMessage::Key(key) if key.kind == KeyEventKind::Release => false,
+        ClientMessage::Key(key) if key.kind == KeyEventKind::Repeat => {
+            let navigation_open = dock.selector_open
+                || dock.navigation.is_some()
+                || matches!(dock.machine_popup, Some(MachinePopup::Menu { .. }));
+            navigation_open
+                && matches!(
+                    key.code,
+                    KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::PageUp
+                        | KeyCode::PageDown
+                        | KeyCode::Home
+                        | KeyCode::End
+                        | KeyCode::Char('j' | 'k' | 'g' | 'G')
+                )
+        }
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -5740,18 +5759,37 @@ mod tests {
     }
 
     #[test]
-    fn federated_docks_ignore_non_press_key_phases() {
-        assert!(client_owned_input_phase(&ClientMessage::Key(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
-        )));
-        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
-            assert!(!client_owned_input_phase(&ClientMessage::Key(
-                KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, kind)
-            )));
-        }
-        assert!(client_owned_input_phase(&ClientMessage::Paste(
-            "text".into()
-        )));
+    fn federated_docks_repeat_only_safe_navigation_keys() {
+        let mut dock = DockState::default();
+        let key = |code, kind| {
+            ClientMessage::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
+        };
+
+        assert!(client_owned_input_phase(
+            &key(KeyCode::Enter, KeyEventKind::Press),
+            &dock
+        ));
+        assert!(!client_owned_input_phase(
+            &key(KeyCode::Down, KeyEventKind::Repeat),
+            &dock
+        ));
+        dock.selector_open = true;
+        assert!(client_owned_input_phase(
+            &key(KeyCode::Down, KeyEventKind::Repeat),
+            &dock
+        ));
+        assert!(!client_owned_input_phase(
+            &key(KeyCode::Enter, KeyEventKind::Repeat),
+            &dock
+        ));
+        assert!(!client_owned_input_phase(
+            &key(KeyCode::Down, KeyEventKind::Release),
+            &dock
+        ));
+        assert!(client_owned_input_phase(
+            &ClientMessage::Paste("text".into()),
+            &dock
+        ));
     }
 
     #[test]

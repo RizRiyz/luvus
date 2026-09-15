@@ -3841,10 +3841,9 @@ impl App {
                     {
                         self.mark_input_for(pane);
                     }
+                    return false;
                 }
-                // Repeats never enter the Luvus command path: an orphan repeat
-                // must not re-run a prefix/direct shortcut or modal action.
-                return false;
+                return self.handle_safe_ui_navigation_repeat(key);
             }
             KeyEventKind::Press => {
                 // A missing host release must not leave ownership attached to a
@@ -4243,6 +4242,32 @@ impl App {
             }
             // Intercepted above (before this match); handled here too for safety.
             Mode::Resize => self.handle_resize_mode_key(key),
+        }
+    }
+
+    fn handle_safe_ui_navigation_repeat(&mut self, key: KeyEvent) -> bool {
+        if self.switcher && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            self.switcher_key(key);
+            return true;
+        }
+        let Some(focus) = self.sidebar_focus else {
+            return false;
+        };
+        if !matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Char('j' | 'k' | 'g' | 'G')
+        ) {
+            return false;
+        }
+        match focus {
+            SidebarListFocus::Workspaces => self.handle_workspaces_key(key),
+            SidebarListFocus::Agents => self.handle_agents_key(key),
         }
     }
 }
@@ -5379,6 +5404,42 @@ mod tests {
         }
         assert_eq!(tail, b"\x1b[A\x1b[A\x1b[1;1:3A");
         assert!(input_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn workspace_and_switcher_lists_repeat_navigation_but_not_activation() {
+        let _env = crate::persist::test_env("safe-ui-navigation-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.create_workspace_at(std::env::temp_dir().join("repeat-navigation-workspace"));
+        app.active_ws = 0;
+        app.sidebar_focus = Some(SidebarListFocus::Workspaces);
+        app.workspace_cursor = 0;
+
+        let repeat = |code| {
+            AppEvent::Key(KeyEvent::new_with_kind(
+                code,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            ))
+        };
+        assert!(app.handle_event(repeat(KeyCode::Down)));
+        assert_eq!(app.workspace_cursor, 1);
+        assert_eq!(
+            app.active_ws, 0,
+            "navigation repeat does not activate a row"
+        );
+        assert!(!app.handle_event(repeat(KeyCode::Enter)));
+        assert_eq!(app.active_ws, 0, "activation repeat is ignored");
+        assert_eq!(app.sidebar_focus, Some(SidebarListFocus::Workspaces));
+
+        app.open_switcher();
+        app.switcher_cursor = 0;
+        assert!(app.handle_event(repeat(KeyCode::Down)));
+        assert_eq!(app.switcher_cursor, 1);
+        assert!(app.switcher, "navigation repeat keeps the switcher open");
+        assert!(!app.handle_event(repeat(KeyCode::Enter)));
+        assert!(app.switcher, "activation repeat cannot select and close");
     }
 
     #[test]
