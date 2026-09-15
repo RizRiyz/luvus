@@ -1173,19 +1173,43 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("test executable directory");
         let executable = dir.join("luvus");
         let _ = std::fs::remove_file(&executable);
-        std::fs::copy("/bin/sleep", &executable).expect("luvus-named executable");
+        // Copying a macOS platform binary such as /bin/sleep out of /bin is
+        // SIGKILL'd by AMFI (exit 137), so the kill guard never sees a live
+        // process. Compile a tiny unsigned helper named `luvus` instead.
+        let mut compile = std::process::Command::new("cc")
+            .arg("-o")
+            .arg(&executable)
+            .args(["-x", "c", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn cc for luvus-named helper");
+        {
+            use std::io::Write;
+            let mut stdin = compile.stdin.take().expect("cc stdin");
+            stdin
+                .write_all(b"#include <unistd.h>\nint main(void) { for (;;) pause(); }\n")
+                .expect("write helper source");
+        }
+        let output = compile.wait_with_output().expect("wait cc");
+        assert!(
+            output.status.success(),
+            "cc failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let mut child = std::process::Command::new(&executable)
             .arg("30")
             .spawn()
             .expect("spawn luvus-named process");
 
         let mut stoppable = false;
-        for _ in 0..20 {
+        for _ in 0..50 {
             if super::is_stoppable_luvus_pid(child.id()) {
                 stoppable = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
         let _ = child.kill();
