@@ -2260,6 +2260,55 @@ struct ForwardedKeyPress {
     press: KeyEvent,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UiRepeatContext {
+    CommandInspect,
+    Help,
+    Changelog,
+    ModuleSetting,
+    NamedSessions,
+    NamedSessionPrompt,
+    SessionMenu,
+    Settings,
+    Search(u64),
+    PickerText,
+    PickerList,
+    WorktreePrompt,
+    WorktreeList,
+    TabRename,
+    TabMenu,
+    WorkspaceMenu,
+    PaneMenu,
+    AgentMenu,
+    FilePrompt,
+    FileMenu,
+    DiffMenu,
+    Switcher,
+    PaneRename,
+    WorkspaceRename,
+    OrchForm(OrchFormField),
+    OrchStart,
+    OrchDetail,
+    Scroll(PaneId),
+    Copy(PaneId),
+    Resize(PaneId),
+    Sidebar(SidebarListFocus),
+    Files(crate::diff::FilesMode),
+    GitFilter,
+    GitDetail,
+    Git,
+    Orch,
+    MissionAnswer,
+    Mission,
+    FileView(PaneId),
+    FileSearch(PaneId),
+    DiffView(PaneId),
+    DiffNoteSelect(PaneId),
+    DiffText(PaneId),
+    Preview(PaneId),
+    PreviewSearch(PaneId),
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// One random value for this server lifetime. Harness runtimes from an old
@@ -2327,6 +2376,9 @@ pub struct App {
     /// local monolithic input uses `None`. The original event lets client
     /// teardown release Kitty keys; Legacy releases encode no bytes.
     forwarded_key_presses: HashMap<(Option<u64>, KeyCode, bool), ForwardedKeyPress>,
+    /// UI-owned presses whose Repeat may be reprocessed while the same input
+    /// receiver remains active. Like pane ownership, leases are client-scoped.
+    ui_repeat_leases: HashMap<(Option<u64>, KeyCode, bool), UiRepeatContext>,
     /// Transient source for one server-routed input event. Never persisted or
     /// exposed on the wire; reset immediately after dispatch.
     input_client_id: Option<u64>,
@@ -3115,6 +3167,7 @@ impl App {
             keymap,
             direct_keymap,
             forwarded_key_presses: HashMap::new(),
+            ui_repeat_leases: HashMap::new(),
             input_client_id: None,
             prefix,
             agent_names: HashMap::new(),
@@ -3796,6 +3849,7 @@ impl App {
             keymap,
             direct_keymap,
             forwarded_key_presses: HashMap::new(),
+            ui_repeat_leases: HashMap::new(),
             input_client_id: None,
             prefix,
             agent_names,

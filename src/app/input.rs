@@ -430,6 +430,8 @@ impl App {
     }
 
     pub(crate) fn release_client_key_presses(&mut self, client_id: u64) {
+        self.ui_repeat_leases
+            .retain(|identity, _| identity.0 != Some(client_id));
         let releases = self
             .forwarded_key_presses
             .iter()
@@ -698,7 +700,13 @@ impl App {
         }
         match ev {
             AppEvent::Key(k) => self.handle_key(k),
-            AppEvent::Mouse(m) => self.handle_mouse(m),
+            AppEvent::Mouse(m) => {
+                // Pointer interaction may close and reopen the same kind of UI
+                // receiver without a key dispatch observing the transition.
+                // Do not let a held key lease attach to that new instance.
+                self.ui_repeat_leases.clear();
+                self.handle_mouse(m)
+            }
             AppEvent::Paste(s) => {
                 // Copy mode owns input just like scroll mode: never leak a
                 // pasted command into the pane while the user is selecting.
@@ -3847,7 +3855,10 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         let identity = key_identity(self.input_client_id, key);
         match key.kind {
-            KeyEventKind::Release => return self.forward_key_release(key),
+            KeyEventKind::Release => {
+                self.ui_repeat_leases.remove(&identity);
+                return self.forward_key_release(key);
+            }
             KeyEventKind::Repeat => {
                 if let Some(held) = self.forwarded_key_presses.get(&identity).copied() {
                     // A held pane key remains pane-owned, but a newly opened
@@ -3860,16 +3871,16 @@ impl App {
                     }
                     return false;
                 }
-                if self.scroll_pane.is_some() && is_scroll_navigation_repeat(key) {
-                    return self.handle_scroll_mode_key(key);
+                let Some(context) = self.ui_repeat_leases.get(&identity).copied() else {
+                    return false;
+                };
+                if self.ui_repeat_receiver() != Some(context)
+                    || !self.ui_repeat_allowed(context, key)
+                {
+                    self.ui_repeat_leases.remove(&identity);
+                    return false;
                 }
-                if self.copy_mode.is_some() && is_copy_navigation_repeat(key) {
-                    return self.handle_copy_mode_key(key);
-                }
-                if self.mode == Mode::Resize && is_resize_navigation_repeat(key) {
-                    return self.handle_resize_mode_key(key);
-                }
-                return self.handle_safe_ui_navigation_repeat(key);
+                return self.dispatch_key_press(key);
             }
             KeyEventKind::Press => {
                 // A missing host release must not leave the old pane believing
@@ -3877,8 +3888,294 @@ impl App {
                 if let Some(held) = self.forwarded_key_presses.remove(&identity) {
                     self.release_forwarded_key_press(held);
                 }
+                self.ui_repeat_leases.remove(&identity);
             }
         }
+
+        let initial_context = self.ui_repeat_receiver();
+        let changed = self.dispatch_key_press(key);
+        let resulting_context = self.ui_repeat_receiver();
+        if initial_context != resulting_context {
+            // A modal/view transition invalidates every held UI key. This also
+            // prevents a key leased to an old instance from attaching to a
+            // later instance of the same receiver kind after close + reopen.
+            self.ui_repeat_leases.clear();
+        } else if let Some(context) = initial_context {
+            if self.ui_repeat_allowed(context, key) {
+                if !self.forwarded_key_presses.contains_key(&identity) {
+                    self.ui_repeat_leases.insert(identity, context);
+                }
+            } else {
+                self.ui_repeat_leases.clear();
+            }
+        }
+        changed
+    }
+
+    fn ui_repeat_receiver(&self) -> Option<UiRepeatContext> {
+        if self.cmd_inspect.is_some() {
+            return Some(UiRepeatContext::CommandInspect);
+        }
+        if self.help_open {
+            return Some(UiRepeatContext::Help);
+        }
+        if self.changelog_open {
+            return Some(UiRepeatContext::Changelog);
+        }
+        if self.module_setting_edit.is_some() {
+            return Some(UiRepeatContext::ModuleSetting);
+        }
+        if self.session_delete_confirm.is_some() {
+            return None;
+        }
+        if let Some(menu) = self.named_session_menu.as_ref() {
+            if self.session_menu.is_some() {
+                return Some(UiRepeatContext::SessionMenu);
+            }
+            if menu.prompt.is_some() {
+                return Some(UiRepeatContext::NamedSessionPrompt);
+            }
+            return Some(UiRepeatContext::NamedSessions);
+        }
+        if self.settings.is_some() {
+            return self
+                .settings
+                .as_ref()
+                .is_some_and(|ui| !ui.capturing)
+                .then_some(UiRepeatContext::Settings);
+        }
+        if let Some(search) = self.search.as_ref() {
+            return Some(UiRepeatContext::Search(search.instance));
+        }
+        if let Some(picker) = self.picker.as_ref() {
+            return Some(if picker.creating.is_some() || picker.going_to.is_some() {
+                UiRepeatContext::PickerText
+            } else {
+                UiRepeatContext::PickerList
+            });
+        }
+        if self.worktree_prompt.is_some() {
+            return Some(UiRepeatContext::WorktreePrompt);
+        }
+        if self.worktree_open.is_some() {
+            return Some(UiRepeatContext::WorktreeList);
+        }
+        if self.tab_rename.is_some() {
+            return Some(UiRepeatContext::TabRename);
+        }
+        if self.tab_menu.is_some() {
+            return Some(UiRepeatContext::TabMenu);
+        }
+        if self.ws_menu.is_some() {
+            return Some(UiRepeatContext::WorkspaceMenu);
+        }
+        if self.pane_menu.is_some() {
+            return Some(UiRepeatContext::PaneMenu);
+        }
+        if self.agent_menu.is_some() {
+            return Some(UiRepeatContext::AgentMenu);
+        }
+        if self.file_prompt.is_some() {
+            return Some(UiRepeatContext::FilePrompt);
+        }
+        if self.file_delete.is_some() || self.worktree_delete.is_some() {
+            return None;
+        }
+        if self.file_menu.is_some() {
+            return Some(UiRepeatContext::FileMenu);
+        }
+        if self.diff_menu.is_some() {
+            return Some(UiRepeatContext::DiffMenu);
+        }
+        if self.orch_menu.is_some() || self.dock_menu.is_some() {
+            return None;
+        }
+        if self.switcher {
+            return Some(UiRepeatContext::Switcher);
+        }
+        if self.pane_rename.is_some() {
+            return Some(UiRepeatContext::PaneRename);
+        }
+        if self.ws_rename.is_some() {
+            return Some(UiRepeatContext::WorkspaceRename);
+        }
+        if let Some(form) = self.orch_form.as_ref() {
+            return Some(UiRepeatContext::OrchForm(form.field));
+        }
+        if self.orch_start.is_some() {
+            return Some(UiRepeatContext::OrchStart);
+        }
+        if self.orch_detail.is_some() {
+            return Some(UiRepeatContext::OrchDetail);
+        }
+        if let Some(pane) = self.scroll_pane {
+            return Some(UiRepeatContext::Scroll(pane));
+        }
+        if let Some(copy) = self.copy_mode {
+            return Some(UiRepeatContext::Copy(copy.pane));
+        }
+        if self.mode == Mode::Resize {
+            return Some(UiRepeatContext::Resize(self.layout().focus));
+        }
+        if let Some(focus) = self.sidebar_focus {
+            return Some(UiRepeatContext::Sidebar(focus));
+        }
+        if self.files_focused {
+            return Some(UiRepeatContext::Files(self.files_mode));
+        }
+        if self.mode == Mode::Normal && self.active_is_git() {
+            let git = self.active_git()?;
+            if git.filtering {
+                return Some(UiRepeatContext::GitFilter);
+            }
+            if git.open_pr.is_some() || git.open_commit.is_some() || git.open_issue.is_some() {
+                return Some(UiRepeatContext::GitDetail);
+            }
+            return Some(UiRepeatContext::Git);
+        }
+        if self.mode == Mode::Normal && self.active_is_orch() {
+            return Some(UiRepeatContext::Orch);
+        }
+        if self.mode == Mode::Normal && self.active_is_mission() {
+            if self.mission_answer.is_some() {
+                return Some(UiRepeatContext::MissionAnswer);
+            }
+            if self.mission_detail.is_some() {
+                return None;
+            }
+            return Some(UiRepeatContext::Mission);
+        }
+        if self.mode == Mode::Normal {
+            let focus = self.layout().focus;
+            return match self.views.get(&focus) {
+                Some(ViewKind::File(view)) => {
+                    if view.search.as_ref().is_some_and(|search| search.editing) {
+                        Some(UiRepeatContext::FileSearch(focus))
+                    } else {
+                        Some(UiRepeatContext::FileView(focus))
+                    }
+                }
+                Some(ViewKind::Diff(view)) => {
+                    if view.note_draft.is_some() {
+                        Some(UiRepeatContext::DiffText(focus))
+                    } else if view.note_selecting {
+                        Some(UiRepeatContext::DiffNoteSelect(focus))
+                    } else if view.search_editing {
+                        Some(UiRepeatContext::DiffText(focus))
+                    } else {
+                        Some(UiRepeatContext::DiffView(focus))
+                    }
+                }
+                Some(ViewKind::Preview(view)) => {
+                    if view.search.as_ref().is_some_and(|search| search.editing) {
+                        Some(UiRepeatContext::PreviewSearch(focus))
+                    } else {
+                        Some(UiRepeatContext::Preview(focus))
+                    }
+                }
+                None => None,
+            };
+        }
+        None
+    }
+
+    fn ui_repeat_allowed(&self, context: UiRepeatContext, key: KeyEvent) -> bool {
+        let below_shortcuts = matches!(
+            context,
+            UiRepeatContext::Sidebar(_)
+                | UiRepeatContext::Files(_)
+                | UiRepeatContext::GitFilter
+                | UiRepeatContext::GitDetail
+                | UiRepeatContext::Git
+                | UiRepeatContext::Orch
+                | UiRepeatContext::MissionAnswer
+                | UiRepeatContext::Mission
+                | UiRepeatContext::FileView(_)
+                | UiRepeatContext::FileSearch(_)
+                | UiRepeatContext::DiffView(_)
+                | UiRepeatContext::DiffNoteSelect(_)
+                | UiRepeatContext::DiffText(_)
+                | UiRepeatContext::Preview(_)
+                | UiRepeatContext::PreviewSearch(_)
+        );
+        if below_shortcuts
+            && self.mode == Mode::Normal
+            && (self.prefix.matches(&key)
+                || keys::direct_command(&self.direct_keymap, &key).is_some())
+        {
+            return false;
+        }
+        match context {
+            UiRepeatContext::ModuleSetting
+            | UiRepeatContext::NamedSessionPrompt
+            | UiRepeatContext::PickerText
+            | UiRepeatContext::WorktreePrompt
+            | UiRepeatContext::TabRename
+            | UiRepeatContext::FilePrompt
+            | UiRepeatContext::PaneRename
+            | UiRepeatContext::WorkspaceRename
+            | UiRepeatContext::GitFilter
+            | UiRepeatContext::MissionAnswer
+            | UiRepeatContext::FileSearch(_)
+            | UiRepeatContext::DiffText(_)
+            | UiRepeatContext::PreviewSearch(_) => is_text_edit_repeat(key),
+            UiRepeatContext::Search(_) => {
+                is_text_edit_repeat(key)
+                    || is_vertical_navigation_repeat(key)
+                    || matches!(key.code, KeyCode::Char('p' | 'n') if keys::is_ctrl_chord(key.modifiers))
+            }
+            UiRepeatContext::Switcher => {
+                is_text_edit_repeat(key) || is_vertical_navigation_repeat(key)
+            }
+            UiRepeatContext::OrchForm(field) => {
+                matches!(
+                    field,
+                    OrchFormField::Title
+                        | OrchFormField::Paths
+                        | OrchFormField::Deps
+                        | OrchFormField::Gate
+                        | OrchFormField::Prompt
+                        | OrchFormField::Agent
+                        | OrchFormField::Schedule
+                ) && is_text_edit_repeat(key)
+            }
+            UiRepeatContext::Scroll(_) => is_scroll_navigation_repeat(key),
+            UiRepeatContext::Copy(_) => is_copy_navigation_repeat(key),
+            UiRepeatContext::Resize(_) => is_resize_navigation_repeat(key),
+            UiRepeatContext::Files(_) => is_list_navigation_repeat(key),
+            UiRepeatContext::Git | UiRepeatContext::Orch | UiRepeatContext::Mission => {
+                is_dashboard_navigation_repeat(key)
+            }
+            UiRepeatContext::FileView(_) | UiRepeatContext::Preview(_) => {
+                is_native_view_navigation_repeat(key)
+                    || matches!(key.code, KeyCode::Char('n' | 'N'))
+            }
+            UiRepeatContext::DiffView(_) => {
+                is_native_view_navigation_repeat(key) && key.code != KeyCode::Char(' ')
+            }
+            UiRepeatContext::DiffNoteSelect(_) => is_native_view_navigation_repeat(key),
+            UiRepeatContext::CommandInspect
+            | UiRepeatContext::Help
+            | UiRepeatContext::Changelog
+            | UiRepeatContext::NamedSessions
+            | UiRepeatContext::SessionMenu
+            | UiRepeatContext::Settings
+            | UiRepeatContext::PickerList
+            | UiRepeatContext::WorktreeList
+            | UiRepeatContext::TabMenu
+            | UiRepeatContext::WorkspaceMenu
+            | UiRepeatContext::PaneMenu
+            | UiRepeatContext::AgentMenu
+            | UiRepeatContext::FileMenu
+            | UiRepeatContext::DiffMenu
+            | UiRepeatContext::OrchStart
+            | UiRepeatContext::OrchDetail
+            | UiRepeatContext::Sidebar(_)
+            | UiRepeatContext::GitDetail => is_vertical_navigation_repeat(key),
+        }
+    }
+
+    fn dispatch_key_press(&mut self, key: KeyEvent) -> bool {
         if self.bar.overflow.take().is_some() {
             return true;
         }
@@ -4272,36 +4569,76 @@ impl App {
             Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
-
-    fn handle_safe_ui_navigation_repeat(&mut self, key: KeyEvent) -> bool {
-        if self.switcher && matches!(key.code, KeyCode::Up | KeyCode::Down) {
-            self.switcher_key(key);
-            return true;
-        }
-        let Some(focus) = self.sidebar_focus else {
-            return false;
-        };
-        if !matches!(
-            key.code,
-            KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-                | KeyCode::Home
-                | KeyCode::End
-                | KeyCode::Char('j' | 'k' | 'g' | 'G')
-        ) {
-            return false;
-        }
-        match focus {
-            SidebarListFocus::Workspaces => self.handle_workspaces_key(key),
-            SidebarListFocus::Agents => self.handle_agents_key(key),
-        }
-    }
 }
 
 fn key_identity(source: Option<u64>, key: KeyEvent) -> (Option<u64>, KeyCode, bool) {
     (source, key.code, key.state.contains(KeyEventState::KEYPAD))
+}
+
+fn is_vertical_navigation_repeat(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Char('j' | 'k' | 'g' | 'G')
+    )
+}
+
+fn is_list_navigation_repeat(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'g' | 'G')
+    )
+}
+
+fn is_dashboard_navigation_repeat(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Char('j' | 'k' | 'g' | 'G')
+    )
+}
+
+fn is_native_view_navigation_repeat(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Char('h' | 'j' | 'k' | 'l' | 'g' | 'G' | 'd' | 'u' | ' ')
+    )
+}
+
+fn is_text_edit_repeat(key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Backspace | KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => true,
+        KeyCode::Char(c) => !c.is_control() && !keys::is_ctrl_chord(key.modifiers),
+        _ => false,
+    }
 }
 
 fn is_scroll_navigation_repeat(key: KeyEvent) -> bool {
@@ -5531,35 +5868,105 @@ mod tests {
         let _env = crate::persist::test_env("safe-ui-navigation-repeat");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
-        app.create_workspace_at(std::env::temp_dir().join("repeat-navigation-workspace"));
+        app.create_workspace_at(std::env::temp_dir().join("repeat-navigation-workspace-a"));
+        app.create_workspace_at(std::env::temp_dir().join("repeat-navigation-workspace-b"));
         app.active_ws = 0;
         app.sidebar_focus = Some(SidebarListFocus::Workspaces);
         app.workspace_cursor = 0;
 
-        let repeat = |code| {
-            AppEvent::Key(KeyEvent::new_with_kind(
-                code,
-                KeyModifiers::NONE,
-                KeyEventKind::Repeat,
-            ))
-        };
-        assert!(app.handle_event(repeat(KeyCode::Down)));
+        let event =
+            |code, kind| AppEvent::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind));
+        assert!(app.handle_event(event(KeyCode::Down, KeyEventKind::Press)));
         assert_eq!(app.workspace_cursor, 1);
+        assert!(app.handle_event(event(KeyCode::Down, KeyEventKind::Repeat)));
+        assert_eq!(app.workspace_cursor, 2);
         assert_eq!(
             app.active_ws, 0,
             "navigation repeat does not activate a row"
         );
-        assert!(!app.handle_event(repeat(KeyCode::Enter)));
+        assert!(!app.handle_event(event(KeyCode::Enter, KeyEventKind::Repeat)));
         assert_eq!(app.active_ws, 0, "activation repeat is ignored");
         assert_eq!(app.sidebar_focus, Some(SidebarListFocus::Workspaces));
 
         app.open_switcher();
         app.switcher_cursor = 0;
-        assert!(app.handle_event(repeat(KeyCode::Down)));
+        assert!(app.handle_event(event(KeyCode::Down, KeyEventKind::Press)));
         assert_eq!(app.switcher_cursor, 1);
+        assert!(app.handle_event(event(KeyCode::Down, KeyEventKind::Repeat)));
+        assert_eq!(app.switcher_cursor, 2);
         assert!(app.switcher, "navigation repeat keeps the switcher open");
-        assert!(!app.handle_event(repeat(KeyCode::Enter)));
+        assert!(!app.handle_event(event(KeyCode::Enter, KeyEventKind::Repeat)));
         assert!(app.switcher, "activation repeat cannot select and close");
+    }
+
+    #[test]
+    fn ui_repeat_leases_restore_text_and_file_navigation_without_repeating_actions() {
+        let _env = crate::persist::test_env("ui-repeat-leases");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let event =
+            |code, kind| AppEvent::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind));
+
+        app.open_search();
+        assert!(app.handle_client_event(7, event(KeyCode::Char('x'), KeyEventKind::Press)));
+        assert_eq!(app.search.as_ref().unwrap().query, "x");
+        assert!(app.handle_client_event(7, event(KeyCode::Char('x'), KeyEventKind::Repeat)));
+        assert_eq!(app.search.as_ref().unwrap().query, "xx");
+        assert!(!app.handle_client_event(8, event(KeyCode::Char('x'), KeyEventKind::Repeat)));
+        assert_eq!(
+            app.search.as_ref().unwrap().query,
+            "xx",
+            "another client cannot borrow the held text lease"
+        );
+        app.release_client_key_presses(7);
+        assert!(!app.handle_client_event(7, event(KeyCode::Char('x'), KeyEventKind::Repeat)));
+        assert_eq!(
+            app.search.as_ref().unwrap().query,
+            "xx",
+            "client teardown clears UI leases"
+        );
+        app.close_search();
+
+        let root = std::path::PathBuf::from("repeat-file-tree");
+        app.file_tree.set_root(root.clone());
+        app.file_tree.apply_dir(
+            root,
+            vec![
+                crate::files::Entry {
+                    name: "one".into(),
+                    is_dir: false,
+                },
+                crate::files::Entry {
+                    name: "two".into(),
+                    is_dir: false,
+                },
+                crate::files::Entry {
+                    name: "three".into(),
+                    is_dir: false,
+                },
+            ],
+        );
+        app.files_focused = true;
+        app.files_mode = crate::diff::FilesMode::Files;
+        assert!(app.handle_event(event(KeyCode::Down, KeyEventKind::Press)));
+        assert_eq!(app.file_tree.cursor, 1);
+        assert!(app.handle_event(event(KeyCode::Down, KeyEventKind::Repeat)));
+        assert_eq!(app.file_tree.cursor, 2);
+
+        let cursor = app.file_tree.cursor;
+        assert!(app.handle_event(event(KeyCode::Char('a'), KeyEventKind::Press)));
+        assert!(app.file_menu.is_some());
+        app.file_menu = None;
+        assert!(!app.handle_event(event(KeyCode::Down, KeyEventKind::Repeat)));
+        assert_eq!(
+            app.file_tree.cursor, cursor,
+            "an action transition invalidates an older navigation lease"
+        );
+        assert!(!app.handle_event(event(KeyCode::Char('a'), KeyEventKind::Repeat)));
+        assert!(
+            app.file_menu.is_none(),
+            "action keys never acquire a repeat lease"
+        );
     }
 
     #[test]

@@ -2023,7 +2023,9 @@ mod tests {
     use std::path::Path;
 
     use ratatui::backend::TestBackend;
-    use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::crossterm::event::{
+        KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::Terminal;
 
     use super::*;
@@ -2802,12 +2804,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn clicking_saved_note_card_opens_that_note_in_the_inline_editor() {
-        let _env = crate::persist::test_env("diff-note-card-click");
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut app = App::new(120, 32, tx).unwrap();
-        let key = install_snapshot(&mut app);
+    fn seed_saved_note(app: &mut App) -> (PaneId, usize) {
+        let key = install_snapshot(app);
         app.open_diff_view(key.clone(), OpenTarget::Tab);
         let id = app.layout().focus;
         let changed = DiffLine {
@@ -2844,6 +2842,7 @@ mod tests {
         view.preference = crate::diff::DiffLayoutPreference::Stack;
         view.stack_rows = stack_rows;
         view.split_rows = split_rows;
+        view.selected = selected;
         view.load = DiffLoad::Ready(Arc::new(file_diff));
         app.diff.notes.push(crate::diff::ReviewNote {
             id: "clicked-note".into(),
@@ -2865,6 +2864,38 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         });
+        (id, selected)
+    }
+
+    #[test]
+    fn diff_view_space_repeat_does_not_toggle_note_selection() {
+        let _env = crate::persist::test_env("diff-note-space-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let (_id, _selected) = seed_saved_note(&mut app);
+        let event = |kind| {
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                kind,
+            ))
+        };
+
+        assert!(app.handle_event(event(KeyEventKind::Press)));
+        assert!(app.diff.selected_notes.contains("clicked-note"));
+        assert!(!app.handle_event(event(KeyEventKind::Repeat)));
+        assert!(
+            app.diff.selected_notes.contains("clicked-note"),
+            "held Space cannot toggle review-note send selection"
+        );
+    }
+
+    #[test]
+    fn clicking_saved_note_card_opens_that_note_in_the_inline_editor() {
+        let _env = crate::persist::test_env("diff-note-card-click");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let (id, selected) = seed_saved_note(&mut app);
 
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
         terminal
