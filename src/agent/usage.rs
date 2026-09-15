@@ -5,9 +5,10 @@
 //! invokes a model, or treats an all-zero/incomplete ledger as free usage.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
 use serde_json::Value;
@@ -30,28 +31,128 @@ const CODEX_USAGE_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const CODEX_MODEL_HEAD_BYTES: u64 = 256 * 1024;
 
 /// Open a native session file without following a final-component symlink.
-/// Callers must use this handle for both metadata and content so a path cannot
-/// be replaced between validation and the read.
+/// Intermediate ancestors are still followed. Prefer [`open_session_file_in`]
+/// when the trusted store directory is known.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::agent) fn open_session_file(path: &Path) -> Option<File> {
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+    open_session_file_in(path.parent()?, path)
+}
+
+/// Open `path` by walking from trusted `store` with no-follow/open-at
+/// semantics. `store` itself may be reached through a symlink; every
+/// component below it must be a real directory, and the leaf a regular file.
+pub(in crate::agent) fn open_session_file_in(store: &Path, path: &Path) -> Option<File> {
+    let names = relative_leaf_names(store, path)?;
+    open_nofollow_from(store, &names)
+}
+
+fn relative_leaf_names<'a>(store: &Path, path: &'a Path) -> Option<Vec<&'a OsStr>> {
+    let mut names = Vec::new();
+    for component in path.strip_prefix(store).ok()?.components() {
+        match component {
+            Component::Normal(name) => names.push(name),
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => return None,
+        }
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    (!names.is_empty()).then_some(names)
+}
+
+#[cfg(unix)]
+fn open_nofollow_from(store: &Path, names: &[&OsStr]) -> Option<File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let mut current = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(store)
+        .ok()?;
+    for (index, name) in names.iter().enumerate() {
+        let last = index + 1 == names.len();
+        let c_name = CString::new(name.as_bytes()).ok()?;
+        let mut flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        if !last {
+            flags |= libc::O_DIRECTORY;
+        }
+        // SAFETY: `c_name` is a NUL-terminated path component with no interior NUL.
+        let fd = unsafe { libc::openat(current.as_raw_fd(), c_name.as_ptr(), flags) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: `openat` returned a new fd that this function now owns.
+        let next = unsafe { File::from_raw_fd(fd) };
+        if last {
+            return regular_file(next);
+        }
+        current = next;
     }
-    let file = options.open(path).ok()?;
+    None
+}
+
+#[cfg(windows)]
+fn open_nofollow_from(store: &Path, names: &[&OsStr]) -> Option<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    let mut current = store.to_path_buf();
+    for (index, name) in names.iter().enumerate() {
+        current.push(name);
+        let last = index + 1 == names.len();
+        let mut options = OpenOptions::new();
+        options.read(true);
+        let mut flags = FILE_FLAG_OPEN_REPARSE_POINT;
+        if !last {
+            flags |= FILE_FLAG_BACKUP_SEMANTICS;
+        }
+        options.custom_flags(flags);
+        let file = options.open(&current).ok()?;
+        let metadata = file.metadata().ok()?;
+        if metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+            return None;
+        }
+        if last {
+            return metadata.is_file().then_some(file);
+        }
+        if !metadata.is_dir() {
+            return None;
+        }
+    }
+    None
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_nofollow_from(store: &Path, names: &[&OsStr]) -> Option<File> {
+    let mut current = store.to_path_buf();
+    for (index, name) in names.iter().enumerate() {
+        current.push(name);
+        let metadata = std::fs::symlink_metadata(&current).ok()?;
+        if metadata.file_type().is_symlink() {
+            return None;
+        }
+        let last = index + 1 == names.len();
+        if last {
+            let file = File::open(&current).ok()?;
+            return regular_file(file);
+        }
+        if !metadata.is_dir() {
+            return None;
+        }
+    }
+    None
+}
+
+fn regular_file(file: File) -> Option<File> {
     let metadata = file.metadata().ok()?;
     if metadata.file_type().is_symlink() || !metadata.is_file() || is_reparse_point(&metadata) {
-        return None;
+        None
+    } else {
+        Some(file)
     }
-    Some(file)
 }
 
 #[cfg(windows)]
@@ -68,8 +169,12 @@ const fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
 
 /// Read JSONL with a strict per-record allocation ceiling. Invalid and
 /// oversized records are skipped; an unreadable file fails the whole read.
-fn for_each_json_line(path: &Path, mut visit: impl FnMut(&Value)) -> Option<()> {
-    let file = open_session_file(path)?;
+#[cfg(test)]
+fn for_each_json_line(path: &Path, visit: impl FnMut(&Value)) -> Option<()> {
+    for_each_json_file(open_session_file(path)?, visit)
+}
+
+fn for_each_json_file(file: File, mut visit: impl FnMut(&Value)) -> Option<()> {
     let mut reader = BufReader::with_capacity(64 * 1024, file);
     let mut line = Vec::with_capacity(4096);
     let mut oversized = false;
@@ -191,6 +296,7 @@ fn finish(mut usage: AgentUsage) -> Option<AgentUsage> {
     Some(usage)
 }
 
+#[cfg(test)]
 fn modified(path: &Path) -> Option<SystemTime> {
     open_session_file(path)?.metadata().ok()?.modified().ok()
 }
@@ -199,60 +305,85 @@ fn modified(path: &Path) -> Option<SystemTime> {
 /// name is handled deliberately: adapters with a stable structured store read
 /// it, while agents without one return `None` rather than guessed counters.
 pub fn session_usage(agent: &str, cwd: &Path, session_id: &str) -> Option<AgentUsage> {
+    let (base, path) = session_file(agent, cwd, session_id)?;
+    let file = open_session_file_in(&base, &path)?;
     match canonical(agent) {
-        "claude" => claude_usage(&claude_path(&claude::sessions::base(), cwd, session_id)?),
-        "codex" => codex_usage(&codex::sessions::session_path(
-            &codex::sessions::base(),
-            session_id,
-        )?),
-        "copilot" => copilot_usage(&copilot_path(&copilot::sessions::base(), session_id)?),
-        "kimi" => kimi_usage(&kimi::sessions::session_dir(
-            &kimi::sessions::base(),
-            session_id,
-        )?),
-        "grok" => grok_usage(&grok::sessions::session_dir(
-            &grok::sessions::base(),
-            cwd,
-            session_id,
-        )?),
-        "pi" => pi_usage(&pi_store::session_path(&pi::sessions::base(), session_id)?),
-        "omp" => pi_usage(&pi_store::session_path(&omp::sessions_base(), session_id)?),
-        "gemini" => gemini_usage(&chat_store::session_path(
-            &gemini::sessions::base(),
-            session_id,
-        )?),
-        "qwen" => gemini_usage(&chat_store::session_path(
-            &qwen::sessions::base(),
-            session_id,
-        )?),
-        "fx" => fx_usage(&fx_dir(&fx::sessions::base(), session_id)?),
-        // These agents currently expose identity/state but no stable,
-        // structured, per-session usage store Luvus can read safely.
-        "aider" | "antigravity" | "letta" | "kilo" | "kiro" | "cursor" | "amp" | "droid"
-        | "opencode" | "devin" => None,
-        _ => None, // manifest-defined agents degrade honestly too.
+        "claude" => claude_from_file(file),
+        "codex" => codex_from_file(file),
+        "copilot" => copilot_from_file(file),
+        "kimi" => kimi_from_file(file),
+        "grok" => grok_from_file(file),
+        "pi" | "omp" => pi_from_file(file),
+        "gemini" | "qwen" => gemini_from_file(file),
+        "fx" => fx_from_file(file),
+        _ => None,
     }
 }
 
 /// Last modification time of the authoritative usage source. Mission Control
 /// uses this as a cheap idle-session cache key before invoking the parser.
 pub fn session_mtime(agent: &str, cwd: &Path, session_id: &str) -> Option<SystemTime> {
-    let path = match canonical(agent) {
-        "claude" => claude_path(&claude::sessions::base(), cwd, session_id)?,
-        "codex" => codex::sessions::session_path(&codex::sessions::base(), session_id)?,
-        "copilot" => copilot_path(&copilot::sessions::base(), session_id)?,
-        "kimi" => kimi::sessions::session_dir(&kimi::sessions::base(), session_id)?
-            .join("agents/main/wire.jsonl"),
-        "grok" => grok::sessions::session_dir(&grok::sessions::base(), cwd, session_id)?
-            .join("updates.jsonl"),
-        "pi" => pi_store::session_path(&pi::sessions::base(), session_id)?,
-        "omp" => pi_store::session_path(&omp::sessions_base(), session_id)?,
-        "gemini" => chat_store::session_path(&gemini::sessions::base(), session_id)?,
-        "qwen" => chat_store::session_path(&qwen::sessions::base(), session_id)?,
-        "fx" => fx_dir(&fx::sessions::base(), session_id)?.join("usage-v2.json"),
+    let (base, path) = session_file(agent, cwd, session_id)?;
+    open_session_file_in(&base, &path)?
+        .metadata()
+        .ok()?
+        .modified()
+        .ok()
+}
+
+fn session_file(agent: &str, cwd: &Path, session_id: &str) -> Option<(PathBuf, PathBuf)> {
+    Some(match canonical(agent) {
+        "claude" => {
+            let base = claude::sessions::base();
+            (base.clone(), claude_path(&base, cwd, session_id)?)
+        }
+        "codex" => {
+            let base = codex::sessions::base();
+            (
+                base.clone(),
+                codex::sessions::session_path(&base, session_id)?,
+            )
+        }
+        "copilot" => {
+            let base = copilot::sessions::base();
+            (base.clone(), copilot_path(&base, session_id)?)
+        }
+        "kimi" => {
+            let base = kimi::sessions::base();
+            let path =
+                kimi::sessions::session_dir(&base, session_id)?.join("agents/main/wire.jsonl");
+            (base, path)
+        }
+        "grok" => {
+            let base = grok::sessions::base();
+            let path = grok::sessions::session_dir(&base, cwd, session_id)?.join("updates.jsonl");
+            (base, path)
+        }
+        "pi" => {
+            let base = pi::sessions::base();
+            (base.clone(), pi_store::session_path(&base, session_id)?)
+        }
+        "omp" => {
+            let base = omp::sessions_base();
+            (base.clone(), pi_store::session_path(&base, session_id)?)
+        }
+        "gemini" => {
+            let base = gemini::sessions::base();
+            (base.clone(), chat_store::session_path(&base, session_id)?)
+        }
+        "qwen" => {
+            let base = qwen::sessions::base();
+            (base.clone(), chat_store::session_path(&base, session_id)?)
+        }
+        "fx" => {
+            let base = fx::sessions::base();
+            (
+                base.clone(),
+                fx_dir(&base, session_id)?.join("usage-v2.json"),
+            )
+        }
         _ => return None,
-    };
-    modified(&path)
+    })
 }
 
 fn canonical(agent: &str) -> &str {
@@ -269,31 +400,40 @@ pub(in crate::agent) fn session_leaf(id: &str) -> bool {
 /// Construct the native Claude JSONL path only when the session id stays a
 /// single leaf inside the bound project directory.
 pub(in crate::agent) fn claude_path(base: &Path, cwd: &Path, session_id: &str) -> Option<PathBuf> {
-    if !session_leaf(session_id) {
-        return None;
-    }
-    let project_dir = claude::sessions::project_dir(base, cwd);
-    let path = project_dir.join(format!("{session_id}.jsonl"));
-    (path.parent() == Some(project_dir.as_path())).then_some(path)
+    contained_child(
+        &claude::sessions::project_dir(base, cwd),
+        &format!("{session_id}.jsonl"),
+    )
+    .filter(|_| session_leaf(session_id))
 }
 
 fn copilot_path(base: &Path, session_id: &str) -> Option<PathBuf> {
-    session_leaf(session_id).then(|| {
-        base.join("session-state")
-            .join(session_id)
-            .join("events.jsonl")
-    })
+    Some(contained_child(&base.join("session-state"), session_id)?.join("events.jsonl"))
 }
 
 fn fx_dir(base: &Path, session_id: &str) -> Option<PathBuf> {
-    session_leaf(session_id).then(|| base.join("sessions").join(session_id))
+    contained_child(&base.join("sessions"), session_id)
 }
 
+/// Join `leaf` onto `parent` only when the result stays a direct child.
+fn contained_child(parent: &Path, leaf: &str) -> Option<PathBuf> {
+    if !session_leaf(leaf) {
+        return None;
+    }
+    let path = parent.join(leaf);
+    (path.parent() == Some(parent)).then_some(path)
+}
+
+#[cfg(test)]
 fn claude_usage(path: &Path) -> Option<AgentUsage> {
+    claude_from_file(open_session_file(path)?)
+}
+
+fn claude_from_file(file: File) -> Option<AgentUsage> {
     let mut usage = AgentUsage::default();
     let mut context_tokens = 0;
     let mut seen = HashSet::new();
-    for_each_json_line(path, |v| {
+    for_each_json_file(file, |v| {
         let message = v.get("message");
         let Some(raw) = message
             .and_then(|m| m.get("usage"))
@@ -329,13 +469,17 @@ fn claude_usage(path: &Path) -> Option<AgentUsage> {
     finish(usage)
 }
 
+#[cfg(test)]
 fn codex_usage(path: &Path) -> Option<AgentUsage> {
-    codex_usage_bounded(path, CODEX_USAGE_TAIL_BYTES, CODEX_MODEL_HEAD_BYTES)
+    codex_from_file(open_session_file(path)?)
 }
 
-fn codex_usage_bounded(path: &Path, tail_limit: u64, head_limit: u64) -> Option<AgentUsage> {
+fn codex_from_file(file: File) -> Option<AgentUsage> {
+    codex_usage_bounded(file, CODEX_USAGE_TAIL_BYTES, CODEX_MODEL_HEAD_BYTES)
+}
+
+fn codex_usage_bounded(mut file: File, tail_limit: u64, head_limit: u64) -> Option<AgentUsage> {
     let mut usage = AgentUsage::default();
-    let mut file = open_session_file(path)?;
     let len = file.metadata().ok()?.len();
     let tail_start = len.saturating_sub(tail_limit);
     let tail = read_window(&mut file, tail_start, tail_limit)?;
@@ -396,7 +540,12 @@ fn codex_usage_bounded(path: &Path, tail_limit: u64, head_limit: u64) -> Option<
     finish(usage)
 }
 
+#[cfg(test)]
 fn copilot_usage(path: &Path) -> Option<AgentUsage> {
+    copilot_from_file(open_session_file(path)?)
+}
+
+fn copilot_from_file(file: File) -> Option<AgentUsage> {
     #[derive(Default)]
     struct ModelTotal {
         input: u64,
@@ -405,7 +554,7 @@ fn copilot_usage(path: &Path) -> Option<AgentUsage> {
     }
     let mut totals: HashMap<String, ModelTotal> = HashMap::new();
     let mut seen = HashSet::new();
-    for_each_json_line(path, |v| {
+    for_each_json_file(file, |v| {
         if v.get("type").and_then(Value::as_str) != Some("session.shutdown") {
             return;
         }
@@ -459,12 +608,16 @@ fn copilot_usage(path: &Path) -> Option<AgentUsage> {
     finish(usage)
 }
 
+#[cfg(test)]
 fn kimi_usage(dir: &Path) -> Option<AgentUsage> {
-    let wire = dir.join("agents/main/wire.jsonl");
+    kimi_from_file(open_session_file(&dir.join("agents/main/wire.jsonl"))?)
+}
+
+fn kimi_from_file(file: File) -> Option<AgentUsage> {
     let mut usage = AgentUsage::default();
     let mut context_tokens = 0;
     let mut context_limit = 0;
-    for_each_json_line(&wire, |v| {
+    for_each_json_file(file, |v| {
         let record = v.get("payload").unwrap_or(v);
         if let Some(model) = record
             .get("model")
@@ -492,11 +645,16 @@ fn kimi_usage(dir: &Path) -> Option<AgentUsage> {
     finish(usage)
 }
 
+#[cfg(test)]
 fn grok_usage(dir: &Path) -> Option<AgentUsage> {
+    grok_from_file(open_session_file(&dir.join("updates.jsonl"))?)
+}
+
+fn grok_from_file(file: File) -> Option<AgentUsage> {
     let mut usage = AgentUsage::default();
     let mut seen = HashSet::new();
     let mut cost_ticks = 0u64;
-    for_each_json_line(&dir.join("updates.jsonl"), |v| {
+    for_each_json_file(file, |v| {
         let Some(raw) = v.pointer("/params/update/usage") else {
             return;
         };
@@ -531,12 +689,17 @@ fn grok_usage(dir: &Path) -> Option<AgentUsage> {
     finish(usage)
 }
 
+#[cfg(test)]
 fn pi_usage(path: &Path) -> Option<AgentUsage> {
+    pi_from_file(open_session_file(path)?)
+}
+
+fn pi_from_file(file: File) -> Option<AgentUsage> {
     let mut usage = AgentUsage::default();
     let mut direct_cost = 0.0;
     let mut has_direct_cost = false;
     let mut seen = HashSet::new();
-    for_each_json_line(path, |v| {
+    for_each_json_file(file, |v| {
         let record = v.get("message").unwrap_or(v);
         let Some(raw) = record.get("usage") else {
             return;
@@ -576,7 +739,12 @@ fn pi_usage(path: &Path) -> Option<AgentUsage> {
     finish(usage)
 }
 
+#[cfg(test)]
 fn gemini_usage(path: &Path) -> Option<AgentUsage> {
+    gemini_from_file(open_session_file(path)?)
+}
+
+fn gemini_from_file(file: File) -> Option<AgentUsage> {
     let mut usage = AgentUsage::default();
     let mut seen = HashSet::new();
     let mut latest_context = None;
@@ -620,7 +788,7 @@ fn gemini_usage(path: &Path) -> Option<AgentUsage> {
         }
     };
 
-    for_each_json_line(path, |v| {
+    for_each_json_file(file, |v| {
         apply_message(v);
         if let Some(messages) = v.pointer("/$set/messages").and_then(Value::as_array) {
             for message in messages {
@@ -632,9 +800,13 @@ fn gemini_usage(path: &Path) -> Option<AgentUsage> {
     finish(usage)
 }
 
+#[cfg(test)]
 fn fx_usage(dir: &Path) -> Option<AgentUsage> {
-    let raw: Value =
-        serde_json::from_reader(open_session_file(&dir.join("usage-v2.json"))?).ok()?;
+    fx_from_file(open_session_file(&dir.join("usage-v2.json"))?)
+}
+
+fn fx_from_file(file: File) -> Option<AgentUsage> {
+    let raw: Value = serde_json::from_reader(file).ok()?;
     let snapshot = raw.get("snapshot")?;
     let cache_read = n(snapshot, "cache_read_tokens");
     let cache_write = n(snapshot, "cache_write_tokens");
@@ -743,7 +915,8 @@ mod tests {
         );
         fs::write(&path, transcript).unwrap();
 
-        let usage = codex_usage_bounded(&path, 300, 128).unwrap();
+        let usage =
+            super::codex_usage_bounded(open_session_file(&path).unwrap(), 300, 128).unwrap();
         assert_eq!(usage.model, "gpt-5.6-sol");
         assert_eq!(
             (usage.tokens_in, usage.tokens_out, usage.cache),
@@ -990,6 +1163,21 @@ mod tests {
             fx_dir(Path::new("/base"), "sess-1"),
             Some(PathBuf::from("/base/sessions/sess-1"))
         );
+        let colon_copilot = copilot_path(Path::new("/base"), "C:foo");
+        let colon_fx = fx_dir(Path::new("/base"), "C:foo");
+        #[cfg(windows)]
+        {
+            assert_eq!(colon_copilot, None);
+            assert_eq!(colon_fx, None);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                colon_copilot,
+                Some(PathBuf::from("/base/session-state/C:foo/events.jsonl"))
+            );
+            assert_eq!(colon_fx, Some(PathBuf::from("/base/sessions/C:foo")));
+        }
     }
 
     #[test]
@@ -1075,5 +1263,40 @@ mod tests {
         assert!(!body.contains("9999"));
         assert!(open_session_file(&path).is_none());
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn usage_readers_do_not_follow_store_ancestor_symlinks() {
+        use std::os::unix::fs::symlink;
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+        let root = tmp("claude-ancestor");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &root);
+        let outside = tmp("claude-ancestor-outside");
+        let encoded = outside.join("-work-app");
+        fs::create_dir_all(&encoded).unwrap();
+        fs::write(
+            encoded.join("sess-1.jsonl"),
+            concat!(
+                r#"{"message":{"id":"msg-1","model":"claude-sonnet-4","usage":{"input_tokens":100,"output_tokens":20}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        symlink(&outside, root.join("projects")).unwrap();
+        assert!(
+            open_session_file_in(&root, &root.join("projects/-work-app/sess-1.jsonl")).is_none()
+        );
+        assert!(session_usage("claude", Path::new("/work/app"), "sess-1").is_none());
+        assert!(session_mtime("claude", Path::new("/work/app"), "sess-1").is_none());
+        match previous {
+            Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 }
