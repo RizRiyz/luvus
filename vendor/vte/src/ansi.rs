@@ -322,6 +322,23 @@ impl<T: Timeout> Processor<T> {
         self.stop_sync_internal(handler, None);
     }
 
+    /// Drop a synchronized update without replaying its buffered bytes.
+    ///
+    /// A pending DEC 2026 frame was parsed against the previous grid size. After
+    /// a resize those bytes often start with CUP/ED for the old height; applying
+    /// them would blank the new viewport. Size changes must discard that frame.
+    pub fn abort_sync<H>(&mut self, handler: &mut H)
+    where
+        H: Handler,
+    {
+        if !self.state.sync_state.timeout.pending_timeout() {
+            return;
+        }
+        handler.unset_private_mode(NamedPrivateMode::SyncUpdate.into());
+        self.state.sync_state.timeout.clear_timeout();
+        self.state.sync_state.buffer.clear();
+    }
+
     /// End a synchronized update.
     ///
     /// The `bsu_offset` parameter should be passed if the sync buffer contains
@@ -2345,6 +2362,26 @@ mod tests {
 
         let expected: Vec<usize> = (0..256).collect();
         assert_eq!(handler.reset_colors, expected);
+    }
+
+    #[test]
+    fn abort_sync_discards_buffered_sgr_without_dispatching() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+
+        parser.advance(&mut handler, b"\x1b[?2026h\x1b[31m");
+        assert_eq!(parser.state.sync_state.timeout.is_sync, 1);
+        assert!(handler.attr.is_none());
+        assert!(parser.sync_bytes_count() > 0);
+
+        parser.abort_sync(&mut handler);
+        assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
+        assert_eq!(parser.sync_bytes_count(), 0);
+        assert!(handler.attr.is_none(), "aborted bytes must not dispatch");
+
+        parser.advance(&mut handler, b"\x1b[?2026l");
+        assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
+        assert!(handler.attr.is_none());
     }
 
     #[test]
