@@ -47,6 +47,17 @@ const BSU_CSI: [u8; SYNC_ESCAPE_LEN] = *b"\x1b[?2026h";
 /// ESU CSI sequence for terminating synchronized updates.
 const ESU_CSI: [u8; SYNC_ESCAPE_LEN] = *b"\x1b[?2026l";
 
+/// Longest suffix of `buf` that is a proper prefix of `ESU_CSI`.
+fn esu_prefix_len(buf: &[u8]) -> usize {
+    let max = buf.len().min(SYNC_ESCAPE_LEN - 1);
+    for len in (1..=max).rev() {
+        if ESU_CSI.starts_with(&buf[buf.len() - len..]) {
+            return len;
+        }
+    }
+    0
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Hyperlink {
     /// Identifier for the given hyperlink.
@@ -256,6 +267,12 @@ struct SyncState<T: Timeout> {
 
     /// Bytes read during the synchronized update.
     buffer: Vec<u8>,
+
+    /// After `abort_sync`, remaining bytes of that DEC 2026 frame must not reach
+    /// the handler. Drain until ESU (or `SYNC_BUFFER_SIZE`) then resume.
+    discarding: bool,
+    discarded: usize,
+    esu_matched: usize,
 }
 
 impl<T: Timeout> Default for SyncState<T> {
@@ -263,7 +280,13 @@ impl<T: Timeout> Default for SyncState<T> {
         // Synchronized updates are uncommon, but every terminal parser needs a
         // processor. Reserve only after a terminal actually starts one; the
         // existing `SYNC_BUFFER_SIZE` limit remains enforced in `advance_sync`.
-        Self { buffer: Vec::new(), timeout: Default::default() }
+        Self {
+            buffer: Vec::new(),
+            timeout: Default::default(),
+            discarding: false,
+            discarded: 0,
+            esu_matched: 0,
+        }
     }
 }
 
@@ -304,7 +327,9 @@ impl<T: Timeout> Processor<T> {
     {
         let mut processed = 0;
         while processed != bytes.len() {
-            if self.state.sync_state.timeout.pending_timeout() {
+            if self.state.sync_state.discarding {
+                processed += self.advance_discard(&bytes[processed..]);
+            } else if self.state.sync_state.timeout.pending_timeout() {
                 processed += self.advance_sync(handler, &bytes[processed..]);
             } else {
                 let mut performer = Performer::new(&mut self.state, handler);
@@ -336,7 +361,47 @@ impl<T: Timeout> Processor<T> {
         }
         handler.unset_private_mode(NamedPrivateMode::SyncUpdate.into());
         self.state.sync_state.timeout.clear_timeout();
+        self.state.sync_state.esu_matched = esu_prefix_len(&self.state.sync_state.buffer);
         self.state.sync_state.buffer.clear();
+        self.state.sync_state.discarded = 0;
+        self.state.sync_state.discarding = true;
+    }
+
+    /// Drop bytes of an aborted DEC 2026 frame until its ESU, or the sync cap.
+    ///
+    /// Returns the number of bytes consumed from `bytes`. Any remainder is
+    /// parsed normally by the caller.
+    fn advance_discard(&mut self, bytes: &[u8]) -> usize {
+        let mut consumed = 0;
+        while consumed < bytes.len() {
+            if self.state.sync_state.discarded >= SYNC_BUFFER_SIZE {
+                self.clear_discard();
+                break;
+            }
+
+            let byte = bytes[consumed];
+            consumed += 1;
+            self.state.sync_state.discarded = self.state.sync_state.discarded.saturating_add(1);
+
+            let expected = ESU_CSI[self.state.sync_state.esu_matched];
+            if byte == expected {
+                self.state.sync_state.esu_matched += 1;
+                if self.state.sync_state.esu_matched == SYNC_ESCAPE_LEN {
+                    self.clear_discard();
+                    break;
+                }
+                continue;
+            }
+
+            self.state.sync_state.esu_matched = usize::from(byte == ESU_CSI[0]);
+        }
+        consumed
+    }
+
+    fn clear_discard(&mut self) {
+        self.state.sync_state.discarding = false;
+        self.state.sync_state.discarded = 0;
+        self.state.sync_state.esu_matched = 0;
     }
 
     /// End a synchronized update.
@@ -2093,6 +2158,7 @@ mod tests {
         identity_reported: bool,
         color: Option<Rgb>,
         reset_colors: Vec<usize>,
+        clears: usize,
     }
 
     impl Handler for MockHandler {
@@ -2124,6 +2190,10 @@ mod tests {
         fn reset_color(&mut self, index: usize) {
             self.reset_colors.push(index)
         }
+
+        fn clear_screen(&mut self, _mode: ClearMode) {
+            self.clears += 1;
+        }
     }
 
     impl Default for MockHandler {
@@ -2135,6 +2205,7 @@ mod tests {
                 identity_reported: false,
                 color: None,
                 reset_colors: Vec::new(),
+                clears: 0,
             }
         }
     }
@@ -2381,7 +2452,24 @@ mod tests {
 
         parser.advance(&mut handler, b"\x1b[?2026l");
         assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
+        assert!(!parser.state.sync_state.discarding);
         assert!(handler.attr.is_none());
+        assert_eq!(handler.clears, 0);
+    }
+
+    #[test]
+    fn abort_sync_discards_ed2_until_esu_across_chunks() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+
+        parser.advance(&mut handler, b"\x1b[?2026h\x1b[H");
+        parser.abort_sync(&mut handler);
+        parser.advance(&mut handler, b"\x1b[2J\x1b[?20");
+        parser.advance(&mut handler, b"26l\x1b[32m");
+
+        assert_eq!(handler.clears, 0, "late ED2 of the aborted frame must not dispatch");
+        assert!(!parser.state.sync_state.discarding);
+        assert_eq!(handler.attr, Some(Attr::Foreground(Color::Named(NamedColor::Green))));
     }
 
     #[test]
