@@ -1900,6 +1900,9 @@ fn handle_surface_message(
             }
         }
         ServerMessage::OpenUrl(url) if endpoint == *active => crate::platform::open_url(&url),
+        ServerMessage::OpenPath(path) if endpoint == *active => {
+            crate::platform::open_path(std::path::Path::new(&path));
+        }
         ServerMessage::SwitchSession { name } if endpoint == *active => {
             if let Some(exit) = owner_local_session_switch(&endpoint, name) {
                 return Ok(Some(exit));
