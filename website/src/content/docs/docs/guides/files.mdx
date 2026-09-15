@@ -87,8 +87,10 @@ from the right-click menu when you need a permanent view.
 
 **Open Externally** hands the selected file or folder to the desktop. A file
 opens in the application the desktop associates with it; a folder opens in the
-file manager. With `--remote`, the path is handed to the machine running the
-client and opens only if it exists there. The OS handler may execute
+file manager. The server sends an absolute path so the client does not resolve a
+relative row against its own working directory. With `--remote`, that
+path is handed to the machine running the client and opens only if it
+exists there. The OS handler may execute
 application-like or shortcut-like entries (`.app`, `.desktop`, `.lnk`,
 `.command`) the same way double-clicking them would, so only open entries you
 trust. A path that is not valid UTF-8 is refused rather than changed into a

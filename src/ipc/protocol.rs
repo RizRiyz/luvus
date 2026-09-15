@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 /// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
 /// variant one. Its mismatch reply must use that released position.
 const V0141_PROTOCOL_VERSION: u32 = 17;
@@ -1099,6 +1099,7 @@ mod tests {
             .contains("clipboard image exceeds size limit"));
     }
 
+    #[test]
     fn open_path_roundtrips_to_the_display_client() {
         let mut bytes = Vec::new();
         let path = "/tmp/notes-é.pdf".to_string();

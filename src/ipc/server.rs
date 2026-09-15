@@ -3732,12 +3732,23 @@ mod tests {
     /// though it is the foreground client when the input arrives.
     #[test]
     fn open_path_is_routed_to_the_initiating_client_only() {
+        assert_open_path_routes_to_initiator(false);
+    }
+
+    #[test]
+    fn open_path_is_routed_after_machine_sidebar_input() {
+        assert_open_path_routes_to_initiator(true);
+    }
+
+    fn assert_open_path_routes_to_initiator(machine_capable: bool) {
         let _env = crate::persist::test_env("multi-client-open-path");
         let (app_tx, _app_rx) = mpsc::channel();
         let mut app = App::new(120, 40, app_tx).expect("app starts");
         app.server_mode = true;
         let (large, large_rx) = display_client(120, 40, 2);
-        let (small, small_rx) = display_client(50, 20, 1);
+        let (mut small, small_rx) = display_client(50, 20, 1);
+        small.machine_capable = machine_capable;
+        small.shell_dock_layout.owns_workspaces = machine_capable;
         let mut clients = HashMap::from([(1, large), (2, small)]);
         let mut foreground = Some(1);
         let mut interactive_size = (120, 40);

@@ -1095,8 +1095,14 @@ pub fn open_path(path: &Path) {
                 )
                 .spawn()
                 {
-                    let _ = child.wait();
-                    return;
+                    // Linux launchers can exist and still fail (no handler);
+                    // try the next one. macOS `open` and Windows `explorer`
+                    // are the only option, and explorer often exits 1 after a
+                    // successful handoff.
+                    let ok = child.wait().map(|status| status.success()).unwrap_or(false);
+                    if ok || cfg!(any(target_os = "macos", windows)) {
+                        return;
+                    }
                 }
             }
         });

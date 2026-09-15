@@ -17,6 +17,20 @@ use crate::layout::TileLayout;
 
 const RECENT_FILE_CAP: usize = 12;
 
+/// Resolve a FILES row against the workspace and make it absolute on this
+/// process. The display client must not interpret a relative path against its
+/// own working directory.
+fn absolute_external_path(workspace_cwd: &Path, path: PathBuf) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path
+    } else if workspace_cwd.is_absolute() {
+        workspace_cwd.join(path)
+    } else {
+        path
+    };
+    std::path::absolute(&joined).unwrap_or(joined)
+}
+
 /// Existing native views of one file in the active workspace, split by whether
 /// a later click can recycle them. Both can be set at once: opening a tab for a
 /// file the preview is showing deliberately leaves the preview alone.
@@ -621,8 +635,11 @@ impl App {
     /// No filesystem access here — existence is checked on the client when it
     /// receives [`crate::ipc::protocol::ServerMessage::OpenPath`]. The wire
     /// value is text, so reject a non-UTF-8 path instead of letting serde fail
-    /// later and terminate the client's IPC writer.
+    /// later and terminate the client's IPC writer. Relative tree rows are
+    /// resolved against the workspace cwd and made absolute on this process so
+    /// the client does not interpret them against its own working directory.
     pub fn open_path_externally(&mut self, path: PathBuf) {
+        let path = absolute_external_path(&self.ws().cwd, path);
         let Some(path) = path.to_str() else {
             self.show_toast("path is not valid UTF-8");
             return;
@@ -1596,7 +1613,12 @@ mod tests {
         seed_keyboard_tree(&mut app);
         let cursor = app.file_tree.cursor;
         let path = app.file_tree.visible_rows()[cursor].path.clone();
-        let expected = path.to_str().expect("fixture path is UTF-8");
+        let expected = absolute_external_path(&app.ws().cwd, path);
+        let expected = expected.to_str().expect("fixture path is UTF-8");
+        assert!(
+            PathBuf::from(expected).is_absolute(),
+            "the client must receive an absolute path"
+        );
 
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert_eq!(app.pending_open_path.as_deref(), Some(expected), "bare o");
@@ -1634,8 +1656,23 @@ mod tests {
             editors: Vec::new(),
         });
         app.file_menu_action_pub(FileMenuItem::OpenInOs);
-        assert_eq!(app.pending_open_path.as_deref(), path.to_str());
+        let expected = absolute_external_path(&app.ws().cwd, path);
+        assert_eq!(app.pending_open_path.as_deref(), expected.to_str());
         assert!(app.file_menu.is_none());
+    }
+
+    #[test]
+    fn open_path_externally_makes_a_relative_row_absolute() {
+        let _env = crate::persist::test_env("files-open-externally-relative");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_path_externally(PathBuf::from("notes.pdf"));
+        let queued = app.pending_open_path.expect("queued");
+        assert!(
+            Path::new(&queued).is_absolute(),
+            "relative rows must not be interpreted against the client cwd"
+        );
+        assert!(queued.ends_with("notes.pdf"));
     }
 
     /// `PathBuf` serializes through UTF-8 in serde. Refuse an unrepresentable
