@@ -116,7 +116,7 @@ fn open_nofollow_from(store: &Path, names: &[&OsStr]) -> Option<File> {
             return None;
         }
         if last {
-            return metadata.is_file().then_some(file);
+            return regular_file(file);
         }
         if !metadata.is_dir() {
             return None;
@@ -294,11 +294,6 @@ fn finish(mut usage: AgentUsage) -> Option<AgentUsage> {
         usage.cost = estimate_cost(&usage.model, usage.tokens_in, usage.tokens_out, usage.cache);
     }
     Some(usage)
-}
-
-#[cfg(test)]
-fn modified(path: &Path) -> Option<SystemTime> {
-    open_session_file(path)?.metadata().ok()?.modified().ok()
 }
 
 /// Best-effort native-store usage for a precise agent session. Every recognized
@@ -1225,7 +1220,6 @@ mod tests {
         assert!(open_session_file(&path).is_none());
         assert!(claude_usage(&path).is_none());
         assert!(codex_usage(&path).is_none());
-        assert!(modified(&path).is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 
