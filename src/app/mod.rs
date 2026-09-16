@@ -2260,6 +2260,10 @@ impl MenuScroll {
 pub const WORKTREE_CREATE_PENDING: &str = "__worktree_create_pending__";
 pub const WORKTREE_REMOVE_PENDING: &str = "__worktree_remove_pending__";
 
+fn is_worktree_create_pending(error: &(String, String)) -> bool {
+    error.1 == WORKTREE_CREATE_PENDING
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// One random value for this server lifetime. Harness runtimes from an old
@@ -8732,6 +8736,18 @@ mod tests {
     use std::sync::mpsc;
 
     use crate::persist::TEST_ENV_LOCK as ENV_GUARD;
+
+    #[test]
+    fn worktree_create_pending_is_carried_in_the_error_message() {
+        assert!(is_worktree_create_pending(&(
+            "git_error".into(),
+            WORKTREE_CREATE_PENDING.into()
+        )));
+        assert!(!is_worktree_create_pending(&(
+            WORKTREE_CREATE_PENDING.into(),
+            "ordinary error".into()
+        )));
+    }
 
     #[cfg(unix)]
     fn api_call_with_workers(

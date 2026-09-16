@@ -2423,7 +2423,7 @@ impl App {
                 };
                 self.show_toast(format!("{id}: worker started{suffix}"));
             }
-            Err((code, _)) if code == WORKTREE_CREATE_PENDING => {
+            Err(error) if is_worktree_create_pending(&error) => {
                 self.show_toast(format!("{id}: creating worktree…"));
                 let scheduled = self.schedule_pending_worktree(move |app, result| {
                     match result {

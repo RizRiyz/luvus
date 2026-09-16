@@ -325,7 +325,7 @@ impl App {
             }
         }
 
-        if matches!(&started, Err((code, _)) if code == WORKTREE_CREATE_PENDING) {
+        if started.as_ref().is_err_and(is_worktree_create_pending) {
             let retry_run = run_id.to_string();
             match self.schedule_pending_worktree(move |app, result| {
                 match result {
