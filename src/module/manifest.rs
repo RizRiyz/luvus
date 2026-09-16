@@ -42,9 +42,8 @@ pub struct ModuleManifest {
     /// content arrives later through `luvus bar push` (`ui.bar.push` on the API).
     #[serde(default)]
     pub bars: Vec<BarWidgetEntry>,
-    /// Optional synchronous worktree creation provider. Luvus supplies a
-    /// versioned request through `LUVUS_WORKTREE_*` environment variables and
-    /// expects one JSON object containing an absolute `path` on stdout.
+    /// Optional synchronous worktree provider. Luvus writes one versioned JSON
+    /// request to stdin and expects the operation-specific stdout contract.
     #[serde(default)]
     pub worktree_provider: Option<WorktreeProvider>,
     /// User-editable settings rendered in Settings → Modules (docs/13 §3.6).

@@ -13,8 +13,6 @@ use serde_json::{json, Value};
 use crate::config::WorktreeConfig;
 use crate::module::ModuleRegistry;
 
-pub const PROVIDER_VERSION: &str = "1";
-
 #[derive(Deserialize)]
 struct ProviderOutput {
     path: PathBuf,
@@ -79,25 +77,15 @@ impl ProviderJob {
 impl ProviderCommand {
     fn run(
         &self,
-        operation: &str,
         request: Value,
-        mut env: Vec<(String, String)>,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<String, String> {
-        env.extend([
-            (
-                "LUVUS_WORKTREE_PROVIDER_VERSION".into(),
-                PROVIDER_VERSION.into(),
-            ),
-            ("LUVUS_WORKTREE_OPERATION".into(), operation.into()),
-            ("LUVUS_WORKTREE_REQUEST_JSON".into(), request.to_string()),
-        ]);
         crate::module::runtime::run_sync(
             &self.module,
             &self.token,
             &self.context,
             &self.argv,
-            env,
+            &request,
             cancelled,
         )
     }
@@ -111,24 +99,13 @@ fn run_create(
     let branch_exists = bounded_branch_exists(&request.repo, &request.branch, cancelled)?;
     let existing_worktrees = bounded_worktree_paths(&request.repo, cancelled)?;
     let stdout = command.run(
-        "create",
         json!({
-            "version": PROVIDER_VERSION,
+            "version": 1,
+            "operation": "create",
             "repository": request.repo.display().to_string(),
             "branch": request.branch,
             "branch_exists": branch_exists,
         }),
-        vec![
-            (
-                "LUVUS_WORKTREE_REPOSITORY".into(),
-                request.repo.display().to_string(),
-            ),
-            ("LUVUS_WORKTREE_BRANCH".into(), request.branch.clone()),
-            (
-                "LUVUS_WORKTREE_BRANCH_EXISTS".into(),
-                branch_exists.to_string(),
-            ),
-        ],
         cancelled,
     )?;
     let path = parse_provider_output(stdout.as_bytes())?;
@@ -159,30 +136,14 @@ fn run_remove(
 ) -> Result<ProviderResult, String> {
     let canonical_path = validate_remove_target(&request.repo, &request.path, cancelled)?;
     let stdout = command.run(
-        "remove",
         json!({
-            "version": PROVIDER_VERSION,
+            "version": 1,
             "operation": "remove",
             "repository": request.repo.display().to_string(),
             "path": request.path.display().to_string(),
             "branch": request.branch,
             "force": request.force,
         }),
-        vec![
-            (
-                "LUVUS_WORKTREE_REPOSITORY".into(),
-                request.repo.display().to_string(),
-            ),
-            (
-                "LUVUS_WORKTREE_PATH".into(),
-                request.path.display().to_string(),
-            ),
-            (
-                "LUVUS_WORKTREE_BRANCH".into(),
-                request.branch.clone().unwrap_or_default(),
-            ),
-            ("LUVUS_WORKTREE_FORCE".into(), request.force.to_string()),
-        ],
         cancelled,
     )?;
     if !stdout.trim().is_empty() {

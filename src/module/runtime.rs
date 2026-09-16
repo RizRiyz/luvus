@@ -140,22 +140,23 @@ pub fn spawn(
 }
 
 /// Run one manifest-declared command synchronously for a core provider boundary.
-/// This uses the same fixed argv, module cwd, identity, context, settings, output
-/// caps, and no-window behavior as ordinary module commands, but returns only
-/// after the provider has produced its result.
+/// The request is written as one JSON document to stdin. This uses the same
+/// fixed argv, module cwd, identity, context, settings, output caps, and
+/// no-window behavior as ordinary module commands.
 pub fn run_sync(
     module: &InstalledModule,
     module_token: &str,
     ctx: &Value,
     argv: &[String],
-    extra: Vec<(String, String)>,
+    request: &Value,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
-    let env = env(module, module_token, ctx, extra);
-    let (code, out, err) = run(
+    let env = env(module, module_token, ctx, Vec::new());
+    let (code, out, err) = run_with_input(
         &module.root,
         argv,
         &env,
+        Some(request.to_string().into_bytes()),
         Some(SYNC_TIMEOUT),
         Some(cancelled),
     );
@@ -203,13 +204,28 @@ fn run(
     timeout: Option<Duration>,
     cancelled: Option<&AtomicBool>,
 ) -> (Option<i32>, String, String) {
+    run_with_input(root, argv, env, None, timeout, cancelled)
+}
+
+fn run_with_input(
+    root: &PathBuf,
+    argv: &[String],
+    env: &[(String, String)],
+    input: Option<Vec<u8>>,
+    timeout: Option<Duration>,
+    cancelled: Option<&AtomicBool>,
+) -> (Option<i32>, String, String) {
     let Some((program, args)) = argv.split_first() else {
         return (None, String::new(), "empty command".to_string());
     };
     let mut cmd = Command::new(program);
     cmd.args(args)
         .current_dir(root)
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for (k, v) in env {
@@ -251,6 +267,14 @@ fn run(
     } else {
         None
     };
+    let mut stdin = child.stdin.take();
+    let t_in = thread::spawn(move || -> std::io::Result<()> {
+        if let (Some(stdin), Some(input)) = (stdin.as_mut(), input) {
+            use std::io::Write;
+            stdin.write_all(&input)?;
+        }
+        Ok(())
+    });
     // Drain stdout + stderr concurrently (avoids a full-pipe deadlock), keeping
     // only the first OUTPUT_CAP bytes of each.
     let child_pid = child.id();
@@ -261,7 +285,8 @@ fn run(
     let t_err = thread::spawn(move || se.as_mut().map(read_capped).unwrap_or_default());
     let (status, process_timed_out, process_cancelled) =
         wait_for_child(&mut child, deadline, cancelled);
-    let (output_timed_out, output_cancelled) = wait_for_output(&t_out, &t_err, deadline, cancelled);
+    let (output_timed_out, output_cancelled) =
+        wait_for_output(&t_in, &t_out, &t_err, deadline, cancelled);
     let timed_out = process_timed_out || output_timed_out;
     let was_cancelled = process_cancelled || output_cancelled;
     if timed_out || was_cancelled {
@@ -272,10 +297,12 @@ fn run(
         let _ = child.kill();
         let _ = child.wait();
         let grace = Instant::now() + Duration::from_secs(1);
-        while (!t_out.is_finished() || !t_err.is_finished()) && Instant::now() < grace {
+        while (!t_in.is_finished() || !t_out.is_finished() || !t_err.is_finished())
+            && Instant::now() < grace
+        {
             thread::sleep(Duration::from_millis(10));
         }
-        if !t_out.is_finished() || !t_err.is_finished() {
+        if !t_in.is_finished() || !t_out.is_finished() || !t_err.is_finished() {
             let message = if was_cancelled && !timed_out {
                 "module command cancelled".to_string()
             } else {
@@ -287,8 +314,18 @@ fn run(
             return (None, String::new(), message);
         }
     }
+    let input_result = t_in
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::other("module stdin writer panicked")));
     let out = t_out.join().unwrap_or_default();
     let mut err = t_err.join().unwrap_or_default();
+    let input_failed = input_result.is_err();
+    if let Err(error) = input_result {
+        if !err.is_empty() && !err.ends_with('\n') {
+            err.push('\n');
+        }
+        err.push_str(&format!("write stdin failed: {error}"));
+    }
     drop(tree_guard);
     if timed_out || was_cancelled {
         if !err.is_empty() && !err.ends_with('\n') {
@@ -304,7 +341,7 @@ fn run(
         }
     }
     match status {
-        Ok(_) if timed_out || was_cancelled => (None, out, err),
+        Ok(_) if timed_out || was_cancelled || input_failed => (None, out, err),
         Ok(s) => (s.code(), out, err),
         Err(e) => (None, out, format!("{err}\nwait failed: {e}")),
     }
@@ -338,6 +375,7 @@ fn wait_for_child(
 }
 
 fn wait_for_output(
+    stdin: &thread::JoinHandle<std::io::Result<()>>,
     stdout: &thread::JoinHandle<String>,
     stderr: &thread::JoinHandle<String>,
     deadline: Option<Instant>,
@@ -346,7 +384,7 @@ fn wait_for_output(
     let Some(deadline) = deadline else {
         return (false, false);
     };
-    while !stdout.is_finished() || !stderr.is_finished() {
+    while !stdin.is_finished() || !stdout.is_finished() || !stderr.is_finished() {
         if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
             return (false, true);
         }
@@ -398,7 +436,23 @@ fn read_capped<R: Read>(r: &mut R) -> String {
 mod tests {
     use super::{complete_env, MODULE_TOKEN_ENV};
     #[cfg(unix)]
-    use super::{run, AtomicBool, Duration, Ordering};
+    use super::{run, run_with_input, AtomicBool, Duration, Ordering};
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_provider_writes_json_to_stdin() {
+        let root = std::env::temp_dir();
+        let (code, out, err) = run_with_input(
+            &root,
+            &["/bin/sh".into(), "-c".into(), "cat".into()],
+            &[],
+            Some(br#"{"version":1,"operation":"create"}"#.to_vec()),
+            Some(Duration::from_secs(2)),
+            None,
+        );
+        assert_eq!(code, Some(0), "{err}");
+        assert_eq!(out, r#"{"version":1,"operation":"create"}"#);
+    }
 
     #[cfg(unix)]
     #[test]

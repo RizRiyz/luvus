@@ -122,18 +122,31 @@ platforms = ["macos", "linux"] # optional
 The user selects the module by canonical id in
 `config.json` as `worktree.provider`; configuration cannot replace this fixed
 argv. Luvus runs the command in the module root with normal module identity and
-settings variables plus:
+settings variables, and writes exactly one versioned JSON request to stdin.
+Creation receives:
 
-| Variable | Meaning |
-|---|---|
-| `LUVUS_WORKTREE_PROVIDER_VERSION` | Provider contract version, currently `1`. |
-| `LUVUS_WORKTREE_OPERATION` | `create` or `remove`. |
-| `LUVUS_WORKTREE_REPOSITORY` | Source repository path. |
-| `LUVUS_WORKTREE_PATH` | Removal target; unset for creation. |
-| `LUVUS_WORKTREE_BRANCH` | Exact requested/target branch. |
-| `LUVUS_WORKTREE_BRANCH_EXISTS` | Creation only: `true` when the local branch already exists. |
-| `LUVUS_WORKTREE_FORCE` | Removal only: `true` for a confirmed TUI force-delete. |
-| `LUVUS_WORKTREE_REQUEST_JSON` | Complete versioned request as JSON. |
+```json
+{
+  "version": 1,
+  "operation": "create",
+  "repository": "/absolute/source/repository",
+  "branch": "feature/example",
+  "branch_exists": false
+}
+```
+
+Removal receives:
+
+```json
+{
+  "version": 1,
+  "operation": "remove",
+  "repository": "/absolute/source/repository",
+  "path": "/absolute/path/to/worktree",
+  "branch": "feature/example",
+  "force": false
+}
+```
 
 Creation returns exactly one JSON object on stdout:
 
@@ -651,7 +664,6 @@ takes down luvus.
 | `LUVUS_MODULE_ENTRYPOINT_ID` | Pane commands. |
 | `LUVUS_MODULE_EVENT` | Event hooks (the name) and startup hooks (`startup`). |
 | `LUVUS_MODULE_EVENT_JSON` | Event hooks (the payload). |
-| `LUVUS_WORKTREE_*` | The versioned request for `[worktree_provider]` commands. |
 | `LUVUS_MODULE_ROW_*` | Actions run from a clicked dock row. |
 | `LUVUS_SETTING_<KEY>` / `LUVUS_MODULE_SETTINGS_JSON` | Every command, when you declare `[[settings]]`. |
 

@@ -9411,14 +9411,20 @@ mod tests {
         std::fs::write(
             &fake,
             r#"#!/bin/sh
-repo=$LUVUS_WORKTREE_REPOSITORY
-branch=$LUVUS_WORKTREE_BRANCH
+if env | grep -q '^LUVUS_WORKTREE_'; then
+  printf '%s\n' 'legacy worktree request environment was set' >&2
+  exit 3
+fi
+request="$LUVUS_MODULE_STATE_DIR/request.json"
+cat > "$request"
+repo=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repository"])' "$request")
+branch=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["branch"])' "$request")
+branch_exists=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["branch_exists"]).lower())' "$request")
 if [ "$branch" = hook-error ]; then
   printf '%s\n' 'provider needs interactive approval' >&2
   exit 2
 fi
-printf '%s' "$LUVUS_WORKTREE_REQUEST_JSON" > "$LUVUS_MODULE_STATE_DIR/request.json"
-if [ "$LUVUS_WORKTREE_BRANCH_EXISTS" = false ]; then create='-b'; fi
+if [ "$branch_exists" = false ]; then create='-b'; fi
 safe=$(printf '%s' "$branch" | tr '/ ' '--')
 target="$(dirname "$repo")/wt-$safe"
 git -C "$repo" worktree add -q $create "$branch" "$target"
@@ -9443,11 +9449,20 @@ remove_command = ["./remove-worktree"]
         std::fs::write(
             &remove,
             r#"#!/bin/sh
-printf '%s' "$LUVUS_WORKTREE_REQUEST_JSON" > "$LUVUS_MODULE_STATE_DIR/remove-request.json"
-if [ "$LUVUS_WORKTREE_BRANCH" = stdout-remove ]; then printf noise; exit 0; fi
-if [ "$LUVUS_WORKTREE_BRANCH" = no-remove ]; then exit 0; fi
-if [ "$LUVUS_WORKTREE_FORCE" = true ]; then force='--force'; fi
-git -C "$LUVUS_WORKTREE_REPOSITORY" worktree remove $force "$LUVUS_WORKTREE_PATH"
+if env | grep -q '^LUVUS_WORKTREE_'; then
+  printf '%s\n' 'legacy worktree request environment was set' >&2
+  exit 3
+fi
+request="$LUVUS_MODULE_STATE_DIR/remove-request.json"
+cat > "$request"
+repo=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repository"])' "$request")
+path=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$request")
+branch=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["branch"])' "$request")
+force=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["force"]).lower())' "$request")
+if [ "$branch" = stdout-remove ]; then printf noise; exit 0; fi
+if [ "$branch" = no-remove ]; then exit 0; fi
+if [ "$force" = true ]; then force_arg='--force'; fi
+git -C "$repo" worktree remove $force_arg "$path"
 "#,
         )
         .unwrap();
@@ -9500,7 +9515,8 @@ git -C "$LUVUS_WORKTREE_REPOSITORY" worktree remove $force "$LUVUS_WORKTREE_PATH
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(request["version"], crate::worktree::PROVIDER_VERSION);
+        assert_eq!(request["version"], 1);
+        assert_eq!(request["operation"], "create");
         assert_eq!(request["repository"], repo.display().to_string());
         assert_eq!(request["branch"], "topic");
         assert_eq!(request["branch_exists"], false);
@@ -9563,6 +9579,7 @@ git -C "$LUVUS_WORKTREE_REPOSITORY" worktree remove $force "$LUVUS_WORKTREE_PATH
             .unwrap(),
         )
         .unwrap();
+        assert_eq!(remove_request["version"], 1);
         assert_eq!(remove_request["operation"], "remove");
         assert_eq!(
             std::fs::canonicalize(remove_request["repository"].as_str().unwrap()).unwrap(),
