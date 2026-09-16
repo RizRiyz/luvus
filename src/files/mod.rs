@@ -3,7 +3,7 @@
 //!
 //! Two performance rules, both load-bearing:
 //!
-//! - **Only expanded directories are ever read.** Collapsing forgets nothing
+//! - **Normal browsing reads only expanded directories.** Collapsing forgets nothing
 //!   (the listing stays cached); expanding a never-seen dir asks the app to
 //!   schedule an off-loop `read_dir`. A 100k-file repo costs what you expand.
 //! - **Rendering is O(visible rows).** [`FileTree::visible_rows`] flattens only
@@ -13,7 +13,10 @@
 //!
 //! The model is pure: it never touches the filesystem itself. The app reads
 //! directories on a worker thread and feeds them back via [`FileTree::apply_dir`].
+//! An explicit fuzzy filter temporarily projects indexed file paths instead;
+//! its bounded discovery and scoring worker is owned by [`filter::FileFilter`].
 
+pub mod filter;
 pub mod preview;
 mod view;
 pub use view::{
@@ -69,6 +72,7 @@ struct TreeView {
 
 /// The FILES dock's state: which folder, which dirs are open, and the cursor.
 pub struct FileTree {
+    pub filter: Option<filter::FileFilter>,
     root: PathBuf,
     dirs: HashMap<PathBuf, Dir>,
     expanded: HashSet<PathBuf>,
@@ -98,6 +102,7 @@ pub struct FileTree {
 impl FileTree {
     pub fn new(root: PathBuf) -> Self {
         FileTree {
+            filter: None,
             root,
             dirs: HashMap::new(),
             expanded: HashSet::new(),
@@ -116,6 +121,12 @@ impl FileTree {
         &self.root
     }
 
+    pub fn clear_filter(&mut self) {
+        if let Some(filter) = self.filter.take() {
+            (self.cursor, self.scroll) = filter.saved_position;
+        }
+    }
+
     pub fn root_loaded(&self) -> bool {
         self.is_loaded(&self.root)
     }
@@ -132,6 +143,7 @@ impl FileTree {
         if root == self.root {
             return;
         }
+        self.clear_filter();
         let parked = TreeView {
             expanded: std::mem::take(&mut self.expanded),
             cursor: self.cursor,
@@ -254,6 +266,7 @@ impl FileTree {
     /// Forget every cached directory listing so the next sweep re-reads them —
     /// the `files.refresh` action. Expanded state is kept.
     pub fn invalidate(&mut self) {
+        self.clear_filter();
         self.dirs.clear();
         self.pending.clear();
         self.dirty = true;
@@ -265,6 +278,9 @@ impl FileTree {
     /// `show_hidden` flipped. An unchanged tree returns the cached slice with no
     /// walk and no allocation.
     pub fn visible_rows(&mut self) -> &[VisibleRow] {
+        if let Some(filter) = &self.filter {
+            return &filter.rows;
+        }
         if self.dirty || self.cache_hidden != self.show_hidden {
             self.cache = self.compute_rows();
             self.dirty = false;

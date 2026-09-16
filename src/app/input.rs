@@ -947,6 +947,26 @@ impl App {
                 self.mission_last_cost = Some((total, now));
                 self.active_is_mission()
             }
+            AppEvent::FileFilterResults {
+                instance,
+                generation,
+                rows,
+                partial,
+            } => {
+                if let Some(filter) = self
+                    .file_tree
+                    .filter
+                    .as_mut()
+                    .filter(|f| f.instance == instance && f.generation == generation)
+                {
+                    filter.rows = rows;
+                    filter.partial = partial;
+                    filter.loading = false;
+                    true
+                } else {
+                    false
+                }
+            }
             AppEvent::DirRead { path, entries } => {
                 self.file_tree.apply_dir(path.clone(), entries);
                 self.finish_pending_files_api(&path);
@@ -1176,7 +1196,9 @@ impl App {
         // Search can rank a large catalog, so append the whole paste and launch
         // one recomputation instead of replaying one query per character.
         if self.search.is_some() {
-            self.search_paste(s);
+            if self.file_menu.is_none() {
+                self.search_paste(s);
+            }
             return true;
         }
         // The picker owns both text sub-modes and direct path navigation.
@@ -1219,6 +1241,16 @@ impl App {
         } else if self.pane_rename.is_some() {
             Self::handle_pane_rename_key
         } else {
+            if self.files_focused && self.files_mode == crate::diff::FilesMode::Files {
+                if let Some(filter) = self.file_tree.filter.as_mut() {
+                    if self.file_menu.is_none() {
+                        filter.append(s);
+                        self.file_tree.cursor = 0;
+                        self.file_tree.scroll = 0;
+                    }
+                    return true;
+                }
+            }
             return false;
         };
         for c in s.chars().filter(|c| !c.is_control()) {
@@ -1720,9 +1752,12 @@ impl App {
         // The global-search overlay (docs/63) owns the mouse while open: a click
         // on a result jumps to it, a click outside dismisses, the wheel moves the
         // result cursor.
-        if self.search.is_some() {
+        if self.search.is_some() && self.file_menu.is_none() {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => self.search_click(m.column, m.row),
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.search_context_click(m.column, m.row)
+                }
                 MouseEventKind::ScrollUp => self.search_move(-1),
                 MouseEventKind::ScrollDown => self.search_move(1),
                 _ => {}
@@ -3989,6 +4024,14 @@ impl App {
         // it's left (arrows/`hjkl` resize; `Esc`/`Enter`/`q` exit).
         if self.mode == Mode::Resize {
             return self.handle_resize_mode_key(key);
+        }
+        // Editing a FILES query has the same precedence as other text inputs.
+        if self.files_focused
+            && self.files_mode == crate::diff::FilesMode::Files
+            && self.file_tree.filter.is_some()
+            && !self.prefix.matches(&key)
+        {
+            return self.handle_file_tree_key(key);
         }
         // Explicit direct shortcuts are the only normal-mode keys Luvus takes
         // before pane/dashboard dispatch. The configured prefix retains

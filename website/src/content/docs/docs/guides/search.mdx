@@ -36,6 +36,7 @@ retained pane history.
 | `Tab` / `Shift+Tab` | next or previous scope |
 | `Ctrl+i` | toggle case-sensitive Output matching |
 | `Enter`, click | activate the selected result |
+| `Alt+A`, `F2`, right-click | open FILES actions for a file in this session |
 | `Esc` | clear the query, then close |
 
 Navigation rows render immediately. File paths, retained output, and results
@@ -51,6 +52,34 @@ inside its workspace using the normal **Open files with** setting. An output
 row focuses and scrolls its pane. Selecting another named session hands only
 the current display client to it. A stopped session is not started merely by
 opening or typing in the finder.
+
+To choose where to open a file instead of using the default, select it and
+press `Alt+A` or `F2`. The shared FILES menu offers native views and configured
+editors, as well as the desktop application. The menu appears over the finder;
+`Esc` dismisses only the menu, preserving the query and selection. Choosing an
+action closes the finder and targets the file's workspace. Files from another named
+session must first be opened in that session before using its FILES actions.
+
+## Filter the FILES dock
+
+Focus FILES with **`Ctrl+Space e`**, then press **`f`**. The dock lists fuzzy
+matches by workspace-relative path, including files in collapsed folders.
+Discovery uses the same bounded index as the finder: tracked and unignored
+Git files, or a bounded filesystem walk outside Git. It does not read file
+contents. The catalog is a snapshot for this filter; clear and reopen it to
+pick up newly created files (catalogs can be cached for two seconds).
+
+1. Type a path fragment; paste and Backspace also edit the query.
+2. Select a result with arrows or PageUp/PageDown.
+3. Press **`Enter`** to open its action menu, then choose how to open the file.
+   The search clears and the original tree position is restored.
+4. **`Esc`** cancels the search from either the query or the action menu and
+   restores the original tree. A further `Esc` returns focus to the pane.
+
+While typing, letters such as `a`, `j`, and `q` are query text. The dock shows
+loading, empty, and partial-result states. At most 200 results are displayed
+and the query is limited to 256 characters. Switching workspaces clears the
+filter and discards late results from the old workspace.
 
 With `luvus --remote`, all sources and sibling sessions come from that remote
 Luvus home. Local and remote catalogs are never mixed.

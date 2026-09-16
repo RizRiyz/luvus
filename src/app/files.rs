@@ -510,6 +510,23 @@ impl App {
         }
     }
 
+    /// Open an indexed file's shared action menu without depending on tree rows.
+    pub(crate) fn open_file_path_menu(&mut self, path: PathBuf, anchor: (u16, u16)) {
+        let mut menu = FileMenu {
+            path,
+            is_dir: false,
+            anchor,
+            items: Vec::new(),
+            selected: None,
+            editors: self.editors.clone(),
+        };
+        menu.selected = menu
+            .build_items()
+            .iter()
+            .position(|item| *item != FileMenuItem::Divider);
+        self.file_menu = Some(menu);
+    }
+
     /// Open the selected row's action menu with an initial keyboard selection.
     fn open_file_menu_for_keyboard(&mut self) {
         self.clamp_file_cursor();
@@ -536,7 +553,14 @@ impl App {
     }
 
     fn file_tree_page(&self) -> usize {
-        self.files_area.height.saturating_sub(1).max(1) as usize
+        self.files_area
+            .height
+            .saturating_sub(if self.file_tree.filter.is_some() {
+                3
+            } else {
+                1
+            })
+            .max(1) as usize
     }
 
     fn reveal_file_cursor(&mut self) {
@@ -617,8 +641,44 @@ impl App {
     /// Navigate the FILES tree while it owns keyboard focus. Returns to the
     /// pane before opening a file so its native view receives subsequent keys.
     pub fn handle_file_tree_key(&mut self, key: KeyEvent) -> bool {
+        if let Some(filter) = self.file_tree.filter.as_mut() {
+            match key.code {
+                KeyCode::Esc => self.file_tree.clear_filter(),
+                KeyCode::Enter => self.open_file_menu_for_keyboard(),
+                KeyCode::Backspace => {
+                    filter.query.pop();
+                    filter.recompute();
+                    self.file_tree.cursor = 0;
+                    self.file_tree.scroll = 0;
+                }
+                KeyCode::Char(ch)
+                    if !super::keys::is_ctrl_chord(key.modifiers)
+                        && (!key.modifiers.contains(KeyModifiers::ALT)
+                            || key.modifiers.contains(KeyModifiers::CONTROL)) =>
+                {
+                    filter.append(&ch.to_string());
+                    self.file_tree.cursor = 0;
+                    self.file_tree.scroll = 0;
+                }
+                KeyCode::Up => self.move_file_cursor(-1),
+                KeyCode::Down => self.move_file_cursor(1),
+                KeyCode::PageUp => self.move_file_cursor(-(self.file_tree_page() as isize)),
+                KeyCode::PageDown => self.move_file_cursor(self.file_tree_page() as isize),
+                _ => {}
+            }
+            return true;
+        }
         let page = self.file_tree_page() as isize;
         match key.code {
+            KeyCode::Char('f') if key.modifiers == KeyModifiers::NONE => {
+                self.file_tree.filter = Some(crate::files::filter::FileFilter::start(
+                    self.file_tree.root().to_path_buf(),
+                    self.app_tx.clone(),
+                    (self.file_tree.cursor, self.file_tree.scroll),
+                ));
+                self.file_tree.cursor = 0;
+                self.file_tree.scroll = 0;
+            }
             KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
             KeyCode::Up | KeyCode::Char('k') => self.move_file_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_file_cursor(1),
@@ -671,7 +731,7 @@ impl App {
             .filter_map(|(index, item)| (*item != FileMenuItem::Divider).then_some(index))
             .collect();
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.file_menu = None,
+            KeyCode::Esc | KeyCode::Char('q') => self.cancel_file_menu(),
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
                 if selectable.is_empty() {
                     return;
@@ -713,7 +773,16 @@ impl App {
         match hit {
             Some(FileMenuItem::Divider) => {}
             Some(it) => self.file_menu_action(it),
-            None => self.file_menu = None,
+            None => self.cancel_file_menu(),
+        }
+    }
+
+    fn cancel_file_menu(&mut self) {
+        self.file_menu = None;
+        if let Some(search) = self.search.as_mut() {
+            search.file_action = None;
+        } else {
+            self.file_tree.clear_filter();
         }
     }
 
@@ -725,6 +794,10 @@ impl App {
         let Some(menu) = self.file_menu.take() else {
             return;
         };
+        if self.search.is_some() && !self.finish_search_file_action(&menu.path) {
+            return;
+        }
+        self.file_tree.clear_filter();
         // New entries land *inside* a folder, or beside a clicked file.
         let dir = if menu.is_dir {
             menu.path.clone()
@@ -1380,6 +1453,101 @@ mod tests {
         app.files_area = ratatui::layout::Rect::new(0, 0, 30, 3);
         app.files_focused = true;
         root
+    }
+
+    #[test]
+    fn files_filter_finds_collapsed_paths_and_restores_tree_after_actions() {
+        let _env = crate::persist::test_env("files-filter-workflow");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("luvus-filter-workflow-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("nested/deep")).unwrap();
+        let path = root.join("nested/deep/unique_filter.rs");
+        std::fs::write(&path, "fixture").unwrap();
+        app.file_tree.set_root(root.clone());
+        app.file_tree.apply_dir(
+            root.clone(),
+            vec![crate::files::Entry {
+                name: "nested".into(),
+                is_dir: true,
+            }],
+        );
+        app.files_focused = true;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_file_tree_key(key(KeyCode::Char('f')));
+        assert!(app.handle_event(AppEvent::Paste("uq\nfltr".into())));
+        assert_eq!(app.file_tree.filter.as_ref().unwrap().query, "uqfltr");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.file_tree.filter.as_ref().unwrap().loading {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap();
+            app.handle_event(event);
+        }
+        assert_eq!(app.file_tree.visible_rows().len(), 1);
+        assert_eq!(app.file_tree.visible_rows()[0].path, path);
+        let rows = app.file_tree.visible_rows().to_vec();
+        app.handle_file_tree_key(key(KeyCode::Enter));
+        assert_eq!(app.file_menu.as_ref().unwrap().path, path);
+        app.handle_file_menu_key(key(KeyCode::Esc));
+        assert!(app.files_focused);
+        assert!(app.file_tree.filter.is_none());
+        assert_eq!(app.file_tree.visible_rows().len(), 1);
+        assert!(!app.file_tree.visible_rows()[0].expanded);
+        app.handle_file_tree_key(key(KeyCode::Char('f')));
+        let filter = app.file_tree.filter.as_ref().unwrap();
+        app.handle_event(AppEvent::FileFilterResults {
+            instance: filter.instance,
+            generation: filter.generation,
+            rows,
+            partial: false,
+        });
+        app.handle_file_tree_key(key(KeyCode::Enter));
+        app.file_menu_action_pub(FileMenuItem::OpenReadonly);
+        assert!(app.file_menu.is_none());
+        assert!(app.file_tree.filter.is_none());
+        assert!(!app.file_tree.visible_rows()[0].expanded);
+        assert!(!app.files_focused);
+        assert!(
+            matches!(app.views.get(&app.layout().focus), Some(ViewKind::File(view)) if view.path == path)
+        );
+        app.files_focused = true;
+        app.handle_file_tree_key(key(KeyCode::Char('f')));
+        app.handle_file_tree_key(key(KeyCode::Esc));
+        assert!(app.file_tree.filter.is_none());
+        assert!(app.files_focused);
+        app.handle_file_tree_key(key(KeyCode::Esc));
+        assert!(!app.files_focused);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn files_filter_rejects_stale_results_and_clears_on_workspace_change() {
+        let _env = crate::persist::test_env("files-filter-stale");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        seed_keyboard_tree(&mut app);
+        app.file_tree.cursor = 2;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        let filter = app.file_tree.filter.as_ref().unwrap();
+        let instance = filter.instance;
+        let generation = filter.generation;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.file_menu.is_none(), "letters edit the query");
+        let stale = || AppEvent::FileFilterResults {
+            instance,
+            generation,
+            rows: Vec::new(),
+            partial: true,
+        };
+        assert!(!app.handle_event(stale()));
+        assert!(app.file_tree.filter.as_ref().unwrap().loading);
+        app.file_tree.set_root(PathBuf::from("another-project"));
+        assert!(app.file_tree.filter.is_none());
+        assert!(!app.handle_event(stale()));
+        app.file_tree.set_root(PathBuf::from("keyboard-project"));
+        assert_eq!(app.file_tree.cursor, 2);
     }
 
     #[test]

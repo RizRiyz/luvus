@@ -1059,7 +1059,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         menu::draw_ws_menu(f, area, app, cat, &t);
     }
     // The FILES-dock context menu + its create/rename/delete modals (docs/38).
-    if app.file_menu.is_some() {
+    if app.file_menu.is_some() && app.search.is_none() {
         menu::draw_file_menu(f, area, app, cat, &t);
     }
     if app.diff_menu.is_some() {
@@ -1196,6 +1196,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // The global scrollback-search overlay (docs/63), above the chrome.
     if app.search.is_some() {
         search::draw_search(f, area, app, &t);
+        if app.file_menu.is_some() {
+            menu::draw_file_menu(f, area, app, cat, &t);
+        }
     }
     // A transient toast (e.g. "Copied") flashes on top of everything.
     if let Some((text, _)) = &app.toast {
