@@ -290,17 +290,24 @@ impl App {
     }
 
     /// Key handling while the PR detail panel is open.
-    fn handle_pr_detail_key(&mut self, key: KeyEvent) {
+    fn handle_pr_detail_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_pr_detail(),
-            KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
-            KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.git_scroll(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.git_scroll(-1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
             KeyCode::Char('r') => self.git_refresh_detail(),
             KeyCode::Char('o') => self.pr_detail_web(),
             KeyCode::Char('c') | KeyCode::Enter => self.pr_action("checkout"),
             KeyCode::Char('a') => self.pr_action("approve"),
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     // ── commit detail view (docs/17): `git show` in-tab, not in a pane ────────
@@ -359,26 +366,50 @@ impl App {
 
     /// Keys while the commit detail is open: `esc`/`q` back, `j`/`k` scroll,
     /// `o` open the commit on GitHub.
-    fn handle_commit_detail_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.git_close_commit_detail(),
-            KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
-            KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
-            KeyCode::PageUp => self.git_scroll(-self.git_page_size()),
-            KeyCode::PageDown => self.git_scroll(self.git_page_size()),
+    fn handle_commit_detail_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
+        let repeat_safe = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.git_close_commit_detail();
+                false
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.git_scroll(1);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.git_scroll(-1);
+                true
+            }
+            KeyCode::PageUp => {
+                self.git_scroll(-self.git_page_size());
+                true
+            }
+            KeyCode::PageDown => {
+                self.git_scroll(self.git_page_size());
+                true
+            }
             KeyCode::Char('g') | KeyCode::Home => {
                 if let Some(g) = self.active_git_mut() {
                     g.scroll = 0;
                 }
+                true
             }
             KeyCode::Char('G') | KeyCode::End => {
                 if let Some(g) = self.active_git_mut() {
                     g.scroll = usize::MAX; // clamped in render
                 }
+                true
             }
-            KeyCode::Char('o') => self.commit_open_web(),
-            _ => {}
+            KeyCode::Char('o') => {
+                self.commit_open_web();
+                false
+            }
+            _ => false,
+        };
+        if repeat_safe {
+            return crate::app::UiRepeatDisposition::Reprocess;
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// `o` in the commit detail: open the commit's page on GitHub. Only meaningful
@@ -598,26 +629,50 @@ impl App {
     }
 
     /// Keys while the issue detail is open: `esc`/`q` back, `j`/`k` scroll, `o` web.
-    fn handle_issue_detail_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.git_close_issue_detail(),
-            KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
-            KeyCode::Char('k') | KeyCode::Up => self.git_scroll(-1),
-            KeyCode::PageUp => self.git_scroll(-self.git_page_size()),
-            KeyCode::PageDown => self.git_scroll(self.git_page_size()),
+    fn handle_issue_detail_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
+        let repeat_safe = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.git_close_issue_detail();
+                false
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.git_scroll(1);
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.git_scroll(-1);
+                true
+            }
+            KeyCode::PageUp => {
+                self.git_scroll(-self.git_page_size());
+                true
+            }
+            KeyCode::PageDown => {
+                self.git_scroll(self.git_page_size());
+                true
+            }
             KeyCode::Char('g') | KeyCode::Home => {
                 if let Some(g) = self.active_git_mut() {
                     g.scroll = 0;
                 }
+                true
             }
             KeyCode::Char('G') | KeyCode::End => {
                 if let Some(g) = self.active_git_mut() {
                     g.scroll = usize::MAX;
                 }
+                true
             }
-            KeyCode::Char('o') => self.issue_detail_web(),
-            _ => {}
+            KeyCode::Char('o') => {
+                self.issue_detail_web();
+                false
+            }
+            _ => false,
+        };
+        if repeat_safe {
+            return crate::app::UiRepeatDisposition::Reprocess;
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// `s`: cycle the PR/Issue state filter and re-fetch. PRs cycle open → closed
@@ -745,8 +800,9 @@ impl App {
     }
 
     /// Key handling while a git tab is focused.
-    pub fn handle_git_key(&mut self, key: KeyEvent) {
+    pub fn handle_git_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         // Filter-input sub-mode.
+        let mut filter_repeat_safe = false;
         if let Some(g) = self.active_git_mut() {
             if g.filtering {
                 match key.code {
@@ -757,66 +813,143 @@ impl App {
                     KeyCode::Enter => g.filtering = false,
                     KeyCode::Backspace => {
                         g.filter.pop();
+                        filter_repeat_safe = true;
                     }
-                    KeyCode::Char(c) => g.filter.push(c),
+                    KeyCode::Char(c) => {
+                        g.filter.push(c);
+                        filter_repeat_safe =
+                            !super::keys::is_ctrl_chord(key.modifiers) && !c.is_control();
+                    }
                     _ => {}
                 }
                 g.cursor = 0;
-                return;
+                if filter_repeat_safe {
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
+                return crate::app::UiRepeatDisposition::Suppress;
             }
         }
         // The PR detail panel captures keys while open.
         if self.active_git().is_some_and(|g| g.open_pr.is_some()) {
-            self.handle_pr_detail_key(key);
-            return;
+            return self.handle_pr_detail_key(key);
         }
         // The commit detail view captures keys while open (docs/17).
         if self.active_git().is_some_and(|g| g.open_commit.is_some()) {
-            self.handle_commit_detail_key(key);
-            return;
+            return self.handle_commit_detail_key(key);
         }
         // The issue detail view captures keys while open (docs/17).
         if self.active_git().is_some_and(|g| g.open_issue.is_some()) {
-            self.handle_issue_detail_key(key);
-            return;
+            return self.handle_issue_detail_key(key);
         }
-        match key.code {
-            KeyCode::Char('j') => self.git_scroll(1),
-            KeyCode::Char('k') => self.git_scroll(-1),
+        let repeat_safe = match key.code {
+            KeyCode::Char('j') => {
+                self.git_scroll(1);
+                true
+            }
+            KeyCode::Char('k') => {
+                self.git_scroll(-1);
+                true
+            }
             KeyCode::Down if self.active_git().map(|g| g.section) == Some(Section::Status) => {
-                self.git_status_move(1)
+                self.git_status_move(1);
+                true
             }
             KeyCode::Up if self.active_git().map(|g| g.section) == Some(Section::Status) => {
-                self.git_status_move(-1)
+                self.git_status_move(-1);
+                true
             }
-            KeyCode::Down => self.git_scroll(1),
-            KeyCode::Up => self.git_scroll(-1),
-            KeyCode::Char('g') | KeyCode::Home => self.git_set_cursor(0),
-            KeyCode::Char('G') | KeyCode::End => self.git_set_cursor(usize::MAX),
-            KeyCode::Tab | KeyCode::Right => self.git_switch(true),
-            KeyCode::BackTab | KeyCode::Left => self.git_switch(false),
-            KeyCode::Char(c @ '1'..='6') => self.git_set_section(c as usize - '1' as usize),
+            KeyCode::Down => {
+                self.git_scroll(1);
+                true
+            }
+            KeyCode::Up => {
+                self.git_scroll(-1);
+                true
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.git_set_cursor(0);
+                true
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.git_set_cursor(usize::MAX);
+                true
+            }
+            KeyCode::Right => {
+                self.git_switch(true);
+                true
+            }
+            KeyCode::Left => {
+                self.git_switch(false);
+                true
+            }
+            KeyCode::Tab => {
+                self.git_switch(true);
+                false
+            }
+            KeyCode::BackTab => {
+                self.git_switch(false);
+                false
+            }
+            KeyCode::Char(c @ '1'..='6') => {
+                self.git_set_section(c as usize - '1' as usize);
+                false
+            }
             KeyCode::Char('/') => {
                 if let Some(g) = self.active_git_mut() {
                     g.filtering = true;
                     g.filter.clear();
                 }
+                false
             }
-            KeyCode::Char('r') => self.git_refresh(),
-            KeyCode::Char('o') => self.git_open_web(),
-            KeyCode::Char('d') => self.git_diff(),
-            KeyCode::Char('m') => self.git_toggle_scope(),
+            KeyCode::Char('r') => {
+                self.git_refresh();
+                false
+            }
+            KeyCode::Char('o') => {
+                self.git_open_web();
+                false
+            }
+            KeyCode::Char('d') => {
+                self.git_diff();
+                false
+            }
+            KeyCode::Char('m') => {
+                self.git_toggle_scope();
+                false
+            }
             // Status view: `x` reveals contributor emails (hidden by default),
             // `E` expands the contributor list to every author.
-            KeyCode::Char('x') => self.git_toggle_emails(),
-            KeyCode::Char('E') => self.git_toggle_contributors(),
+            KeyCode::Char('x') => {
+                self.git_toggle_emails();
+                false
+            }
+            KeyCode::Char('E') => {
+                self.git_toggle_contributors();
+                false
+            }
             // `s` cycles the open/closed/all filter (PRs + Issues).
-            KeyCode::Char('s') => self.git_toggle_state(),
-            KeyCode::Char('c') => self.git_run_in_pane("gh pr create".to_string()),
-            KeyCode::Enter => self.git_activate(),
-            KeyCode::Esc | KeyCode::Char('q') => self.close_git_tab(),
-            _ => {}
+            KeyCode::Char('s') => {
+                self.git_toggle_state();
+                false
+            }
+            KeyCode::Char('c') => {
+                self.git_run_in_pane("gh pr create".to_string());
+                false
+            }
+            KeyCode::Enter => {
+                self.git_activate();
+                false
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_git_tab();
+                false
+            }
+            _ => false,
+        };
+        if repeat_safe {
+            return crate::app::UiRepeatDisposition::Reprocess;
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Run `cmd` in the workspace's first terminal pane (GIT-3): switch to a pane tab,
@@ -1787,10 +1920,21 @@ mod tests {
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
-        // Status scrolls as a block (offset moves, not a cursor).
+        // Status scrolls as a block (`j`/`k`), while arrows move the explicit
+        // changed-file selection used by diff activation.
         app.git_scroll(3);
         assert_eq!(app.active_git().unwrap().scroll, 3);
         assert_eq!(app.active_git().unwrap().cursor, 0);
+        assert!(app.git_status_selected_file().is_none());
+        app.handle_git_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.active_git().unwrap().scroll, 4);
+        assert!(app.git_status_selected_file().is_none());
+        app.handle_git_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.active_git().unwrap().scroll, 4);
+        assert_eq!(
+            app.git_status_selected_file(),
+            Some(("f0.rs".to_string(), false))
+        );
 
         // An over-scroll is clamped to the content during render.
         if let Some(g) = app.active_git_mut() {

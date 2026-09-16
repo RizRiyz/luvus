@@ -376,7 +376,7 @@ impl App {
     /// into the filter, arrows move, `Tab` cycles scope, `⏎` activates. `Esc`
     /// clears a non-empty filter first, then closes. Because it is a filter box,
     /// letters (including `j`/`k`) type rather than navigate — use the arrows.
-    pub fn switcher_key(&mut self, key: KeyEvent) {
+    pub fn switcher_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let targets = self.switcher_targets();
         let n = targets.len();
         match key.code {
@@ -391,11 +391,13 @@ impl App {
             }
             KeyCode::Up => {
                 self.switcher_cursor = self.switcher_cursor.saturating_sub(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Down => {
                 if n > 0 {
                     self.switcher_cursor = (self.switcher_cursor + 1).min(n - 1);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Tab => {
                 let next = self.switcher_scope.next();
@@ -410,14 +412,19 @@ impl App {
                 self.switcher_query.pop();
                 self.switcher_cursor = 0;
                 self.switcher_scroll = 0;
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char(c) if !super::keys::is_ctrl_chord(key.modifiers) => {
                 self.switcher_query.push(c);
                 self.switcher_cursor = 0;
                 self.switcher_scroll = 0;
+                if !c.is_control() {
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// A click on a scope chip switches scope; returns whether one was hit.

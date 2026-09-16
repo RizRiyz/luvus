@@ -2254,6 +2254,94 @@ impl MenuScroll {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ForwardedKeyPress {
+    pane: PaneId,
+    press: KeyEvent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum UiRepeatDisposition {
+    #[default]
+    Suppress,
+    Reprocess,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct KeyDispatch {
+    pub(super) changed: bool,
+    pub(super) repeat: UiRepeatDisposition,
+}
+
+impl KeyDispatch {
+    pub(super) const fn new(changed: bool, repeat: UiRepeatDisposition) -> Self {
+        Self { changed, repeat }
+    }
+
+    pub(super) const fn suppress(changed: bool) -> Self {
+        Self::new(changed, UiRepeatDisposition::Suppress)
+    }
+
+    pub(super) const fn reprocess(changed: bool) -> Self {
+        Self::new(changed, UiRepeatDisposition::Reprocess)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UiRepeatLease {
+    context: UiRepeatContext,
+    press: KeyEvent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UiRepeatContext {
+    CommandInspect,
+    Help,
+    Changelog,
+    ModuleSetting,
+    NamedSessions,
+    NamedSessionPrompt,
+    SessionMenu,
+    Settings,
+    Search(u64),
+    PickerText,
+    PickerList,
+    WorktreePrompt,
+    WorktreeList,
+    TabRename,
+    TabMenu,
+    WorkspaceMenu,
+    PaneMenu,
+    AgentMenu,
+    FilePrompt,
+    FileMenu,
+    DiffMenu,
+    Switcher,
+    PaneRename,
+    WorkspaceRename,
+    OrchForm(OrchFormField),
+    OrchStart,
+    OrchDetail,
+    Scroll(PaneId),
+    Copy(PaneId),
+    Resize(PaneId),
+    Sidebar(SidebarListFocus),
+    Files(crate::diff::FilesMode),
+    GitFilter,
+    GitDetail,
+    Git,
+    Orch,
+    MissionAnswer,
+    Mission,
+    FileView(PaneId),
+    FileSearch(PaneId),
+    DiffView(PaneId),
+    DiffNoteSelect(PaneId),
+    DiffText(PaneId),
+    Preview(PaneId),
+    PreviewSearch(PaneId),
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// One random value for this server lifetime. Harness runtimes from an old
@@ -2316,6 +2404,17 @@ pub struct App {
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
     /// authoritative unless the user opts a chord into Luvus handling.
     pub direct_keymap: keys::DirectKeymap,
+    /// Presses forwarded to a pane. The client id is part of the identity
+    /// because multiple active displays may hold the same key concurrently;
+    /// local monolithic input uses `None`. The original event lets client
+    /// teardown release Kitty keys; Legacy releases encode no bytes.
+    forwarded_key_presses: HashMap<(Option<u64>, KeyCode, bool), ForwardedKeyPress>,
+    /// UI-owned presses whose Repeat may be reprocessed while the same input
+    /// receiver remains active. Like pane ownership, leases are client-scoped.
+    ui_repeat_leases: HashMap<(Option<u64>, KeyCode, bool), UiRepeatLease>,
+    /// Transient source for one server-routed input event. Never persisted or
+    /// exposed on the wire; reset immediately after dispatch.
+    input_client_id: Option<u64>,
     /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
     pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
@@ -3100,6 +3199,9 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            forwarded_key_presses: HashMap::new(),
+            ui_repeat_leases: HashMap::new(),
+            input_client_id: None,
             prefix,
             agent_names: HashMap::new(),
             settings: None,
@@ -3779,6 +3881,9 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            forwarded_key_presses: HashMap::new(),
+            ui_repeat_leases: HashMap::new(),
+            input_client_id: None,
             prefix,
             agent_names,
             settings: None,
@@ -4372,26 +4477,34 @@ impl App {
     }
 
     /// Keyboard navigation for WORKSPACES, mirroring FILES and DIFF.
-    pub fn handle_workspaces_key(&mut self, key: KeyEvent) -> bool {
+    pub fn handle_workspaces_key(&mut self, key: KeyEvent) -> crate::app::KeyDispatch {
         let order = self.workspace_display_order();
         let page = (usize::from(self.workspaces_area.height) / 2).max(1) as isize;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
             KeyCode::Up | KeyCode::Char('k') => {
-                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -1)
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -1);
+                return crate::app::KeyDispatch::reprocess(true);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), 1)
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), 1);
+                return crate::app::KeyDispatch::reprocess(true);
             }
             KeyCode::PageUp => {
-                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -page)
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -page);
+                return crate::app::KeyDispatch::reprocess(true);
             }
             KeyCode::PageDown => {
-                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), page)
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), page);
+                return crate::app::KeyDispatch::reprocess(true);
             }
-            KeyCode::Home | KeyCode::Char('g') => self.workspace_cursor = 0,
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.workspace_cursor = 0;
+                return crate::app::KeyDispatch::reprocess(true);
+            }
             KeyCode::End | KeyCode::Char('G') => {
-                self.workspace_cursor = order.len().saturating_sub(1)
+                self.workspace_cursor = order.len().saturating_sub(1);
+                return crate::app::KeyDispatch::reprocess(true);
             }
             KeyCode::Enter => {
                 if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
@@ -4418,28 +4531,40 @@ impl App {
             }
             _ => {}
         }
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 
     /// Keyboard navigation for AGENTS. `f` changes All/Active and `s` changes
     /// workspace scope; row activation matches the existing mouse behavior.
-    pub fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
+    pub fn handle_agents_key(&mut self, key: KeyEvent) -> crate::app::KeyDispatch {
         let rows = self.agent_dock_targets();
         let page = (usize::from(self.agents_area.height) / 2).max(1) as isize;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
             KeyCode::Up | KeyCode::Char('k') => {
-                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -1)
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -1);
+                return crate::app::KeyDispatch::reprocess(true);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), 1)
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), 1);
+                return crate::app::KeyDispatch::reprocess(true);
             }
-            KeyCode::PageUp => Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -page),
+            KeyCode::PageUp => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -page);
+                return crate::app::KeyDispatch::reprocess(true);
+            }
             KeyCode::PageDown => {
-                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), page)
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), page);
+                return crate::app::KeyDispatch::reprocess(true);
             }
-            KeyCode::Home | KeyCode::Char('g') => self.agent_cursor = 0,
-            KeyCode::End | KeyCode::Char('G') => self.agent_cursor = rows.len().saturating_sub(1),
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.agent_cursor = 0;
+                return crate::app::KeyDispatch::reprocess(true);
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.agent_cursor = rows.len().saturating_sub(1);
+                return crate::app::KeyDispatch::reprocess(true);
+            }
             KeyCode::Char('f') => {
                 self.set_agents_filter(!self.agents_active_only);
                 self.agent_cursor = 0;
@@ -4461,7 +4586,7 @@ impl App {
             }
             _ => {}
         }
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 
     fn activate_agent_dock_target(&mut self, target: AgentDockTarget) {
@@ -5526,7 +5651,7 @@ impl App {
 
     /// Key handling while the tab-rename modal is open. `Enter` commits (an empty
     /// name clears the custom name, reverting to the number); `Esc` cancels.
-    pub fn handle_tab_rename_key(&mut self, key: KeyEvent) {
+    pub fn handle_tab_rename_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         match key.code {
             KeyCode::Esc => self.tab_rename = None,
             KeyCode::Enter => {
@@ -5543,6 +5668,7 @@ impl App {
                 if let Some(r) = self.tab_rename.as_mut() {
                     r.buffer.pop();
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char(c) => {
                 if let Some(r) = self.tab_rename.as_mut() {
@@ -5550,9 +5676,13 @@ impl App {
                         r.buffer.push(c);
                     }
                 }
+                if !keys::is_ctrl_chord(key.modifiers) && !c.is_control() {
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     // ── tab context menu (right-click a tab) ──
@@ -6078,7 +6208,7 @@ impl App {
     /// Key handling while the pane-rename modal is open. `Enter` applies the name
     /// (empty clears it), `Esc` cancels. Typing is restricted to the addressable
     /// grammar, so the buffer is always a valid name.
-    pub fn handle_pane_rename_key(&mut self, key: KeyEvent) {
+    pub fn handle_pane_rename_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         match key.code {
             KeyCode::Esc => self.pane_rename = None,
             KeyCode::Enter => {
@@ -6091,6 +6221,7 @@ impl App {
                 if let Some(r) = self.pane_rename.as_mut() {
                     r.buffer.pop();
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char(c) => {
                 if let Some(r) = self.pane_rename.as_mut() {
@@ -6101,17 +6232,21 @@ impl App {
                     let first_ok = !r.buffer.is_empty() || c.is_ascii_lowercase();
                     if char_ok && first_ok && r.buffer.chars().count() < PANE_NAME_MAX {
                         r.buffer.push(c);
+                        if !keys::is_ctrl_chord(key.modifiers) && !c.is_control() {
+                            return crate::app::UiRepeatDisposition::Reprocess;
+                        }
                     }
                 }
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Key handling while the workspace-rename modal is open (mirrors tab rename).
     /// `Enter` commits a non-empty name (the on-disk folder is never renamed);
     /// `Esc` cancels.
-    pub fn handle_ws_rename_key(&mut self, key: KeyEvent) {
+    pub fn handle_ws_rename_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         match key.code {
             KeyCode::Esc => self.ws_rename = None,
             KeyCode::Enter => {
@@ -6129,6 +6264,7 @@ impl App {
                 if let Some(r) = self.ws_rename.as_mut() {
                     r.buffer.pop();
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char(c) => {
                 if let Some(r) = self.ws_rename.as_mut() {
@@ -6136,17 +6272,21 @@ impl App {
                         r.buffer.push(c);
                     }
                 }
+                if !keys::is_ctrl_chord(key.modifiers) && !c.is_control() {
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Keyboard navigation for the workspace context menu. Dividers are skipped;
     /// mouse-opened menus acquire a selection on the first navigation key.
-    pub fn handle_ws_menu_key(&mut self, key: KeyEvent) {
+    pub fn handle_ws_menu_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let Some(index) = self.ws_menu_target_index() else {
             self.ws_menu = None;
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         };
         let items = self.ws_menu_items(index);
         let selectable: Vec<usize> = items
@@ -6158,7 +6298,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.ws_menu = None,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
                 if selectable.is_empty() {
-                    return;
+                    return crate::app::UiRepeatDisposition::Suppress;
                 }
                 let current = self
                     .ws_menu
@@ -6175,6 +6315,7 @@ impl App {
                 if let Some(menu) = self.ws_menu.as_mut() {
                     menu.selected = Some(selectable[next]);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Enter => {
                 let selected = self.ws_menu.as_ref().and_then(|menu| menu.selected);
@@ -6184,6 +6325,7 @@ impl App {
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// Open the pane context menu (split / close) for `pane`, anchored at the
@@ -6703,9 +6845,9 @@ impl App {
 
     /// Keyboard navigation for the AGENTS menu, with the same wrapping and
     /// divider-skipping behavior as FILES and DIFF menus.
-    pub fn handle_agent_menu_key(&mut self, key: KeyEvent) {
+    pub fn handle_agent_menu_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let Some(target) = self.agent_menu.as_ref().map(|menu| menu.target.clone()) else {
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         };
         let items = self.agent_menu_items(target);
         let selectable: Vec<usize> = items
@@ -6717,7 +6859,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.agent_menu = None,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
                 if selectable.is_empty() {
-                    return;
+                    return crate::app::UiRepeatDisposition::Suppress;
                 }
                 let current = self
                     .agent_menu
@@ -6734,6 +6876,7 @@ impl App {
                 if let Some(menu) = self.agent_menu.as_mut() {
                     menu.selected = Some(selectable[next]);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Enter => {
                 let selected = self.agent_menu.as_ref().and_then(|menu| menu.selected);
@@ -6743,6 +6886,7 @@ impl App {
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     pub fn open_session_menu(
@@ -6813,15 +6957,15 @@ impl App {
         }
     }
 
-    pub fn handle_session_menu_key(&mut self, key: KeyEvent) {
+    pub fn handle_session_menu_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let Some(actions) = self.session_menu.as_ref().map(|menu| menu.actions.clone()) else {
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         };
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.session_menu = None,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
                 if actions.is_empty() {
-                    return;
+                    return crate::app::UiRepeatDisposition::Suppress;
                 }
                 let current = self.session_menu.as_ref().and_then(|menu| menu.selected);
                 let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
@@ -6834,6 +6978,7 @@ impl App {
                 if let Some(menu) = self.session_menu.as_mut() {
                     menu.selected = Some(next);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Enter => {
                 let selected = self.session_menu.as_ref().and_then(|menu| menu.selected);
@@ -6843,6 +6988,7 @@ impl App {
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     fn stop_named_session(&mut self, name: String) {
@@ -6932,7 +7078,7 @@ impl App {
     }
 
     /// Key handling while the new-worktree prompt is open.
-    pub fn handle_worktree_prompt_key(&mut self, key: KeyEvent) {
+    pub fn handle_worktree_prompt_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         match key.code {
             KeyCode::Esc => {
                 self.worktree_prompt = None;
@@ -6963,15 +7109,20 @@ impl App {
                     b.pop();
                 }
                 self.worktree_error = None;
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char(c) => {
                 if let Some(b) = self.worktree_prompt.as_mut() {
                     b.push(c);
                 }
                 self.worktree_error = None;
+                if !keys::is_ctrl_chord(key.modifiers) && !c.is_control() {
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// The workspace menu's "Open Worktree": list every checkout of the repo at
@@ -7074,15 +7225,20 @@ impl App {
     /// Keys for the open-worktree list modal: ↑/↓ (or k/j) move, ⏎ opens the
     /// highlighted checkout — focusing the existing workspace when it's already
     /// open, a worktree is one place — esc closes.
-    pub fn handle_worktree_open_key(&mut self, key: KeyEvent) {
+    pub fn handle_worktree_open_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let Some(list) = self.worktree_open.as_mut() else {
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         };
+        let mut repeat_safe = false;
         match key.code {
             KeyCode::Esc => self.close_worktree_list(),
-            KeyCode::Up | KeyCode::Char('k') => list.cursor = list.cursor.saturating_sub(1),
+            KeyCode::Up | KeyCode::Char('k') => {
+                list.cursor = list.cursor.saturating_sub(1);
+                repeat_safe = true;
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 list.cursor = (list.cursor + 1).min(list.entries.len().saturating_sub(1));
+                repeat_safe = true;
             }
             // Nothing to pick yet; the rows are still being listed.
             KeyCode::Enter if list.loading => {}
@@ -7099,6 +7255,10 @@ impl App {
             }
             _ => {}
         }
+        if repeat_safe {
+            return crate::app::UiRepeatDisposition::Reprocess;
+        }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// A click on open-worktree list row `i`: highlight it, then open it by the
@@ -7873,6 +8033,7 @@ impl App {
             self.agent_usage.remove(&key);
             self.usage_mtimes.remove(&key);
         }
+        self.forwarded_key_presses.retain(|_, held| held.pane != id);
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);
@@ -15757,6 +15918,16 @@ mod tests {
         // `mission_rows`, so it's set now.)
         app.handle_mission_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(app.mission_detail.is_some(), "detail overlay opened");
+        let selected = app.mission_cursor;
+        assert_eq!(
+            app.handle_mission_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            UiRepeatDisposition::Suppress
+        );
+        assert_eq!(
+            app.mission_cursor, selected,
+            "detail overlay owns navigation instead of moving the hidden list"
+        );
+        assert!(app.mission_detail.is_some(), "navigation keeps detail open");
         app.handle_mission_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.mission_detail.is_none(), "detail overlay closed");
     }

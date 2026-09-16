@@ -171,7 +171,11 @@ impl App {
         true
     }
 
-    pub fn handle_preview_key(&mut self, id: PaneId, key_event: KeyEvent) -> bool {
+    pub fn handle_preview_key(
+        &mut self,
+        id: PaneId,
+        key_event: KeyEvent,
+    ) -> crate::app::KeyDispatch {
         let rect = self
             .pane_content_rects
             .iter()
@@ -186,32 +190,78 @@ impl App {
             .unwrap_or(20)
             .max(1);
         let Some(ViewKind::Preview(view)) = self.views.get_mut(&id) else {
-            return false;
+            return crate::app::KeyDispatch::suppress(false);
         };
         if view.search.as_ref().is_some_and(|search| search.editing) {
-            match key_event.code {
-                KeyCode::Char(ch) => view.search_push(ch),
-                KeyCode::Backspace => view.search_backspace(),
-                KeyCode::Enter => view.search_commit(layout_key, viewport),
-                KeyCode::Esc => view.search_cancel(),
-                _ => return false,
+            let repeat_safe = match key_event.code {
+                KeyCode::Char(ch) => {
+                    view.search_push(ch);
+                    !super::keys::is_ctrl_chord(key_event.modifiers) && !ch.is_control()
+                }
+                KeyCode::Backspace => {
+                    view.search_backspace();
+                    true
+                }
+                KeyCode::Enter => {
+                    view.search_commit(layout_key, viewport);
+                    false
+                }
+                KeyCode::Esc => {
+                    view.search_cancel();
+                    false
+                }
+                _ => return crate::app::KeyDispatch::suppress(false),
+            };
+            if repeat_safe {
+                return crate::app::KeyDispatch::reprocess(true);
             }
-            return true;
+            return crate::app::KeyDispatch::suppress(true);
         }
-        match key_event.code {
-            KeyCode::Char('j') | KeyCode::Down => view.scroll_by(1, viewport, layout_key),
-            KeyCode::Char('k') | KeyCode::Up => view.scroll_by(-1, viewport, layout_key),
-            KeyCode::Char('d') => view.scroll_by(viewport as i32 / 2, viewport, layout_key),
-            KeyCode::Char('u') => view.scroll_by(-(viewport as i32) / 2, viewport, layout_key),
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                view.scroll_by(viewport as i32, viewport, layout_key)
+        let repeat_safe = match key_event.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                view.scroll_by(1, viewport, layout_key);
+                true
             }
-            KeyCode::PageUp => view.scroll_by(-(viewport as i32), viewport, layout_key),
-            KeyCode::Char('g') | KeyCode::Home => view.scroll = 0,
-            KeyCode::Char('G') | KeyCode::End => view.goto_bottom(viewport, layout_key),
-            KeyCode::Char('/') => view.search_begin(),
-            KeyCode::Char('n') => view.search_step(true, viewport),
-            KeyCode::Char('N') => view.search_step(false, viewport),
+            KeyCode::Char('k') | KeyCode::Up => {
+                view.scroll_by(-1, viewport, layout_key);
+                true
+            }
+            KeyCode::Char('d') => {
+                view.scroll_by(viewport as i32 / 2, viewport, layout_key);
+                true
+            }
+            KeyCode::Char('u') => {
+                view.scroll_by(-(viewport as i32) / 2, viewport, layout_key);
+                true
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                view.scroll_by(viewport as i32, viewport, layout_key);
+                true
+            }
+            KeyCode::PageUp => {
+                view.scroll_by(-(viewport as i32), viewport, layout_key);
+                true
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                view.scroll = 0;
+                true
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                view.goto_bottom(viewport, layout_key);
+                true
+            }
+            KeyCode::Char('/') => {
+                view.search_begin();
+                false
+            }
+            KeyCode::Char('n') => {
+                view.search_step(true, viewport);
+                true
+            }
+            KeyCode::Char('N') => {
+                view.search_step(false, viewport);
+                true
+            }
             KeyCode::Char('y') | KeyCode::Char('c') => {
                 let text = view.document().map(|document| document.source.to_string());
                 if let Some(text) = text {
@@ -221,19 +271,26 @@ impl App {
                 } else {
                     self.show_toast("nothing to copy");
                 }
-                return true;
+                return crate::app::KeyDispatch::suppress(true);
             }
-            KeyCode::Char('q') => self.close_pane(id),
+            KeyCode::Char('q') => {
+                self.close_pane(id);
+                false
+            }
             KeyCode::Esc => {
                 if view.search.is_some() {
                     view.search_cancel();
                 } else {
                     self.close_pane(id);
                 }
+                false
             }
-            _ => return false,
+            _ => return crate::app::KeyDispatch::suppress(false),
+        };
+        if repeat_safe {
+            return crate::app::KeyDispatch::reprocess(true);
         }
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 
     /// Activate a rendered link only after an explicit modified click. Web

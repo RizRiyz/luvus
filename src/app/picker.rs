@@ -614,7 +614,7 @@ impl App {
     }
 
     /// Key handling while the folder picker is open.
-    pub fn handle_picker_key(&mut self, key: KeyEvent) {
+    pub fn handle_picker_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         // New-folder name input sub-mode.
         if let Some(p) = self.picker.as_mut() {
             if let Some(buf) = p.creating.as_mut() {
@@ -627,16 +627,21 @@ impl App {
                         let name = buf.clone();
                         self.picker_create_folder(name);
                     }
-                    _ if is_word_delete_key(key) => delete_last_path_word(buf),
+                    _ if is_word_delete_key(key) => {
+                        delete_last_path_word(buf);
+                        return crate::app::UiRepeatDisposition::Reprocess;
+                    }
                     KeyCode::Backspace => {
                         buf.pop();
+                        return crate::app::UiRepeatDisposition::Reprocess;
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         buf.push(c);
+                        return crate::app::UiRepeatDisposition::Reprocess;
                     }
                     _ => {}
                 }
-                return;
+                return crate::app::UiRepeatDisposition::Suppress;
             }
         }
         if self.picker.as_ref().is_some_and(|p| p.going_to.is_some()) {
@@ -669,6 +674,7 @@ impl App {
                         p.error = None;
                     }
                     self.invalidate_go_to_completion();
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Backspace => {
                     if let Some(p) = self.picker.as_mut() {
@@ -678,6 +684,7 @@ impl App {
                         p.error = None;
                     }
                     self.invalidate_go_to_completion();
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(p) = self.picker.as_mut() {
@@ -687,17 +694,24 @@ impl App {
                         p.error = None;
                     }
                     self.invalidate_go_to_completion();
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
                 _ => {}
             }
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         }
         match key.code {
             KeyCode::Tab | KeyCode::BackTab if self.client_machine_capable => {
                 self.picker_open_remote_machine()
             }
-            KeyCode::Char('j') | KeyCode::Down => self.picker_move(1),
-            KeyCode::Char('k') | KeyCode::Up => self.picker_move(-1),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.picker_move(1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.picker_move(-1);
+                return crate::app::UiRepeatDisposition::Reprocess;
+            }
             KeyCode::Left | KeyCode::Backspace | KeyCode::Char('h') => self.picker_up(),
             KeyCode::Right | KeyCode::Char('l') => self.picker_descend(),
             KeyCode::Enter => self.picker_activate(),
@@ -716,6 +730,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.close_folder_picker(),
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     fn picker_move(&mut self, delta: i32) {
@@ -1052,6 +1067,23 @@ mod tests {
         assert!(matches!(p.row(2), Row::Home));
         assert!(matches!(p.row(3), Row::Up));
         assert!(matches!(p.row(4), Row::Entry(0)));
+    }
+
+    #[test]
+    fn picker_home_navigates_once_without_acquiring_a_repeat_lease() {
+        let _env = crate::persist::test_env("picker-home-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let home = crate::platform::home_dir().expect("test home");
+        let elsewhere = std::env::temp_dir().join("luvus-picker-home-repeat");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        app.open_folder_picker_at(elsewhere);
+
+        assert_eq!(
+            app.handle_picker_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            crate::app::UiRepeatDisposition::Suppress
+        );
+        assert_eq!(app.picker.as_ref().unwrap().path, home);
     }
 
     #[test]
@@ -1675,6 +1707,55 @@ mod tests {
     }
 
     #[test]
+    fn picker_word_delete_repeats_in_both_text_modes() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("picker-word-delete-repeat");
+        let tmp = complete_fixture("word-delete-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let event = |code, modifiers, kind| {
+            crate::event::AppEvent::Key(KeyEvent::new_with_kind(code, modifiers, kind))
+        };
+
+        app.open_folder_picker_at(tmp.clone());
+        app.picker.as_mut().unwrap().creating = Some("one/two/three".into());
+        assert!(app.handle_event(event(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )));
+        assert!(app.handle_event(event(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+        assert_eq!(
+            app.picker.as_ref().unwrap().creating.as_deref(),
+            Some("one/")
+        );
+
+        app.picker.as_mut().unwrap().creating = None;
+        app.picker.as_mut().unwrap().going_to = Some("one/two/three".into());
+        assert!(app.handle_event(event(
+            KeyCode::Backspace,
+            KeyModifiers::ALT,
+            KeyEventKind::Press,
+        )));
+        assert!(app.handle_event(event(
+            KeyCode::Backspace,
+            KeyModifiers::ALT,
+            KeyEventKind::Repeat,
+        )));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("one/")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn go_to_tab_completes_folders_without_opening() {
         let _env = crate::persist::test_env("picker-go-to-tab");
         let tmp = complete_fixture("app-tab");
@@ -2029,10 +2110,10 @@ mod tests {
 
             match scenario {
                 "typed" => {
-                    app.handle_picker_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
                 }
                 "deleted" => {
-                    app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
                 }
                 // Row 3 outside a repo is the first entry: `other`.
                 "navigated" => {
@@ -2044,7 +2125,7 @@ mod tests {
                     app.picker_click(row);
                 }
                 "cancelled" => {
-                    app.handle_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+                    app.handle_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
                 }
                 "closed" => app.close_folder_picker(),
                 _ => unreachable!(),

@@ -616,26 +616,52 @@ impl App {
 
     /// Navigate the FILES tree while it owns keyboard focus. Returns to the
     /// pane before opening a file so its native view receives subsequent keys.
-    pub fn handle_file_tree_key(&mut self, key: KeyEvent) -> bool {
+    pub fn handle_file_tree_key(&mut self, key: KeyEvent) -> crate::app::KeyDispatch {
         let page = self.file_tree_page() as isize;
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
-            KeyCode::Up | KeyCode::Char('k') => self.move_file_cursor(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_file_cursor(1),
-            KeyCode::PageUp => self.move_file_cursor(-page),
-            KeyCode::PageDown => self.move_file_cursor(page),
+        let repeat_safe = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.files_focused = false;
+                false
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_file_cursor(-1);
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_file_cursor(1);
+                true
+            }
+            KeyCode::PageUp => {
+                self.move_file_cursor(-page);
+                true
+            }
+            KeyCode::PageDown => {
+                self.move_file_cursor(page);
+                true
+            }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.file_tree.cursor = 0;
                 self.reveal_file_cursor();
+                true
             }
             KeyCode::End | KeyCode::Char('G') => {
                 let len = self.file_tree.visible_rows().len();
                 self.file_tree.cursor = len.saturating_sub(1);
                 self.reveal_file_cursor();
+                true
             }
-            KeyCode::Left | KeyCode::Char('h') => self.collapse_file_row_or_parent(),
-            KeyCode::Right | KeyCode::Char('l') => self.expand_file_row_or_child(),
-            KeyCode::Char('a') => self.open_file_menu_for_keyboard(),
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.collapse_file_row_or_parent();
+                true
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.expand_file_row_or_child();
+                true
+            }
+            KeyCode::Char('a') => {
+                self.open_file_menu_for_keyboard();
+                false
+            }
             KeyCode::Enter => {
                 let target = if key.modifiers.contains(KeyModifiers::SHIFT) {
                     OpenTarget::Pane
@@ -652,17 +678,21 @@ impl App {
                     self.files_focused = false;
                 }
                 self.file_row_activate(index, target);
+                false
             }
-            _ => {}
+            _ => false,
+        };
+        if repeat_safe {
+            return crate::app::KeyDispatch::reprocess(true);
         }
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 
     /// Keyboard navigation for a FILES row action menu. Dividers are skipped;
     /// mouse-opened menus acquire a selection on the first navigation key.
-    pub fn handle_file_menu_key(&mut self, key: KeyEvent) {
+    pub fn handle_file_menu_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         let Some(menu) = self.file_menu.as_ref() else {
-            return;
+            return crate::app::UiRepeatDisposition::Suppress;
         };
         let items = menu.build_items();
         let selectable: Vec<usize> = items
@@ -674,7 +704,7 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.file_menu = None,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
                 if selectable.is_empty() {
-                    return;
+                    return crate::app::UiRepeatDisposition::Suppress;
                 }
                 let current = self
                     .file_menu
@@ -691,6 +721,7 @@ impl App {
                 if let Some(menu) = self.file_menu.as_mut() {
                     menu.selected = Some(selectable[next]);
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Enter => {
                 let selected = self.file_menu.as_ref().and_then(|menu| menu.selected);
@@ -700,6 +731,7 @@ impl App {
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     /// A click inside the open file menu: run the hit item, else dismiss.
@@ -877,7 +909,7 @@ impl App {
     }
 
     /// Keys for the create/rename prompt: type the name, `⏎` commit, `Esc` cancel.
-    pub fn file_prompt_key(&mut self, key: KeyEvent) {
+    pub fn file_prompt_key(&mut self, key: KeyEvent) -> crate::app::UiRepeatDisposition {
         match key.code {
             KeyCode::Esc => self.file_prompt = None,
             KeyCode::Enter => self.commit_file_prompt(),
@@ -886,6 +918,7 @@ impl App {
                     p.buffer.pop();
                     p.error = None;
                 }
+                return crate::app::UiRepeatDisposition::Reprocess;
             }
             KeyCode::Char(c) => {
                 if let Some(p) = self.file_prompt.as_mut() {
@@ -894,9 +927,13 @@ impl App {
                         p.error = None;
                     }
                 }
+                if !super::keys::is_ctrl_chord(key.modifiers) && !c.is_control() {
+                    return crate::app::UiRepeatDisposition::Reprocess;
+                }
             }
             _ => {}
         }
+        crate::app::UiRepeatDisposition::Suppress
     }
 
     fn commit_file_prompt(&mut self) {
@@ -1216,7 +1253,7 @@ impl App {
 
     /// Keys for a focused file view: scroll, wrap, close. Returns whether the
     /// frame should repaint.
-    pub fn handle_file_key(&mut self, id: PaneId, key: KeyEvent) -> bool {
+    pub fn handle_file_key(&mut self, id: PaneId, key: KeyEvent) -> crate::app::KeyDispatch {
         // Rows visible in the view = its pane content height minus the footer.
         let rect = self
             .pane_content_rects
@@ -1227,49 +1264,105 @@ impl App {
             .map(|r| r.height.saturating_sub(1) as usize)
             .unwrap_or(20);
         let Some(ViewKind::File(v)) = self.views.get_mut(&id) else {
-            return false;
+            return crate::app::KeyDispatch::suppress(false);
         };
         // Text column width: the scroll clamp needs it to measure how many rows a
         // soft-wrapped line really occupies.
         let text_w = rect.map(|r| view_text_w(v, r.width)).unwrap_or(0);
         // While typing a search query, keys edit the query.
         if v.search.as_ref().is_some_and(|s| s.editing) {
-            match key.code {
-                KeyCode::Char(c) => v.search_push(c),
-                KeyCode::Backspace => v.search_backspace(),
+            let repeat_safe = match key.code {
+                KeyCode::Char(c) => {
+                    v.search_push(c);
+                    !super::keys::is_ctrl_chord(key.modifiers) && !c.is_control()
+                }
+                KeyCode::Backspace => {
+                    v.search_backspace();
+                    true
+                }
                 KeyCode::Enter => {
                     v.search_commit();
                     v.search_step(true, viewport); // reveal the first hit
+                    false
                 }
-                KeyCode::Esc => v.search_cancel(),
-                _ => return false,
+                KeyCode::Esc => {
+                    v.search_cancel();
+                    false
+                }
+                _ => return crate::app::KeyDispatch::suppress(false),
+            };
+            if repeat_safe {
+                return crate::app::KeyDispatch::reprocess(true);
             }
-            return true;
+            return crate::app::KeyDispatch::suppress(true);
         }
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => v.scroll_by(1, viewport, text_w),
-            KeyCode::Char('k') | KeyCode::Up => v.scroll_by(-1, viewport, text_w),
-            KeyCode::Char('d') => v.scroll_by(viewport as i32 / 2, viewport, text_w),
-            KeyCode::Char('u') => v.scroll_by(-(viewport as i32) / 2, viewport, text_w),
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                v.scroll_by(viewport as i32, viewport, text_w)
+        let repeat_safe = match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                v.scroll_by(1, viewport, text_w);
+                true
             }
-            KeyCode::PageUp => v.scroll_by(-(viewport as i32), viewport, text_w),
-            KeyCode::Char('g') | KeyCode::Home => v.goto_top(),
-            KeyCode::Char('G') | KeyCode::End => v.goto_bottom(viewport, text_w),
-            KeyCode::Char('h') | KeyCode::Left => v.scroll_right(-8),
-            KeyCode::Char('l') | KeyCode::Right => v.scroll_right(8),
-            KeyCode::Char('w') => v.wrap = !v.wrap,
-            KeyCode::Char('/') => v.search_begin(),
-            KeyCode::Char('n') => v.search_step(true, viewport),
-            KeyCode::Char('N') => v.search_step(false, viewport),
+            KeyCode::Char('k') | KeyCode::Up => {
+                v.scroll_by(-1, viewport, text_w);
+                true
+            }
+            KeyCode::Char('d') => {
+                v.scroll_by(viewport as i32 / 2, viewport, text_w);
+                true
+            }
+            KeyCode::Char('u') => {
+                v.scroll_by(-(viewport as i32) / 2, viewport, text_w);
+                true
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                v.scroll_by(viewport as i32, viewport, text_w);
+                true
+            }
+            KeyCode::PageUp => {
+                v.scroll_by(-(viewport as i32), viewport, text_w);
+                true
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                v.goto_top();
+                true
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                v.goto_bottom(viewport, text_w);
+                true
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                v.scroll_right(-8);
+                true
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                v.scroll_right(8);
+                true
+            }
+            KeyCode::Char('w') => {
+                v.wrap = !v.wrap;
+                false
+            }
+            KeyCode::Char('/') => {
+                v.search_begin();
+                false
+            }
+            KeyCode::Char('n') => {
+                v.search_step(true, viewport);
+                true
+            }
+            KeyCode::Char('N') => {
+                v.search_step(false, viewport);
+                true
+            }
             // `y` copies the whole file to the clipboard, through the same path
             // as a pane text selection (native clipboard + OSC 52 + a toast).
             KeyCode::Char('y') | KeyCode::Char('c') => {
                 self.copy_file_view(id);
-                return true;
+                return crate::app::KeyDispatch::suppress(true);
             }
-            KeyCode::Char('q') | KeyCode::Char('x') => self.close_pane(id),
+            KeyCode::Char('q') | KeyCode::Char('x') => {
+                self.close_pane(id);
+                false
+            }
             KeyCode::Esc => {
                 // Esc clears a committed search first, else closes the view.
                 if v.search.is_some() {
@@ -1277,10 +1370,14 @@ impl App {
                 } else {
                     self.close_pane(id);
                 }
+                false
             }
-            _ => return false,
+            _ => return crate::app::KeyDispatch::suppress(false),
+        };
+        if repeat_safe {
+            return crate::app::KeyDispatch::reprocess(true);
         }
-        true
+        crate::app::KeyDispatch::suppress(true)
     }
 }
 
@@ -1389,7 +1486,8 @@ mod tests {
         let mut app = App::new(80, 24, tx).unwrap();
         let root = seed_keyboard_tree(&mut app);
 
-        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let expanded = app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(expanded.changed, "expanding a directory requires a render");
         assert!(app.file_tree.visible_rows()[0].expanded);
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(app.file_tree.cursor, 1, "right enters the first child");
@@ -1398,8 +1496,16 @@ mod tests {
             root.join("src/main.rs")
         );
 
-        app.handle_file_tree_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let collapsed = app.handle_file_tree_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(app.file_tree.cursor, 0, "left returns to the parent");
+        assert!(collapsed.changed, "moving to the parent requires a render");
+        let collapsed = app.handle_file_tree_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(
+            collapsed.changed,
+            "collapsing a directory requires a render"
+        );
+        assert!(!app.file_tree.visible_rows()[0].expanded);
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         app.handle_file_tree_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(app.file_tree.cursor, 3);
         assert_eq!(app.file_tree.scroll, 2, "the last row remains in view");

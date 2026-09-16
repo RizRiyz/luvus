@@ -176,29 +176,29 @@ pub(crate) fn install_tui_panic_hook() {
     }));
 }
 
-/// Ask the host terminal to report **modified keys unambiguously** (the Kitty
-/// keyboard protocol, via crossterm's `DISAMBIGUATE_ESCAPE_CODES`).
+/// Ask the host terminal to report modified keys unambiguously and preserve
+/// functional-key press/repeat/release phases (Kitty flags 1 and 2).
 ///
-/// Legacy terminal encoding has no room for modifiers on `Enter`: the terminal
-/// sends a bare `CR` for Enter *and* Shift+Enter, so luvus literally cannot tell
-/// them apart and an agent's "new line, don't submit" key never works. With this
-/// pushed, a capable terminal (Ghostty, Kitty, WezTerm, foot, rio, recent
-/// iTerm2) reports `Shift+Enter` as its own key, which `encode_key` forwards to
-/// the pane as `ESC CR`.
-///
-/// Only `DISAMBIGUATE_ESCAPE_CODES` is requested — deliberately *not*
-/// `REPORT_EVENT_TYPES` (key-release events) or `REPORT_ALL_KEYS_AS_ESCAPE_CODES`
-/// (which would stop plain text arriving as `Char`). Pushed only when the
-/// terminal advertises support, so nothing is emitted into a terminal that would
-/// print it as garbage, and popped on teardown (including the panic hook).
+/// Crossterm exposes event phases losslessly, so nested applications that ask
+/// Luvus for `REPORT_EVENT_TYPES` receive them. Text-producing keys and legacy
+/// Enter/Tab/Backspace remain ordinary bytes as required by Kitty unless the
+/// nested application also asks for report-all. Flags 4/16 are not requested:
+/// Crossterm 0.29 does not expose their complete alternate-key or associated-text
+/// payloads. Pushed only when the terminal advertises support and popped on
+/// teardown (including the panic hook).
 pub(crate) fn push_key_protocol() {
     use ratatui::crossterm::terminal::supports_keyboard_enhancement;
     if matches!(supports_keyboard_enhancement(), Ok(true)) {
         let _ = execute!(
             std::io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(host_keyboard_enhancement_flags())
         );
     }
+}
+
+fn host_keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
 }
 
 /// Raise a desktop notification for terminals that show one (iTerm2, etc.).
@@ -1700,6 +1700,15 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+
+    #[test]
+    fn host_keyboard_protocol_requests_only_crossterm_lossless_flags() {
+        let flags = host_keyboard_enhancement_flags();
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+        assert!(!flags.contains(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES));
+    }
 
     #[test]
     fn stale_server_version_fails_before_binary_attach() {

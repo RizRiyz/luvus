@@ -538,24 +538,26 @@ pub fn run() -> Result<()> {
         }
 
         if app.should_quit {
-            broadcast(
+            let disconnected = broadcast(
                 &mut clients,
                 ServerMessage::ServerShutdown {
                     reason: "server stopped".into(),
                 },
             );
+            release_disconnected_clients(&mut app, disconnected);
             break;
         }
         // A termination signal (kill, logout, system shutdown) requests a clean
         // exit: notify clients and fall through to the final session save below,
         // so the snapshot is current when the machine comes back.
         if shutdown::requested() {
-            broadcast(
+            let disconnected = broadcast(
                 &mut clients,
                 ServerMessage::ServerShutdown {
                     reason: "server terminated".into(),
                 },
             );
+            release_disconnected_clients(&mut app, disconnected);
             break;
         }
         if !app.persist_session_now {
@@ -574,6 +576,7 @@ pub fn run() -> Result<()> {
             app.detach_requested = false;
             if let Some(id) = foreground.take() {
                 if let Some(c) = clients.remove(&id) {
+                    app.release_client_key_presses(id);
                     let _ = c.send_control(ServerMessage::Detach);
                 }
                 foreground = latest_client(&clients);
@@ -636,7 +639,8 @@ pub fn run() -> Result<()> {
             }
         }
         if let Some(revision) = app.pending_machine_catalog_revision.take() {
-            broadcast_machine_catalog_changed(&mut clients, revision);
+            let disconnected = broadcast_machine_catalog_changed(&mut clients, revision);
+            release_disconnected_clients(&mut app, disconnected);
         }
 
         // A state transition here (e.g. a silent agent reaching Done) has no PtyData
@@ -654,19 +658,24 @@ pub fn run() -> Result<()> {
         if app.tick_automations(crate::automation::unix_now()) {
             render_request.record(RenderCause::Detection);
         }
+        let mut disconnected = Vec::new();
         for msg in app.pending_notify.drain(..) {
-            broadcast_effect(&mut clients, ServerMessage::Notify(msg));
+            disconnected.extend(broadcast_effect(&mut clients, ServerMessage::Notify(msg)));
         }
         if let Some(signal) = app.pending_sound.take() {
-            broadcast_effect(&mut clients, ServerMessage::Sound(signal));
+            disconnected.extend(broadcast_effect(&mut clients, ServerMessage::Sound(signal)));
         }
         // A finished mouse selection copies to the client's clipboard (OSC 52).
         if let Some(url) = app.pending_open_url.take() {
-            broadcast_effect(&mut clients, ServerMessage::OpenUrl(url));
+            disconnected.extend(broadcast_effect(&mut clients, ServerMessage::OpenUrl(url)));
         }
         if let Some(text) = app.pending_clipboard.take() {
-            broadcast_effect(&mut clients, ServerMessage::Clipboard(text));
+            disconnected.extend(broadcast_effect(
+                &mut clients,
+                ServerMessage::Clipboard(text),
+            ));
         }
+        release_disconnected_clients(&mut app, disconnected);
         // An expired toast forces one render so it disappears (idle frames don't).
         if app.tick_toast(Instant::now()) {
             render_request.record(RenderCause::Metadata);
@@ -748,7 +757,8 @@ pub fn run() -> Result<()> {
         // Suspended clients retain semantic navigation, not terminal frames.
         // Refresh only after a non-PTY change and send only changed snapshots.
         if refresh_navigation {
-            refresh_suspended_workspaces(&app, &mut clients);
+            let disconnected = refresh_suspended_workspaces(&app, &mut clients);
+            release_disconnected_clients(&mut app, disconnected);
         }
         if !has_render_clients(&clients) {
             // Suspended remote endpoints retain no render debt. Preparing one
@@ -824,6 +834,7 @@ fn apply(
             );
             let was_foreground = *foreground == Some(id);
             clients.remove(&id);
+            app.release_client_key_presses(id);
             app.client_files_visible = client_files_visible(clients);
             if was_foreground {
                 *foreground = latest_client(clients);
@@ -843,6 +854,7 @@ fn apply(
             client.prepare_ticket = Some(ticket);
             client.size = (cols.max(1), rows.max(1));
             client.interest = SurfaceInterest::Prepared;
+            app.release_client_key_presses(id);
             client.force_full = true;
             client.retained_ready = false;
             client.retained_pane_content.clear();
@@ -860,6 +872,9 @@ fn apply(
                 return false;
             }
             client.interest = interest;
+            if interest != SurfaceInterest::Active {
+                app.release_client_key_presses(id);
+            }
             client.prepare_ticket = None;
             client.force_full = true;
             client.behind = false;
@@ -1068,21 +1083,30 @@ fn apply(
             }
 
             // Input ownership follows actual interaction, not background resize
-            // noise. Before hit-testing a newly active client, commit its view
-            // geometry and PTY dimensions synchronously.
-            let promoted = *foreground != Some(id);
+            // noise or trailing enhanced-key phases. Repeat/release still reach
+            // App for pane pairing, but only a press may adopt another client's
+            // viewport and PTY geometry.
+            let key_phase_promotes = !matches!(
+                &input,
+                ClientInput::Key(key)
+                    if key.kind != ratatui::crossterm::event::KeyEventKind::Press
+            );
+            let promoted = key_phase_promotes && *foreground != Some(id);
             if promoted {
                 *foreground = Some(id);
                 apply_foreground_client(app, clients, *foreground);
             }
             let target_size = clients.get(&id).map(|client| client.size);
-            if promoted || target_size.is_some_and(|size| size != *interactive_size) {
+            let adopts_input_view = key_phase_promotes
+                && (promoted || target_size.is_some_and(|size| size != *interactive_size));
+            if adopts_input_view {
                 let no_damage = HashMap::new();
                 let disconnected = clients.get_mut(&id).is_some_and(|client| {
                     render_client(app, client, true, false, false, &no_damage).disconnected
                 });
                 if disconnected {
                     clients.remove(&id);
+                    app.release_client_key_presses(id);
                     *foreground = latest_client(clients);
                     apply_foreground_client(app, clients, *foreground);
                     discard_client_input(input);
@@ -1105,7 +1129,7 @@ fn apply(
                 .expect("input client remains registered");
             let scoped = client.machine_capable && client.shell_dock_layout.owns_workspaces;
             if !scoped {
-                return app.handle_event(event);
+                return app.handle_client_event(id, event);
             }
             let previous = app.sidebars.clone();
             let previous_workspace_paths = app.config.layout.workspace_paths;
@@ -1114,7 +1138,7 @@ fn apply(
                 app.config.layout.workspace_paths = state.workspace_paths;
             }
             app.client_sidebar_input = true;
-            let changed = app.handle_event(event);
+            let changed = app.handle_client_event(id, event);
             app.client_sidebar_input = false;
             let layout = app.sidebars.to_config();
             let workspace_paths = app.config.layout.workspace_paths;
@@ -1148,23 +1172,50 @@ fn discard_client_input(input: ClientInput) {
     }
 }
 
-fn broadcast(clients: &mut Clients, msg: ServerMessage) {
-    clients.retain(|_, client| client.send_control(msg.clone()).is_ok());
+fn release_disconnected_clients(app: &mut App, clients: Vec<u64>) {
+    for id in clients {
+        app.release_client_key_presses(id);
+    }
 }
 
-fn broadcast_effect(clients: &mut Clients, msg: ServerMessage) {
-    clients.retain(|_, client| {
-        client.interest != SurfaceInterest::Active || client.send_control(msg.clone()).is_ok()
+fn broadcast(clients: &mut Clients, msg: ServerMessage) -> Vec<u64> {
+    let mut disconnected = Vec::new();
+    clients.retain(|id, client| {
+        let connected = client.send_control(msg.clone()).is_ok();
+        if !connected {
+            disconnected.push(*id);
+        }
+        connected
     });
+    disconnected
 }
 
-fn broadcast_machine_catalog_changed(clients: &mut Clients, revision: u64) {
-    clients.retain(|_, client| {
-        !client.machine_capable
+fn broadcast_effect(clients: &mut Clients, msg: ServerMessage) -> Vec<u64> {
+    let mut disconnected = Vec::new();
+    clients.retain(|id, client| {
+        let connected =
+            client.interest != SurfaceInterest::Active || client.send_control(msg.clone()).is_ok();
+        if !connected {
+            disconnected.push(*id);
+        }
+        connected
+    });
+    disconnected
+}
+
+fn broadcast_machine_catalog_changed(clients: &mut Clients, revision: u64) -> Vec<u64> {
+    let mut disconnected = Vec::new();
+    clients.retain(|id, client| {
+        let connected = !client.machine_capable
             || client
                 .send_control(ServerMessage::MachineCatalogChanged { revision })
-                .is_ok()
+                .is_ok();
+        if !connected {
+            disconnected.push(*id);
+        }
+        connected
     });
+    disconnected
 }
 
 fn has_active_clients(clients: &Clients) -> bool {
@@ -1348,6 +1399,7 @@ fn render_clients(
     }
     for id in scratch.dead.drain(..) {
         clients.remove(&id);
+        app.release_client_key_presses(id);
     }
     if foreground.is_some_and(|id| !clients.contains_key(&id)) {
         *foreground = latest_client(clients);
@@ -1448,15 +1500,16 @@ fn acknowledge_visible_terminal_generations(
     }
 }
 
-fn refresh_suspended_workspaces(app: &App, clients: &mut Clients) {
+fn refresh_suspended_workspaces(app: &App, clients: &mut Clients) -> Vec<u64> {
     if !clients
         .values()
         .any(|client| client.machine_capable && client.interest == SurfaceInterest::Suspended)
     {
-        return;
+        return Vec::new();
     }
     let projection = shell_workspace_projection(app);
-    clients.retain(|_, client| {
+    let mut disconnected = Vec::new();
+    clients.retain(|id, client| {
         if client.machine_capable
             && client.interest == SurfaceInterest::Suspended
             && client.last_shell_workspaces != projection
@@ -1465,12 +1518,14 @@ fn refresh_suspended_workspaces(app: &App, clients: &mut Clients) {
                 .send_control(ServerMessage::ShellWorkspaces(projection.clone()))
                 .is_err()
             {
+                disconnected.push(*id);
                 return false;
             }
             client.last_shell_workspaces.clone_from(&projection);
         }
         true
     });
+    disconnected
 }
 
 fn shell_resize_projection(
@@ -2443,8 +2498,8 @@ mod tests {
     use super::{
         apply, broadcast, broadcast_effect, broadcast_machine_catalog_changed, ends_client_writer,
         frame_cadence_ready, frame_wait, handle_client, record_event_render_request,
-        render_clients, ClientSender, ClientState, EventRenderSource, FrameSendError, RenderCause,
-        RenderRequest, RenderScratch, FRAME_INTERVAL,
+        release_disconnected_clients, render_clients, ClientSender, ClientState, EventRenderSource,
+        FrameSendError, RenderCause, RenderRequest, RenderScratch, FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
@@ -3463,6 +3518,45 @@ mod tests {
     /// its clipboard payload. Frames may be dropped and repaired, but clipboard
     /// writes must remain queued or the next paste uses stale clipboard content.
     #[test]
+    fn failed_broadcast_releases_the_removed_clients_held_pane_keys() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("broadcast-held-key-cleanup");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).expect("app starts");
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = mpsc::channel();
+        let target = app.panes.get_mut(&pane).expect("focused pane");
+        target.replace_input_sender_for_test(input_tx);
+        target.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        app.handle_client_event(
+            7,
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            )),
+        );
+        let crate::terminal::pty::InputAction::Bytes(press) = input_rx.recv().unwrap() else {
+            panic!("Press must reach the pane");
+        };
+        assert_eq!(press, b"\x1b[A");
+
+        let (client, receiver) = display_client(80, 24, 1);
+        drop(receiver);
+        let mut clients = HashMap::from([(7, client)]);
+        let disconnected = broadcast(&mut clients, ServerMessage::Notify("done".into()));
+        release_disconnected_clients(&mut app, disconnected);
+
+        assert!(clients.is_empty());
+        let crate::terminal::pty::InputAction::Bytes(release) = input_rx.recv().unwrap() else {
+            panic!("client removal must release its held key");
+        };
+        assert_eq!(release, b"\x1b[1;1:3A");
+    }
+
+    #[test]
     fn clipboard_is_reliable_when_a_tab_frame_is_already_queued() {
         let (messages, rx) = mpsc::channel();
         let client = ClientState::new(
@@ -3673,6 +3767,25 @@ mod tests {
         assert_eq!(foreground, Some(1), "background resize cannot steal input");
         assert_eq!(clients[&2].size, (46, 16));
         assert_eq!(interactive_size, (120, 40));
+
+        assert!(!apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Key(KeyEvent::new_with_kind(
+                    KeyCode::Up,
+                    KeyModifiers::NONE,
+                    ratatui::crossterm::event::KeyEventKind::Release,
+                )),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert_eq!(foreground, Some(1), "release cannot steal input ownership");
+        assert_eq!(interactive_size, (120, 40));
+        assert!(!app.compact, "release cannot adopt a background viewport");
 
         assert!(!apply(
             AppEvent::ClientInput {

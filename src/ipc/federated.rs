@@ -17,8 +17,8 @@ use anyhow::{anyhow, Result};
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
-    MouseEventKind,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
@@ -60,6 +60,12 @@ enum ShellEvent {
 enum Endpoint {
     Local,
     Remote { machine_id: String, session: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum KeyOwner {
+    Client,
+    Server(Endpoint),
 }
 
 enum MachineState {
@@ -294,6 +300,9 @@ struct DockState {
     machine_form_hits: Vec<(MachineFormHit, Rect)>,
     machine_form_backdrop_pending: bool,
     machine_popup: Option<MachinePopup>,
+    /// Physical keys stay with the side that consumed their Press even when a
+    /// selector opens or closes before the matching Repeat/Release arrives.
+    key_owners: HashMap<(KeyCode, bool), KeyOwner>,
     dirty: bool,
 }
 
@@ -371,6 +380,7 @@ impl Default for DockState {
             machine_form_hits: Vec::new(),
             machine_form_backdrop_pending: false,
             machine_popup: None,
+            key_owners: HashMap::new(),
             dirty: true,
         }
     }
@@ -748,17 +758,51 @@ fn run_inner(
                 dock.dirty = true;
             }
             ShellEvent::Input(message) => {
-                if handle_dock_input(
-                    &message,
-                    &mut dock,
-                    &active,
-                    &mut candidate,
-                    &mut pending_endpoint,
-                    &mut machines,
-                    &writer,
-                    terminal,
-                    &events_tx,
-                )? {
+                let phase_route = owned_key_phase(&message, &mut dock, &active);
+                let phase_endpoint = match phase_route {
+                    OwnedKeyPhase::Consume => continue,
+                    OwnedKeyPhase::ClientRepeat => {
+                        handle_dock_input(
+                            &message,
+                            &mut dock,
+                            &active,
+                            &mut candidate,
+                            &mut pending_endpoint,
+                            &mut machines,
+                            &writer,
+                            terminal,
+                            &events_tx,
+                        )?;
+                        continue;
+                    }
+                    OwnedKeyPhase::EvaluatePress => None,
+                    OwnedKeyPhase::Server(endpoint) => Some(endpoint),
+                };
+                let consumed = phase_endpoint.is_none()
+                    && handle_dock_input(
+                        &message,
+                        &mut dock,
+                        &active,
+                        &mut candidate,
+                        &mut pending_endpoint,
+                        &mut machines,
+                        &writer,
+                        terminal,
+                        &events_tx,
+                    )?;
+                if let ClientMessage::Key(key) = &message {
+                    if key.kind == KeyEventKind::Press {
+                        dock.key_owners.insert(
+                            federated_key_identity(*key),
+                            if consumed {
+                                KeyOwner::Client
+                            } else {
+                                KeyOwner::Server(active.clone())
+                            },
+                        );
+                    }
+                }
+                if consumed {
                     continue;
                 }
                 if matches!(message, ClientMessage::Detach) {
@@ -766,7 +810,11 @@ fn run_inner(
                     running = false;
                     continue;
                 }
-                if let Err(error) = send_surface(&active, &message, &machines, &writer) {
+                let destination = phase_endpoint.as_ref().unwrap_or(&active);
+                if let Err(error) = send_surface(destination, &message, &machines, &writer) {
+                    if destination != &active {
+                        continue;
+                    }
                     if matches!(active, Endpoint::Local) {
                         return Err(error);
                     }
@@ -5571,6 +5619,62 @@ fn write_row(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OwnedKeyPhase {
+    EvaluatePress,
+    ClientRepeat,
+    Consume,
+    Server(Endpoint),
+}
+
+fn federated_key_identity(key: KeyEvent) -> (KeyCode, bool) {
+    (key.code, key.state.contains(KeyEventState::KEYPAD))
+}
+
+fn owned_key_phase(
+    message: &ClientMessage,
+    dock: &mut DockState,
+    active: &Endpoint,
+) -> OwnedKeyPhase {
+    let ClientMessage::Key(key) = message else {
+        return OwnedKeyPhase::EvaluatePress;
+    };
+    let identity = federated_key_identity(*key);
+    match key.kind {
+        KeyEventKind::Press => OwnedKeyPhase::EvaluatePress,
+        KeyEventKind::Repeat => match dock.key_owners.get(&identity) {
+            Some(KeyOwner::Client) if client_repeat_allowed(*key, dock) => {
+                OwnedKeyPhase::ClientRepeat
+            }
+            Some(KeyOwner::Client) => OwnedKeyPhase::Consume,
+            Some(KeyOwner::Server(endpoint)) => OwnedKeyPhase::Server(endpoint.clone()),
+            None => OwnedKeyPhase::Server(active.clone()),
+        },
+        KeyEventKind::Release => match dock.key_owners.remove(&identity) {
+            Some(KeyOwner::Client) => OwnedKeyPhase::Consume,
+            Some(KeyOwner::Server(endpoint)) => OwnedKeyPhase::Server(endpoint),
+            None => OwnedKeyPhase::Server(active.clone()),
+        },
+    }
+}
+
+fn client_repeat_allowed(key: KeyEvent, dock: &DockState) -> bool {
+    let navigation_open = dock.selector_open
+        || dock.navigation.is_some()
+        || matches!(dock.machine_popup, Some(MachinePopup::Menu { .. }));
+    navigation_open
+        && matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Char('j' | 'k' | 'g' | 'G')
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5727,6 +5831,88 @@ mod tests {
         assert!(machine_can_disconnect(&MachineState::Reconnecting {
             at: Instant::now()
         }));
+    }
+
+    #[test]
+    fn federated_docks_keep_repeat_and_release_with_the_press_owner() {
+        let mut dock = DockState::default();
+        let key = |code, kind| {
+            ClientMessage::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
+        };
+        let down = federated_key_identity(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let pressed_endpoint = Endpoint::Local;
+        let active = Endpoint::Remote {
+            machine_id: "other".into(),
+            session: "default".into(),
+        };
+
+        // A server-owned Press stays with its exact endpoint if an overlay
+        // opens or another surface becomes active before its trailing phases.
+        dock.key_owners
+            .insert(down, KeyOwner::Server(pressed_endpoint.clone()));
+        dock.selector_open = true;
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Repeat),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Server(pressed_endpoint.clone())
+        );
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Release),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Server(pressed_endpoint)
+        );
+        assert!(!dock.key_owners.contains_key(&down));
+
+        // A client-owned navigation Press may repeat while its selector is
+        // open, and its Release never leaks to the selected server even if the
+        // selector closes first.
+        dock.key_owners.insert(down, KeyOwner::Client);
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Repeat),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::ClientRepeat
+        );
+        dock.selector_open = false;
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Repeat),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Consume
+        );
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Release),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Consume
+        );
+        assert!(!dock.key_owners.contains_key(&down));
+
+        // Action repeats remain suppressed even while their client-owned Press
+        // is held.
+        let enter = federated_key_identity(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        dock.selector_open = true;
+        dock.key_owners.insert(enter, KeyOwner::Client);
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Enter, KeyEventKind::Repeat),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Consume
+        );
     }
 
     #[test]
