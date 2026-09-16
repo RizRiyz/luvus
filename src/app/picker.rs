@@ -627,7 +627,10 @@ impl App {
                         let name = buf.clone();
                         self.picker_create_folder(name);
                     }
-                    _ if is_word_delete_key(key) => delete_last_path_word(buf),
+                    _ if is_word_delete_key(key) => {
+                        delete_last_path_word(buf);
+                        return crate::app::UiRepeatDisposition::Reprocess;
+                    }
                     KeyCode::Backspace => {
                         buf.pop();
                         return crate::app::UiRepeatDisposition::Reprocess;
@@ -671,6 +674,7 @@ impl App {
                         p.error = None;
                     }
                     self.invalidate_go_to_completion();
+                    return crate::app::UiRepeatDisposition::Reprocess;
                 }
                 KeyCode::Backspace => {
                     if let Some(p) = self.picker.as_mut() {
@@ -1698,6 +1702,55 @@ mod tests {
 
         app.handle_picker_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
         assert_eq!(app.picker.as_ref().unwrap().going_to.as_deref(), Some(""));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn picker_word_delete_repeats_in_both_text_modes() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("picker-word-delete-repeat");
+        let tmp = complete_fixture("word-delete-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let event = |code, modifiers, kind| {
+            crate::event::AppEvent::Key(KeyEvent::new_with_kind(code, modifiers, kind))
+        };
+
+        app.open_folder_picker_at(tmp.clone());
+        app.picker.as_mut().unwrap().creating = Some("one/two/three".into());
+        assert!(app.handle_event(event(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        )));
+        assert!(app.handle_event(event(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        )));
+        assert_eq!(
+            app.picker.as_ref().unwrap().creating.as_deref(),
+            Some("one/")
+        );
+
+        app.picker.as_mut().unwrap().creating = None;
+        app.picker.as_mut().unwrap().going_to = Some("one/two/three".into());
+        assert!(app.handle_event(event(
+            KeyCode::Backspace,
+            KeyModifiers::ALT,
+            KeyEventKind::Press,
+        )));
+        assert!(app.handle_event(event(
+            KeyCode::Backspace,
+            KeyModifiers::ALT,
+            KeyEventKind::Repeat,
+        )));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("one/")
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
