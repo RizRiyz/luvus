@@ -40,6 +40,7 @@ mod git;
 mod input;
 pub(crate) mod io_jobs;
 mod keys;
+pub(crate) mod line_edit;
 mod mission;
 mod modules;
 mod persistence;
@@ -596,6 +597,8 @@ pub struct CmdInspect {
 pub struct TabRename {
     pub target: TabMenuTarget,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
 }
 
 /// One row of the open-worktree modal (docs/18 WT): a checkout of the repo, as
@@ -1191,6 +1194,8 @@ pub struct WsRename {
     /// open if another workspace closes through the API.
     pub workspace_id: String,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
 }
 
 /// Cap a custom workspace name (same reasoning as [`TAB_NAME_MAX`]). Shared
@@ -1212,6 +1217,8 @@ pub enum WorkspaceUpdateError {
 pub struct PaneRename {
     pub pane: PaneId,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
 }
 
 /// Cap a live pane name at the addressable-name length (`[a-z][a-z0-9_-]{0,31}`).
@@ -5518,7 +5525,12 @@ impl App {
             if tab.is_renameable() {
                 let buffer = tab.name.clone().unwrap_or_default();
                 if let Some(target) = self.tab_menu_target(workspace, index) {
-                    self.tab_rename = Some(TabRename { target, buffer });
+                    let cursor = buffer.chars().count();
+                    self.tab_rename = Some(TabRename {
+                        target,
+                        buffer,
+                        cursor,
+                    });
                 }
             }
         }
@@ -5539,19 +5551,11 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.tab_rename.as_mut() {
-                    r.buffer.pop();
+                    line_edit::edit_line(&mut r.buffer, &mut r.cursor, key, TAB_NAME_MAX, |_| true);
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.tab_rename.as_mut() {
-                    if r.buffer.chars().count() < TAB_NAME_MAX {
-                        r.buffer.push(c);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -6044,6 +6048,7 @@ impl App {
             self.ws_rename = Some(WsRename {
                 workspace_id: w.id.clone(),
                 buffer: w.name.clone(),
+                cursor: w.name.chars().count(),
             });
         }
     }
@@ -6072,7 +6077,12 @@ impl App {
             .find_map(|(name, target)| (*target == pane).then_some(name.as_str()))
             .unwrap_or("")
             .to_string();
-        self.pane_rename = Some(PaneRename { pane, buffer });
+        let cursor = buffer.chars().count();
+        self.pane_rename = Some(PaneRename {
+            pane,
+            buffer,
+            cursor,
+        });
     }
 
     /// Key handling while the pane-rename modal is open. `Enter` applies the name
@@ -6087,24 +6097,33 @@ impl App {
                     self.set_agent_name(r.pane, (!name.is_empty()).then_some(name));
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.pane_rename.as_mut() {
-                    r.buffer.pop();
+                    let key = match key.code {
+                        KeyCode::Char(c) => {
+                            KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), key.modifiers)
+                        }
+                        _ => key,
+                    };
+                    // Every edit must keep the name addressable: a letter first,
+                    // then letters, digits, `_`, or `-`. Deleting a leading letter
+                    // that would expose a digit is refused like a bad keystroke.
+                    let addressable = |name: &str| {
+                        let mut chars = name.chars();
+                        chars.next().is_none_or(|c| c.is_ascii_lowercase())
+                            && chars.all(|c| {
+                                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
+                            })
+                    };
+                    line_edit::edit_line(
+                        &mut r.buffer,
+                        &mut r.cursor,
+                        key,
+                        PANE_NAME_MAX,
+                        addressable,
+                    );
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.pane_rename.as_mut() {
-                    let c = c.to_ascii_lowercase();
-                    let char_ok =
-                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
-                    // A name must start with a letter.
-                    let first_ok = !r.buffer.is_empty() || c.is_ascii_lowercase();
-                    if char_ok && first_ok && r.buffer.chars().count() < PANE_NAME_MAX {
-                        r.buffer.push(c);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -6125,19 +6144,11 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.ws_rename.as_mut() {
-                    r.buffer.pop();
+                    line_edit::edit_line(&mut r.buffer, &mut r.cursor, key, WS_NAME_MAX, |_| true);
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.ws_rename.as_mut() {
-                    if r.buffer.chars().count() < WS_NAME_MAX {
-                        r.buffer.push(c);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -10647,6 +10658,37 @@ mod tests {
 
         assert_eq!(app.workspaces[0].id, target_id);
         assert_eq!(app.workspaces[0].name, "renamed");
+    }
+
+    #[test]
+    fn workspace_rename_arrows_move_the_caret_instead_of_typing_at_the_end() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].name = "Recall issue".into();
+        app.open_ws_rename(0);
+        let press =
+            |app: &mut App, code| app.handle_ws_rename_key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        for _ in 0.."issue".len() {
+            press(&mut app, KeyCode::Left);
+        }
+        for c in "bot ".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Delete);
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Char('s'));
+        let rename = app.ws_rename.as_ref().expect("rename modal stays open");
+        assert_eq!(rename.buffer, "recall bot issues");
+        assert!(
+            app.ws_menu.is_none() && app.sidebar_focus.is_none(),
+            "no navigation"
+        );
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.workspaces[0].name, "recall bot issues");
     }
 
     #[test]

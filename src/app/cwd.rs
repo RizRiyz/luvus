@@ -820,6 +820,7 @@ mod tests {
         app.ws_rename = Some(WsRename {
             workspace_id: home_id.clone(),
             buffer: "keep".into(),
+            cursor: 4,
         });
         app.worktree_delete = Some(home_id.clone());
         assert!(app.create_workspace_at(other.clone()), "second workspace");

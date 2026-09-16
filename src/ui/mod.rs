@@ -1021,20 +1021,28 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     }
     app.worktree_open_rects = worktree_open_rects;
     // The tab-rename modal (docs/28).
-    if let Some(buf) = app.tab_rename.as_ref().map(|r| r.buffer.clone()) {
-        let (c, x) = picker::draw_tab_rename(f, area, &buf, hover, cat, &t);
+    if let Some((buf, cursor)) = app
+        .tab_rename
+        .as_ref()
+        .map(|r| (r.buffer.clone(), r.cursor))
+    {
+        let (c, x) = picker::draw_tab_rename(f, area, &buf, cursor, hover, cat, &t);
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
     }
     // The workspace-rename modal, then the right-click context menu (on top).
-    if let Some(buf) = app.ws_rename.as_ref().map(|r| r.buffer.clone()) {
-        let (c, x) = picker::draw_ws_rename(f, area, &buf, hover, cat, &t);
+    if let Some((buf, cursor)) = app.ws_rename.as_ref().map(|r| (r.buffer.clone(), r.cursor)) {
+        let (c, x) = picker::draw_ws_rename(f, area, &buf, cursor, hover, cat, &t);
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
     }
     // The pane-rename modal (same look), from the pane / AGENTS right-click menu.
-    if let Some(buf) = app.pane_rename.as_ref().map(|r| r.buffer.clone()) {
-        let (c, x) = picker::draw_pane_rename(f, area, &buf, hover, cat, &t);
+    if let Some((buf, cursor)) = app
+        .pane_rename
+        .as_ref()
+        .map(|r| (r.buffer.clone(), r.cursor))
+    {
+        let (c, x) = picker::draw_pane_rename(f, area, &buf, cursor, hover, cat, &t);
         app.modal_commit_rect = c;
         app.modal_cancel_rect = x;
     }
