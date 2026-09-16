@@ -62,7 +62,10 @@ pub enum Cmd {
     FocusUp,
     FocusRight,
     NextPane,
+    FocusBack,
+    FocusForward,
     NextAttention,
+    NextDoneAgent,
     SplitRight,
     SplitDown,
     SplitAuto,
@@ -110,7 +113,10 @@ impl Cmd {
         Cmd::FocusUp,
         Cmd::FocusRight,
         Cmd::NextPane,
+        Cmd::FocusBack,
+        Cmd::FocusForward,
         Cmd::NextAttention,
+        Cmd::NextDoneAgent,
         Cmd::SplitRight,
         Cmd::SplitDown,
         Cmd::SplitAuto,
@@ -162,7 +168,10 @@ impl Cmd {
             Cmd::FocusUp => "focus_up",
             Cmd::FocusRight => "focus_right",
             Cmd::NextPane => "next_pane",
+            Cmd::FocusBack => "focus_back",
+            Cmd::FocusForward => "focus_forward",
             Cmd::NextAttention => "next_attention",
+            Cmd::NextDoneAgent => "next_done_agent",
             Cmd::SplitRight => "split_right",
             Cmd::SplitDown => "split_down",
             Cmd::SplitAuto => "split_auto",
@@ -219,7 +228,10 @@ impl Cmd {
             Cmd::FocusUp => cat.cmd_focus_up,
             Cmd::FocusRight => cat.cmd_focus_right,
             Cmd::NextPane => cat.cmd_next_pane,
+            Cmd::FocusBack => cat.cmd_focus_back,
+            Cmd::FocusForward => cat.cmd_focus_forward,
             Cmd::NextAttention => cat.cmd_next_attention,
+            Cmd::NextDoneAgent => cat.cmd_next_done_agent,
             Cmd::SplitRight => cat.cmd_split_right,
             Cmd::SplitDown => cat.cmd_split_down,
             Cmd::SplitAuto => cat.cmd_split_auto,
@@ -265,7 +277,10 @@ impl Cmd {
             | Cmd::FocusUp
             | Cmd::FocusRight
             | Cmd::NextPane
+            | Cmd::FocusBack
+            | Cmd::FocusForward
             | Cmd::NextAttention
+            | Cmd::NextDoneAgent
             | Cmd::SplitRight
             | Cmd::SplitDown
             | Cmd::SplitAuto
@@ -307,7 +322,10 @@ impl Cmd {
             Cmd::FocusUp => "↑",
             Cmd::FocusRight => "→",
             Cmd::NextPane => ";",
+            Cmd::FocusBack => "[",
+            Cmd::FocusForward => "]",
             Cmd::NextAttention => ".",
+            Cmd::NextDoneAgent => ">",
             Cmd::SplitRight => "v",
             Cmd::SplitDown => "s",
             Cmd::SplitAuto => "+",
@@ -865,7 +883,10 @@ impl App {
             Cmd::FocusUp => self.focus_dir(Dir::Up),
             Cmd::FocusRight => self.focus_dir(Dir::Right),
             Cmd::NextPane => self.focus_next_pane(),
+            Cmd::FocusBack => self.focus_history_back(),
+            Cmd::FocusForward => self.focus_history_forward(),
             Cmd::NextAttention => self.focus_next_attention(),
+            Cmd::NextDoneAgent => self.focus_next_done_agent(),
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
             Cmd::SplitAuto => self.split_auto(),
@@ -913,7 +934,9 @@ impl App {
                 if let Some(&(workspace, _)) =
                     self.workspace_display_order().get(usize::from(index))
                 {
-                    self.active_ws = workspace;
+                    let tab = self.workspaces[workspace].active_tab;
+                    let pane = self.workspaces[workspace].tabs[tab].layout.focus;
+                    self.focus_location(workspace, tab, pane);
                 }
             }
             Cmd::NewWorktree => self.open_worktree_prompt(),
@@ -937,39 +960,52 @@ impl App {
         }
     }
 
-    /// Jump focus to the next agent pane that is **Blocked** — one waiting on the
-    /// user — cycling in the same node → tab → pane order the AGENTS sidebar lists
-    /// (QW-1, docs/46). Crosses nodes and tabs via [`focus_pane_global`]. With
-    /// nothing waiting it flashes a toast instead of moving focus, so the key is
-    /// always safe to mash.
-    pub fn focus_next_attention(&mut self) {
-        let mut blocked: Vec<crate::ids::PaneId> = Vec::new();
+    /// Jump focus to the next agent pane in `state`, cycling in the same
+    /// workspace → tab → pane order as the AGENTS sidebar. Cross-workspace
+    /// jumps flow through [`focus_pane_global`] so previous-focus navigation
+    /// can return to the pane the user came from.
+    fn focus_next_agent_in_state(
+        &mut self,
+        state: crate::ui::theme::State,
+        empty_message: &'static str,
+    ) {
+        let mut matches = Vec::new();
         for ws in &self.workspaces {
             for tab in &ws.tabs {
                 for id in tab.layout.leaves() {
-                    if let Some(s) = self.status.get(&id) {
-                        let is_agent =
-                            self.manifests.is_agent(&s.agent) || s.agent_session.is_some();
-                        if is_agent && s.state == crate::ui::theme::State::Blocked {
-                            blocked.push(id);
+                    if let Some(status) = self.status.get(&id) {
+                        let is_agent = self.manifests.is_agent(&status.agent)
+                            || status.agent_session.is_some();
+                        if is_agent && status.state == state {
+                            matches.push(id);
                         }
                     }
                 }
             }
         }
-        if blocked.is_empty() {
-            let msg = self.catalog.no_agents_waiting;
-            self.show_toast(msg);
+        if matches.is_empty() {
+            self.show_toast(empty_message);
             return;
         }
-        // Advance from the current focus if it's already on a waiting agent,
-        // otherwise start at the first one.
         let focus = self.layout().focus;
-        let next = match blocked.iter().position(|&b| b == focus) {
-            Some(i) => blocked[(i + 1) % blocked.len()],
-            None => blocked[0],
+        let next = match matches.iter().position(|&id| id == focus) {
+            Some(index) => matches[(index + 1) % matches.len()],
+            None => matches[0],
         };
         self.focus_pane_global(next);
+    }
+
+    /// Jump to the next Blocked agent that needs user attention.
+    pub fn focus_next_attention(&mut self) {
+        self.focus_next_agent_in_state(
+            crate::ui::theme::State::Blocked,
+            self.catalog.no_agents_waiting,
+        );
+    }
+
+    /// Jump to the next agent that finished while unfocused.
+    pub fn focus_next_done_agent(&mut self) {
+        self.focus_next_agent_in_state(crate::ui::theme::State::Done, self.catalog.no_agents_done);
     }
 }
 
@@ -989,8 +1025,11 @@ mod tests {
         assert_eq!(m.get("="), Some(&Cmd::OpenSettings));
         assert_eq!(m.get("t"), Some(&Cmd::OpenSessions));
         assert_eq!(m.get("y"), Some(&Cmd::CopyMode));
-        assert_eq!(m.get("i"), Some(&Cmd::OpenDiff));
-        assert_eq!(m.get("m"), Some(&Cmd::OpenMission));
+        assert_eq!(m.get(";"), Some(&Cmd::NextPane));
+        assert_eq!(m.get("["), Some(&Cmd::FocusBack));
+        assert_eq!(m.get("]"), Some(&Cmd::FocusForward));
+        assert_eq!(m.get("."), Some(&Cmd::NextAttention));
+        assert_eq!(m.get(">"), Some(&Cmd::NextDoneAgent));
         assert_eq!(m.get("M"), Some(&Cmd::Switcher));
         assert_eq!(m.get("w"), Some(&Cmd::FocusWorkspaces));
         assert_eq!(m.get("u"), Some(&Cmd::NextWorkspace));
@@ -1280,6 +1319,37 @@ mod tests {
             direct_command(&bindings, &KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)),
             Some(Cmd::PrevTab),
             "the later command in the stable command list owns a duplicate chord"
+        );
+    }
+
+    #[test]
+    fn focus_navigation_commands_support_direct_bindings() {
+        let mut configured = HashMap::new();
+        configured.insert(Cmd::FocusBack.id().into(), "alt+[".into());
+        configured.insert(Cmd::FocusForward.id().into(), "alt+]".into());
+        configured.insert(Cmd::NextDoneAgent.id().into(), "alt+d".into());
+
+        let bindings = build_direct_keymap(&configured);
+        assert_eq!(
+            direct_command(
+                &bindings,
+                &KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT)
+            ),
+            Some(Cmd::FocusBack)
+        );
+        assert_eq!(
+            direct_command(
+                &bindings,
+                &KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT)
+            ),
+            Some(Cmd::FocusForward)
+        );
+        assert_eq!(
+            direct_command(
+                &bindings,
+                &KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT)
+            ),
+            Some(Cmd::NextDoneAgent)
         );
     }
 
@@ -1737,6 +1807,138 @@ mod tests {
         assert!(!app.active_is_mission());
         app.run_cmd(Cmd::OpenMission);
         assert!(app.active_is_mission());
+    }
+
+    #[test]
+    fn focus_history_moves_back_and_forward_across_tabs() {
+        let _env = crate::persist::test_env("focus-history-tabs");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        let second = crate::ids::PaneId::alloc();
+        let third = crate::ids::PaneId::alloc();
+        app.workspaces[0]
+            .tabs
+            .push(Tab::panes(TileLayout::new(second)));
+        app.workspaces[0]
+            .tabs
+            .push(Tab::panes(TileLayout::new(third)));
+
+        app.focus_tab(1).unwrap();
+        app.focus_tab(2).unwrap();
+        app.run_cmd(Cmd::FocusBack);
+        assert_eq!(app.layout().focus, second);
+        app.run_cmd(Cmd::FocusBack);
+        assert_eq!(app.layout().focus, first);
+        app.run_cmd(Cmd::FocusForward);
+        assert_eq!(app.layout().focus, second);
+        app.run_cmd(Cmd::FocusForward);
+        assert_eq!(app.layout().focus, third);
+    }
+
+    #[test]
+    fn ordinary_focus_after_history_back_clears_forward_branch() {
+        let _env = crate::persist::test_env("focus-history-branch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        let second = crate::ids::PaneId::alloc();
+        let third = crate::ids::PaneId::alloc();
+        app.workspaces[0]
+            .tabs
+            .push(Tab::panes(TileLayout::new(second)));
+        app.workspaces[0]
+            .tabs
+            .push(Tab::panes(TileLayout::new(third)));
+
+        app.focus_tab(1).unwrap();
+        app.focus_tab(2).unwrap();
+        app.run_cmd(Cmd::FocusBack);
+        assert_eq!(app.layout().focus, second);
+        app.focus_pane_global(first);
+        app.run_cmd(Cmd::FocusForward);
+        assert_eq!(
+            app.layout().focus,
+            first,
+            "new navigation clears forward history"
+        );
+    }
+
+    #[test]
+    fn next_done_agent_cycles_and_records_focus_history() {
+        let _env = crate::persist::test_env("next-done-agent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        app.run_cmd(Cmd::SplitRight);
+        let ids = app.layout().leaves();
+        assert_eq!(ids.len(), 2, "split gave two panes");
+        for &id in &ids {
+            let mut status = PaneStatus::new("claude".to_string());
+            status.state = crate::ui::theme::State::Done;
+            app.status.insert(id, status);
+        }
+
+        let origin = app.layout().focus;
+        app.run_cmd(Cmd::NextDoneAgent);
+        let done = app.layout().focus;
+        assert_ne!(done, origin, "jumped to the other done agent");
+
+        app.run_cmd(Cmd::FocusBack);
+        assert_eq!(app.layout().focus, origin, "returned through focus history");
+        app.run_cmd(Cmd::FocusForward);
+        assert_eq!(app.layout().focus, done, "advanced through focus history");
+    }
+
+    #[test]
+    fn focus_history_skips_closed_panes() {
+        let _env = crate::persist::test_env("focus-history-closed");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        app.run_cmd(Cmd::SplitRight);
+        let second = app.layout().focus;
+        app.focus_pane_global(first);
+        app.close_pane(second);
+
+        app.run_cmd(Cmd::FocusBack);
+        assert_eq!(app.layout().focus, first);
+    }
+
+    #[test]
+    fn focus_history_returns_across_tabs() {
+        let _env = crate::persist::test_env("previous-focus-tabs");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let origin = app.layout().focus;
+        let other = crate::ids::PaneId::alloc();
+        app.workspaces[0]
+            .tabs
+            .push(Tab::panes(TileLayout::new(other)));
+
+        app.focus_tab(1).unwrap();
+        assert_eq!(app.layout().focus, other);
+        app.run_cmd(Cmd::FocusBack);
+
+        assert_eq!(app.ws().active_tab, 0);
+        assert_eq!(app.layout().focus, origin);
+    }
+
+    #[test]
+    fn next_done_agent_ignores_non_agents_and_other_states() {
+        let _env = crate::persist::test_env("next-done-agent-none");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(Cmd::SplitRight);
+        let before = app.layout().focus;
+        let history_back = app.focus_history_back.clone();
+        let history_forward = app.focus_history_forward.clone();
+
+        app.focus_next_done_agent();
+
+        assert_eq!(app.layout().focus, before);
+        assert_eq!(app.focus_history_back, history_back);
+        assert_eq!(app.focus_history_forward, history_forward);
     }
 
     #[test]

@@ -1197,6 +1197,7 @@ pub struct WsRename {
 /// with the CLI so local validation and the socket mutation agree.
 pub(crate) const WS_NAME_MAX: usize = 40;
 const MAX_CLOSED_WORKSPACE_PATHS: usize = 128;
+const FOCUS_HISTORY_LIMIT: usize = 64;
 
 /// Why workspace metadata could not be changed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2316,6 +2317,11 @@ pub struct App {
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
     /// authoritative unless the user opts a chord into Luvus handling.
     pub direct_keymap: keys::DirectKeymap,
+    /// Process-local pane jump history. Ordinary focus changes append to the
+    /// back stack and clear the forward stack, matching browser/Vim jump-list
+    /// branch semantics. Entries are bounded and are not persisted.
+    focus_history_back: Vec<PaneId>,
+    focus_history_forward: Vec<PaneId>,
     /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
     pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
@@ -3100,6 +3106,8 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            focus_history_back: Vec::new(),
+            focus_history_forward: Vec::new(),
             prefix,
             agent_names: HashMap::new(),
             settings: None,
@@ -3779,6 +3787,8 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            focus_history_back: Vec::new(),
+            focus_history_forward: Vec::new(),
             prefix,
             agent_names,
             settings: None,
@@ -4395,7 +4405,9 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
-                    self.active_ws = workspace;
+                    let tab = self.workspaces[workspace].active_tab;
+                    let pane = self.workspaces[workspace].tabs[tab].layout.focus;
+                    self.focus_location(workspace, tab, pane);
                     self.sidebar_focus = None;
                 }
             }
@@ -5086,6 +5098,7 @@ impl App {
         spawn: impl FnOnce(&mut Self) -> Option<PaneId>,
     ) -> Option<PaneId> {
         let previous_zoom = self.zoomed;
+        let caller_focus = self.layout().focus;
         let previous_target_focus = self.workspaces[workspace].tabs[tab].layout.focus;
         let new_id = spawn(self)?;
         {
@@ -5097,6 +5110,10 @@ impl App {
             }
         }
         if focus {
+            if caller_focus != new_id {
+                Self::push_focus_history(&mut self.focus_history_back, caller_focus);
+                self.focus_history_forward.clear();
+            }
             self.active_ws = workspace;
             self.workspaces[workspace].active_tab = tab;
             self.scroll_pane = None;
@@ -7161,8 +7178,8 @@ impl App {
         {
             return Err(TabFocusError::PositionOutOfRange);
         }
-        self.active_ws = workspace;
-        self.workspaces[workspace].active_tab = index;
+        let pane = self.workspaces[workspace].tabs[index].layout.focus;
+        self.focus_location(workspace, index, pane);
         Ok(())
     }
 
@@ -7171,10 +7188,13 @@ impl App {
     }
 
     fn cycle_tab(&mut self, delta: isize) {
-        let ws = &mut self.workspaces[self.active_ws];
+        let workspace = self.active_ws;
+        let ws = &self.workspaces[workspace];
         let n = ws.tabs.len() as isize;
         if n > 0 {
-            ws.active_tab = (((ws.active_tab as isize + delta) % n + n) % n) as usize;
+            let tab = (((ws.active_tab as isize + delta) % n + n) % n) as usize;
+            let pane = ws.tabs[tab].layout.focus;
+            self.focus_location(workspace, tab, pane);
         }
     }
 
@@ -7471,8 +7491,39 @@ impl App {
         })
     }
 
+    fn push_focus_history(history: &mut Vec<PaneId>, id: PaneId) {
+        if history.last() == Some(&id) {
+            return;
+        }
+        if history.len() == FOCUS_HISTORY_LIMIT {
+            history.remove(0);
+        }
+        history.push(id);
+    }
+
+    fn set_focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+        self.active_ws = workspace;
+        self.workspaces[workspace].active_tab = tab;
+        self.workspaces[workspace].tabs[tab].layout.focus = id;
+        self.scroll_pane = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+        let current = self.layout().focus;
+        let location_changed = self.active_ws != workspace
+            || self.workspaces[workspace].active_tab != tab
+            || current != id;
+        if location_changed {
+            Self::push_focus_history(&mut self.focus_history_back, current);
+            self.focus_history_forward.clear();
+            self.set_focus_location(workspace, tab, id);
+        } else {
+            self.mode = Mode::Normal;
+        }
+    }
+
     fn focus_pane_global(&mut self, id: PaneId) {
-        let changed = self.layout().focus != id;
         let mut found = None;
         for (wi, ws) in self.workspaces.iter().enumerate() {
             for (ti, tab) in ws.tabs.iter().enumerate() {
@@ -7482,26 +7533,59 @@ impl App {
             }
         }
         if let Some((wi, ti)) = found {
-            self.active_ws = wi;
-            self.workspaces[wi].active_tab = ti;
-            self.workspaces[wi].tabs[ti].layout.focus = id;
-            if changed {
-                self.scroll_pane = None;
+            self.focus_location(wi, ti, id);
+        }
+    }
+
+    /// Move backward through pane focus history. Dead panes are discarded
+    /// lazily, so closing a tab or workspace cannot strand navigation.
+    fn focus_history_back(&mut self) {
+        let current = self.layout().focus;
+        while let Some(target) = self.focus_history_back.pop() {
+            if target == current {
+                continue;
             }
-            self.mode = Mode::Normal;
+            if let Some((workspace, tab)) = self.pane_location(target) {
+                Self::push_focus_history(&mut self.focus_history_forward, current);
+                self.set_focus_location(workspace, tab, target);
+                return;
+            }
+        }
+    }
+
+    /// Move forward after one or more history-back jumps. Any ordinary focus
+    /// change clears this stack and begins a new history branch.
+    fn focus_history_forward(&mut self) {
+        let current = self.layout().focus;
+        while let Some(target) = self.focus_history_forward.pop() {
+            if target == current {
+                continue;
+            }
+            if let Some((workspace, tab)) = self.pane_location(target) {
+                Self::push_focus_history(&mut self.focus_history_back, current);
+                self.set_focus_location(workspace, tab, target);
+                return;
+            }
         }
     }
 
     fn cycle_workspace(&mut self, delta: isize) {
         let n = self.workspaces.len() as isize;
         if n > 0 {
-            self.active_ws = (((self.active_ws as isize + delta) % n + n) % n) as usize;
+            let workspace = (((self.active_ws as isize + delta) % n + n) % n) as usize;
+            let tab = self.workspaces[workspace].active_tab;
+            let pane = self.workspaces[workspace].tabs[tab].layout.focus;
+            self.focus_pane_global(pane);
         }
     }
 
     fn focus_dir(&mut self, dir: Dir) {
         let area = self.last_pane_area;
+        let current = self.layout().focus;
         self.layout_mut().focus_dir(area, dir);
+        let next = self.layout().focus;
+        self.layout_mut().focus = current;
+        self.focus_pane_global(next);
     }
 
     /// Cycle focus within the current tab's leaf order, wrapping at both ends.
@@ -7515,9 +7599,7 @@ impl App {
         let idx = leaves.iter().position(|&id| id == focus).unwrap_or(0);
         let len = leaves.len() as isize;
         let next = leaves[((idx as isize + delta) % len + len) as usize % leaves.len()];
-        self.layout_mut().focus = next;
-        self.scroll_pane = None;
-        self.mode = Mode::Normal;
+        self.focus_pane_global(next);
     }
 
     fn focus_next_pane(&mut self) {
@@ -7921,6 +8003,8 @@ impl App {
     }
 
     fn close_pane(&mut self, id: PaneId) {
+        self.focus_history_back.retain(|pane| *pane != id);
+        self.focus_history_forward.retain(|pane| *pane != id);
         crate::orch::worker::discard(id);
         let owner = self.pane_location(id);
         let durable = self

@@ -2745,7 +2745,9 @@ impl App {
         if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = (*i).min(self.workspaces.len().saturating_sub(1));
             self.sidebar_focus = None;
-            self.active_ws = i;
+            let tab = self.workspaces[i].active_tab;
+            let pane = self.workspaces[i].tabs[tab].layout.focus;
+            self.focus_location(i, tab, pane);
             return;
         }
         // Clicking a view-selector tab in the git tab switches section (docs/17).
@@ -2851,13 +2853,7 @@ impl App {
         }
         if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
             let id = *id;
-            if self.layout().focus != id {
-                // Leave the old pane's viewport exactly where it is. Only drop
-                // keyboard ownership so subsequent input follows the new focus.
-                self.scroll_pane = None;
-            }
-            self.layout_mut().focus = id;
-            self.mode = Mode::Normal;
+            self.focus_pane_global(id);
         }
     }
 
@@ -3241,9 +3237,7 @@ impl App {
             return false;
         }
         pane.scroll_to_bottom(); // the app's coordinates are the live screen's
-        self.scroll_pane = None;
-        self.layout_mut().focus = id;
-        self.mode = Mode::Normal;
+        self.focus_pane_global(id);
         let g = crate::app::MouseGrab {
             pane: id,
             btn: base_btn + mouse_mod_bits(m.modifiers),
