@@ -278,9 +278,16 @@ impl FileTree {
     /// `show_hidden` flipped. An unchanged tree returns the cached slice with no
     /// walk and no allocation.
     pub fn visible_rows(&mut self) -> &[VisibleRow] {
-        if let Some(filter) = &self.filter {
-            return &filter.rows;
+        if self.filter.is_none() {
+            return self.tree_rows();
         }
+        &self.filter.as_ref().expect("checked above").rows
+    }
+
+    /// The actual expanded-tree projection, independent of the transient FILES
+    /// fuzzy filter. Public automation (`files.tree`) must keep returning tree
+    /// state while an attached client happens to be searching the dock.
+    pub(crate) fn tree_rows(&mut self) -> &[VisibleRow] {
         if self.dirty || self.cache_hidden != self.show_hidden {
             self.cache = self.compute_rows();
             self.dirty = false;
@@ -388,6 +395,26 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!((rows[1].name.as_str(), rows[1].depth), ("mod.rs", 1));
         assert!(!rows[0].loading);
+    }
+
+    #[test]
+    fn tree_projection_is_independent_of_the_transient_fuzzy_filter() {
+        let root = PathBuf::from("/tree-projection-root");
+        let mut tree = FileTree::new(root.clone());
+        tree.apply_dir(root.clone(), vec![e("README.md", false)]);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        tree.filter = Some(filter::FileFilter::start(root.join("missing"), tx, (0, 0)));
+        tree.filter.as_mut().unwrap().rows = vec![VisibleRow {
+            path: root.join("src/main.rs"),
+            name: "src/main.rs".into(),
+            depth: 0,
+            is_dir: false,
+            expanded: false,
+            loading: false,
+        }];
+
+        assert_eq!(tree.visible_rows()[0].name, "src/main.rs");
+        assert_eq!(tree.tree_rows()[0].name, "README.md");
     }
 
     #[test]
