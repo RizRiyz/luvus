@@ -4084,13 +4084,10 @@ impl App {
                         return true;
                     }
                 }
-                // Fixed scrollback keys (like the digits above): scroll the
-                // focused pane's history. `[`/`]` page up/down (no Fn needed on a
-                // Mac), and so do PageUp/PageDown; Home/End jump to the top / live
-                // bottom (Fn+↑/↓/←/→ on a MacBook).
+                // Fixed physical scrollback keys: PageUp/PageDown move by a page;
+                // Home/End jump to the top / live bottom. Printable keys resolve
+                // through the configurable command map below.
                 let scroll_code = match key.code {
-                    KeyCode::Char('[') => Some(KeyCode::PageUp),
-                    KeyCode::Char(']') => Some(KeyCode::PageDown),
                     c @ (KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End) => {
                         Some(c)
                     }

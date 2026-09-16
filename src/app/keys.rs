@@ -1810,6 +1810,43 @@ mod tests {
     }
 
     #[test]
+    fn default_prefix_keys_navigate_focus_history() {
+        let _env = crate::persist::test_env("focus-history-prefix-keys");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let second = crate::ids::PaneId::alloc();
+        let third = crate::ids::PaneId::alloc();
+        app.workspaces[0]
+            .tabs
+            .push(Tab::panes(TileLayout::new(second)));
+        app.workspaces[0]
+            .tabs
+            .push(Tab::panes(TileLayout::new(third)));
+        app.focus_tab(1).unwrap();
+        app.focus_tab(2).unwrap();
+
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.layout().focus, second);
+
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.layout().focus, third);
+    }
+
+    #[test]
     fn focus_history_moves_back_and_forward_across_tabs() {
         let _env = crate::persist::test_env("focus-history-tabs");
         let (tx, _rx) = std::sync::mpsc::channel();

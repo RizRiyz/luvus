@@ -788,7 +788,9 @@ impl App {
                     .get(ws)
                     .is_some_and(|workspace| workspace.cwd == cwd)
                 {
-                    self.active_ws = ws;
+                    let tab = self.workspaces[ws].active_tab;
+                    let pane = self.workspaces[ws].tabs[tab].layout.focus;
+                    self.focus_location(ws, tab, pane);
                 }
             }
             SearchTarget::Tab {
@@ -798,8 +800,8 @@ impl App {
                 tab_leaves,
             } => {
                 if let Some(tab) = self.resolve_search_tab(ws, &workspace_cwd, &tab_leaves) {
-                    self.active_ws = ws;
-                    self.workspaces[ws].active_tab = tab;
+                    let pane = self.workspaces[ws].tabs[tab].layout.focus;
+                    self.focus_location(ws, tab, pane);
                 }
             }
             SearchTarget::Pane { pane } | SearchTarget::Agent { pane } => {
@@ -884,7 +886,9 @@ impl App {
             match kind {
                 "folder" => {
                     let ws = workspace()?;
-                    self.active_ws = ws;
+                    let tab = self.workspaces[ws].active_tab;
+                    let pane = self.workspaces[ws].tabs[tab].layout.focus;
+                    self.focus_location(ws, tab, pane);
                 }
                 "tab" => {
                     let ws = workspace()?;
@@ -913,8 +917,8 @@ impl App {
                     let tab = self
                         .resolve_search_tab(ws, &workspace_cwd, &leaves)
                         .ok_or_else(|| "target tab no longer exists".to_string())?;
-                    self.active_ws = ws;
-                    self.workspaces[ws].active_tab = tab;
+                    let pane = self.workspaces[ws].tabs[tab].layout.focus;
+                    self.focus_location(ws, tab, pane);
                 }
                 "pane" | "agent" => self.focus_pane_global(pane()?),
                 "file" => {
@@ -1684,6 +1688,63 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&app.handle_search_activate(&bad)).unwrap();
         assert_eq!(value["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn search_tab_navigation_starts_a_new_focus_history_branch() {
+        let _env = crate::persist::test_env("search-focus-history-branch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        let second = PaneId::alloc();
+        let third = PaneId::alloc();
+        let fourth = PaneId::alloc();
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                second,
+            )));
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                third,
+            )));
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                fourth,
+            )));
+        app.focus_tab(1).unwrap();
+        app.focus_tab(2).unwrap();
+        app.focus_history_back();
+        assert_eq!(app.layout().focus, second);
+
+        let cwd = app.workspaces[0].cwd.clone();
+        let request = crate::ipc::api::ApiRequest {
+            id: "history-tab-activate".into(),
+            method: "search.activate".into(),
+            params: serde_json::json!({
+                "kind": "tab",
+                "target": {
+                    "workspace": 0,
+                    "workspace_path": cwd,
+                    "tab": 4,
+                    "tab_panes": [fourth.0.to_string()],
+                },
+            }),
+            reply: std::sync::mpsc::channel().0,
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&app.handle_search_activate(&request)).unwrap();
+        assert_eq!(value["result"]["activated"], true);
+        assert_eq!(app.layout().focus, fourth);
+        app.focus_history_forward();
+        assert_eq!(
+            app.layout().focus,
+            fourth,
+            "search navigation clears the abandoned forward branch"
+        );
+        assert_ne!(app.layout().focus, first);
     }
 
     #[test]
