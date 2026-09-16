@@ -334,20 +334,11 @@ impl App {
                         app.discard_ready_worktree();
                     }
                     Err(message) => {
-                        if let Some(run) = app.automation.run(&retry_run).cloned() {
-                            let _ = app.automation.set_run_status(
-                                &retry_run,
-                                RunStatus::Failed,
-                                Some(message.clone()),
-                                crate::automation::unix_now(),
-                            );
-                            app.persist_automation();
-                            app.emit_event(
-                                "automation.run_failed",
-                                json!({"automation_id": run.automation_id, "run_id": retry_run,
-                                    "code": "git_error", "message": message}),
-                            );
-                        }
+                        app.fail_deferred_automation_start(
+                            &retry_run,
+                            message,
+                            crate::automation::unix_now(),
+                        );
                     }
                 }
                 true
@@ -390,6 +381,34 @@ impl App {
             }
         }
         true
+    }
+
+    fn fail_deferred_automation_start(&mut self, run_id: &str, message: String, now: u64) {
+        let Some(run) = self.automation.run(run_id).cloned() else {
+            return;
+        };
+        if let Some(task_id) = run.task_id.as_deref() {
+            let _ = self.orch.set_status(task_id, TaskStatus::Failed);
+            let _ = self.orch.add_output(task_id, message.clone());
+            self.orch.save();
+            let task = self
+                .orch
+                .task(task_id)
+                .map(super::dispatch::task_json)
+                .unwrap_or(serde_json::Value::Null);
+            self.emit_event("task.updated", task);
+        }
+        let _ =
+            self.automation
+                .set_run_status(run_id, RunStatus::Failed, Some(message.clone()), now);
+        self.persist_automation();
+        self.emit_event(
+            "automation.run_failed",
+            json!({"automation_id": run.automation_id, "run_id": run_id,
+                "task_id": run.task_id, "code": "git_error", "message": message}),
+        );
+        self.pending_notify
+            .push(format!("Automation {} failed to start", run.automation_id));
     }
 
     pub(crate) fn validate_active_agent_target(
@@ -1895,6 +1914,64 @@ mod tests {
             app.automation.run(&run.id).unwrap().status,
             RunStatus::Running
         );
+    }
+
+    #[test]
+    fn deferred_worktree_failure_updates_linked_task_and_notifies() {
+        let _env = crate::persist::test_env("automation-deferred-worktree-failure");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let definition = app
+            .automation
+            .create(
+                automation_input(
+                    app.workspaces[0].id.clone(),
+                    crate::automation::Trigger::Once {
+                        at_utc: 4_000_000_000,
+                    },
+                ),
+                None,
+                10,
+            )
+            .unwrap();
+        let run = app
+            .automation
+            .request_run(&definition.id, None, 20)
+            .unwrap();
+        let task = app
+            .orch
+            .add_task("review".into(), Vec::new(), Vec::new(), None)
+            .unwrap();
+        app.orch
+            .attach_automation(
+                &task.id,
+                "review the changes".into(),
+                AutomationProvenance {
+                    automation_id: definition.id.clone(),
+                    run_id: run.id.clone(),
+                    scheduled_at: run.scheduled_at,
+                },
+            )
+            .unwrap();
+        app.automation
+            .bind_task(&run.id, task.id.clone(), 20)
+            .unwrap();
+
+        app.fail_deferred_automation_start(&run.id, "provider failed".into(), 21);
+
+        let task = app.orch.task(&task.id).unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(
+            task.outputs.last().map(String::as_str),
+            Some("provider failed")
+        );
+        let run = app.automation.run(&run.id).unwrap();
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.error.as_deref(), Some("provider failed"));
+        assert!(app
+            .pending_notify
+            .iter()
+            .any(|message| message == &format!("Automation {} failed to start", definition.id)));
     }
 
     #[test]

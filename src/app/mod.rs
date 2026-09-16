@@ -8731,6 +8731,7 @@ mod tests {
 
     use crate::persist::TEST_ENV_LOCK as ENV_GUARD;
 
+    #[cfg(unix)]
     fn api_call_with_workers(
         app: &mut App,
         events: &mpsc::Receiver<AppEvent>,

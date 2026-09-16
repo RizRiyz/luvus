@@ -276,14 +276,15 @@ fn run(
             thread::sleep(Duration::from_millis(10));
         }
         if !t_out.is_finished() || !t_err.is_finished() {
-            return (
-                None,
-                String::new(),
+            let message = if was_cancelled && !timed_out {
+                "module command cancelled".to_string()
+            } else {
                 format!(
                     "module command timed out after {} seconds",
                     timeout.unwrap_or(SYNC_TIMEOUT).as_secs()
-                ),
-            );
+                )
+            };
+            return (None, String::new(), message);
         }
     }
     let out = t_out.join().unwrap_or_default();
@@ -424,6 +425,7 @@ mod tests {
         trigger.join().unwrap();
         assert_eq!(code, None);
         assert!(err.contains("cancelled"), "{err:?}");
+        assert!(!err.contains("timed out"), "{err:?}");
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
