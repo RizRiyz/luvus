@@ -42,9 +42,21 @@ pub struct ModuleManifest {
     /// content arrives later through `luvus bar push` (`ui.bar.push` on the API).
     #[serde(default)]
     pub bars: Vec<BarWidgetEntry>,
+    /// Optional synchronous worktree creation provider. Luvus supplies a
+    /// versioned request through `LUVUS_WORKTREE_*` environment variables and
+    /// expects one JSON object containing an absolute `path` on stdout.
+    #[serde(default)]
+    pub worktree_provider: Option<WorktreeProvider>,
     /// User-editable settings rendered in Settings → Modules (docs/13 §3.6).
     #[serde(default)]
     pub settings: Vec<SettingSpec>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WorktreeProvider {
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub platforms: Option<Vec<String>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -276,6 +288,10 @@ impl ModuleManifest {
             check_argv(&e.command, &format!("event {}", e.on))?;
             check_platforms(e.platforms.as_ref(), &format!("event {}", e.on))?;
         }
+        if let Some(provider) = &self.worktree_provider {
+            check_argv(&provider.command, "worktree_provider")?;
+            check_platforms(provider.platforms.as_ref(), "worktree_provider")?;
+        }
         let mut setting_keys = HashSet::new();
         for s in &self.settings {
             if !valid_local_id(&s.key) {
@@ -359,6 +375,13 @@ impl ModuleManifest {
                     .any(|c| c == context || (c == "node" && context == "workspace"))
             })
             .collect()
+    }
+
+    /// Worktree provider command when declared and allowed on this platform.
+    pub fn worktree_provider(&self) -> Option<&WorktreeProvider> {
+        self.worktree_provider
+            .as_ref()
+            .filter(|provider| allowed_on(provider.platforms.as_ref()))
     }
 
     /// Find a setting spec by key.
@@ -518,6 +541,7 @@ mod tests {
             panes: vec![],
             docks: vec![],
             bars: vec![],
+            worktree_provider: None,
             settings: vec![],
         }
     }
@@ -537,6 +561,23 @@ mod tests {
         let mut m = base();
         m.actions.push(action("refresh"));
         assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn worktree_provider_validates_command_and_platform_gate() {
+        let mut manifest = base();
+        manifest.worktree_provider = Some(WorktreeProvider {
+            command: Vec::new(),
+            platforms: None,
+        });
+        assert!(manifest.validate().unwrap_err().contains("non-empty argv"));
+
+        manifest.worktree_provider = Some(WorktreeProvider {
+            command: vec!["provider".into()],
+            platforms: Some(vec!["never-this-platform".into()]),
+        });
+        assert!(manifest.validate().is_ok());
+        assert!(manifest.worktree_provider().is_none());
     }
 
     #[test]
@@ -724,6 +765,9 @@ default = 20
 min = 1
 max = 99
 step = 1
+
+[worktree_provider]
+command = ["./create-worktree"]
 "#,
         )
         .expect("parses");
@@ -732,6 +776,10 @@ step = 1
         assert_eq!(m.actions_for_context("workspace").len(), 1);
         assert!(m.setting("token").unwrap().secret);
         assert_eq!(m.setting("limit").unwrap().default_value(), 20);
+        assert_eq!(
+            m.worktree_provider().unwrap().command,
+            ["./create-worktree"]
+        );
     }
 
     #[test]

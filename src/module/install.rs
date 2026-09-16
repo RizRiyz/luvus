@@ -165,9 +165,24 @@ fn print_preview(spec: &str, sha: &str, m: &ModuleManifest) {
     println!("  id:      {}", m.id);
     println!("  name:    {} {}", m.name, m.version);
     println!("  commit:  {}", short(sha));
-    let mut commands: Vec<String> = Vec::new();
+    let commands = preview_commands(m);
+    if commands.is_empty() {
+        println!("  (no commands declared)");
+    } else {
+        println!("Commands this module can run:");
+        for c in commands {
+            println!("{c}");
+        }
+    }
+}
+
+fn preview_commands(m: &ModuleManifest) -> Vec<String> {
+    let mut commands = Vec::new();
     for b in &m.build {
         commands.push(format!("  build:   {}", b.command.join(" ")));
+    }
+    for (index, startup) in m.startup.iter().enumerate() {
+        commands.push(format!("  startup {index}: {}", startup.command.join(" ")));
     }
     for a in &m.actions {
         commands.push(format!("  action {}: {}", a.id, a.command.join(" ")));
@@ -178,14 +193,13 @@ fn print_preview(spec: &str, sha: &str, m: &ModuleManifest) {
     for e in &m.events {
         commands.push(format!("  on {}: {}", e.on, e.command.join(" ")));
     }
-    if commands.is_empty() {
-        println!("  (no commands declared)");
-    } else {
-        println!("Commands this module can run:");
-        for c in commands {
-            println!("{c}");
-        }
+    if let Some(provider) = &m.worktree_provider {
+        commands.push(format!(
+            "  worktree provider: {}",
+            provider.command.join(" ")
+        ));
     }
+    commands
 }
 
 fn confirm() -> Result<bool> {
@@ -274,6 +288,30 @@ mod tests {
         assert!(sub.is_empty());
 
         assert!(parse_spec("nope").is_err());
+    }
+
+    #[test]
+    fn install_preview_includes_startup_and_worktree_provider_commands() {
+        let manifest: ModuleManifest = toml::from_str(
+            r#"id = "example.provider"
+name = "Provider"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+[[startup]]
+command = ["./startup"]
+[worktree_provider]
+command = ["./create-worktree"]
+"#,
+        )
+        .unwrap();
+        manifest.validate().unwrap();
+        let commands = preview_commands(&manifest);
+        assert!(commands
+            .iter()
+            .any(|line| line.contains("startup 0: ./startup")));
+        assert!(commands
+            .iter()
+            .any(|line| line.contains("worktree provider: ./create-worktree")));
     }
 
     #[test]

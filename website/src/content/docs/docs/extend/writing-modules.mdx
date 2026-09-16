@@ -98,6 +98,7 @@ with `module log`.
 | `min_luvus_version` | ✓ | Install is refused if newer than the host. Use `0.8.3` if you use right-click menus, settings, startup hooks, or dock row values. |
 | `description` |  | One-line summary. |
 | `platforms` |  | e.g. `["macos", "linux"]`. Omit for all. `[]` is an error. |
+| `worktree_provider` |  | A single `[worktree_provider]` table declares a fixed synchronous worktree creation command. |
 
 The manifest filename is `luvus-module.toml`.
 
@@ -105,6 +106,44 @@ Every entry below (`build`, `startup`, `actions`, `events`, `panes`) also
 accepts its own `platforms` list, which overrides the top-level one. That's how
 one manifest ships a `pbcopy` action on macOS and a `clip.exe` action on
 Windows without either showing up on the wrong machine.
+
+### `[worktree_provider]`: create worktrees for Luvus
+
+A module may expose one synchronous worktree creation command:
+
+```toml
+[worktree_provider]
+command = ["./create-worktree"]
+platforms = ["macos", "linux"] # optional
+```
+
+The user selects the module by canonical id in
+`config.json` as `worktree.provider`; configuration cannot replace this fixed
+argv. Luvus runs the command in the module root with normal module identity and
+settings variables plus:
+
+| Variable | Meaning |
+|---|---|
+| `LUVUS_WORKTREE_PROVIDER_VERSION` | Provider contract version, currently `1`. |
+| `LUVUS_WORKTREE_REPOSITORY` | Source repository path. |
+| `LUVUS_WORKTREE_BRANCH` | Exact requested branch. |
+| `LUVUS_WORKTREE_BRANCH_EXISTS` | `true` when the local branch already exists. |
+| `LUVUS_WORKTREE_REQUEST_JSON` | Version, repository, branch, and `branch_exists` as JSON. |
+
+Return exactly one JSON object on stdout:
+
+```json
+{"path":"/absolute/path/to/worktree"}
+```
+
+Write human logs to stderr. A non-zero exit preserves stderr for the user.
+The provider command is synchronous: do not call the Luvus CLI or API from it,
+because the server is waiting for the provider result. It may use its own module
+settings, config, and state directories normally. Luvus opens no workspace until it verifies that the returned path exists, is a
+registered worktree of the source repository, shares its Git common directory,
+and checks out the requested branch. Removal and ORCH merge stay Git-backed.
+The provider command is shown in the module install confirmation alongside all
+other executable commands.
 
 ### `[[actions]]`: on-demand commands
 
@@ -601,6 +640,7 @@ takes down luvus.
 | `LUVUS_MODULE_ENTRYPOINT_ID` | Pane commands. |
 | `LUVUS_MODULE_EVENT` | Event hooks (the name) and startup hooks (`startup`). |
 | `LUVUS_MODULE_EVENT_JSON` | Event hooks (the payload). |
+| `LUVUS_WORKTREE_*` | The versioned request for `[worktree_provider]` commands. |
 | `LUVUS_MODULE_ROW_*` | Actions run from a clicked dock row. |
 | `LUVUS_SETTING_<KEY>` / `LUVUS_MODULE_SETTINGS_JSON` | Every command, when you declare `[[settings]]`. |
 

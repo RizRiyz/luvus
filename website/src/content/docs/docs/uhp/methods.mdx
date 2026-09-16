@@ -198,8 +198,10 @@ also published by `workspace.list` and `workspace.get`. Filter or correlate on
 stable `workspace_id`; worktree mode creates its branch from that workspace's
 repository using the configured `worktree.provider`, while workspace mode
 creates a dedicated branchless task tab there. The same provider is used by
-`worktree.create` and TUI creation. Provider selection is host configuration,
-not a per-request executable or command parameter. The workspace must belong to
+`worktree.create` and TUI creation. A non-`git` value is the canonical id of an
+enabled module declaring `[worktree_provider]`; provider selection is host
+configuration, not a per-request executable or command parameter. The
+workspace must belong to
 the task's recorded project. `branch` is valid
 only in worktree mode, and `task.merge` returns
 `merge_unavailable` for a workspace worker. `task.start` also accepts

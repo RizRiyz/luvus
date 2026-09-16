@@ -299,7 +299,7 @@ impl App {
             .iter()
             .map(|workspace| (workspace.id.clone(), workspace.active_tab))
             .collect();
-        let started = self.task_start_automation(
+        let mut started = self.task_start_automation(
             &task_id,
             run.task.agent_id.clone(),
             run.task.mode,
@@ -322,6 +322,38 @@ impl App {
                 .position(|workspace| workspace.id == workspace_id)
             {
                 self.active_ws = index;
+            }
+        }
+
+        if matches!(&started, Err((code, _)) if code == WORKTREE_CREATE_PENDING) {
+            let retry_run = run_id.to_string();
+            match self.schedule_pending_worktree(move |app, result| {
+                match result {
+                    Ok(()) => {
+                        app.start_automation_run(&retry_run, crate::automation::unix_now());
+                        app.discard_ready_worktree();
+                    }
+                    Err(message) => {
+                        if let Some(run) = app.automation.run(&retry_run).cloned() {
+                            let _ = app.automation.set_run_status(
+                                &retry_run,
+                                RunStatus::Failed,
+                                Some(message.clone()),
+                                crate::automation::unix_now(),
+                            );
+                            app.persist_automation();
+                            app.emit_event(
+                                "automation.run_failed",
+                                json!({"automation_id": run.automation_id, "run_id": retry_run,
+                                    "code": "git_error", "message": message}),
+                            );
+                        }
+                    }
+                }
+                true
+            }) {
+                Ok(()) => return true,
+                Err(message) => started = Err(("busy".into(), message)),
             }
         }
 

@@ -1,157 +1,380 @@
-//! Configurable worktree creation backends.
+//! Worktree creation provider boundary.
 //!
-//! Creation is the only provider-controlled operation. Removal and ORCH merge
-//! continue to use Git directly. Every backend returns a candidate path, which
-//! is verified against Git before callers may open a workspace there.
+//! The built-in Git provider remains the default. A module can opt into the
+//! creation boundary with `[worktree_provider]`; Luvus runs only that fixed
+//! manifest argv and validates the returned checkout before opening it.
 
-use std::ffi::OsString;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 use crate::config::WorktreeConfig;
+use crate::module::ModuleRegistry;
 
-const FORBIDDEN_EXACT: &[&str] = &[
-    "-C",
-    "--config",
-    "--config-set",
-    "--format",
-    "-x",
-    "--execute",
-    "--no-cd",
-    "--cd",
-    "-c",
-    "--create",
-    "-b",
-    "--base",
-    "--branches",
-    "--remotes",
-    "--prs",
-    "--clobber",
-    "-y",
-    "--yes",
-    "--",
-];
+pub const PROVIDER_VERSION: &str = "1";
 
 #[derive(Deserialize)]
-struct WorktrunkOutput {
+struct ProviderOutput {
     path: PathBuf,
 }
 
-/// Create `branch` using the configured backend and verify the returned path.
-pub fn create(
-    config: &WorktreeConfig,
-    repo: &Path,
-    git_path: &Path,
-    branch: &str,
-) -> Result<PathBuf, String> {
-    let provider = config.provider.trim().to_ascii_lowercase();
-    if provider == "worktrunk" && branch.starts_with('-') {
-        return Err("branch names beginning with '-' are not allowed with Worktrunk".to_string());
-    }
-    let path = match provider.as_str() {
-        "git" => {
-            crate::git::local::worktree_add(repo, git_path, branch)?;
-            git_path.to_path_buf()
-        }
-        "worktrunk" => create_with_worktrunk(config, repo, branch)?,
-        provider => return Err(format!("unknown worktree provider: {provider}")),
-    };
-    validate(repo, &path, branch)?;
-    Ok(path)
+pub struct CreatedWorktree {
+    pub repo: PathBuf,
+    pub path: PathBuf,
+    pub branch: String,
+    pub worktree_created: bool,
+    pub branch_created: bool,
 }
 
-pub(crate) fn validate_config(config: &WorktreeConfig) -> Result<(), String> {
-    if config.provider.trim().eq_ignore_ascii_case("worktrunk") {
-        if config.executable.trim().is_empty() {
-            return Err("worktree.executable must not be empty".to_string());
+pub struct CreateJob {
+    module: crate::module::InstalledModule,
+    token: String,
+    context: Value,
+    argv: Vec<String>,
+    repo: PathBuf,
+    branch: String,
+}
+
+impl CreateJob {
+    pub fn run(self, cancelled: &std::sync::atomic::AtomicBool) -> Result<CreatedWorktree, String> {
+        let branch_exists = bounded_branch_exists(&self.repo, &self.branch, cancelled)?;
+        let existing_worktrees = bounded_worktree_paths(&self.repo, cancelled)?;
+        let request = json!({
+            "version": PROVIDER_VERSION,
+            "repository": self.repo.display().to_string(),
+            "branch": self.branch,
+            "branch_exists": branch_exists,
+        });
+        let extra = vec![
+            (
+                "LUVUS_WORKTREE_PROVIDER_VERSION".into(),
+                PROVIDER_VERSION.into(),
+            ),
+            (
+                "LUVUS_WORKTREE_REPOSITORY".into(),
+                self.repo.display().to_string(),
+            ),
+            ("LUVUS_WORKTREE_BRANCH".into(), self.branch.clone()),
+            (
+                "LUVUS_WORKTREE_BRANCH_EXISTS".into(),
+                branch_exists.to_string(),
+            ),
+            ("LUVUS_WORKTREE_REQUEST_JSON".into(), request.to_string()),
+        ];
+        let stdout = crate::module::runtime::run_sync(
+            &self.module,
+            &self.token,
+            &self.context,
+            &self.argv,
+            extra,
+            cancelled,
+        )?;
+        let path = parse_provider_output(stdout.as_bytes())?;
+        if let Err(error) = validate_bounded(&self.repo, &path, &self.branch, cancelled) {
+            cleanup_failed_creation(
+                &self.repo,
+                &path,
+                &self.branch,
+                !branch_exists,
+                &existing_worktrees,
+            );
+            return Err(error);
         }
-        validate_extra_args(&config.args)?;
+        let worktree_created = !worktree_existed(&path, &existing_worktrees);
+        Ok(CreatedWorktree {
+            repo: self.repo,
+            path,
+            branch: self.branch,
+            worktree_created,
+            branch_created: !branch_exists,
+        })
+    }
+}
+
+pub fn module_job(
+    config: &WorktreeConfig,
+    modules: &ModuleRegistry,
+    module_tokens: &HashMap<String, String>,
+    context: Value,
+    repo: &Path,
+    branch: &str,
+) -> Result<Option<CreateJob>, String> {
+    let provider_id = config.provider.trim();
+    if provider_id.eq_ignore_ascii_case("git") {
+        return Ok(None);
+    }
+    let (module, provider) = resolve_module(modules, provider_id)?;
+    let token = module_tokens
+        .get(&module.id)
+        .ok_or_else(|| format!("module {provider_id} has no runtime credential"))?;
+    Ok(Some(CreateJob {
+        module: module.clone(),
+        token: token.clone(),
+        context,
+        argv: provider.command.clone(),
+        repo: repo.to_path_buf(),
+        branch: branch.to_string(),
+    }))
+}
+
+/// Create `branch` with the built-in Git provider and verify the checkout.
+pub fn create_git(repo: &Path, git_path: &Path, branch: &str) -> Result<PathBuf, String> {
+    crate::git::local::worktree_add(repo, git_path, branch)?;
+    validate(repo, git_path, branch)?;
+    Ok(git_path.to_path_buf())
+}
+
+pub(crate) fn validate_config(
+    config: &WorktreeConfig,
+    modules: Option<&ModuleRegistry>,
+) -> Result<(), String> {
+    let provider = config.provider.trim();
+    if provider.is_empty() {
+        return Err("worktree.provider must not be empty".to_string());
+    }
+    if provider.eq_ignore_ascii_case("git") {
+        return Ok(());
+    }
+    if let Some(modules) = modules {
+        resolve_module(modules, provider)?;
     }
     Ok(())
 }
 
-fn create_with_worktrunk(
-    config: &WorktreeConfig,
-    repo: &Path,
-    branch: &str,
-) -> Result<PathBuf, String> {
-    let executable = config.executable.trim();
-    if executable.is_empty() {
-        return Err("worktree.executable must not be empty".to_string());
+fn resolve_module<'a>(
+    modules: &'a ModuleRegistry,
+    provider_id: &str,
+) -> Result<
+    (
+        &'a crate::module::InstalledModule,
+        &'a crate::module::manifest::WorktreeProvider,
+    ),
+    String,
+> {
+    let module = modules
+        .find(provider_id)
+        .ok_or_else(|| format!("worktree provider module is not installed: {provider_id}"))?;
+    if module.id != provider_id {
+        return Err(format!(
+            "worktree.provider must use the canonical module id: {}",
+            module.id
+        ));
     }
-    let args = worktrunk_args(repo, branch, &config.args)?;
-
-    let output = crate::platform::no_window(Command::new(executable).args(&args))
-        .output()
-        .map_err(|error| format!("failed to run {executable}: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("{executable} exited with {}", output.status)
-        } else {
-            stderr
-        });
+    if !module.is_runnable() {
+        return Err(format!(
+            "worktree provider module is not enabled: {provider_id}"
+        ));
     }
-    parse_worktrunk_output(&output.stdout)
+    let provider = module
+        .manifest
+        .worktree_provider()
+        .ok_or_else(|| format!("module {provider_id} does not declare [worktree_provider]"))?;
+    Ok((module, provider))
 }
 
-fn worktrunk_args(repo: &Path, branch: &str, extra: &[String]) -> Result<Vec<OsString>, String> {
-    validate_extra_args(extra)?;
-    let mut args = vec![
-        OsString::from("-C"),
-        repo.as_os_str().to_owned(),
-        OsString::from("switch"),
-    ];
-    args.extend(extra.iter().map(OsString::from));
-    if !crate::git::local::branch_exists(repo, branch) {
-        args.push(OsString::from("--create"));
-    }
-    args.extend([
-        OsString::from(branch),
-        OsString::from("--no-cd"),
-        OsString::from("--format"),
-        OsString::from("json"),
-    ]);
-    Ok(args)
-}
-
-fn validate_extra_args(args: &[String]) -> Result<(), String> {
-    for arg in args {
-        if arg.is_empty() {
-            return Err("worktree.args must not contain an empty argument".to_string());
-        }
-        let option = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
-        let short = option
-            .strip_prefix('-')
-            .filter(|value| !value.starts_with('-'));
-        let protected_short = short.is_some_and(|value| {
-            value
-                .chars()
-                .any(|flag| matches!(flag, 'C' | 'x' | 'c' | 'b' | 'y'))
-        });
-        if FORBIDDEN_EXACT.contains(&option) || option.starts_with("--config-") || protected_short {
-            return Err(format!(
-                "worktree.args contains protected Worktrunk argument: {arg}"
-            ));
-        }
-        if !arg.starts_with('-') {
-            return Err(format!(
-                "worktree.args may contain only option tokens, not a branch or command: {arg}"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn parse_worktrunk_output(stdout: &[u8]) -> Result<PathBuf, String> {
-    let output: WorktrunkOutput = serde_json::from_slice(stdout)
-        .map_err(|error| format!("Worktrunk returned invalid JSON: {error}"))?;
+fn parse_provider_output(stdout: &[u8]) -> Result<PathBuf, String> {
+    let output: ProviderOutput = serde_json::from_slice(stdout)
+        .map_err(|error| format!("worktree provider returned invalid JSON: {error}"))?;
     if !output.path.is_absolute() {
-        return Err("Worktrunk returned a non-absolute worktree path".to_string());
+        return Err("worktree provider returned a non-absolute path".to_string());
     }
     Ok(output.path)
+}
+
+fn bounded_git(
+    cwd: &Path,
+    args: &[&str],
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
+    let mut argv = vec!["git".to_string()];
+    argv.extend(args.iter().map(|arg| (*arg).to_string()));
+    crate::module::runtime::run_bounded_argv(&cwd.to_path_buf(), &argv, cancelled)
+}
+
+fn bounded_worktree_paths(
+    repo: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<PathBuf>, String> {
+    let raw = bounded_git(repo, &["worktree", "list", "--porcelain", "-z"], cancelled)
+        .or_else(|_| bounded_git(repo, &["worktree", "list", "--porcelain"], cancelled))?;
+    Ok(raw
+        .split(['\0', '\n'])
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(PathBuf::from)
+        .collect())
+}
+
+fn bounded_branch_exists(
+    repo: &Path,
+    branch: &str,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<bool, String> {
+    let refname = format!("refs/heads/{branch}");
+    match bounded_git(
+        repo,
+        &["show-ref", "--verify", "--quiet", &refname],
+        cancelled,
+    ) {
+        Ok(_) => Ok(true),
+        Err(error) if error == "command failed" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn worktree_existed(path: &Path, existing_worktrees: &[PathBuf]) -> bool {
+    let Some(returned) = std::fs::canonicalize(path).ok() else {
+        return false;
+    };
+    existing_worktrees.iter().any(|existing| {
+        std::fs::canonicalize(existing)
+            .map(|existing| crate::platform::same_path(&existing, &returned))
+            .unwrap_or(false)
+    })
+}
+
+fn cleanup_failed_creation(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    branch_created: bool,
+    existing_worktrees: &[PathBuf],
+) {
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    let cleanup = AtomicBool::new(false);
+    if worktree_existed(path, existing_worktrees) {
+        return;
+    }
+    let source_common = bounded_common_dir(repo, &cleanup, Duration::from_secs(5));
+    let returned_common = bounded_common_dir(path, &cleanup, Duration::from_secs(5));
+    if source_common.is_err()
+        || returned_common.is_err()
+        || !crate::platform::same_path(&source_common.unwrap(), &returned_common.unwrap())
+    {
+        return;
+    }
+    let run = |args: Vec<String>| {
+        crate::module::runtime::run_bounded_argv_for(
+            &repo.to_path_buf(),
+            &args,
+            &cleanup,
+            Duration::from_secs(5),
+        )
+    };
+    let removed = run(vec![
+        "git".into(),
+        "worktree".into(),
+        "remove".into(),
+        "--force".into(),
+        path.display().to_string(),
+    ])
+    .is_ok();
+    if removed && branch_created {
+        let _ = run(vec![
+            "git".into(),
+            "branch".into(),
+            "-D".into(),
+            "--".into(),
+            branch.to_string(),
+        ]);
+    }
+}
+
+fn bounded_common_dir(
+    cwd: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+    timeout: std::time::Duration,
+) -> Result<PathBuf, String> {
+    let argv = vec!["git".into(), "rev-parse".into(), "--git-common-dir".into()];
+    let raw = crate::module::runtime::run_bounded_argv_for(
+        &cwd.to_path_buf(),
+        &argv,
+        cancelled,
+        timeout,
+    )?;
+    let path = PathBuf::from(raw.trim());
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+}
+
+fn validate_bounded(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    if !path.is_dir() {
+        return Err(format!(
+            "worktree provider returned a missing directory: {}",
+            path.display()
+        ));
+    }
+    let run = |cwd: &Path, args: &[&str]| {
+        let mut argv = vec!["git".to_string()];
+        argv.extend(args.iter().map(|arg| (*arg).to_string()));
+        crate::module::runtime::run_bounded_argv(&cwd.to_path_buf(), &argv, cancelled)
+    };
+    if run(path, &["rev-parse", "--is-inside-work-tree"])?.trim() != "true" {
+        return Err(format!(
+            "worktree provider returned a path that is not a Git worktree: {}",
+            path.display()
+        ));
+    }
+    let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "could not resolve returned worktree path {}: {error}",
+            path.display()
+        )
+    })?;
+    let raw = run(repo, &["worktree", "list", "--porcelain", "-z"])
+        .or_else(|_| run(repo, &["worktree", "list", "--porcelain"]))?;
+    let registered = raw
+        .split(['\0', '\n'])
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .any(|candidate| {
+            std::fs::canonicalize(candidate)
+                .map(|candidate| crate::platform::same_path(&candidate, &canonical_path))
+                .unwrap_or(false)
+        });
+    if !registered {
+        return Err(format!(
+            "worktree provider returned a path not registered as a Git worktree: {}",
+            path.display()
+        ));
+    }
+    let common_dir = |cwd: &Path| -> Result<PathBuf, String> {
+        let raw = run(cwd, &["rev-parse", "--git-common-dir"])?;
+        let path = PathBuf::from(raw.trim());
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        };
+        Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+    };
+    let source_common = common_dir(repo)?;
+    let worktree_common = common_dir(path)?;
+    if !crate::platform::same_path(&source_common, &worktree_common) {
+        return Err(format!(
+            "worktree provider returned a checkout from a different repository: {}",
+            path.display()
+        ));
+    }
+    let actual = run(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if actual.trim() != branch {
+        return Err(format!(
+            "worktree provider returned branch {:?}, expected {branch:?}",
+            actual.trim()
+        ));
+    }
+    Ok(())
 }
 
 fn validate(repo: &Path, path: &Path, branch: &str) -> Result<(), String> {
@@ -215,245 +438,145 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_contract_conflicts_and_positional_tokens() {
-        for arg in [
-            "-C",
-            "-C/tmp/x",
-            "--config=x",
-            "--config-set",
-            "--format=json",
-            "-x",
-            "-xcode",
-            "--execute=code",
-            "--no-cd",
-            "--cd",
-            "-c",
-            "--create",
-            "--base=main",
-            "-b",
-            "--branches",
-            "--remotes",
-            "--prs",
-            "--clobber",
-            "--yes",
-            "-y",
-            "-vc",
-            "-vy",
-            "-vb",
-            "--",
-            "topic",
-        ] {
-            let error = validate_extra_args(&[arg.to_string()]).unwrap_err();
-            assert!(error.contains(arg), "{arg}: {error}");
-        }
-    }
-
-    #[test]
-    fn accepts_non_conflicting_option_tokens() {
-        assert!(validate_extra_args(&["--no-hooks".into(), "-vv".into()]).is_ok());
-    }
-
-    #[test]
-    fn rejects_option_shaped_branch_before_constructing_argv() {
-        let config = WorktreeConfig {
-            provider: "worktrunk".into(),
-            executable: "must-not-run".into(),
-            args: Vec::new(),
-        };
-        let error = create(
-            &config,
-            Path::new("/unused/repo"),
-            Path::new("/unused/worktree"),
-            "--execute=sh",
+    fn config_requires_a_provider_id() {
+        assert!(validate_config(
+            &WorktreeConfig {
+                provider: "  ".into()
+            },
+            None,
         )
-        .unwrap_err();
-        assert!(error.contains("not allowed with Worktrunk"));
+        .is_err());
+        assert!(validate_config(&WorktreeConfig::default(), None).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn config_validation_trims_provider_before_protecting_worktrunk() {
-        let config = WorktreeConfig {
-            provider: " worktrunk ".into(),
-            executable: "wt".into(),
-            args: vec!["--yes".into()],
+    fn cancelled_post_validation_cleans_created_worktree_and_branch() {
+        let base = std::env::temp_dir().join(format!(
+            "luvus-worktree-cancel-cleanup-{}-{}",
+            std::process::id(),
+            crate::automation::unix_now()
+        ));
+        let repo = base.join("repo");
+        let path = base.join("topic");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         };
-        assert!(validate_config(&config).is_err());
+        git(&["init", "-q", "-b", "main"], &repo);
+        git(
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+            &repo,
+        );
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "topic",
+                path.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let error = validate_bounded(&repo, &path, "topic", &cancelled).unwrap_err();
+        assert!(error.contains("cancelled"));
+        cleanup_failed_creation(&repo, &path, "topic", true, &[]);
+        assert!(!path.exists());
+        assert!(!crate::git::local::branch_exists(&repo, "topic"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_validation_never_removes_a_preexisting_worktree() {
+        let base = std::env::temp_dir().join(format!(
+            "luvus-worktree-existing-safe-{}-{}",
+            std::process::id(),
+            crate::automation::unix_now()
+        ));
+        let repo = base.join("repo");
+        let path = base.join("existing");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"], &repo);
+        git(
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+            &repo,
+        );
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "existing",
+                path.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        let existing = vec![path.clone()];
+        assert!(worktree_existed(&path, &existing));
+        cleanup_failed_creation(&repo, &path, "requested", true, &existing);
+        assert!(path.exists());
+        assert!(crate::git::local::branch_exists(&repo, "existing"));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
-    fn parses_json_path_and_rejects_other_output() {
+    fn parses_provider_json_path_and_rejects_other_output() {
         let path = if cfg!(windows) {
             r#"C:\\repo.wt"#
         } else {
             "/repo.wt"
         };
-        let json = format!(
-            r#"{{"action":"created","branch":"topic","path":"{path}","created_branch":true,"base_branch":"main"}}"#
-        );
+        let json = format!(r#"{{"path":"{path}"}}"#);
         assert_eq!(
-            parse_worktrunk_output(json.as_bytes()).unwrap(),
+            parse_provider_output(json.as_bytes()).unwrap(),
             PathBuf::from(path.replace("\\\\", "\\"))
         );
-        assert!(parse_worktrunk_output(b"human log\n{\"path\":\"/repo.wt\"}").is_err());
-        assert!(parse_worktrunk_output(br#"{"path":"relative"}"#).is_err());
-    }
-
-    #[cfg(unix)]
-    fn test_repo(tag: &str) -> (PathBuf, PathBuf) {
-        let base =
-            std::env::temp_dir().join(format!("luvus-provider-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let repo = base.join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(&repo)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&[
-            "-c",
-            "user.email=test@example.com",
-            "-c",
-            "user.name=Test",
-            "commit",
-            "-q",
-            "--allow-empty",
-            "-m",
-            "init",
-        ]);
-        (base, repo)
-    }
-
-    #[cfg(unix)]
-    fn write_fake_worktrunk(base: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let executable = base.join("fake-wt");
-        std::fs::write(&executable, body).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        executable
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn worktrunk_creates_new_branch_with_fixed_argv_and_parses_stdout_only() {
-        let (base, repo) = test_repo("new");
-        let path = base.join("topic-wt");
-        let fake = write_fake_worktrunk(
-            &base,
-            &format!(
-                r#"#!/bin/sh
-printf '%s\n' "$@" > "$0.args"
-repo=$2
-shift 3
-create=
-if [ "$1" = --create ]; then create=1; shift; fi
-branch=$1
-if [ -n "$create" ]; then
-  git -C "$repo" worktree add -q -b "$branch" '{}'
-else
-  git -C "$repo" worktree add -q '{}' "$branch"
-fi
-printf '%s\n' 'human hook log' >&2
-printf '%s\n' '{{"action":"created","branch":"topic","path":"{}","created_branch":true,"base_branch":"main"}}'
-"#,
-                path.display(),
-                path.display(),
-                path.display()
-            ),
-        );
-        let config = WorktreeConfig {
-            provider: "worktrunk".into(),
-            executable: fake.display().to_string(),
-            args: Vec::new(),
-        };
-
-        assert_eq!(
-            create(&config, &repo, &base.join("unused"), "topic").unwrap(),
-            path
-        );
-        let args = std::fs::read_to_string(fake.with_extension("args")).unwrap();
-        let expected = format!(
-            "-C\n{}\nswitch\n--create\ntopic\n--no-cd\n--format\njson\n",
-            repo.display()
-        );
-        assert_eq!(args, expected);
-        assert!(!args.contains("--yes"));
-        let _ = std::fs::remove_dir_all(base);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn existing_local_branch_omits_create_from_worktrunk_argv() {
-        let (base, repo) = test_repo("existing");
-        let args = worktrunk_args(&repo, "main", &["--no-hooks".into()]).unwrap();
-        let args: Vec<String> = args
-            .into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "-C",
-                repo.to_str().unwrap(),
-                "switch",
-                "--no-hooks",
-                "main",
-                "--no-cd",
-                "--format",
-                "json",
-            ]
-        );
-        assert!(!args.iter().any(|arg| arg == "--create"));
-        let _ = std::fs::remove_dir_all(base);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn worktrunk_failure_preserves_stderr() {
-        let (base, repo) = test_repo("stderr");
-        let fake = write_fake_worktrunk(
-            &base,
-            "#!/bin/sh\nprintf '%s\\n' 'Cannot prompt for approval in non-interactive environment' >&2\nexit 2\n",
-        );
-        let config = WorktreeConfig {
-            provider: "worktrunk".into(),
-            executable: fake.display().to_string(),
-            args: Vec::new(),
-        };
-        let error = create(&config, &repo, &base.join("unused"), "topic").unwrap_err();
-        assert_eq!(
-            error,
-            "Cannot prompt for approval in non-interactive environment"
-        );
-        let _ = std::fs::remove_dir_all(base);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn validation_rejects_wrong_branch_and_unregistered_directory() {
-        let (base, repo) = test_repo("validate");
-        let worktree = base.join("main-wt");
-        let output = Command::new("git")
-            .args(["worktree", "add", "-q", "-b", "actual"])
-            .arg(&worktree)
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        assert!(validate(&repo, &worktree, "expected")
-            .unwrap_err()
-            .contains("actual"));
-        let ordinary = base.join("ordinary");
-        std::fs::create_dir_all(&ordinary).unwrap();
-        assert!(validate(&repo, &ordinary, "actual").is_err());
-        let _ = std::fs::remove_dir_all(base);
+        assert!(parse_provider_output(b"human log\n{\"path\":\"/repo.wt\"}").is_err());
+        assert!(parse_provider_output(br#"{"path":"relative"}"#).is_err());
     }
 }

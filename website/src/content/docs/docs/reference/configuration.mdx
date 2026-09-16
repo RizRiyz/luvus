@@ -14,7 +14,7 @@ owner-only (`0700`).
 | `modules.json` + `modules/` | installed extensions and their state |
 | `themes/*.toml` | installed data-only themes, shared by named sessions |
 | `themes/*.source.json` | source URL/path, SHA-256 digest, and install timestamp for managed theme installs |
-| `worktrees/` | worktrees created by the default Git provider, nested per repo; Worktrunk uses its own configured path template |
+| `worktrees/` | worktrees created by the default Git provider, nested per repo; module providers may choose other locations |
 | `reviews/` | private local DIFF notes and viewed fingerprints, keyed by hashed repository and worktree identity |
 | `luvus.sock` / `luvus-client.sock` | the control + render sockets (owner-only) |
 
@@ -51,9 +51,7 @@ cleanly across versions because unknown fields get defaults.
 | `prefix` | the command-mode prefix (default `ctrl+space`). Accepts `f1`–`f12` as safe single keys, or a character/Space chord containing `Ctrl` or `Alt`, such as `ctrl+b`, `alt+\`, or `shift+f12` (see [Keybindings](/docs/reference/keybindings/)) |
 | `keybindings` | command id → key, overriding the defaults |
 | `direct_keybindings` | opt-in command id → modified semantic chord handled without the prefix. It is empty by default; configured chords are intercepted instead of reaching the focused pane (see [Keybindings](/docs/reference/keybindings/#opt-in-direct-shortcuts)). |
-| `worktree.provider` | worktree creation backend: `git` (default, backward-compatible) or `worktrunk`. This applies to CLI/API creation, TUI creation, and ORCH task worktrees; remove and task merge remain Git-backed. |
-| `worktree.executable` | Worktrunk executable name or path; defaults to `wt`. It is executed directly, never as a shell command. |
-| `worktree.args` | structured extra argv for Worktrunk. Luvus rejects positional values and arguments that can override repository/config/output, execute another program, change cd behavior, select/create/base a branch, clobber paths, or bypass hook approval. Luvus supplies `-C <repo> switch [--create] <branch> --no-cd --format json`. |
+| `worktree.provider` | worktree creation backend: `git` (default, backward-compatible) or the canonical id of an enabled module declaring `[worktree_provider]`. Configuration cannot supply executable or argv. This applies to CLI/API creation, TUI creation, and ORCH task worktrees; remove and task merge remain Git-backed. |
 | `bars.top_right` / `bars.bottom_right` / `bars.off` | canonical widget ids (`module:id`) in each Luvus Bar placement. `core:runtime-status` defaults to Bottom. Live content and notifications are never persisted. |
 
 ## Environment variables

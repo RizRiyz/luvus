@@ -2257,6 +2257,22 @@ impl MenuScroll {
     }
 }
 
+pub const WORKTREE_CREATE_PENDING: &str = "__worktree_create_pending__";
+
+struct ReadyWorktree {
+    repo: PathBuf,
+    path: PathBuf,
+    branch: String,
+    worktree_created: bool,
+    branch_created: bool,
+}
+
+impl ReadyWorktree {
+    fn matches(&self, repo: &std::path::Path, branch: &str) -> bool {
+        crate::platform::same_path(&self.repo, repo) && self.branch == branch
+    }
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// One random value for this server lifetime. Harness runtimes from an old
@@ -2309,6 +2325,9 @@ pub struct App {
     config_baseline: crate::config::Config,
     config_persistence: config_persistence::ConfigPersistence,
     io_jobs: io_jobs::IoJobs,
+    worktree_create_inflight: bool,
+    pending_worktree_job: Option<crate::worktree::CreateJob>,
+    ready_worktree: Option<ReadyWorktree>,
     automation_persistence: automation_persistence::AutomationPersistence,
     file_metadata_inflight: bool,
     file_metadata_cursor: usize,
@@ -3101,6 +3120,9 @@ impl App {
             config_baseline,
             config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
+            worktree_create_inflight: false,
+            pending_worktree_job: None,
+            ready_worktree: None,
             automation_persistence: automation_persistence::AutomationPersistence::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
@@ -3782,6 +3804,9 @@ impl App {
             config_baseline,
             config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
+            worktree_create_inflight: false,
+            pending_worktree_job: None,
+            ready_worktree: None,
             automation_persistence: automation_persistence::AutomationPersistence::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
@@ -5501,6 +5526,46 @@ impl App {
         if !crate::git::local::is_repo(repo) {
             return Err("not a git repository".into());
         }
+        if let Some(ready) = self
+            .ready_worktree
+            .take_if(|ready| ready.matches(repo, branch))
+        {
+            if self.create_workspace_at(ready.path.clone()) {
+                return Ok(ready.path);
+            }
+            if !ready.worktree_created {
+                return Err("provider returned a worktree whose workspace did not open".into());
+            }
+            let mut cleanup = crate::git::local::worktree_remove_force(repo, &ready.path);
+            if cleanup.is_ok() && ready.branch_created {
+                cleanup = crate::git::local::branch_delete_force(repo, branch);
+            }
+            let detail = cleanup
+                .err()
+                .map(|error| format!("; cleanup failed: {error}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "worktree created but its workspace did not open{detail}"
+            ));
+        }
+        if self.ready_worktree.is_some() {
+            self.discard_ready_worktree();
+            return Err("worktree target changed while the provider was running".into());
+        }
+        if let Some(job) = crate::worktree::module_job(
+            &self.config.worktree,
+            &self.modules,
+            &self.module_tokens,
+            crate::module::context::build(self, "worktree.provider"),
+            repo,
+            branch,
+        )? {
+            if self.worktree_create_inflight || self.pending_worktree_job.is_some() {
+                return Err("a worktree creation is already pending".into());
+            }
+            self.pending_worktree_job = Some(job);
+            return Err(WORKTREE_CREATE_PENDING.into());
+        }
         // Nest under the **main** worktree's name, so every checkout of one repo
         // groups under a single folder even when you branch off another worktree.
         let base = worktrees_dir_for(repo);
@@ -5514,9 +5579,57 @@ impl App {
             path = base.join(format!("{slug}-{n}"));
             n += 1;
         }
-        let path = crate::worktree::create(&self.config.worktree, repo, &path, branch)?;
+        let path = crate::worktree::create_git(repo, &path, branch)?;
         self.create_workspace_at(path.clone());
         Ok(path)
+    }
+
+    fn discard_ready_worktree(&mut self) {
+        let Some(ready) = self.ready_worktree.take() else {
+            return;
+        };
+        if !ready.worktree_created {
+            return;
+        }
+        let mut cleanup = crate::git::local::worktree_remove_force(&ready.repo, &ready.path);
+        if cleanup.is_ok() && ready.branch_created {
+            cleanup = crate::git::local::branch_delete_force(&ready.repo, &ready.branch);
+        }
+        if let Err(error) = cleanup {
+            self.show_toast(format!("worktree cleanup failed: {error}"));
+        }
+    }
+
+    fn schedule_pending_worktree(
+        &mut self,
+        finish: impl FnOnce(&mut App, Result<(), String>) -> bool + Send + 'static,
+    ) -> Result<(), String> {
+        let job = self
+            .pending_worktree_job
+            .take()
+            .ok_or_else(|| "worktree provider did not prepare a job".to_string())?;
+        self.worktree_create_inflight = true;
+        self.io_jobs
+            .submit_parallel(self.app_tx.clone(), move |cancelled| {
+                let result = job.run(&cancelled);
+                Box::new(move |app| {
+                    app.worktree_create_inflight = false;
+                    let result = result.map(|created| {
+                        app.ready_worktree = Some(ReadyWorktree {
+                            repo: created.repo,
+                            path: created.path,
+                            branch: created.branch,
+                            worktree_created: created.worktree_created,
+                            branch_created: created.branch_created,
+                        });
+                    });
+                    finish(app, result)
+                })
+            })
+            .inspect_err(|_| {
+                self.worktree_create_inflight = false;
+            })
+            .map_err(str::to_string)
     }
 
     /// Open the new-worktree branch prompt (`Ctrl+Space G`) for the active workspace,
@@ -6956,6 +7069,12 @@ impl App {
 
     /// Key handling while the new-worktree prompt is open.
     pub fn handle_worktree_prompt_key(&mut self, key: KeyEvent) {
+        if self.worktree_create_inflight
+            && self.worktree_error.as_deref() == Some("creating worktree…")
+            && key.code != KeyCode::Esc
+        {
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.worktree_prompt = None;
@@ -6971,6 +7090,40 @@ impl App {
                             self.worktree_prompt = None;
                             self.worktree_repo = None;
                             self.worktree_error = None;
+                        }
+                        Err(e) if e == WORKTREE_CREATE_PENDING => {
+                            self.worktree_error = Some("creating worktree…".into());
+                            let expected_repo = repo.clone();
+                            let expected_branch = branch.clone();
+                            let scheduled = self.schedule_pending_worktree(move |app, result| {
+                                let still_pending =
+                                    app.worktree_repo.as_ref().is_some_and(|current| {
+                                        crate::platform::same_path(current, &expected_repo)
+                                    }) && app.worktree_prompt.as_deref()
+                                        == Some(expected_branch.as_str());
+                                if !still_pending {
+                                    app.discard_ready_worktree();
+                                    return true;
+                                }
+                                match result {
+                                    Ok(()) => match app.create_worktree(&repo, &branch) {
+                                        Ok(_) => {
+                                            app.worktree_prompt = None;
+                                            app.worktree_repo = None;
+                                            app.worktree_error = None;
+                                        }
+                                        Err(error) => {
+                                            app.discard_ready_worktree();
+                                            app.worktree_error = Some(error);
+                                        }
+                                    },
+                                    Err(error) => app.worktree_error = Some(error),
+                                }
+                                true
+                            });
+                            if let Err(error) = scheduled {
+                                self.worktree_error = Some(error);
+                            }
                         }
                         // Failure (branch already checked out, dirty tree, empty
                         // name…): keep the prompt open and show why, so it's never
@@ -8462,6 +8615,30 @@ mod tests {
 
     use crate::persist::TEST_ENV_LOCK as ENV_GUARD;
 
+    fn api_call_with_workers(
+        app: &mut App,
+        events: &mpsc::Receiver<AppEvent>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let (reply, response) = mpsc::channel();
+        app.handle_event(AppEvent::Api(ApiRequest {
+            id: "test".into(),
+            method: method.into(),
+            params,
+            reply,
+        }));
+        loop {
+            if let Ok(response) = response.try_recv() {
+                return serde_json::from_str(&response).unwrap();
+            }
+            let event = events
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("API worker completion");
+            app.handle_event(event);
+        }
+    }
+
     /// Exercise guards for a restore/spawn failure that leaves no layout. Normal
     /// user close paths immediately create a neutral home terminal instead.
     fn force_empty_session(app: &mut App) {
@@ -9103,56 +9280,180 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn api_worktree_create_uses_configured_worktrunk_provider() {
+    fn api_worktree_create_uses_configured_module_provider() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _env = crate::persist::test_env("worktrunk-api-create");
-        let (base, repo, _sibling) = repo_with_sibling_worktree("worktrunk-api-create");
+        let _env = crate::persist::test_env("module-provider-api-create");
+        let (base, repo, _sibling) = repo_with_sibling_worktree("module-provider-api-create");
         let path = base.join("wt-topic");
-        let fake = base.join("fake-wt");
+        let module = base.join("module");
+        std::fs::create_dir_all(&module).unwrap();
+        let fake = module.join("create-worktree");
         std::fs::write(
             &fake,
-            format!(
-                r#"#!/bin/sh
-repo=$2
-shift 3
-if [ "$1" = --create ]; then shift; create='-b'; fi
-branch=$1
-git -C "$repo" worktree add -q $create "$branch" '{}'
-printf '%s\n' '{{"action":"created","branch":"topic","path":"{}","created_branch":true,"base_branch":"main"}}'
+            r#"#!/bin/sh
+repo=$LUVUS_WORKTREE_REPOSITORY
+branch=$LUVUS_WORKTREE_BRANCH
+if [ "$branch" = hook-error ]; then
+  printf '%s\n' 'provider needs interactive approval' >&2
+  exit 2
+fi
+printf '%s' "$LUVUS_WORKTREE_REQUEST_JSON" > "$LUVUS_MODULE_STATE_DIR/request.json"
+if [ "$LUVUS_WORKTREE_BRANCH_EXISTS" = false ]; then create='-b'; fi
+safe=$(printf '%s' "$branch" | tr '/ ' '--')
+target="$(dirname "$repo")/wt-$safe"
+git -C "$repo" worktree add -q $create "$branch" "$target"
+printf '%s\n' "{\"path\":\"$target\"}"
 "#,
-                path.display(),
-                path.display()
-            ),
         )
         .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            module.join("luvus-module.toml"),
+            r#"id = "example.worktree"
+name = "Worktree provider"
+version = "0.1.0"
+min_luvus_version = "0.14.0"
+[worktree_provider]
+command = ["./create-worktree"]
+"#,
+        )
+        .unwrap();
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, events) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        app.workspaces[0].cwd = repo;
+        app.module_link_with(&module, true, None).unwrap();
+        let info = api_call(
+            &mut app,
+            "module.info",
+            serde_json::json!({"id":"example.worktree"}),
+        );
+        assert_eq!(info["result"]["worktree_provider"], true);
+        app.workspaces[0].cwd = repo.clone();
         app.config.worktree = crate::config::WorktreeConfig {
-            provider: "worktrunk".into(),
-            executable: fake.display().to_string(),
-            args: Vec::new(),
+            provider: "example.worktree".into(),
         };
-        let response = api_call(
+        let (reply, response) = mpsc::channel();
+        app.handle_event(AppEvent::Api(ApiRequest {
+            id: "create".into(),
+            method: "worktree.create".into(),
+            params: serde_json::json!({"branch":"topic"}),
+            reply,
+        }));
+        assert!(response.try_recv().is_err(), "provider request is parked");
+        let ping = api_call(&mut app, "ping", serde_json::json!({}));
+        assert_eq!(ping["result"]["type"], "pong");
+        let response = loop {
+            if let Ok(response) = response.try_recv() {
+                break serde_json::from_str::<serde_json::Value>(&response).unwrap();
+            }
+            app.handle_event(
+                events
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("provider completion"),
+            );
+        };
+        assert_eq!(
+            response["result"]["path"],
+            path.display().to_string(),
+            "{response}"
+        );
+        assert!(crate::platform::same_path(&app.ws().cwd, &path));
+        let request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                crate::module::paths::state_dir("example.worktree").join("request.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["version"], crate::worktree::PROVIDER_VERSION);
+        assert_eq!(request["repository"], repo.display().to_string());
+        assert_eq!(request["branch"], "topic");
+        assert_eq!(request["branch_exists"], false);
+
+        app.orch
+            .add_task("module worker".into(), vec![], vec![], None)
+            .unwrap();
+        let workspace_id = app.ws().id.clone();
+        let started = api_call_with_workers(
+            &mut app,
+            &events,
+            "task.start",
+            serde_json::json!({
+                "id":"t1",
+                "mode":"worktree",
+                "workspace_id":workspace_id
+            }),
+        );
+        assert_eq!(started["result"]["branch"], "luvus/t1");
+        assert_eq!(started["result"]["mode"], "worktree");
+        assert!(started["result"]["pane"].as_str().is_some());
+        let task_path = std::path::PathBuf::from(started["result"]["worktree"].as_str().unwrap());
+        assert!(crate::platform::same_path(&app.ws().cwd, &task_path));
+
+        app.modules.find_mut("example.worktree").unwrap().enabled = false;
+        let disabled = api_call(
             &mut app,
             "worktree.create",
-            serde_json::json!({"branch":"topic"}),
+            serde_json::json!({"branch":"disabled-topic"}),
         );
-        assert_eq!(response["result"]["path"], path.display().to_string());
-        assert!(crate::platform::same_path(&app.ws().cwd, &path));
+        assert!(
+            disabled["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not enabled"),
+            "{disabled}"
+        );
+        app.modules.find_mut("example.worktree").unwrap().enabled = true;
 
+        let failed = api_call_with_workers(
+            &mut app,
+            &events,
+            "worktree.create",
+            serde_json::json!({"branch":"hook-error"}),
+        );
+        assert_eq!(
+            failed["error"]["message"],
+            "provider needs interactive approval"
+        );
+
+        let expected_revision = crate::ipc::api::current_sequence(&app.events);
+        let (reply, revision_response) = mpsc::channel();
+        app.handle_event(AppEvent::Api(ApiRequest {
+            id: "revision".into(),
+            method: "worktree.create".into(),
+            params: serde_json::json!({
+                "branch":"revision-topic",
+                "if_revision":expected_revision
+            }),
+            reply,
+        }));
+        assert!(revision_response.try_recv().is_err());
+        app.emit_event("test.revision", serde_json::json!({}));
+        let conflict = loop {
+            if let Ok(response) = revision_response.try_recv() {
+                break serde_json::from_str::<serde_json::Value>(&response).unwrap();
+            }
+            app.handle_event(
+                events
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("revisioned provider completion"),
+            );
+        };
+        assert_eq!(conflict["error"]["code"], "revision_conflict");
+        assert!(!base.join("wt-revision-topic").exists());
+        assert!(!crate::git::local::branch_exists(&repo, "revision-topic"));
+
+        app.config.worktree.provider = "missing.provider".into();
         let rejected = api_call(
             &mut app,
             "worktree.create",
-            serde_json::json!({"branch":"--execute=sh"}),
+            serde_json::json!({"branch":"another-topic"}),
         );
         assert!(rejected["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not allowed with Worktrunk"));
+            .contains("not installed"));
         let _ = std::fs::remove_dir_all(base);
     }
 

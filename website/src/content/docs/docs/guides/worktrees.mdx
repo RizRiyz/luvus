@@ -6,48 +6,63 @@ description: Work on several branches of one repo at once, where each worktree i
 Git worktrees let one repository have several branches checked out in separate
 folders. luvus makes them **first-class workspaces**. Creation uses the built-in
 Git provider by default, so existing installations keep their current behavior.
-You can opt into Worktrunk for creation while removal and task merge continue to
-use Git directly.
+A third-party module can provide creation through any worktree manager; removal
+and task merge continue to use Git directly.
 
 ## Creation provider
 
-Set the provider in `~/.luvus/config.json` (debug builds:
-`~/.luvus-dev/config.json`):
+Install or link an enabled module whose manifest declares a fixed provider
+command, then select its canonical module id in `~/.luvus/config.json` (debug
+builds: `~/.luvus-dev/config.json`):
+
+```toml
+# The module's luvus-module.toml
+id = "example.worktree-manager"
+name = "Worktree Manager"
+version = "0.1.0"
+min_luvus_version = "0.14.1"
+
+[worktree_provider]
+command = ["./create-worktree"]
+```
 
 ```json
 {
   "worktree": {
-    "provider": "worktrunk",
-    "executable": "wt",
-    "args": ["--no-hooks"]
+    "provider": "example.worktree-manager"
   }
 }
 ```
 
-`executable` is one executable name or path, not a shell command. `args` is a
-JSON argv array; Luvus never passes it through a shell. Luvus owns and protects
-Worktrunk's repository, operation, branch, navigation, and output arguments:
-`-C <repo> switch [--create] <branch> --no-cd --format json`. `--create` is
-included only when the requested local branch does not exist.
+The configuration selects only a registered module; it cannot supply an
+executable, argv, or shell command. Luvus runs the fixed manifest argv directly
+in the module directory with the module's normal settings and identity
+environment. The provider receives:
 
-Conflicting or contract-changing arguments are rejected, including `-C`,
-`--config`, `--config-set`, `--format`, `-x`/`--execute`, `--cd`/`--no-cd`,
-`-c`/`--create`, `-b`/`--base`, branch-picker options, `--clobber`, `--`, and
-`-y`/`--yes`. The last restriction is intentional: Luvus does not approve or
-skip Worktrunk project hooks. If Worktrunk reports that hook approval is needed,
-review and approve it interactively with Worktrunk, then retry.
+- `LUVUS_WORKTREE_PROVIDER_VERSION` (`1`)
+- `LUVUS_WORKTREE_REPOSITORY` (source repository path)
+- `LUVUS_WORKTREE_BRANCH` (exact requested branch)
+- `LUVUS_WORKTREE_BRANCH_EXISTS` (`true` or `false` for a local branch)
+- `LUVUS_WORKTREE_REQUEST_JSON` (the same versioned request as one JSON object)
 
-Worktrunk chooses the worktree path. Before opening it, Luvus verifies that the
-path exists, is a registered worktree of the source repository, shares its Git
-common directory, and has the requested branch checked out. Worktrunk's JSON is
-read from stdout; human logs and actionable hook errors on stderr remain intact.
+On success, stdout must contain only `{"path":"/absolute/worktree/path"}`.
+Human diagnostics belong on stderr. A non-zero exit preserves stderr in the
+user-facing error, so approval or non-interactive failures from the underlying
+tool remain actionable. The provider is synchronous and must not call back into
+the Luvus CLI/API while the server is waiting; module settings and config/state
+directories remain available.
+
+Before opening the returned path, Luvus verifies that it exists, is registered
+as a Git worktree, shares the source repository's Git common directory, and has
+the requested branch checked out. This provider applies uniformly to
+`worktree.create`, TUI creation, and ORCH task worktrees.
 
 ## Create one
 
 - **`Ctrl+Space G`**: type a branch name. With the default provider, luvus runs
   `git worktree add` under `~/.luvus/worktrees/<repo>/<branch>` and opens it as a
-  workspace. With Worktrunk, `wt switch` chooses the path from your Worktrunk
-  configuration. `esc` or a click outside the prompt cancels it.
+  workspace. A module provider chooses its own path and creation tool. `esc` or
+  a click outside the prompt cancels it.
 - **The folder picker** (`Ctrl+Space N`): when browsing a git repo, an *Open
   with new worktree* row (or the `w` key) does the same for that repo.
 - **CLI**: `luvus worktree create <branch>` · `open <path>` · `list` ·

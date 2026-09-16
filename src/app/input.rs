@@ -340,6 +340,40 @@ impl App {
             return true;
         };
         let response = self.handle_api(&req);
+        let worktree_pending = serde_json::from_str::<serde_json::Value>(&response)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/message")
+                    .and_then(|message| message.as_str())
+                    .map(|message| message == WORKTREE_CREATE_PENDING)
+            })
+            .unwrap_or(false);
+        if worktree_pending {
+            let retry = req.clone();
+            let parked = req.clone();
+            let scheduled = self.schedule_pending_worktree(move |app, result| {
+                let response = match result {
+                    Ok(()) => {
+                        let response = app.handle_api(&retry);
+                        app.discard_ready_worktree();
+                        response
+                    }
+                    Err(message) => json!({"id":parked.id,"error":{
+                        "code":"git_error", "message":message
+                    }})
+                    .to_string(),
+                };
+                app.reply_after_automation_save(parked, response);
+                true
+            });
+            if let Err(message) = scheduled {
+                let _ = req.reply.send(
+                    json!({"id":req.id,"error":{"code":"busy","message":message}}).to_string(),
+                );
+            }
+            return true;
+        }
         self.reply_after_automation_save(req, response);
         true
     }
