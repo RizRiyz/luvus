@@ -14,6 +14,36 @@ use super::*;
 /// shown to users, which is `Shift+N` for the matching workspace default.
 const SHIFTED_DIGIT_KEYS: [&str; 9] = ["!", "@", "#", "$", "%", "^", "&", "*", "("];
 
+/// Enhanced keyboard protocols may preserve an unshifted US-ASCII key plus a
+/// Shift modifier where legacy input reports the resulting symbol directly.
+/// Normalize both representations before looking up a prefix command.
+fn shifted_ascii_symbol(character: char) -> Option<char> {
+    Some(match character {
+        '`' => '~',
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        _ => return None,
+    })
+}
+
 fn workspace_jump_index(position: u8) -> usize {
     position.saturating_sub(1).min(8) as usize
 }
@@ -405,8 +435,10 @@ pub fn key_reference_rows() -> usize {
 /// Used both to match presses and to display/store bindings.
 pub fn key_string(key: &KeyEvent) -> Option<String> {
     Some(match key.code {
-        KeyCode::Char(c @ '1'..='9') if key.modifiers.contains(KeyModifiers::SHIFT) => {
-            SHIFTED_DIGIT_KEYS[c as usize - '1' as usize].into()
+        KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            shifted_ascii_symbol(character)
+                .unwrap_or(character)
+                .to_string()
         }
         KeyCode::Char(c) => c.to_string(),
         KeyCode::Left => "←".into(),
@@ -1807,6 +1839,40 @@ mod tests {
         assert!(!app.active_is_mission());
         app.run_cmd(Cmd::OpenMission);
         assert!(app.active_is_mission());
+    }
+
+    #[test]
+    fn shifted_period_prefix_key_runs_next_done_agent() {
+        let _env = crate::persist::test_env("next-done-agent-shifted-period");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(Cmd::SplitRight);
+        let panes = app.layout().leaves();
+        for pane in &panes {
+            let mut status = PaneStatus::new("claude".to_string());
+            status.state = crate::ui::theme::State::Done;
+            app.status.insert(*pane, status);
+        }
+        let origin = app.layout().focus;
+
+        assert_eq!(
+            key_string(&KeyEvent::new(KeyCode::Char('.'), KeyModifiers::SHIFT)),
+            Some(">".to_string())
+        );
+        assert_eq!(
+            key_string(&KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE)),
+            Some(".".to_string())
+        );
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('.'),
+            KeyModifiers::SHIFT,
+        )));
+
+        assert_ne!(app.layout().focus, origin, "Shift+. runs NextDoneAgent");
     }
 
     #[test]
