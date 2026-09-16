@@ -728,6 +728,11 @@ impl App {
                 if let Some(s) = self.status.get_mut(&id) {
                     s.last_activity = Instant::now();
                 }
+                if let Some(pane) = self.panes.get(&id) {
+                    if let Some(text) = pane.take_pending_clipboard() {
+                        self.pending_clipboard = Some(text);
+                    }
+                }
                 self.detection_dirty.insert(id);
                 if self.panes.contains_key(&id) {
                     self.runtime_cwd_dirty_panes.insert(id);

@@ -8689,6 +8689,19 @@ mod tests {
     }
 
     #[test]
+    fn pane_osc52_store_queues_pending_clipboard() {
+        let _env = crate::persist::test_env("pane-osc52-clipboard");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        if let Ok(mut engine) = app.panes.get(&id).unwrap().engine.lock() {
+            engine.advance(b"\x1b]52;c;aGVsbG8tb3NjNTI=\x07");
+        }
+        assert!(app.handle_event(AppEvent::PtyData(id)));
+        assert_eq!(app.pending_clipboard.as_deref(), Some("hello-osc52"));
+    }
+
+    #[test]
     fn paste_fills_an_open_text_input_modal_not_the_pane() {
         // Regression: pasting (e.g. an nsec) into a Settings string field leaked
         // to the focused pane instead of the field. A paste while a text-input

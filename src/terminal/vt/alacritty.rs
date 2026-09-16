@@ -32,6 +32,9 @@ struct TitleState {
 
 type TitleSlot = Arc<Mutex<TitleState>>;
 
+/// Latest OSC 52 store request from the child, drained by the app loop.
+type ClipboardSlot = Arc<Mutex<Option<String>>>;
+
 /// Receives terminal-generated responses (cursor reports, device attributes,
 /// etc.) and forwards them back to the child via the shared write channel.
 /// Also captures the window title (OSC 0/2) for agent detection.
@@ -39,6 +42,7 @@ type TitleSlot = Arc<Mutex<TitleState>>;
 pub struct EventProxy {
     tx: InputSender,
     title: TitleSlot,
+    clipboard: ClipboardSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
 }
 
@@ -82,6 +86,13 @@ impl EventListener for EventProxy {
                     }
                 }
             }
+            Event::ClipboardStore(_, text) => {
+                if let Ok(mut pending) = self.clipboard.lock() {
+                    *pending = Some(text);
+                }
+            }
+            // OSC 52 read would expose the host clipboard to untrusted pane apps.
+            Event::ClipboardLoad(_, _) => {}
             _ => {}
         }
     }
@@ -110,6 +121,7 @@ pub struct AlacrittyEngine {
     term: Term<EventProxy>,
     parser: Processor,
     title: TitleSlot,
+    clipboard: ClipboardSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
@@ -157,10 +169,12 @@ impl AlacrittyEngine {
             rows: rows.max(1) as usize,
         };
         let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
+        let clipboard: ClipboardSlot = Arc::new(Mutex::new(None));
         let appearance = Arc::new(Mutex::new(initial_appearance));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
             title: title.clone(),
+            clipboard: clipboard.clone(),
             appearance: appearance.clone(),
         };
         // Alacritty retains history by rows, not bytes. Derive a conservative
@@ -178,6 +192,7 @@ impl AlacrittyEngine {
             term,
             parser: Processor::new(),
             title,
+            clipboard,
             response_tx: resp_tx,
             appearance,
             history_budget_bytes,
@@ -919,6 +934,13 @@ impl VtEngine for AlacrittyEngine {
 
     fn title_generation(&self) -> u64 {
         self.title.lock().map_or(0, |title| title.generation)
+    }
+
+    fn take_pending_clipboard(&mut self) -> Option<String> {
+        self.clipboard
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
     }
 
     fn set_history_budget(&mut self, bytes: usize) {
@@ -2591,5 +2613,17 @@ mod tests {
 
         engine.advance(b"\x1b[?2040$p");
         assert_eq!(recv_bytes(&rx), b"\x1b[?2040;0$y");
+    }
+
+    #[test]
+    fn osc52_store_forwards_clipboard_text() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        engine.advance(b"\x1b]52;c;aGVsbG8tb3NjNTI=\x07");
+        assert_eq!(
+            engine.take_pending_clipboard().as_deref(),
+            Some("hello-osc52")
+        );
+        assert!(engine.take_pending_clipboard().is_none());
     }
 }

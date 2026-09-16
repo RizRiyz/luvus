@@ -771,6 +771,10 @@ impl Pane {
             != generation
     }
 
+    pub(crate) fn take_pending_clipboard(&self) -> Option<String> {
+        self.engine.lock().ok()?.take_pending_clipboard()
+    }
+
     #[cfg(test)]
     pub(crate) fn mark_data_pending_for_test(&self) {
         self.data_pending.store(true, Ordering::Release);
