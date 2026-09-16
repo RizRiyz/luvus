@@ -2977,6 +2977,31 @@ mod tests {
     }
 
     #[test]
+    fn diff_view_left_and_right_select_the_source_side() {
+        let _env = crate::persist::test_env("diff-side-navigation");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let (id, _) = seed_saved_note(&mut app);
+
+        assert_eq!(
+            app.handle_diff_key_dispatch(id, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+                .repeat,
+            crate::app::UiRepeatDisposition::Reprocess
+        );
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Diff(view))
+                if view.selected_side == crate::diff::DiffSide::Old
+        ));
+        app.handle_diff_key_dispatch(id, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Diff(view))
+                if view.selected_side == crate::diff::DiffSide::New
+        ));
+    }
+
+    #[test]
     fn clicking_saved_note_card_opens_that_note_in_the_inline_editor() {
         let _env = crate::persist::test_env("diff-note-card-click");
         let (tx, _rx) = std::sync::mpsc::channel();

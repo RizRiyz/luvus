@@ -1486,7 +1486,8 @@ mod tests {
         let mut app = App::new(80, 24, tx).unwrap();
         let root = seed_keyboard_tree(&mut app);
 
-        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let expanded = app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(expanded.changed, "expanding a directory requires a render");
         assert!(app.file_tree.visible_rows()[0].expanded);
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         assert_eq!(app.file_tree.cursor, 1, "right enters the first child");
@@ -1495,8 +1496,16 @@ mod tests {
             root.join("src/main.rs")
         );
 
-        app.handle_file_tree_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        let collapsed = app.handle_file_tree_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(app.file_tree.cursor, 0, "left returns to the parent");
+        assert!(collapsed.changed, "moving to the parent requires a render");
+        let collapsed = app.handle_file_tree_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert!(
+            collapsed.changed,
+            "collapsing a directory requires a render"
+        );
+        assert!(!app.file_tree.visible_rows()[0].expanded);
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         app.handle_file_tree_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(app.file_tree.cursor, 3);
         assert_eq!(app.file_tree.scroll, 2, "the last row remains in view");

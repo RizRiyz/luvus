@@ -721,11 +721,7 @@ impl App {
             }
             KeyCode::Char('g') => self.picker_start_go_to(),
             KeyCode::Char('.') => self.picker_toggle_hidden(),
-            KeyCode::Home => {
-                self.picker_home();
-                return crate::app::UiRepeatDisposition::Reprocess;
-            }
-            KeyCode::Char('~') => self.picker_home(),
+            KeyCode::Home | KeyCode::Char('~') => self.picker_home(),
             KeyCode::Char('w') => self.picker_make_worktree(),
             KeyCode::Esc | KeyCode::Char('q') => self.close_folder_picker(),
             _ => {}
@@ -1067,6 +1063,23 @@ mod tests {
         assert!(matches!(p.row(2), Row::Home));
         assert!(matches!(p.row(3), Row::Up));
         assert!(matches!(p.row(4), Row::Entry(0)));
+    }
+
+    #[test]
+    fn picker_home_navigates_once_without_acquiring_a_repeat_lease() {
+        let _env = crate::persist::test_env("picker-home-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let home = crate::platform::home_dir().expect("test home");
+        let elsewhere = std::env::temp_dir().join("luvus-picker-home-repeat");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        app.open_folder_picker_at(elsewhere);
+
+        assert_eq!(
+            app.handle_picker_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            crate::app::UiRepeatDisposition::Suppress
+        );
+        assert_eq!(app.picker.as_ref().unwrap().path, home);
     }
 
     #[test]

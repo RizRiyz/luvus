@@ -15918,6 +15918,16 @@ mod tests {
         // `mission_rows`, so it's set now.)
         app.handle_mission_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
         assert!(app.mission_detail.is_some(), "detail overlay opened");
+        let selected = app.mission_cursor;
+        assert_eq!(
+            app.handle_mission_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            UiRepeatDisposition::Suppress
+        );
+        assert_eq!(
+            app.mission_cursor, selected,
+            "detail overlay owns navigation instead of moving the hidden list"
+        );
+        assert!(app.mission_detail.is_some(), "navigation keeps detail open");
         app.handle_mission_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.mission_detail.is_none(), "detail overlay closed");
     }

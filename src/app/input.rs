@@ -4071,10 +4071,10 @@ impl App {
             return Some(UiRepeatContext::OrchDetail);
         }
         if let Some(pane) = self.scroll_pane {
-            return Some(UiRepeatContext::Scroll(pane));
+            return (pane == self.layout().focus).then_some(UiRepeatContext::Scroll(pane));
         }
         if let Some(copy) = self.copy_mode {
-            return Some(UiRepeatContext::Copy(copy.pane));
+            return (copy.pane == self.layout().focus).then_some(UiRepeatContext::Copy(copy.pane));
         }
         if self.mode == Mode::Resize {
             return Some(UiRepeatContext::Resize(self.layout().focus));
@@ -5960,6 +5960,44 @@ mod tests {
             app.mode,
             Mode::Resize,
             "action repeat cannot exit resize mode"
+        );
+    }
+
+    #[test]
+    fn api_focus_change_invalidates_scroll_and_copy_repeat_receivers() {
+        let _env = crate::persist::test_env("mode-repeat-api-focus-change");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let old_pane = app.layout().focus;
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let new_pane = app.layout().focus;
+        let (new_tx, new_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&new_pane)
+            .unwrap()
+            .replace_input_sender_for_test(new_tx);
+        let key =
+            |code, kind| AppEvent::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind));
+
+        app.layout_mut().focus = old_pane;
+        assert!(app.enter_scroll_mode(1));
+        assert!(app.handle_event(key(KeyCode::Up, KeyEventKind::Press)));
+        app.layout_mut().focus = new_pane;
+        assert!(!app.handle_event(key(KeyCode::Up, KeyEventKind::Repeat)));
+        assert!(
+            new_rx.try_recv().is_err(),
+            "scroll Repeat cannot leak to new focus"
+        );
+
+        app.layout_mut().focus = old_pane;
+        app.scroll_pane = None;
+        assert!(app.begin_copy_mode());
+        assert!(app.handle_event(key(KeyCode::Down, KeyEventKind::Press)));
+        app.layout_mut().focus = new_pane;
+        assert!(!app.handle_event(key(KeyCode::Down, KeyEventKind::Repeat)));
+        assert!(
+            new_rx.try_recv().is_err(),
+            "copy Repeat cannot leak to new focus"
         );
     }
 

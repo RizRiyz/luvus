@@ -538,24 +538,26 @@ pub fn run() -> Result<()> {
         }
 
         if app.should_quit {
-            broadcast(
+            let disconnected = broadcast(
                 &mut clients,
                 ServerMessage::ServerShutdown {
                     reason: "server stopped".into(),
                 },
             );
+            release_disconnected_clients(&mut app, disconnected);
             break;
         }
         // A termination signal (kill, logout, system shutdown) requests a clean
         // exit: notify clients and fall through to the final session save below,
         // so the snapshot is current when the machine comes back.
         if shutdown::requested() {
-            broadcast(
+            let disconnected = broadcast(
                 &mut clients,
                 ServerMessage::ServerShutdown {
                     reason: "server terminated".into(),
                 },
             );
+            release_disconnected_clients(&mut app, disconnected);
             break;
         }
         if !app.persist_session_now {
@@ -637,7 +639,8 @@ pub fn run() -> Result<()> {
             }
         }
         if let Some(revision) = app.pending_machine_catalog_revision.take() {
-            broadcast_machine_catalog_changed(&mut clients, revision);
+            let disconnected = broadcast_machine_catalog_changed(&mut clients, revision);
+            release_disconnected_clients(&mut app, disconnected);
         }
 
         // A state transition here (e.g. a silent agent reaching Done) has no PtyData
@@ -655,19 +658,24 @@ pub fn run() -> Result<()> {
         if app.tick_automations(crate::automation::unix_now()) {
             render_request.record(RenderCause::Detection);
         }
+        let mut disconnected = Vec::new();
         for msg in app.pending_notify.drain(..) {
-            broadcast_effect(&mut clients, ServerMessage::Notify(msg));
+            disconnected.extend(broadcast_effect(&mut clients, ServerMessage::Notify(msg)));
         }
         if let Some(signal) = app.pending_sound.take() {
-            broadcast_effect(&mut clients, ServerMessage::Sound(signal));
+            disconnected.extend(broadcast_effect(&mut clients, ServerMessage::Sound(signal)));
         }
         // A finished mouse selection copies to the client's clipboard (OSC 52).
         if let Some(url) = app.pending_open_url.take() {
-            broadcast_effect(&mut clients, ServerMessage::OpenUrl(url));
+            disconnected.extend(broadcast_effect(&mut clients, ServerMessage::OpenUrl(url)));
         }
         if let Some(text) = app.pending_clipboard.take() {
-            broadcast_effect(&mut clients, ServerMessage::Clipboard(text));
+            disconnected.extend(broadcast_effect(
+                &mut clients,
+                ServerMessage::Clipboard(text),
+            ));
         }
+        release_disconnected_clients(&mut app, disconnected);
         // An expired toast forces one render so it disappears (idle frames don't).
         if app.tick_toast(Instant::now()) {
             render_request.record(RenderCause::Metadata);
@@ -749,7 +757,8 @@ pub fn run() -> Result<()> {
         // Suspended clients retain semantic navigation, not terminal frames.
         // Refresh only after a non-PTY change and send only changed snapshots.
         if refresh_navigation {
-            refresh_suspended_workspaces(&app, &mut clients);
+            let disconnected = refresh_suspended_workspaces(&app, &mut clients);
+            release_disconnected_clients(&mut app, disconnected);
         }
         if !has_render_clients(&clients) {
             // Suspended remote endpoints retain no render debt. Preparing one
@@ -1163,23 +1172,50 @@ fn discard_client_input(input: ClientInput) {
     }
 }
 
-fn broadcast(clients: &mut Clients, msg: ServerMessage) {
-    clients.retain(|_, client| client.send_control(msg.clone()).is_ok());
+fn release_disconnected_clients(app: &mut App, clients: Vec<u64>) {
+    for id in clients {
+        app.release_client_key_presses(id);
+    }
 }
 
-fn broadcast_effect(clients: &mut Clients, msg: ServerMessage) {
-    clients.retain(|_, client| {
-        client.interest != SurfaceInterest::Active || client.send_control(msg.clone()).is_ok()
+fn broadcast(clients: &mut Clients, msg: ServerMessage) -> Vec<u64> {
+    let mut disconnected = Vec::new();
+    clients.retain(|id, client| {
+        let connected = client.send_control(msg.clone()).is_ok();
+        if !connected {
+            disconnected.push(*id);
+        }
+        connected
     });
+    disconnected
 }
 
-fn broadcast_machine_catalog_changed(clients: &mut Clients, revision: u64) {
-    clients.retain(|_, client| {
-        !client.machine_capable
+fn broadcast_effect(clients: &mut Clients, msg: ServerMessage) -> Vec<u64> {
+    let mut disconnected = Vec::new();
+    clients.retain(|id, client| {
+        let connected =
+            client.interest != SurfaceInterest::Active || client.send_control(msg.clone()).is_ok();
+        if !connected {
+            disconnected.push(*id);
+        }
+        connected
+    });
+    disconnected
+}
+
+fn broadcast_machine_catalog_changed(clients: &mut Clients, revision: u64) -> Vec<u64> {
+    let mut disconnected = Vec::new();
+    clients.retain(|id, client| {
+        let connected = !client.machine_capable
             || client
                 .send_control(ServerMessage::MachineCatalogChanged { revision })
-                .is_ok()
+                .is_ok();
+        if !connected {
+            disconnected.push(*id);
+        }
+        connected
     });
+    disconnected
 }
 
 fn has_active_clients(clients: &Clients) -> bool {
@@ -1464,15 +1500,16 @@ fn acknowledge_visible_terminal_generations(
     }
 }
 
-fn refresh_suspended_workspaces(app: &App, clients: &mut Clients) {
+fn refresh_suspended_workspaces(app: &App, clients: &mut Clients) -> Vec<u64> {
     if !clients
         .values()
         .any(|client| client.machine_capable && client.interest == SurfaceInterest::Suspended)
     {
-        return;
+        return Vec::new();
     }
     let projection = shell_workspace_projection(app);
-    clients.retain(|_, client| {
+    let mut disconnected = Vec::new();
+    clients.retain(|id, client| {
         if client.machine_capable
             && client.interest == SurfaceInterest::Suspended
             && client.last_shell_workspaces != projection
@@ -1481,12 +1518,14 @@ fn refresh_suspended_workspaces(app: &App, clients: &mut Clients) {
                 .send_control(ServerMessage::ShellWorkspaces(projection.clone()))
                 .is_err()
             {
+                disconnected.push(*id);
                 return false;
             }
             client.last_shell_workspaces.clone_from(&projection);
         }
         true
     });
+    disconnected
 }
 
 fn shell_resize_projection(
@@ -2459,8 +2498,8 @@ mod tests {
     use super::{
         apply, broadcast, broadcast_effect, broadcast_machine_catalog_changed, ends_client_writer,
         frame_cadence_ready, frame_wait, handle_client, record_event_render_request,
-        render_clients, ClientSender, ClientState, EventRenderSource, FrameSendError, RenderCause,
-        RenderRequest, RenderScratch, FRAME_INTERVAL,
+        release_disconnected_clients, render_clients, ClientSender, ClientState, EventRenderSource,
+        FrameSendError, RenderCause, RenderRequest, RenderScratch, FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
@@ -3478,6 +3517,45 @@ mod tests {
     /// A tab switch requests a frame at the same time a finished selection sends
     /// its clipboard payload. Frames may be dropped and repaired, but clipboard
     /// writes must remain queued or the next paste uses stale clipboard content.
+    #[test]
+    fn failed_broadcast_releases_the_removed_clients_held_pane_keys() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("broadcast-held-key-cleanup");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).expect("app starts");
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = mpsc::channel();
+        let target = app.panes.get_mut(&pane).expect("focused pane");
+        target.replace_input_sender_for_test(input_tx);
+        target.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        app.handle_client_event(
+            7,
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            )),
+        );
+        let crate::terminal::pty::InputAction::Bytes(press) = input_rx.recv().unwrap() else {
+            panic!("Press must reach the pane");
+        };
+        assert_eq!(press, b"\x1b[A");
+
+        let (client, receiver) = display_client(80, 24, 1);
+        drop(receiver);
+        let mut clients = HashMap::from([(7, client)]);
+        let disconnected = broadcast(&mut clients, ServerMessage::Notify("done".into()));
+        release_disconnected_clients(&mut app, disconnected);
+
+        assert!(clients.is_empty());
+        let crate::terminal::pty::InputAction::Bytes(release) = input_rx.recv().unwrap() else {
+            panic!("client removal must release its held key");
+        };
+        assert_eq!(release, b"\x1b[1;1:3A");
+    }
+
     #[test]
     fn clipboard_is_reliable_when_a_tab_frame_is_already_queued() {
         let (messages, rx) = mpsc::channel();

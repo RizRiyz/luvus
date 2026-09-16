@@ -1920,10 +1920,21 @@ mod tests {
         });
         app.workspaces[0].active_tab = app.workspaces[0].tabs.len() - 1;
 
-        // Status scrolls as a block (offset moves, not a cursor).
+        // Status scrolls as a block (`j`/`k`), while arrows move the explicit
+        // changed-file selection used by diff activation.
         app.git_scroll(3);
         assert_eq!(app.active_git().unwrap().scroll, 3);
         assert_eq!(app.active_git().unwrap().cursor, 0);
+        assert!(app.git_status_selected_file().is_none());
+        app.handle_git_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.active_git().unwrap().scroll, 4);
+        assert!(app.git_status_selected_file().is_none());
+        app.handle_git_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.active_git().unwrap().scroll, 4);
+        assert_eq!(
+            app.git_status_selected_file(),
+            Some(("f0.rs".to_string(), false))
+        );
 
         // An over-scroll is clamped to the content during render.
         if let Some(g) = app.active_git_mut() {
