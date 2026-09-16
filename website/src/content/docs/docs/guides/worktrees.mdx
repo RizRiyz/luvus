@@ -6,8 +6,9 @@ description: Work on several branches of one repo at once, where each worktree i
 Git worktrees let one repository have several branches checked out in separate
 folders. luvus makes them **first-class workspaces**. Creation uses the built-in
 Git provider by default, so existing installations keep their current behavior.
-A third-party module can provide creation through any worktree manager; removal
-and task merge continue to use Git directly.
+A third-party module can provide creation and, optionally, explicit removal
+through any worktree manager. Internal rollback and task merge continue to use
+Git directly.
 
 ## Creation provider
 
@@ -24,6 +25,7 @@ min_luvus_version = "0.14.1"
 
 [worktree_provider]
 command = ["./create-worktree"]
+remove_command = ["./remove-worktree"] # optional
 ```
 
 ```json
@@ -40,13 +42,21 @@ in the module directory with the module's normal settings and identity
 environment. The provider receives:
 
 - `LUVUS_WORKTREE_PROVIDER_VERSION` (`1`)
+- `LUVUS_WORKTREE_OPERATION` (`create` or `remove`)
 - `LUVUS_WORKTREE_REPOSITORY` (source repository path)
-- `LUVUS_WORKTREE_BRANCH` (exact requested branch)
-- `LUVUS_WORKTREE_BRANCH_EXISTS` (`true` or `false` for a local branch)
-- `LUVUS_WORKTREE_REQUEST_JSON` (the same versioned request as one JSON object)
+- `LUVUS_WORKTREE_BRANCH` (exact requested/target branch)
+- `LUVUS_WORKTREE_REQUEST_JSON` (the complete versioned request as one JSON object)
 
-On success, stdout must contain only `{"path":"/absolute/worktree/path"}`.
-Human diagnostics belong on stderr. A non-zero exit preserves stderr in the
+Creation additionally receives `LUVUS_WORKTREE_BRANCH_EXISTS` (`true` or
+`false` for a local branch) and must emit only `{"path":"/absolute/worktree/path"}`.
+
+When `remove_command` is present, explicit `worktree.remove` and confirmed TUI
+deletes invoke it with `LUVUS_WORKTREE_PATH`, `LUVUS_WORKTREE_BRANCH`, and
+`LUVUS_WORKTREE_FORCE`, plus the complete request in
+`LUVUS_WORKTREE_REQUEST_JSON`. Removal must write nothing to stdout and must
+both unregister the worktree and remove its directory. If `remove_command` is
+omitted, explicit removal falls back to built-in Git. Human diagnostics belong
+on stderr. A non-zero exit preserves stderr in the
 user-facing error, so approval or non-interactive failures from the underlying
 tool remain actionable. The provider is synchronous and must not call back into
 the Luvus CLI/API while the server is waiting; module settings and config/state

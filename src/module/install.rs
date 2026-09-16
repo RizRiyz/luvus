@@ -195,9 +195,15 @@ fn preview_commands(m: &ModuleManifest) -> Vec<String> {
     }
     if let Some(provider) = &m.worktree_provider {
         commands.push(format!(
-            "  worktree provider: {}",
+            "  worktree creation provider: {}",
             provider.command.join(" ")
         ));
+        if let Some(command) = &provider.remove_command {
+            commands.push(format!(
+                "  worktree removal provider: {}",
+                command.join(" ")
+            ));
+        }
     }
     commands
 }
@@ -301,6 +307,7 @@ min_luvus_version = "0.1.0"
 command = ["./startup"]
 [worktree_provider]
 command = ["./create-worktree"]
+remove_command = ["./remove-worktree"]
 "#,
         )
         .unwrap();
@@ -311,7 +318,10 @@ command = ["./create-worktree"]
             .any(|line| line.contains("startup 0: ./startup")));
         assert!(commands
             .iter()
-            .any(|line| line.contains("worktree provider: ./create-worktree")));
+            .any(|line| line.contains("worktree creation provider: ./create-worktree")));
+        assert!(commands
+            .iter()
+            .any(|line| line.contains("worktree removal provider: ./remove-worktree")));
     }
 
     #[test]

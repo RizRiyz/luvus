@@ -57,22 +57,8 @@ impl App {
                 .ok()
                 .and_then(|wts| wts.into_iter().find(|w| w.is_main).map(|w| w.path))
                 .unwrap_or_else(|| self.ws().cwd.clone());
-            crate::git::local::worktree_remove(&repo, &path).map_err(git_err)?;
-            // Tidy the now-possibly-empty `worktrees/<repo>/` parent — but only
-            // under our managed dir, and `remove_dir` only succeeds if empty.
-            if let Some(parent) = path.parent() {
-                if parent.starts_with(crate::persist::config_dir().join("worktrees")) {
-                    let _ = std::fs::remove_dir(parent);
-                }
-            }
-            // Close the workspace opened at this worktree, if any.
-            if let Some(i) = self
-                .workspaces
-                .iter()
-                .position(|w| crate::platform::same_path(&w.cwd, &path))
-            {
-                self.close_workspace(i);
-            }
+            self.remove_worktree_explicit(&repo, &path, false)
+                .map_err(git_err)?;
             Ok(json!({"type":"ok"}))
         }
     }

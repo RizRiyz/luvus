@@ -20,6 +20,105 @@ struct ProviderOutput {
     path: PathBuf,
 }
 
+pub struct RemoveRequest {
+    pub repo: PathBuf,
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub force: bool,
+}
+
+pub struct RemoveJob {
+    module: crate::module::InstalledModule,
+    token: String,
+    context: Value,
+    argv: Vec<String>,
+    request: RemoveRequest,
+}
+
+impl RemoveJob {
+    pub fn run(self, cancelled: &std::sync::atomic::AtomicBool) -> Result<PathBuf, String> {
+        let canonical_path =
+            validate_remove_target(&self.request.repo, &self.request.path, cancelled)?;
+        let request = json!({
+            "version": PROVIDER_VERSION,
+            "operation": "remove",
+            "repository": self.request.repo.display().to_string(),
+            "path": self.request.path.display().to_string(),
+            "branch": self.request.branch,
+            "force": self.request.force,
+        });
+        let extra = vec![
+            (
+                "LUVUS_WORKTREE_PROVIDER_VERSION".into(),
+                PROVIDER_VERSION.into(),
+            ),
+            ("LUVUS_WORKTREE_OPERATION".into(), "remove".into()),
+            (
+                "LUVUS_WORKTREE_REPOSITORY".into(),
+                self.request.repo.display().to_string(),
+            ),
+            (
+                "LUVUS_WORKTREE_PATH".into(),
+                self.request.path.display().to_string(),
+            ),
+            (
+                "LUVUS_WORKTREE_BRANCH".into(),
+                self.request.branch.clone().unwrap_or_default(),
+            ),
+            (
+                "LUVUS_WORKTREE_FORCE".into(),
+                self.request.force.to_string(),
+            ),
+            ("LUVUS_WORKTREE_REQUEST_JSON".into(), request.to_string()),
+        ];
+        let stdout = crate::module::runtime::run_sync(
+            &self.module,
+            &self.token,
+            &self.context,
+            &self.argv,
+            extra,
+            cancelled,
+        )?;
+        if !stdout.trim().is_empty() {
+            return Err("worktree removal provider must not write to stdout".into());
+        }
+        validate_removed(
+            &self.request.repo,
+            &self.request.path,
+            &canonical_path,
+            cancelled,
+        )?;
+        Ok(self.request.path)
+    }
+}
+
+pub fn module_remove_job(
+    config: &WorktreeConfig,
+    modules: &ModuleRegistry,
+    module_tokens: &HashMap<String, String>,
+    context: Value,
+    request: RemoveRequest,
+) -> Result<Option<RemoveJob>, String> {
+    let provider_id = config.provider.trim();
+    if provider_id.eq_ignore_ascii_case("git") {
+        return Ok(None);
+    }
+    let (module, provider) = resolve_module(modules, provider_id)?;
+    let Some(argv) = provider.remove_command.as_ref() else {
+        return Ok(None);
+    };
+    let token = module_tokens
+        .get(&module.id)
+        .ok_or_else(|| format!("module {provider_id} has no runtime credential"))?;
+    Ok(Some(RemoveJob {
+        module: module.clone(),
+        token: token.clone(),
+        context,
+        argv: argv.clone(),
+        request,
+    }))
+}
+
 pub struct CreatedWorktree {
     pub repo: PathBuf,
     pub path: PathBuf,
@@ -52,6 +151,7 @@ impl CreateJob {
                 "LUVUS_WORKTREE_PROVIDER_VERSION".into(),
                 PROVIDER_VERSION.into(),
             ),
+            ("LUVUS_WORKTREE_OPERATION".into(), "create".into()),
             (
                 "LUVUS_WORKTREE_REPOSITORY".into(),
                 self.repo.display().to_string(),
@@ -172,6 +272,60 @@ fn resolve_module<'a>(
         .worktree_provider()
         .ok_or_else(|| format!("module {provider_id} does not declare [worktree_provider]"))?;
     Ok((module, provider))
+}
+
+fn validate_remove_target(
+    repo: &Path,
+    path: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<PathBuf, String> {
+    let worktrees = bounded_worktree_paths(repo, cancelled)?;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| format!("could not resolve worktree {}: {error}", path.display()))?;
+    let position = worktrees.iter().position(|candidate| {
+        std::fs::canonicalize(candidate)
+            .map(|candidate| crate::platform::same_path(&candidate, &canonical))
+            .unwrap_or(false)
+    });
+    match position {
+        None => return Err("worktree removal target is not registered".into()),
+        Some(0) => return Err("the main worktree cannot be removed".into()),
+        Some(_) => {}
+    }
+    let source_common = bounded_common_dir(repo, cancelled, std::time::Duration::from_secs(300))?;
+    let target_common = bounded_common_dir(path, cancelled, std::time::Duration::from_secs(300))?;
+    if !crate::platform::same_path(&source_common, &target_common) {
+        return Err("worktree removal target belongs to another repository".into());
+    }
+    Ok(canonical)
+}
+
+fn validate_removed(
+    repo: &Path,
+    path: &Path,
+    canonical_path: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!(
+            "worktree removal provider left the directory in place: {}",
+            path.display()
+        ));
+    }
+    let registered = bounded_worktree_paths(repo, cancelled)?
+        .iter()
+        .any(|candidate| {
+            std::fs::canonicalize(candidate)
+                .map(|candidate| crate::platform::same_path(&candidate, canonical_path))
+                .unwrap_or_else(|_| {
+                    crate::platform::same_path(candidate, canonical_path)
+                        || crate::platform::same_path(candidate, path)
+                })
+        });
+    if registered {
+        return Err("worktree removal provider left the worktree registered".into());
+    }
+    Ok(())
 }
 
 fn parse_provider_output(stdout: &[u8]) -> Result<PathBuf, String> {

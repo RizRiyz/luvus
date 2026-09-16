@@ -2258,6 +2258,7 @@ impl MenuScroll {
 }
 
 pub const WORKTREE_CREATE_PENDING: &str = "__worktree_create_pending__";
+pub const WORKTREE_REMOVE_PENDING: &str = "__worktree_remove_pending__";
 
 struct ReadyWorktree {
     repo: PathBuf,
@@ -2325,9 +2326,11 @@ pub struct App {
     config_baseline: crate::config::Config,
     config_persistence: config_persistence::ConfigPersistence,
     io_jobs: io_jobs::IoJobs,
-    worktree_create_inflight: bool,
+    worktree_provider_inflight: bool,
     pending_worktree_job: Option<crate::worktree::CreateJob>,
+    pending_worktree_remove_job: Option<crate::worktree::RemoveJob>,
     ready_worktree: Option<ReadyWorktree>,
+    ready_worktree_remove: Option<PathBuf>,
     automation_persistence: automation_persistence::AutomationPersistence,
     file_metadata_inflight: bool,
     file_metadata_cursor: usize,
@@ -3120,9 +3123,11 @@ impl App {
             config_baseline,
             config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
-            worktree_create_inflight: false,
+            worktree_provider_inflight: false,
             pending_worktree_job: None,
+            pending_worktree_remove_job: None,
             ready_worktree: None,
+            ready_worktree_remove: None,
             automation_persistence: automation_persistence::AutomationPersistence::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
@@ -3804,9 +3809,11 @@ impl App {
             config_baseline,
             config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
-            worktree_create_inflight: false,
+            worktree_provider_inflight: false,
             pending_worktree_job: None,
+            pending_worktree_remove_job: None,
             ready_worktree: None,
+            ready_worktree_remove: None,
             automation_persistence: automation_persistence::AutomationPersistence::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
@@ -5560,7 +5567,7 @@ impl App {
             repo,
             branch,
         )? {
-            if self.worktree_create_inflight || self.pending_worktree_job.is_some() {
+            if self.worktree_provider_inflight || self.pending_worktree_job.is_some() {
                 return Err("a worktree creation is already pending".into());
             }
             self.pending_worktree_job = Some(job);
@@ -5582,6 +5589,105 @@ impl App {
         let path = crate::worktree::create_git(repo, &path, branch)?;
         self.create_workspace_at(path.clone());
         Ok(path)
+    }
+
+    pub(crate) fn remove_worktree_explicit(
+        &mut self,
+        repo: &std::path::Path,
+        path: &std::path::Path,
+        force: bool,
+    ) -> Result<(), String> {
+        if self
+            .ready_worktree_remove
+            .take_if(|ready| crate::platform::same_path(ready, path))
+            .is_some()
+        {
+            self.finish_explicit_worktree_remove(path);
+            return Ok(());
+        }
+        let worktrees = crate::git::local::worktrees(repo)?;
+        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let target = worktrees.iter().find(|worktree| {
+            !worktree.is_main
+                && std::fs::canonicalize(&worktree.path)
+                    .map(|candidate| crate::platform::same_path(&candidate, &canonical_path))
+                    .unwrap_or(false)
+        });
+        let Some(target) = target else {
+            return Err("worktree removal target is not a linked worktree".into());
+        };
+        if let Some(job) = crate::worktree::module_remove_job(
+            &self.config.worktree,
+            &self.modules,
+            &self.module_tokens,
+            crate::module::context::build(self, "worktree.provider.remove"),
+            crate::worktree::RemoveRequest {
+                repo: repo.to_path_buf(),
+                path: path.to_path_buf(),
+                branch: target.branch.clone(),
+                force,
+            },
+        )? {
+            if self.worktree_provider_inflight
+                || self.pending_worktree_job.is_some()
+                || self.pending_worktree_remove_job.is_some()
+            {
+                return Err("a worktree provider operation is already pending".into());
+            }
+            self.pending_worktree_remove_job = Some(job);
+            return Err(WORKTREE_REMOVE_PENDING.into());
+        }
+        if force {
+            crate::git::local::worktree_remove_force(repo, path)?;
+            if path.exists() {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        } else {
+            crate::git::local::worktree_remove(repo, path)?;
+        }
+        self.finish_explicit_worktree_remove(path);
+        Ok(())
+    }
+
+    fn finish_explicit_worktree_remove(&mut self, path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            if parent.starts_with(crate::persist::config_dir().join("worktrees")) {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+        if let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| crate::platform::same_path(&workspace.cwd, path))
+        {
+            self.close_workspace(index);
+        }
+    }
+
+    fn schedule_pending_worktree_remove(
+        &mut self,
+        finish: impl FnOnce(&mut App, Result<(), String>) -> bool + Send + 'static,
+    ) -> Result<(), String> {
+        let job = self
+            .pending_worktree_remove_job
+            .take()
+            .ok_or_else(|| "worktree removal provider did not prepare a job".to_string())?;
+        self.worktree_provider_inflight = true;
+        self.io_jobs
+            .submit_parallel(self.app_tx.clone(), move |cancelled| {
+                let result = job.run(&cancelled);
+                Box::new(move |app| {
+                    app.worktree_provider_inflight = false;
+                    let result = result.map(|path| {
+                        app.ready_worktree_remove = Some(path);
+                    });
+                    finish(app, result)
+                })
+            })
+            .inspect_err(|_| {
+                self.worktree_provider_inflight = false;
+            })
+            .map_err(str::to_string)
     }
 
     fn discard_ready_worktree(&mut self) {
@@ -5608,12 +5714,12 @@ impl App {
             .pending_worktree_job
             .take()
             .ok_or_else(|| "worktree provider did not prepare a job".to_string())?;
-        self.worktree_create_inflight = true;
+        self.worktree_provider_inflight = true;
         self.io_jobs
             .submit_parallel(self.app_tx.clone(), move |cancelled| {
                 let result = job.run(&cancelled);
                 Box::new(move |app| {
-                    app.worktree_create_inflight = false;
+                    app.worktree_provider_inflight = false;
                     let result = result.map(|created| {
                         app.ready_worktree = Some(ReadyWorktree {
                             repo: created.repo,
@@ -5627,7 +5733,7 @@ impl App {
                 })
             })
             .inspect_err(|_| {
-                self.worktree_create_inflight = false;
+                self.worktree_provider_inflight = false;
             })
             .map_err(str::to_string)
     }
@@ -6155,15 +6261,25 @@ impl App {
             self.show_toast("not a worktree");
             return;
         };
-        match crate::git::local::worktree_remove_force(&repo, &path) {
-            Ok(()) => {
-                if path.exists() {
-                    let _ = std::fs::remove_dir_all(&path);
+        match self.remove_worktree_explicit(&repo, &path, true) {
+            Ok(()) => self.show_toast("worktree deleted"),
+            Err(error) if error == WORKTREE_REMOVE_PENDING => {
+                self.show_toast("deleting worktree…");
+                let scheduled = self.schedule_pending_worktree_remove(move |app, result| {
+                    match result {
+                        Ok(()) => match app.remove_worktree_explicit(&repo, &path, true) {
+                            Ok(()) => app.show_toast("worktree deleted"),
+                            Err(error) => app.show_toast(format!("delete failed: {error}")),
+                        },
+                        Err(error) => app.show_toast(format!("delete failed: {error}")),
+                    }
+                    true
+                });
+                if let Err(error) = scheduled {
+                    self.show_toast(format!("delete failed: {error}"));
                 }
-                self.close_workspace(index);
-                self.show_toast("worktree deleted");
             }
-            Err(e) => self.show_toast(format!("delete failed: {e}")),
+            Err(error) => self.show_toast(format!("delete failed: {error}")),
         }
     }
 
@@ -7069,7 +7185,7 @@ impl App {
 
     /// Key handling while the new-worktree prompt is open.
     pub fn handle_worktree_prompt_key(&mut self, key: KeyEvent) {
-        if self.worktree_create_inflight
+        if self.worktree_provider_inflight
             && self.worktree_error.as_deref() == Some("creating worktree…")
             && key.code != KeyCode::Esc
         {
@@ -9316,9 +9432,23 @@ version = "0.1.0"
 min_luvus_version = "0.14.0"
 [worktree_provider]
 command = ["./create-worktree"]
+remove_command = ["./remove-worktree"]
 "#,
         )
         .unwrap();
+        let remove = module.join("remove-worktree");
+        std::fs::write(
+            &remove,
+            r#"#!/bin/sh
+printf '%s' "$LUVUS_WORKTREE_REQUEST_JSON" > "$LUVUS_MODULE_STATE_DIR/remove-request.json"
+if [ "$LUVUS_WORKTREE_BRANCH" = stdout-remove ]; then printf noise; exit 0; fi
+if [ "$LUVUS_WORKTREE_BRANCH" = no-remove ]; then exit 0; fi
+if [ "$LUVUS_WORKTREE_FORCE" = true ]; then force='--force'; fi
+git -C "$LUVUS_WORKTREE_REPOSITORY" worktree remove $force "$LUVUS_WORKTREE_PATH"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&remove, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let (tx, events) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -9329,6 +9459,7 @@ command = ["./create-worktree"]
             serde_json::json!({"id":"example.worktree"}),
         );
         assert_eq!(info["result"]["worktree_provider"], true);
+        assert_eq!(info["result"]["worktree_remove_provider"], true);
         app.workspaces[0].cwd = repo.clone();
         app.config.worktree = crate::config::WorktreeConfig {
             provider: "example.worktree".into(),
@@ -9390,6 +9521,139 @@ command = ["./create-worktree"]
         assert!(started["result"]["pane"].as_str().is_some());
         let task_path = std::path::PathBuf::from(started["result"]["worktree"].as_str().unwrap());
         assert!(crate::platform::same_path(&app.ws().cwd, &task_path));
+
+        let topic_workspace = app
+            .workspaces
+            .iter()
+            .find(|workspace| crate::platform::same_path(&workspace.cwd, &path))
+            .unwrap()
+            .id
+            .clone();
+        assert!(path.exists(), "topic worktree still exists before removal");
+        let listed = crate::git::local::worktrees(&repo).unwrap();
+        let canonical_topic = std::fs::canonicalize(&path).unwrap();
+        assert!(
+            listed.iter().any(|worktree| {
+                !worktree.is_main
+                    && std::fs::canonicalize(&worktree.path)
+                        .map(|candidate| crate::platform::same_path(&candidate, &canonical_topic))
+                        .unwrap_or(false)
+            }),
+            "topic worktree is registered: {listed:?}"
+        );
+        let removed = api_call_with_workers(
+            &mut app,
+            &events,
+            "worktree.remove",
+            serde_json::json!({"path":path}),
+        );
+        assert_eq!(removed["result"]["type"], "ok", "{removed}");
+        assert!(!path.exists());
+        assert!(!app
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == topic_workspace));
+        let remove_request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                crate::module::paths::state_dir("example.worktree").join("remove-request.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(remove_request["operation"], "remove");
+        assert_eq!(
+            std::fs::canonicalize(remove_request["repository"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&repo).unwrap(),
+        );
+        assert_eq!(
+            std::path::Path::new(remove_request["path"].as_str().unwrap()),
+            std::path::Path::new(&path),
+        );
+        assert_eq!(remove_request["branch"], "topic");
+        assert_eq!(remove_request["force"], false);
+
+        let add_worktree = |branch: &str| {
+            let target = base.join(format!("wt-{branch}"));
+            let output = std::process::Command::new("git")
+                .args(["worktree", "add", "-q", "-b", branch])
+                .arg(&target)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            target
+        };
+        for (branch, expected) in [
+            ("stdout-remove", "must not write to stdout"),
+            ("no-remove", "left the directory in place"),
+        ] {
+            let target = add_worktree(branch);
+            let failed_remove = api_call_with_workers(
+                &mut app,
+                &events,
+                "worktree.remove",
+                serde_json::json!({"path":target}),
+            );
+            assert!(
+                failed_remove["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected),
+                "{failed_remove}"
+            );
+            assert!(target.exists());
+            crate::git::local::worktree_remove_force(&repo, &target).unwrap();
+            crate::git::local::branch_delete_force(&repo, branch).unwrap();
+        }
+
+        let revision_remove = add_worktree("revision-remove");
+        let expected_revision = crate::ipc::api::current_sequence(&app.events);
+        let (reply, revision_remove_response) = mpsc::channel();
+        app.handle_event(AppEvent::Api(ApiRequest {
+            id: "revision-remove".into(),
+            method: "worktree.remove".into(),
+            params: serde_json::json!({
+                "path":revision_remove,
+                "if_revision":expected_revision
+            }),
+            reply,
+        }));
+        assert!(revision_remove_response.try_recv().is_err());
+        app.emit_event("test.remove-revision", serde_json::json!({}));
+        let revision_removed = loop {
+            if let Ok(response) = revision_remove_response.try_recv() {
+                break serde_json::from_str::<serde_json::Value>(&response).unwrap();
+            }
+            app.handle_event(
+                events
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("revisioned remove provider completion"),
+            );
+        };
+        assert_eq!(
+            revision_removed["result"]["type"], "ok",
+            "{revision_removed}"
+        );
+        assert!(!revision_remove.exists());
+        crate::git::local::branch_delete_force(&repo, "revision-remove").unwrap();
+
+        let fallback = add_worktree("fallback-remove");
+        app.modules
+            .find_mut("example.worktree")
+            .unwrap()
+            .manifest
+            .worktree_provider
+            .as_mut()
+            .unwrap()
+            .remove_command = None;
+        let fallback_result = api_call(
+            &mut app,
+            "worktree.remove",
+            serde_json::json!({"path":fallback}),
+        );
+        assert_eq!(fallback_result["result"]["type"], "ok");
+        assert!(!fallback.exists());
+        crate::git::local::branch_delete_force(&repo, "fallback-remove").unwrap();
 
         app.modules.find_mut("example.worktree").unwrap().enabled = false;
         let disabled = api_call(

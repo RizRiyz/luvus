@@ -54,7 +54,12 @@ pub struct ModuleManifest {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WorktreeProvider {
+    /// Fixed argv for creation requests.
     pub command: Vec<String>,
+    /// Optional fixed argv for explicit removal requests. When absent, Luvus
+    /// retains its built-in Git removal behavior.
+    #[serde(default)]
+    pub remove_command: Option<Vec<String>>,
     #[serde(default)]
     pub platforms: Option<Vec<String>>,
 }
@@ -290,6 +295,9 @@ impl ModuleManifest {
         }
         if let Some(provider) = &self.worktree_provider {
             check_argv(&provider.command, "worktree_provider")?;
+            if let Some(command) = &provider.remove_command {
+                check_argv(command, "worktree_provider.remove_command")?;
+            }
             check_platforms(provider.platforms.as_ref(), "worktree_provider")?;
         }
         let mut setting_keys = HashSet::new();
@@ -568,12 +576,21 @@ mod tests {
         let mut manifest = base();
         manifest.worktree_provider = Some(WorktreeProvider {
             command: Vec::new(),
+            remove_command: None,
             platforms: None,
         });
         assert!(manifest.validate().unwrap_err().contains("non-empty argv"));
 
         manifest.worktree_provider = Some(WorktreeProvider {
             command: vec!["provider".into()],
+            remove_command: Some(Vec::new()),
+            platforms: None,
+        });
+        assert!(manifest.validate().unwrap_err().contains("remove_command"));
+
+        manifest.worktree_provider = Some(WorktreeProvider {
+            command: vec!["provider".into()],
+            remove_command: None,
             platforms: Some(vec!["never-this-platform".into()]),
         });
         assert!(manifest.validate().is_ok());
@@ -768,6 +785,7 @@ step = 1
 
 [worktree_provider]
 command = ["./create-worktree"]
+remove_command = ["./remove-worktree"]
 "#,
         )
         .expect("parses");
@@ -779,6 +797,14 @@ command = ["./create-worktree"]
         assert_eq!(
             m.worktree_provider().unwrap().command,
             ["./create-worktree"]
+        );
+        assert_eq!(
+            m.worktree_provider()
+                .unwrap()
+                .remove_command
+                .as_ref()
+                .unwrap(),
+            &["./remove-worktree".to_string()]
         );
     }
 
