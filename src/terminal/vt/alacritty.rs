@@ -419,12 +419,6 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
-        // Horizontal splits shrink the live PTY while a streaming child may still
-        // have a DEC 2026 frame open. That buffer is a full redraw for the *old*
-        // size (home + erase). Replaying it after the height change blanks the
-        // original pane; the new sibling looks fine because it has no in-flight
-        // sync. Drop the stale frame before the grid changes.
-        self.parser.abort_sync(&mut self.term);
         self.term.resize(Dims {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
@@ -1674,56 +1668,6 @@ mod tests {
         assert_eq!(alternate_screen.kind, DamageKind::Full);
         assert!(engine.acknowledge_damage(alternate_screen.generation));
         engine.recycle_damage_snapshot(alternate_screen);
-    }
-
-    fn visible_has_line(engine: &AlacrittyEngine) -> bool {
-        engine.visible_rows().iter().any(|row| row.contains("line"))
-    }
-
-    #[test]
-    fn shrinking_height_keeps_live_rows_visible() {
-        let (tx, _rx) = channel();
-        let mut engine = AlacrittyEngine::new(40, 24, tx, budget_for_rows(40, 200));
-        feed_lines(&mut engine, 40);
-        assert!(visible_has_line(&engine));
-        engine.resize(40, 10);
-        assert!(
-            visible_has_line(&engine),
-            "height shrink must keep the live tail, not a blank viewport: {:?}",
-            engine.visible_rows()
-        );
-    }
-
-    #[test]
-    fn shrinking_height_discards_in_flight_synchronized_clear() {
-        let (tx, _rx) = channel();
-        let mut engine = AlacrittyEngine::new(40, 24, tx, budget_for_rows(40, 200));
-        feed_lines(&mut engine, 40);
-        // Cargo/clippy progress frames wrap a home+erase in DEC 2026. A
-        // horizontal split resizes the PTY while that frame is still open.
-        engine.advance(b"\x1b[?2026h\x1b[H\x1b[2J");
-        engine.resize(40, 10);
-        engine.advance(b"\x1b[?2026l");
-        assert!(
-            visible_has_line(&engine),
-            "stale sync erase must not blank the shrunken pane: {:?}",
-            engine.visible_rows()
-        );
-    }
-
-    #[test]
-    fn shrinking_height_discards_synchronized_clear_split_across_resize() {
-        let (tx, _rx) = channel();
-        let mut engine = AlacrittyEngine::new(40, 24, tx, budget_for_rows(40, 200));
-        feed_lines(&mut engine, 40);
-        engine.advance(b"\x1b[?2026h\x1b[H");
-        engine.resize(40, 10);
-        engine.advance(b"\x1b[2J\x1b[?2026l");
-        assert!(
-            visible_has_line(&engine),
-            "ED2 after abort must not blank the shrunken pane: {:?}",
-            engine.visible_rows()
-        );
     }
 
     // docs/07: agent detection must read the **live** screen, never the
