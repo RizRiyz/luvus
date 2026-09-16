@@ -1931,12 +1931,11 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let cwd = app.workspaces[0].cwd.clone();
-        let other_cwd = cwd.join("other");
-        let path = other_cwd.join("Cargo.toml");
+        let path = cwd.join("Cargo.toml");
         app.workspaces.push(crate::app::Workspace {
             id: "other-workspace".into(),
             name: "other".into(),
-            cwd: other_cwd.clone(),
+            cwd: cwd.join("other"),
             branch: None,
             git_ahead_behind: None,
             worktree: None,
@@ -1958,9 +1957,9 @@ mod tests {
             String::new(),
             [],
             SearchTarget::File {
-                ws: 1,
+                ws: 0,
                 path: path.clone(),
-                workspace_cwd: other_cwd.clone(),
+                workspace_cwd: cwd.clone(),
             },
             false,
         );
@@ -1969,12 +1968,12 @@ mod tests {
             score: 1,
             label_positions: Vec::new(),
         }];
-        app.workspaces[1].cwd = other_cwd.join("changed");
+        app.workspaces[0].cwd = cwd.join("changed");
         app.search_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         assert!(app.file_menu.is_none());
         assert!(app.search.is_some());
-        app.workspaces[1].cwd = other_cwd;
-        let tabs = app.workspaces[1].tabs.len();
+        app.workspaces[0].cwd = cwd;
+        let tabs = app.workspaces[0].tabs.len();
         app.search_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
         assert_eq!(app.search.as_ref().unwrap().query, "a");
         assert_eq!(
@@ -1982,7 +1981,7 @@ mod tests {
             "opening a menu preserves the underlying view"
         );
         assert_eq!(
-            app.workspaces[1].tabs.len(),
+            app.workspaces[0].tabs.len(),
             tabs,
             "menu does not open an editor"
         );
@@ -1995,15 +1994,64 @@ mod tests {
         // A worker may replace the result list while the menu is open. The
         // action must use the menu's snapshot, not the new selected result.
         app.search.as_mut().unwrap().results.clear();
-        // Closing an earlier workspace shifts the target from index 1 to 0.
-        // The deferred action follows its stable workspace ID, not the stale
-        // result index.
-        app.close_workspace(0);
-        assert_eq!(app.workspaces[0].id, "other-workspace");
         app.file_menu_action_pub(crate::app::FileMenuItem::CopyPath);
         assert!(app.search.is_none());
         assert_eq!(app.active_ws, 0, "actions belong to the result's workspace");
         assert_eq!(app.pending_clipboard.as_deref(), path.to_str());
+    }
+
+    #[test]
+    fn finder_file_action_follows_workspace_across_index_shift() {
+        let _env = crate::persist::test_env("finder-file-action-workspace-shift");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let target_cwd = app.workspaces[0].cwd.join("target");
+        let target_path = target_cwd.join("Cargo.toml");
+        app.workspaces.push(crate::app::Workspace {
+            id: "target-workspace".into(),
+            name: "target".into(),
+            cwd: target_cwd.clone(),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![crate::app::Tab::panes(crate::layout::TileLayout::new(
+                PaneId::alloc(),
+            ))],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.open_search();
+        app.search.as_mut().unwrap().results = vec![SearchMatch {
+            entry: SearchEntry::new(
+                "shifted-file".into(),
+                SearchKind::File,
+                "Cargo.toml".into(),
+                String::new(),
+                [],
+                SearchTarget::File {
+                    ws: 1,
+                    path: target_path.clone(),
+                    workspace_cwd: target_cwd,
+                },
+                false,
+            ),
+            score: 1,
+            label_positions: Vec::new(),
+        }];
+
+        app.search_file_actions();
+        assert_eq!(app.file_menu.as_ref().unwrap().path, target_path);
+
+        // Closing an earlier workspace shifts the target from index 1 to 0.
+        // The deferred action follows its stable workspace ID, not the stale
+        // result index.
+        app.close_workspace(0);
+        assert_eq!(app.workspaces[0].id, "target-workspace");
+        app.file_menu_action_pub(crate::app::FileMenuItem::CopyPath);
+
+        assert!(app.search.is_none());
+        assert_eq!(app.active_ws, 0);
+        assert_eq!(app.pending_clipboard.as_deref(), target_path.to_str());
     }
 
     #[test]
