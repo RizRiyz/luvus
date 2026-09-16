@@ -456,6 +456,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn sync_provider_rejects_a_truncated_stdin_request_even_after_exit_zero() {
+        let root = std::env::temp_dir();
+        let (code, _out, err) = run_with_input(
+            &root,
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                "exec 0>&-; printf '{\"path\":\"/unused\"}'".into(),
+            ],
+            &[],
+            Some(vec![b'x'; 1024 * 1024]),
+            Some(Duration::from_secs(2)),
+            None,
+        );
+        assert_eq!(code, None);
+        assert!(err.contains("write stdin failed"), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn sync_cancellation_kills_descendants_holding_output_pipes() {
         let root = std::env::temp_dir();
         let cancelled = std::sync::Arc::new(AtomicBool::new(false));

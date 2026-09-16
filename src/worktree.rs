@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 use crate::config::WorktreeConfig;
 use crate::module::ModuleRegistry;
 
+const GIT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Deserialize)]
 struct ProviderOutput {
     path: PathBuf,
@@ -98,7 +100,7 @@ fn run_create(
 ) -> Result<ProviderResult, String> {
     let branch_exists = bounded_branch_exists(&request.repo, &request.branch, cancelled)?;
     let existing_worktrees = bounded_worktree_paths(&request.repo, cancelled)?;
-    let stdout = command.run(
+    let stdout = match command.run(
         json!({
             "version": 1,
             "operation": "create",
@@ -107,8 +109,30 @@ fn run_create(
             "branch_exists": branch_exists,
         }),
         cancelled,
-    )?;
-    let path = parse_provider_output(stdout.as_bytes())?;
+    ) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            reconcile_failed_creation(
+                &request.repo,
+                &request.branch,
+                !branch_exists,
+                &existing_worktrees,
+            );
+            return Err(error);
+        }
+    };
+    let path = match parse_provider_output(stdout.as_bytes()) {
+        Ok(path) => path,
+        Err(error) => {
+            reconcile_failed_creation(
+                &request.repo,
+                &request.branch,
+                !branch_exists,
+                &existing_worktrees,
+            );
+            return Err(error);
+        }
+    };
     if let Err(error) = validate_bounded(&request.repo, &path, &request.branch, cancelled) {
         cleanup_failed_creation(
             &request.repo,
@@ -135,7 +159,7 @@ fn run_remove(
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<ProviderResult, String> {
     let canonical_path = validate_remove_target(&request.repo, &request.path, cancelled)?;
-    let stdout = command.run(
+    let command_result = command.run(
         json!({
             "version": 1,
             "operation": "remove",
@@ -145,12 +169,22 @@ fn run_remove(
             "force": request.force,
         }),
         cancelled,
-    )?;
-    if !stdout.trim().is_empty() {
-        return Err("worktree removal provider must not write to stdout".into());
+    );
+    // The command may have completed the irreversible deletion before a
+    // non-zero exit, stdin failure, timeout, or cancellation was observed.
+    // Reconcile actual Git/filesystem state with a fresh bounded token so an
+    // already-completed removal is never reported as recoverable failure.
+    let removal = validate_removed(&request.repo, &request.path, &canonical_path);
+    match (command_result, removal) {
+        (_, Ok(())) => Ok(ProviderResult::Removed(request.path)),
+        (Ok(stdout), Err(error)) if !stdout.trim().is_empty() => Err(format!(
+            "worktree removal provider must not write to stdout; {error}"
+        )),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(command_error), Err(validation_error)) => Err(format!(
+            "{command_error}; removal not completed: {validation_error}"
+        )),
     }
-    validate_removed(&request.repo, &request.path, &canonical_path, cancelled)?;
-    Ok(ProviderResult::Removed(request.path))
 }
 
 pub fn module_remove_job(
@@ -299,27 +333,25 @@ fn validate_remove_target(
         Some(0) => return Err("the main worktree cannot be removed".into()),
         Some(_) => {}
     }
-    let source_common = bounded_common_dir(repo, cancelled, std::time::Duration::from_secs(300))?;
-    let target_common = bounded_common_dir(path, cancelled, std::time::Duration::from_secs(300))?;
+    let source_common = bounded_common_dir(repo, cancelled, GIT_PROBE_TIMEOUT)?;
+    let target_common = bounded_common_dir(path, cancelled, GIT_PROBE_TIMEOUT)?;
     if !crate::platform::same_path(&source_common, &target_common) {
         return Err("worktree removal target belongs to another repository".into());
     }
     Ok(canonical)
 }
 
-fn validate_removed(
-    repo: &Path,
-    path: &Path,
-    canonical_path: &Path,
-    cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<(), String> {
+fn validate_removed(repo: &Path, path: &Path, canonical_path: &Path) -> Result<(), String> {
+    use std::sync::atomic::AtomicBool;
+
+    let reconciliation = AtomicBool::new(false);
     if path.exists() {
         return Err(format!(
             "worktree removal provider left the directory in place: {}",
             path.display()
         ));
     }
-    let registered = bounded_worktree_paths(repo, cancelled)?
+    let registered = bounded_worktree_paths_for(repo, &reconciliation, GIT_PROBE_TIMEOUT)?
         .iter()
         .any(|candidate| {
             std::fs::canonicalize(candidate)
@@ -344,22 +376,25 @@ fn parse_provider_output(stdout: &[u8]) -> Result<PathBuf, String> {
     Ok(output.path)
 }
 
-fn bounded_git(
-    cwd: &Path,
-    args: &[&str],
-    cancelled: &std::sync::atomic::AtomicBool,
-) -> Result<String, String> {
-    let mut argv = vec!["git".to_string()];
-    argv.extend(args.iter().map(|arg| (*arg).to_string()));
-    crate::module::runtime::run_bounded_argv(&cwd.to_path_buf(), &argv, cancelled)
-}
-
 fn bounded_worktree_paths(
     repo: &Path,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<PathBuf>, String> {
-    let raw = bounded_git(repo, &["worktree", "list", "--porcelain", "-z"], cancelled)
-        .or_else(|_| bounded_git(repo, &["worktree", "list", "--porcelain"], cancelled))?;
+    bounded_worktree_paths_for(repo, cancelled, crate::module::runtime::SYNC_TIMEOUT)
+}
+
+fn bounded_worktree_paths_for(
+    repo: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+    timeout: std::time::Duration,
+) -> Result<Vec<PathBuf>, String> {
+    let run = |args: &[&str]| {
+        let mut argv = vec!["git".to_string()];
+        argv.extend(args.iter().map(|arg| (*arg).to_string()));
+        crate::module::runtime::run_bounded_argv_for(&repo.to_path_buf(), &argv, cancelled, timeout)
+    };
+    let raw = run(&["worktree", "list", "--porcelain", "-z"])
+        .or_else(|_| run(&["worktree", "list", "--porcelain"]))?;
     Ok(raw
         .split(['\0', '\n'])
         .filter_map(|line| line.strip_prefix("worktree "))
@@ -373,10 +408,11 @@ fn bounded_branch_exists(
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<bool, String> {
     let refname = format!("refs/heads/{branch}");
-    match bounded_git(
+    match bounded_git_for(
         repo,
         &["show-ref", "--verify", "--quiet", &refname],
         cancelled,
+        GIT_PROBE_TIMEOUT,
     ) {
         Ok(_) => Ok(true),
         Err(error) if error == "command failed" => Ok(false),
@@ -384,7 +420,55 @@ fn bounded_branch_exists(
     }
 }
 
+fn reconcile_failed_creation(
+    repo: &Path,
+    branch: &str,
+    branch_created: bool,
+    existing_worktrees: &[PathBuf],
+) {
+    use std::sync::atomic::AtomicBool;
+
+    let cleanup = AtomicBool::new(false);
+    let Ok(current) = bounded_worktree_paths_for(repo, &cleanup, GIT_PROBE_TIMEOUT) else {
+        return;
+    };
+    let candidates = current
+        .into_iter()
+        .filter(|path| !worktree_existed(path, existing_worktrees))
+        .filter(|path| {
+            bounded_git_for(
+                path,
+                &["symbolic-ref", "--quiet", "--short", "HEAD"],
+                &cleanup,
+                GIT_PROBE_TIMEOUT,
+            )
+            .is_ok_and(|actual| actual.trim() == branch)
+        })
+        .collect::<Vec<_>>();
+    let [path] = candidates.as_slice() else {
+        return;
+    };
+    cleanup_failed_creation(repo, path, branch, branch_created, existing_worktrees);
+}
+
+fn bounded_git_for(
+    cwd: &Path,
+    args: &[&str],
+    cancelled: &std::sync::atomic::AtomicBool,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    let mut argv = vec!["git".to_string()];
+    argv.extend(args.iter().map(|arg| (*arg).to_string()));
+    crate::module::runtime::run_bounded_argv_for(&cwd.to_path_buf(), &argv, cancelled, timeout)
+}
+
 fn worktree_existed(path: &Path, existing_worktrees: &[PathBuf]) -> bool {
+    if existing_worktrees
+        .iter()
+        .any(|existing| crate::platform::same_path(existing, path))
+    {
+        return true;
+    }
     let Some(returned) = std::fs::canonicalize(path).ok() else {
         return false;
     };
@@ -403,14 +487,13 @@ fn cleanup_failed_creation(
     existing_worktrees: &[PathBuf],
 ) {
     use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
 
     let cleanup = AtomicBool::new(false);
     if worktree_existed(path, existing_worktrees) {
         return;
     }
-    let source_common = bounded_common_dir(repo, &cleanup, Duration::from_secs(5));
-    let returned_common = bounded_common_dir(path, &cleanup, Duration::from_secs(5));
+    let source_common = bounded_common_dir(repo, &cleanup, GIT_PROBE_TIMEOUT);
+    let returned_common = bounded_common_dir(path, &cleanup, GIT_PROBE_TIMEOUT);
     if source_common.is_err()
         || returned_common.is_err()
         || !crate::platform::same_path(&source_common.unwrap(), &returned_common.unwrap())
@@ -422,7 +505,7 @@ fn cleanup_failed_creation(
             &repo.to_path_buf(),
             &args,
             &cleanup,
-            Duration::from_secs(5),
+            GIT_PROBE_TIMEOUT,
         )
     };
     let removed = run(vec![

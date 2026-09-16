@@ -5599,6 +5599,7 @@ impl App {
             return Ok(());
         }
         if self.ready_worktree_provider.is_some() {
+            self.discard_ready_worktree();
             return Err("worktree target changed while the provider was running".into());
         }
         let worktrees = crate::git::local::worktrees(repo)?;
@@ -5735,7 +5736,9 @@ impl App {
                         app.ready_worktree_provider = Some(ready);
                         Ok(())
                     });
-                    finish(app, result)
+                    let changed = finish(app, result);
+                    app.start_pending_automation_runs(crate::automation::unix_now());
+                    changed
                 })
             })
             .inspect_err(|_| {
@@ -9444,6 +9447,14 @@ if [ "$branch_exists" = false ]; then create='-b'; fi
 safe=$(printf '%s' "$branch" | tr '/ ' '--')
 target="$(dirname "$repo")/wt-$safe"
 git -C "$repo" worktree add -q $create "$branch" "$target"
+if [ "$branch" = post-create-error ]; then
+  printf '%s\n' 'provider failed after creating the worktree' >&2
+  exit 2
+fi
+if [ "$branch" = invalid-json ]; then
+  printf '%s\n' 'provider log on stdout'
+  exit 0
+fi
 printf '%s\n' "{\"path\":\"$target\"}"
 "#,
         )
@@ -9475,10 +9486,19 @@ repo=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["reposito
 path=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$request")
 branch=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["branch"])' "$request")
 force=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["force"]).lower())' "$request")
-if [ "$branch" = stdout-remove ]; then printf noise; exit 0; fi
+if [ "$branch" = stdout-remove ]; then
+  git -C "$repo" worktree remove "$path"
+  printf noise
+  exit 0
+fi
+if [ "$branch" = stdout-no-remove ]; then printf noise; exit 0; fi
 if [ "$branch" = no-remove ]; then exit 0; fi
 if [ "$force" = true ]; then force_arg='--force'; fi
 git -C "$repo" worktree remove $force_arg "$path"
+if [ "$branch" = post-remove-error ]; then
+  printf '%s\n' 'provider failed after removing the worktree' >&2
+  exit 2
+fi
 "#,
         )
         .unwrap();
@@ -9619,8 +9639,41 @@ git -C "$repo" worktree remove $force_arg "$path"
             assert!(output.status.success());
             target
         };
+        let stdout_removed = add_worktree("stdout-remove");
+        let stdout_workspace = app.workspaces[0].id.clone();
+        app.workspaces[0].cwd = stdout_removed.clone();
+        let removed_with_stdout = api_call_with_workers(
+            &mut app,
+            &events,
+            "worktree.remove",
+            serde_json::json!({"path":stdout_removed}),
+        );
+        assert_eq!(removed_with_stdout["result"]["type"], "ok");
+        assert!(!stdout_removed.exists());
+        assert!(!app
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == stdout_workspace));
+        crate::git::local::branch_delete_force(&repo, "stdout-remove").unwrap();
+        app.active_ws = app
+            .workspaces
+            .iter()
+            .position(|workspace| crate::platform::same_path(&workspace.cwd, &task_path))
+            .unwrap();
+
+        let failed_after_remove = add_worktree("post-remove-error");
+        let post_remove_result = api_call_with_workers(
+            &mut app,
+            &events,
+            "worktree.remove",
+            serde_json::json!({"path":failed_after_remove}),
+        );
+        assert_eq!(post_remove_result["result"]["type"], "ok");
+        assert!(!failed_after_remove.exists());
+        crate::git::local::branch_delete_force(&repo, "post-remove-error").unwrap();
+
         for (branch, expected) in [
-            ("stdout-remove", "must not write to stdout"),
+            ("stdout-no-remove", "must not write to stdout"),
             ("no-remove", "left the directory in place"),
         ] {
             let target = add_worktree(branch);
@@ -9716,6 +9769,18 @@ git -C "$repo" worktree remove $force_arg "$path"
             failed["error"]["message"],
             "provider needs interactive approval"
         );
+
+        for branch in ["post-create-error", "invalid-json"] {
+            let failed = api_call_with_workers(
+                &mut app,
+                &events,
+                "worktree.create",
+                serde_json::json!({"branch":branch}),
+            );
+            assert!(failed["error"]["message"].is_string(), "{failed}");
+            assert!(!base.join(format!("wt-{branch}")).exists());
+            assert!(!crate::git::local::branch_exists(&repo, branch));
+        }
 
         let expected_revision = crate::ipc::api::current_sequence(&app.events);
         let (reply, revision_response) = mpsc::channel();

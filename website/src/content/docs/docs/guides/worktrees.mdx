@@ -56,12 +56,15 @@ deletes send:
 {"version":1,"operation":"remove","repository":"/absolute/repo","path":"/absolute/worktree","branch":"feature/example","force":false}
 ```
 
-Removal must write nothing to stdout and must
-both unregister the worktree and remove its directory. If `remove_command` is
-omitted, explicit removal falls back to built-in Git. Human diagnostics belong
-on stderr. A non-zero exit preserves stderr in the
-user-facing error, so approval or non-interactive failures from the underlying
-tool remain actionable. The provider is synchronous and must not call back into
+Removal must write nothing to stdout, exit successfully, and
+both unregister the worktree and remove its directory. If a provider violates
+the exit or stdout contract after the irreversible deletion already completed,
+Luvus reconciles the proven Git and filesystem state rather than leaving a stale
+workspace; stdout is still not a supported result channel. If `remove_command`
+is omitted, explicit removal falls back to built-in Git. Human diagnostics
+belong on stderr. A non-zero exit preserves stderr in the user-facing error when
+the target still exists, so approval or non-interactive failures from the
+underlying tool remain actionable. The provider is synchronous and must not call back into
 the Luvus CLI/API while the server is waiting; module settings and config/state
 directories remain available.
 

@@ -243,6 +243,16 @@ impl App {
             return self.deliver_active_agent_run(&run, now);
         }
 
+        // Module-backed worktree creation has one ordered provider slot. A run
+        // already owns that slot until its deferred callback retries it; leave
+        // every other worktree occurrence Pending instead of turning ordinary
+        // provider contention into a durable automation failure.
+        if run.task.mode == crate::orch::TaskWorkerMode::Worktree
+            && (self.worktree_provider_inflight || self.pending_worktree_provider.is_some())
+        {
+            return false;
+        }
+
         if self.workspaces.is_empty() {
             let message = "no active session".to_string();
             let _ = self.automation.set_run_status(
@@ -328,17 +338,14 @@ impl App {
         if started.as_ref().is_err_and(is_worktree_create_pending) {
             let retry_run = run_id.to_string();
             match self.schedule_pending_worktree(move |app, result| {
+                let now = crate::automation::unix_now();
                 match result {
                     Ok(()) => {
-                        app.start_automation_run(&retry_run, crate::automation::unix_now());
+                        app.start_automation_run(&retry_run, now);
                         app.discard_ready_worktree();
                     }
                     Err(message) => {
-                        app.fail_deferred_automation_start(
-                            &retry_run,
-                            message,
-                            crate::automation::unix_now(),
-                        );
+                        app.fail_deferred_automation_start(&retry_run, message, now);
                     }
                 }
                 true
@@ -1921,19 +1928,14 @@ mod tests {
         let _env = crate::persist::test_env("automation-deferred-worktree-failure");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        let definition = app
-            .automation
-            .create(
-                automation_input(
-                    app.workspaces[0].id.clone(),
-                    crate::automation::Trigger::Once {
-                        at_utc: 4_000_000_000,
-                    },
-                ),
-                None,
-                10,
-            )
-            .unwrap();
+        let mut input = automation_input(
+            app.workspaces[0].id.clone(),
+            crate::automation::Trigger::Once {
+                at_utc: 4_000_000_000,
+            },
+        );
+        input.task.mode = crate::orch::TaskWorkerMode::Worktree;
+        let definition = app.automation.create(input, None, 10).unwrap();
         let run = app
             .automation
             .request_run(&definition.id, None, 20)
@@ -1972,6 +1974,33 @@ mod tests {
             .pending_notify
             .iter()
             .any(|message| message == &format!("Automation {} failed to start", definition.id)));
+    }
+
+    #[test]
+    fn worktree_provider_contention_keeps_automation_pending() {
+        let _env = crate::persist::test_env("automation-worktree-provider-contention");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut input = automation_input(
+            app.workspaces[0].id.clone(),
+            crate::automation::Trigger::Once {
+                at_utc: 4_000_000_000,
+            },
+        );
+        input.task.mode = crate::orch::TaskWorkerMode::Worktree;
+        let definition = app.automation.create(input, None, 10).unwrap();
+        let run = app
+            .automation
+            .request_run(&definition.id, None, 20)
+            .unwrap();
+        app.worktree_provider_inflight = true;
+
+        assert!(!app.start_automation_run(&run.id, 20));
+        let pending = app.automation.run(&run.id).unwrap();
+        assert_eq!(pending.status, RunStatus::Pending);
+        assert!(pending.task_id.is_none());
+        assert!(app.orch.tasks.is_empty());
+        assert!(app.pending_notify.is_empty());
     }
 
     #[test]

@@ -41,9 +41,12 @@ A worktree provider reads one versioned JSON request from stdin. Creation gets
 `version`, `operation`, `repository`, `branch`, and `branch_exists`, and must
 print only `{"path":"/absolute/worktree/path"}` on stdout. Removal gets
 `version`, `operation`, `repository`, `path`, `branch`, and `force`; it must
-print nothing and must unregister and remove the target. Human logs go to
-stderr. This command is synchronous and must not call back into the Luvus
-CLI/API while the server waits. Luvus verifies the returned path is a
+print nothing, exit successfully, and unregister and remove the target. If a
+provider violates its exit or stdout contract after deletion already completed,
+Luvus reconciles the proven Git/filesystem state instead of retaining a stale
+workspace; stdout remains unsupported. Human logs go to stderr. This command is
+synchronous and must not call back into the Luvus CLI/API while the server
+waits. Luvus verifies the returned path is a
 registered worktree of the source repository on the exact requested branch
 before opening a workspace; explicit removal is verified before and after the
 command. Internal rollback and task merge remain Git-backed.

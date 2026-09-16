@@ -227,16 +227,7 @@ fn format_argv(argv: &[String]) -> String {
 }
 
 fn escape_terminal_controls(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|character| {
-            if character.is_control() {
-                character.escape_default().collect::<Vec<_>>()
-            } else {
-                vec![character]
-            }
-        })
-        .collect()
+    value.chars().flat_map(char::escape_debug).collect()
 }
 
 fn confirm() -> Result<bool> {
@@ -367,6 +358,7 @@ remove_command = ["./remove-worktree"]
         assert!(!rendered.contains('\n'));
 
         assert_eq!(escape_terminal_controls("A\u{1b}[2J\nB"), r"A\u{1b}[2J\nB");
+        assert_eq!(escape_terminal_controls("A\u{202e}B"), r"A\u{202e}B");
     }
 
     #[test]
