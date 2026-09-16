@@ -47,6 +47,17 @@ const BSU_CSI: [u8; SYNC_ESCAPE_LEN] = *b"\x1b[?2026h";
 /// ESU CSI sequence for terminating synchronized updates.
 const ESU_CSI: [u8; SYNC_ESCAPE_LEN] = *b"\x1b[?2026l";
 
+/// Longest suffix of `buf` that is a proper prefix of `ESU_CSI`.
+fn esu_prefix_len(buf: &[u8]) -> usize {
+    let max = buf.len().min(SYNC_ESCAPE_LEN - 1);
+    for len in (1..=max).rev() {
+        if ESU_CSI.starts_with(&buf[buf.len() - len..]) {
+            return len;
+        }
+    }
+    0
+}
+
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Hyperlink {
     /// Identifier for the given hyperlink.
@@ -257,10 +268,11 @@ struct SyncState<T: Timeout> {
     /// Bytes read during the synchronized update.
     buffer: Vec<u8>,
 
-    /// After a PTY resize, a child's SIGWINCH redraw (in-flight DEC 2026 or live
-    /// ED/EL/IL/DL/SU/RIS/newlines) must not wipe the new viewport. Cleared by
-    /// the next printable character so a later full redraw can still clear.
-    omit_screen_clears: bool,
+    /// After `abort_sync`, remaining bytes of that DEC 2026 frame must not reach
+    /// the handler. Drain until ESU (or `SYNC_BUFFER_SIZE`) then resume.
+    discarding: bool,
+    discarded: usize,
+    esu_matched: usize,
 }
 
 impl<T: Timeout> Default for SyncState<T> {
@@ -271,7 +283,9 @@ impl<T: Timeout> Default for SyncState<T> {
         Self {
             buffer: Vec::new(),
             timeout: Default::default(),
-            omit_screen_clears: false,
+            discarding: false,
+            discarded: 0,
+            esu_matched: 0,
         }
     }
 }
@@ -313,7 +327,9 @@ impl<T: Timeout> Processor<T> {
     {
         let mut processed = 0;
         while processed != bytes.len() {
-            if self.state.sync_state.timeout.pending_timeout() {
+            if self.state.sync_state.discarding {
+                processed += self.advance_discard(&bytes[processed..]);
+            } else if self.state.sync_state.timeout.pending_timeout() {
                 processed += self.advance_sync(handler, &bytes[processed..]);
             } else {
                 let mut performer = Performer::new(&mut self.state, handler);
@@ -331,31 +347,61 @@ impl<T: Timeout> Processor<T> {
         self.stop_sync_internal(handler, None);
     }
 
-    /// Ignore viewport-wiping sequences until the next printable character.
+    /// Drop a synchronized update without replaying its buffered bytes.
     ///
-    /// A PTY resize (split or divider drag) often races a child's SIGWINCH
-    /// redraw: home+erase, per-line EL, IL/DL, SU, RIS, or a newline flood can
-    /// land before the new-size content. Alternate-screen (1049) is left alone
-    /// so a real TUI still owns the pane.
-    pub fn omit_screen_clears(&mut self) {
-        self.state.sync_state.omit_screen_clears = true;
-    }
-
-    /// Drop a synchronized update's buffered bytes without dispatching them.
-    ///
-    /// Stay in sync so later bytes of the same DEC 2026 window still collect and
-    /// apply on ESU against the new grid. Draining until ESU would throw away
-    /// Cargo/clippy progress for as long as that window stays open.
-    pub fn abort_sync<H>(&mut self, _handler: &mut H)
+    /// A pending DEC 2026 frame was parsed against the previous grid size. After
+    /// a resize those bytes often start with CUP/ED for the old height; applying
+    /// them would blank the new viewport. Size changes must discard that frame.
+    pub fn abort_sync<H>(&mut self, handler: &mut H)
     where
         H: Handler,
     {
-        self.omit_screen_clears();
         if !self.state.sync_state.timeout.pending_timeout() {
             return;
         }
+        handler.unset_private_mode(NamedPrivateMode::SyncUpdate.into());
+        self.state.sync_state.timeout.clear_timeout();
+        self.state.sync_state.esu_matched = esu_prefix_len(&self.state.sync_state.buffer);
         self.state.sync_state.buffer.clear();
-        self.state.sync_state.timeout.set_timeout(SYNC_UPDATE_TIMEOUT);
+        self.state.sync_state.discarded = 0;
+        self.state.sync_state.discarding = true;
+    }
+
+    /// Drop bytes of an aborted DEC 2026 frame until its ESU, or the sync cap.
+    ///
+    /// Returns the number of bytes consumed from `bytes`. Any remainder is
+    /// parsed normally by the caller.
+    fn advance_discard(&mut self, bytes: &[u8]) -> usize {
+        let mut consumed = 0;
+        while consumed < bytes.len() {
+            if self.state.sync_state.discarded >= SYNC_BUFFER_SIZE {
+                self.clear_discard();
+                break;
+            }
+
+            let byte = bytes[consumed];
+            consumed += 1;
+            self.state.sync_state.discarded = self.state.sync_state.discarded.saturating_add(1);
+
+            let expected = ESU_CSI[self.state.sync_state.esu_matched];
+            if byte == expected {
+                self.state.sync_state.esu_matched += 1;
+                if self.state.sync_state.esu_matched == SYNC_ESCAPE_LEN {
+                    self.clear_discard();
+                    break;
+                }
+                continue;
+            }
+
+            self.state.sync_state.esu_matched = usize::from(byte == ESU_CSI[0]);
+        }
+        consumed
+    }
+
+    fn clear_discard(&mut self) {
+        self.state.sync_state.discarding = false;
+        self.state.sync_state.discarded = 0;
+        self.state.sync_state.esu_matched = 0;
     }
 
     /// End a synchronized update.
@@ -1340,16 +1386,12 @@ where
 {
     #[inline]
     fn print(&mut self, c: char) {
-        self.state.sync_state.omit_screen_clears = false;
         self.handler.input(c);
         self.state.preceding_char = Some(c);
     }
 
     #[inline]
     fn print_ascii(&mut self, bytes: &[u8]) {
-        if !bytes.is_empty() {
-            self.state.sync_state.omit_screen_clears = false;
-        }
         self.handler.input_ascii(bytes);
         self.state.preceding_char = bytes.last().copied().map(char::from);
     }
@@ -1367,11 +1409,7 @@ where
             C0::HT => self.handler.put_tab(1),
             C0::BS => self.handler.backspace(),
             C0::CR => self.handler.carriage_return(),
-            C0::LF | C0::VT | C0::FF => {
-                if !self.state.sync_state.omit_screen_clears {
-                    self.handler.linefeed();
-                }
-            },
+            C0::LF | C0::VT | C0::FF => self.handler.linefeed(),
             C0::BEL => self.handler.bell(),
             C0::SUB => self.handler.substitute(),
             C0::SI => self.handler.set_active_charset(CharsetIndex::G0),
@@ -1629,11 +1667,7 @@ where
         };
 
         match (action, intermediates) {
-            ('@', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    handler.insert_blank(next_param_or(1) as usize);
-                }
-            },
+            ('@', []) => handler.insert_blank(next_param_or(1) as usize),
             ('A', []) => handler.move_up(next_param_or(1) as usize),
             ('B', []) | ('e', []) => handler.move_down(next_param_or(1) as usize),
             ('b', []) => {
@@ -1685,12 +1719,6 @@ where
                         self.terminated = true;
                     }
 
-                    if self.state.sync_state.omit_screen_clears
-                        && param == NamedPrivateMode::ColumnMode as u16
-                    {
-                        continue;
-                    }
-
                     handler.set_private_mode(PrivateMode::new(param))
                 }
             },
@@ -1707,10 +1735,6 @@ where
                     },
                 };
 
-                if self.state.sync_state.omit_screen_clears && !matches!(mode, ClearMode::Saved) {
-                    return;
-                }
-
                 handler.clear_screen(mode);
             },
             ('K', []) => {
@@ -1723,10 +1747,6 @@ where
                         return;
                     },
                 };
-
-                if self.state.sync_state.omit_screen_clears {
-                    return;
-                }
 
                 handler.clear_line(mode);
             },
@@ -1754,11 +1774,7 @@ where
 
                 handler.set_scp(char_path, update_mode);
             },
-            ('L', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    handler.insert_blank_lines(next_param_or(1) as usize);
-                }
-            },
+            ('L', []) => handler.insert_blank_lines(next_param_or(1) as usize),
             ('l', []) => {
                 for param in params_iter.map(|param| param[0]) {
                     handler.unset_mode(Mode::new(param))
@@ -1766,19 +1782,10 @@ where
             },
             ('l', [b'?']) => {
                 for param in params_iter.map(|param| param[0]) {
-                    if self.state.sync_state.omit_screen_clears
-                        && param == NamedPrivateMode::ColumnMode as u16
-                    {
-                        continue;
-                    }
                     handler.unset_private_mode(PrivateMode::new(param))
                 }
             },
-            ('M', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    handler.delete_lines(next_param_or(1) as usize);
-                }
-            },
+            ('M', []) => handler.delete_lines(next_param_or(1) as usize),
             ('m', []) => {
                 if params.is_empty() {
                     handler.terminal_attribute(Attr::Reset);
@@ -1804,11 +1811,7 @@ where
             },
             ('n', []) => handler.device_status(next_param_or(0) as usize),
             ('n', [b'?']) => handler.private_device_status(next_param_or(0) as usize),
-            ('P', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    handler.delete_chars(next_param_or(1) as usize);
-                }
-            },
+            ('P', []) => handler.delete_chars(next_param_or(1) as usize),
             ('p', [b'$']) => {
                 let mode = next_param_or(0);
                 handler.report_mode(Mode::new(mode));
@@ -1842,17 +1845,9 @@ where
 
                 handler.set_scrolling_region(top, bottom);
             },
-            ('S', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    handler.scroll_up(next_param_or(1) as usize);
-                }
-            },
+            ('S', []) => handler.scroll_up(next_param_or(1) as usize),
             ('s', []) => handler.save_cursor_position(),
-            ('T', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    handler.scroll_down(next_param_or(1) as usize);
-                }
-            },
+            ('T', []) => handler.scroll_down(next_param_or(1) as usize),
             ('t', []) => match next_param_or(1) as usize {
                 14 => handler.text_area_size_pixels(),
                 18 => handler.text_area_size_chars(),
@@ -1880,11 +1875,7 @@ where
                 handler.pop_keyboard_modes(next_param_or(1));
             },
             ('u', []) => handler.restore_cursor_position(),
-            ('X', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    handler.erase_chars(next_param_or(1) as usize);
-                }
-            },
+            ('X', []) => handler.erase_chars(next_param_or(1) as usize),
             ('Z', []) => handler.move_backward_tabs(next_param_or(1)),
             _ => unhandled!(),
         }
@@ -1919,29 +1910,15 @@ where
 
         match (byte, intermediates) {
             (b'B', intermediates) => configure_charset!(StandardCharset::Ascii, intermediates),
-            (b'D', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    self.handler.linefeed();
-                }
-            },
+            (b'D', []) => self.handler.linefeed(),
             (b'E', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    self.handler.linefeed();
-                }
+                self.handler.linefeed();
                 self.handler.carriage_return();
             },
             (b'H', []) => self.handler.set_horizontal_tabstop(),
-            (b'M', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    self.handler.reverse_index();
-                }
-            },
+            (b'M', []) => self.handler.reverse_index(),
             (b'Z', []) => self.handler.identify_terminal(None),
-            (b'c', []) => {
-                if !self.state.sync_state.omit_screen_clears {
-                    self.handler.reset_state();
-                }
-            },
+            (b'c', []) => self.handler.reset_state(),
             (b'0', intermediates) => {
                 configure_charset!(StandardCharset::SpecialCharacterAndLineDrawing, intermediates)
             },
@@ -2182,9 +2159,6 @@ mod tests {
         color: Option<Rgb>,
         reset_colors: Vec<usize>,
         clears: usize,
-        line_clears: usize,
-        linefeeds: usize,
-        deccolm: usize,
     }
 
     impl Handler for MockHandler {
@@ -2220,26 +2194,6 @@ mod tests {
         fn clear_screen(&mut self, _mode: ClearMode) {
             self.clears += 1;
         }
-
-        fn clear_line(&mut self, _mode: LineClearMode) {
-            self.line_clears += 1;
-        }
-
-        fn linefeed(&mut self) {
-            self.linefeeds += 1;
-        }
-
-        fn set_private_mode(&mut self, mode: PrivateMode) {
-            if matches!(mode, PrivateMode::Named(NamedPrivateMode::ColumnMode)) {
-                self.deccolm += 1;
-            }
-        }
-
-        fn unset_private_mode(&mut self, mode: PrivateMode) {
-            if matches!(mode, PrivateMode::Named(NamedPrivateMode::ColumnMode)) {
-                self.deccolm += 1;
-            }
-        }
     }
 
     impl Default for MockHandler {
@@ -2252,9 +2206,6 @@ mod tests {
                 color: None,
                 reset_colors: Vec::new(),
                 clears: 0,
-                line_clears: 0,
-                linefeeds: 0,
-                deccolm: 0,
             }
         }
     }
@@ -2495,88 +2446,30 @@ mod tests {
         assert!(parser.sync_bytes_count() > 0);
 
         parser.abort_sync(&mut handler);
-        assert!(parser.state.sync_state.timeout.pending_timeout());
+        assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
         assert_eq!(parser.sync_bytes_count(), 0);
         assert!(handler.attr.is_none(), "aborted bytes must not dispatch");
 
         parser.advance(&mut handler, b"\x1b[?2026l");
         assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
+        assert!(!parser.state.sync_state.discarding);
         assert!(handler.attr.is_none());
         assert_eq!(handler.clears, 0);
     }
 
     #[test]
-    fn abort_sync_skips_ed2_until_printable_then_applies_later_sgr() {
+    fn abort_sync_discards_ed2_until_esu_across_chunks() {
         let mut parser = Processor::<TestSyncHandler>::new();
         let mut handler = MockHandler::default();
 
         parser.advance(&mut handler, b"\x1b[?2026h\x1b[H");
         parser.abort_sync(&mut handler);
-        assert!(parser.state.sync_state.timeout.pending_timeout());
         parser.advance(&mut handler, b"\x1b[2J\x1b[?20");
         parser.advance(&mut handler, b"26l\x1b[32m");
 
         assert_eq!(handler.clears, 0, "late ED2 of the aborted frame must not dispatch");
+        assert!(!parser.state.sync_state.discarding);
         assert_eq!(handler.attr, Some(Attr::Foreground(Color::Named(NamedColor::Green))));
-    }
-
-    #[test]
-    fn omit_screen_clears_skips_live_ed2_until_printable() {
-        let mut parser = Processor::<TestSyncHandler>::new();
-        let mut handler = MockHandler::default();
-
-        parser.omit_screen_clears();
-        parser.advance(&mut handler, b"\x1b[2J");
-        assert_eq!(handler.clears, 0);
-        parser.advance(&mut handler, b"X\x1b[2J");
-        assert_eq!(handler.clears, 1);
-    }
-
-    #[test]
-    fn omit_screen_clears_skips_el_newlines_and_ris_until_printable() {
-        let mut parser = Processor::<TestSyncHandler>::new();
-        let mut handler = MockHandler::default();
-
-        parser.omit_screen_clears();
-        parser.advance(&mut handler, b"\x1b[31m\x1b[2K\n\n\x1b[L\x1b[M\x1b[S\x1bc");
-        assert_eq!(handler.line_clears, 0);
-        assert_eq!(handler.linefeeds, 0);
-        assert_eq!(
-            handler.attr,
-            Some(Attr::Foreground(Color::Named(NamedColor::Red))),
-            "RIS must not reset until printable"
-        );
-
-        parser.advance(&mut handler, b"X\x1b[2K\n");
-        assert_eq!(handler.line_clears, 1);
-        assert_eq!(handler.linefeeds, 1);
-        parser.advance(&mut handler, b"\x1bc");
-        assert!(handler.attr.is_none());
-    }
-
-    #[test]
-    fn omit_screen_clears_skips_deccolm_set_and_unset() {
-        let mut parser = Processor::<TestSyncHandler>::new();
-        let mut handler = MockHandler::default();
-
-        parser.omit_screen_clears();
-        parser.advance(&mut handler, b"\x1b[?3h\x1b[?3l");
-        assert_eq!(handler.deccolm, 0);
-
-        parser.advance(&mut handler, b"X\x1b[?3h\x1b[?3l");
-        assert_eq!(handler.deccolm, 2);
-    }
-
-    #[test]
-    fn abort_sync_keeps_later_sync_bytes_for_esu() {
-        let mut parser = Processor::<TestSyncHandler>::new();
-        let mut handler = MockHandler::default();
-
-        parser.advance(&mut handler, b"\x1b[?2026h\x1b[31m");
-        parser.abort_sync(&mut handler);
-        parser.advance(&mut handler, b"\x1b[32m\x1b[?2026l");
-        assert_eq!(handler.attr, Some(Attr::Foreground(Color::Named(NamedColor::Green))));
-        assert_eq!(parser.state.sync_state.timeout.is_sync, 0);
     }
 
     #[test]

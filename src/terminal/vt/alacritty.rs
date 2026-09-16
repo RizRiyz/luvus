@@ -419,12 +419,11 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
-        // Split and divider resize shrink the live PTY while a streaming child
-        // may still have a DEC 2026 frame open, and SIGWINCH often follows with
-        // a live redraw (ED, EL, IL/DL, SU, RIS, or a newline flood). Drop the
-        // stale buffered frame (keep collecting the same sync window) and ignore
-        // those wipes until the next printable so the shrunken pane keeps its
-        // rows. Alternate-screen (1049) is still applied: that is a real TUI.
+        // Horizontal splits shrink the live PTY while a streaming child may still
+        // have a DEC 2026 frame open. That buffer is a full redraw for the *old*
+        // size (home + erase). Replaying it after the height change blanks the
+        // original pane; the new sibling looks fine because it has no in-flight
+        // sync. Drop the stale frame before the grid changes.
         self.parser.abort_sync(&mut self.term);
         self.term.resize(Dims {
             cols: cols.max(1) as usize,
@@ -1723,99 +1722,6 @@ mod tests {
         assert!(
             visible_has_line(&engine),
             "ED2 after abort must not blank the shrunken pane: {:?}",
-            engine.visible_rows()
-        );
-    }
-
-    #[test]
-    fn shrinking_height_keeps_rows_when_sigwinch_sends_live_ed2() {
-        let (tx, _rx) = channel();
-        let mut engine = AlacrittyEngine::new(40, 24, tx, budget_for_rows(40, 200));
-        feed_lines(&mut engine, 40);
-        engine.resize(40, 10);
-        engine.advance(b"\x1b[H\x1b[2J");
-        assert!(
-            visible_has_line(&engine),
-            "live SIGWINCH erase must not blank the shrunken pane: {:?}",
-            engine.visible_rows()
-        );
-        engine.advance(b"kept-after-resize\r\n");
-        assert!(
-            engine
-                .visible_rows()
-                .iter()
-                .any(|row| row.contains("kept-after-resize")),
-            "text after the suppressed erase must still land: {:?}",
-            engine.visible_rows()
-        );
-    }
-
-    #[test]
-    fn shrinking_height_keeps_later_sync_progress() {
-        let (tx, _rx) = channel();
-        let mut engine = AlacrittyEngine::new(40, 24, tx, budget_for_rows(40, 200));
-        feed_lines(&mut engine, 40);
-        engine.advance(b"\x1b[?2026h\x1b[H\x1b[2J");
-        engine.resize(40, 10);
-        engine.advance(b"progress-after-resize\r\n\x1b[?2026l");
-        assert!(
-            visible_has_line(&engine),
-            "aborted sync must still apply later progress: {:?}",
-            engine.visible_rows()
-        );
-        assert!(
-            engine
-                .visible_rows()
-                .iter()
-                .any(|row| row.contains("progress-after-resize")),
-            "later DEC 2026 bytes must not be drained: {:?}",
-            engine.visible_rows()
-        );
-    }
-
-    #[test]
-    fn shrinking_height_keeps_rows_across_sigwinch_redraw_ops() {
-        let (tx, _rx) = channel();
-        let mut engine = AlacrittyEngine::new(40, 24, tx, budget_for_rows(40, 200));
-        feed_lines(&mut engine, 40);
-        engine.resize(40, 10);
-        // Cargo/clippy/indicatif SIGWINCH redraws are not only ED2. Home + erase
-        // below, per-line EL, IL/DL, SU, a newline flood, and RIS all wipe the
-        // viewport if applied before the new-size content.
-        engine.advance(
-            b"\x1b[H\x1b[J\x1b[0J\x1b[1J\x1b[2J\x1b[2K\x1b[K\x1b[1K\x1b[L\x1b[M\x1b[S\x1b[T\x1b[X\x1b[@\x1b[P\n\n\n\x1bD\x1bE\x1bM\x1bc",
-        );
-        assert!(
-            visible_has_line(&engine),
-            "SIGWINCH wipe sequences must not blank the shrunken pane: {:?}",
-            engine.visible_rows()
-        );
-    }
-
-    #[test]
-    fn shrinking_width_keeps_rows_when_sigwinch_sends_live_ed2() {
-        let (tx, _rx) = channel();
-        let mut engine = AlacrittyEngine::new(80, 12, tx, budget_for_rows(80, 200));
-        feed_lines(&mut engine, 20);
-        engine.resize(24, 12);
-        engine.advance(b"\x1b[H\x1b[2J\x1b[2K\n\n");
-        assert!(
-            visible_has_line(&engine),
-            "vertical split / width shrink must keep rows through SIGWINCH erase: {:?}",
-            engine.visible_rows()
-        );
-    }
-
-    #[test]
-    fn shrinking_height_keeps_rows_when_sigwinch_unsets_deccolm() {
-        let (tx, _rx) = channel();
-        let mut engine = AlacrittyEngine::new(40, 24, tx, budget_for_rows(40, 200));
-        feed_lines(&mut engine, 40);
-        engine.resize(40, 10);
-        engine.advance(b"\x1b[?3l");
-        assert!(
-            visible_has_line(&engine),
-            "DECCOLM reset must not blank the shrunken pane: {:?}",
             engine.visible_rows()
         );
     }
