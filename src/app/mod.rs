@@ -3,7 +3,7 @@
 //! (docs/04). Prefix-key driven.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc::Sender, Arc};
 use std::time::{Duration, Instant};
 
@@ -6010,10 +6010,11 @@ impl App {
         }
     }
 
-    /// Delete the armed worktree: `git worktree remove --force` (its branch is
-    /// kept), a folder-removal fallback if git leaves it, then drop the node.
-    /// Guarded so it only ever acts on a **linked worktree**, never a main
-    /// checkout.
+    /// Delete the armed worktree, keeping its branch. Guarded so it only ever
+    /// acts on a **linked worktree**, never a main checkout. The folder is renamed
+    /// aside and removed off the loop, since deleting a dependency tree here
+    /// freezes the UI for tens of seconds. The bar reports the removal, because a
+    /// toast is gone long before it ends.
     fn confirm_worktree_delete(&mut self) {
         let Some(workspace_id) = self.worktree_delete.take() else {
             return;
@@ -6042,6 +6043,69 @@ impl App {
             self.show_toast("not a worktree");
             return;
         };
+        if let Some(parked) = Self::park_for_delete(&path) {
+            let _ = crate::git::local::worktree_prune(&repo);
+            self.close_workspace(index);
+            self.show_toast("worktree removed, starting to delete its files");
+            let target = parked.clone();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "the worktree".into());
+            let progress = Self::delete_progress_key(&name);
+            let widget_key = progress.canonical();
+            if let Ok(widget) = crate::bar::BarWidget::new(
+                progress,
+                crate::bar::BarRegion::BottomRight,
+                vec![crate::bar::BarSegment::text(
+                    format!("deleting {name}"),
+                    crate::bar::BarTone::Warning,
+                )],
+                vec![crate::bar::BarSegment::text(
+                    "deleting",
+                    crate::bar::BarTone::Warning,
+                )],
+                95,
+            ) {
+                let _ = self.bar.push_widget(widget);
+            }
+            let clear_key = widget_key.clone();
+            let accepted = self.io_jobs.submit(self.app_tx.clone(), move || {
+                let removed = std::fs::remove_dir_all(&target);
+                Box::new(move |app: &mut App| {
+                    use crate::bar::NotificationLevel::{Error, Success};
+                    app.bar.remove_widget(&clear_key);
+                    let (text, level, ttl) = match removed {
+                        Ok(()) => (format!("{name}: files deleted"), Success, 20_000),
+                        Err(e) => (format!("{name}: files left behind, {e}"), Error, 60_000),
+                    };
+                    app.show_toast(text.clone());
+                    let _ = app.bar.push_notification(
+                        crate::bar::NotificationPush {
+                            owner: None,
+                            // truncate() would panic mid-character on a non-ASCII error.
+                            text: backend::bounded_text(&text, crate::bar::MAX_TEXT_BYTES),
+                            level,
+                            ttl_ms: ttl,
+                            action: None,
+                            value: None,
+                            dedupe_key: None,
+                        },
+                        Instant::now(),
+                    );
+                    true
+                })
+            });
+            // Nothing reports a fallback removal, so the widget cannot wait on one.
+            if accepted.is_err() {
+                self.bar.remove_widget(&widget_key);
+                std::thread::spawn(move || {
+                    let _ = std::fs::remove_dir_all(&parked);
+                });
+            }
+            return;
+        }
+        // The fallback for a rename that failed: across volumes, or on a held folder.
         match crate::git::local::worktree_remove_force(&repo, &path) {
             Ok(()) => {
                 if path.exists() {
@@ -6052,6 +6116,28 @@ impl App {
             }
             Err(e) => self.show_toast(format!("delete failed: {e}")),
         }
+    }
+
+    /// Keyed per worktree, so two removals at once do not clear each other's.
+    fn delete_progress_key(name: &str) -> crate::bar::BarWidgetKey {
+        let slug: String = name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        crate::bar::BarWidgetKey::new("core", format!("worktree-delete-{slug}"))
+    }
+
+    /// Rename a worktree folder aside, keeping the old parent so the rename stays
+    /// on one volume. `None` means it failed, so the caller removes it inline.
+    fn park_for_delete(path: &Path) -> Option<PathBuf> {
+        let parent = path.parent()?;
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let parked = parent.join(format!(".{name}.deleting-{stamp}"));
+        std::fs::rename(path, &parked).ok().map(|()| parked)
     }
 
     /// Open the rename modal for workspace `index`, pre-filled with its label.
@@ -8627,6 +8713,79 @@ mod tests {
             before,
             "a plain workspace is never deleted"
         );
+    }
+
+    fn deleting_widget(app: &App) -> bool {
+        app.bar
+            .widgets
+            .values()
+            .any(|w| w.key.id.starts_with("worktree-delete-"))
+    }
+
+    /// Confirming a worktree delete hands control back before the folder is gone,
+    /// and every stage says so: the path and the registry entry go at once, the bar
+    /// carries the removal, and the completion reports it.
+    #[test]
+    fn worktree_delete_defers_the_folder_removal() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let _env = crate::persist::test_env("wt-del-defer");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtdefer");
+        std::fs::create_dir_all(wt.join("node_modules/pkg")).unwrap();
+        std::fs::write(wt.join("node_modules/pkg/f"), b"x").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = wt.clone();
+        app.workspaces[0].worktree = worktree_membership(&wt);
+        let linked = app.workspaces[0]
+            .worktree
+            .as_ref()
+            .is_some_and(|m| m.linked);
+        assert!(linked, "the fixture has to be a linked worktree");
+
+        app.worktree_delete = Some(app.workspaces[0].id.clone());
+        app.worktree_delete_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+        assert!(!wt.exists(), "the path goes when the confirm returns");
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("starting to delete")),
+            "the first toast says the deletion is starting, not that it is done"
+        );
+        assert!(deleting_widget(&app), "the bar carries the removal");
+        let listed = std::process::Command::new("git")
+            .args(["worktree", "list"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&listed.stdout).contains("wt-feature"),
+            "the registry entry is pruned, not left pointing at a missing folder"
+        );
+
+        // The completion carries the removal's own result, so it is also the proof.
+        let completion = loop {
+            match rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the folder removal reports a completion")
+            {
+                AppEvent::IoCompleted(done) => break done,
+                _ => continue,
+            }
+        };
+        completion.apply(&mut app);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|(text, _)| text.contains("files deleted")),
+            "the second toast confirms the files are gone, got {:?}",
+            app.toast
+        );
+        assert!(!deleting_widget(&app), "and drops it when the removal ends");
+        assert_eq!(app.bar.notifications.len(), 1, "and leaves a notification");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn key(c: char, m: KeyModifiers) -> AppEvent {
