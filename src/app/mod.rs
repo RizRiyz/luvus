@@ -5514,7 +5514,7 @@ impl App {
             path = base.join(format!("{slug}-{n}"));
             n += 1;
         }
-        crate::git::local::worktree_add(repo, &path, branch)?;
+        let path = crate::worktree::create(&self.config.worktree, repo, &path, branch)?;
         self.create_workspace_at(path.clone());
         Ok(path)
     }
@@ -9099,6 +9099,61 @@ mod tests {
             wt.to_str().unwrap(),
         ]);
         (base, repo, wt)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_worktree_create_uses_configured_worktrunk_provider() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = crate::persist::test_env("worktrunk-api-create");
+        let (base, repo, _sibling) = repo_with_sibling_worktree("worktrunk-api-create");
+        let path = base.join("wt-topic");
+        let fake = base.join("fake-wt");
+        std::fs::write(
+            &fake,
+            format!(
+                r#"#!/bin/sh
+repo=$2
+shift 3
+if [ "$1" = --create ]; then shift; create='-b'; fi
+branch=$1
+git -C "$repo" worktree add -q $create "$branch" '{}'
+printf '%s\n' '{{"action":"created","branch":"topic","path":"{}","created_branch":true,"base_branch":"main"}}'
+"#,
+                path.display(),
+                path.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = repo;
+        app.config.worktree = crate::config::WorktreeConfig {
+            provider: "worktrunk".into(),
+            executable: fake.display().to_string(),
+            args: Vec::new(),
+        };
+        let response = api_call(
+            &mut app,
+            "worktree.create",
+            serde_json::json!({"branch":"topic"}),
+        );
+        assert_eq!(response["result"]["path"], path.display().to_string());
+        assert!(crate::platform::same_path(&app.ws().cwd, &path));
+
+        let rejected = api_call(
+            &mut app,
+            "worktree.create",
+            serde_json::json!({"branch":"--execute=sh"}),
+        );
+        assert!(rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not allowed with Worktrunk"));
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// Open the worktree list and apply its scan inline — the bounded worker's

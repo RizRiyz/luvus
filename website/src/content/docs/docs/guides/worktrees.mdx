@@ -4,14 +4,50 @@ description: Work on several branches of one repo at once, where each worktree i
 ---
 
 Git worktrees let one repository have several branches checked out in separate
-folders. luvus makes them **first-class workspaces**.
+folders. luvus makes them **first-class workspaces**. Creation uses the built-in
+Git provider by default, so existing installations keep their current behavior.
+You can opt into Worktrunk for creation while removal and task merge continue to
+use Git directly.
+
+## Creation provider
+
+Set the provider in `~/.luvus/config.json` (debug builds:
+`~/.luvus-dev/config.json`):
+
+```json
+{
+  "worktree": {
+    "provider": "worktrunk",
+    "executable": "wt",
+    "args": ["--no-hooks"]
+  }
+}
+```
+
+`executable` is one executable name or path, not a shell command. `args` is a
+JSON argv array; Luvus never passes it through a shell. Luvus owns and protects
+Worktrunk's repository, operation, branch, navigation, and output arguments:
+`-C <repo> switch [--create] <branch> --no-cd --format json`. `--create` is
+included only when the requested local branch does not exist.
+
+Conflicting or contract-changing arguments are rejected, including `-C`,
+`--config`, `--config-set`, `--format`, `-x`/`--execute`, `--cd`/`--no-cd`,
+`-c`/`--create`, `-b`/`--base`, branch-picker options, `--clobber`, `--`, and
+`-y`/`--yes`. The last restriction is intentional: Luvus does not approve or
+skip Worktrunk project hooks. If Worktrunk reports that hook approval is needed,
+review and approve it interactively with Worktrunk, then retry.
+
+Worktrunk chooses the worktree path. Before opening it, Luvus verifies that the
+path exists, is a registered worktree of the source repository, shares its Git
+common directory, and has the requested branch checked out. Worktrunk's JSON is
+read from stdout; human logs and actionable hook errors on stderr remain intact.
 
 ## Create one
 
-- **`Ctrl+Space G`**: type a branch name, and luvus runs `git worktree add`
-  under `~/.luvus/worktrees/<repo>/<branch>` and opens it as a workspace.
-  That folder is only where luvus **places** new worktrees; opening one (below)
-  is not limited to it. `esc` or a click outside the prompt cancels it.
+- **`Ctrl+Space G`**: type a branch name. With the default provider, luvus runs
+  `git worktree add` under `~/.luvus/worktrees/<repo>/<branch>` and opens it as a
+  workspace. With Worktrunk, `wt switch` chooses the path from your Worktrunk
+  configuration. `esc` or a click outside the prompt cancels it.
 - **The folder picker** (`Ctrl+Space N`): when browsing a git repo, an *Open
   with new worktree* row (or the `w` key) does the same for that repo.
 - **CLI**: `luvus worktree create <branch>` · `open <path>` · `list` ·

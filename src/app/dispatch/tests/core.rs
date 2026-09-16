@@ -86,6 +86,22 @@ fn config_patch_rejects_unknown_fields_without_mutation() {
     assert!(app.agents_active_only);
     assert!(app.agents_this_workspace);
     assert_eq!(app.agents_scroll, 0);
+
+    let result = app
+        .dispatch(
+            "config.patch",
+            &json!({"patch":{"worktree":{"provider":"worktrunk","executable":"wt","args":["--no-hooks"]}}}),
+        )
+        .unwrap();
+    assert_eq!(result["config"]["worktree"]["provider"], "worktrunk");
+    assert_eq!(app.config.worktree.args, ["--no-hooks"]);
+    let before = app.config.worktree.clone();
+    let error = app.dispatch(
+        "config.patch",
+        &json!({"patch":{"worktree":{"provider":" worktrunk ","args":["--yes"]}}}),
+    );
+    assert!(error.is_err());
+    assert_eq!(app.config.worktree, before);
 }
 
 #[test]

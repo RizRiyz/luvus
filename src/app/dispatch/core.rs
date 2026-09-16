@@ -245,6 +245,8 @@ impl App {
         })?;
         keys::validate_direct_keybindings(&next.direct_keybindings)
             .map_err(|message| ("invalid_request".to_string(), message))?;
+        crate::worktree::validate_config(&next.worktree)
+            .map_err(|message| ("invalid_request".to_string(), message))?;
         if self.theme_registry.get(&next.theme).is_none() && next.theme != "terminal" {
             return Err((
                 "invalid_request".to_string(),

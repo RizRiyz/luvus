@@ -104,10 +104,47 @@ pub struct Config {
     /// or restart. This set keeps an off dock off; re-placing it clears the flag.
     #[serde(default)]
     pub docks_off: Vec<String>,
+    /// Worktree creation backend. The built-in git provider remains the default;
+    /// Worktrunk is an explicit opt-in and receives only structured argv.
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
     /// Luvus Bar placement groups. Dynamic content is never persisted here;
     /// only presentation preferences survive a restart.
     #[serde(default)]
     pub bars: BarConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeConfig {
+    /// `git` (default) or `worktrunk`. Kept as a string so a newer provider name
+    /// remains readable by an older binary and can fail locally when invoked.
+    #[serde(default = "default_worktree_provider")]
+    pub provider: String,
+    /// One executable path/name, never a shell command line.
+    #[serde(default = "default_worktrunk_executable")]
+    pub executable: String,
+    /// Additional Worktrunk option tokens. Contract-critical arguments are
+    /// supplied and protected by Luvus at execution time.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+fn default_worktree_provider() -> String {
+    "git".to_string()
+}
+
+fn default_worktrunk_executable() -> String {
+    "wt".to_string()
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_worktree_provider(),
+            executable: default_worktrunk_executable(),
+            args: Vec::new(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -485,6 +522,7 @@ impl Default for Config {
             mission_pricing: std::collections::HashMap::new(),
             mission_budget: None,
             docks_off: Vec::new(),
+            worktree: WorktreeConfig::default(),
             bars: BarConfig::default(),
         }
     }
@@ -895,6 +933,19 @@ mod tests {
             "old configs gain the default runtime bar"
         );
         assert!(from_empty.bars.top_right.is_empty());
+        assert_eq!(from_empty.worktree, WorktreeConfig::default());
+        let worktrunk: Config = serde_json::from_str(
+            r#"{"worktree":{"provider":"worktrunk","executable":"custom-wt","args":["--no-hooks","-vv"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(worktrunk.worktree.provider, "worktrunk");
+        assert_eq!(worktrunk.worktree.executable, "custom-wt");
+        assert_eq!(worktrunk.worktree.args, ["--no-hooks", "-vv"]);
+        let forward: Config = serde_json::from_str(
+            r#"{"worktree":{"provider":"future-provider","future_option":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(forward.worktree.provider, "future-provider");
         // Round-trip preserves values.
         // Scrollback defaults to a per-pane 10 MiB budget. The legacy line
         // field remains only so old config can migrate safely.

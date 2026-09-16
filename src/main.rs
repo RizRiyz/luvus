@@ -39,6 +39,7 @@ mod theme;
 mod uhp;
 mod ui;
 mod update;
+mod worktree;
 
 use std::io::{self, Write};
 use std::path::Path;
