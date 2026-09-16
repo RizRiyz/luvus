@@ -2882,6 +2882,7 @@ mod tests {
         // Flip the Settings → General "Show hidden files" row (what the toggle
         // does under the hood): dotfiles hide, live, without a re-read.
         app.toggle_files_hidden();
+        app.flush_config_for_test(&_rx);
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         assert!(
             !buffer_text(&term).contains(".env"),
