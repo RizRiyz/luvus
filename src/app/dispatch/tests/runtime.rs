@@ -18,78 +18,9 @@ fn quiet_runtime_can_leave_the_fast_detection_cadence() {
 
     let status = app.status.values_mut().next().unwrap();
     status.candidate = State::Working;
-    status.candidate_since = now - commit_dwell(State::Working);
     assert!(
         app.needs_fast_runtime_tick(now),
-        "a due state transition requests one detection tick"
-    );
-}
-
-#[test]
-fn pty_output_uses_one_quiet_boundary_deadline() {
-    let (_env, mut app) = app("pty-quiet-boundary");
-    let pane = app.layout().focus;
-    let before = Instant::now();
-    for status in app.status.values_mut() {
-        status.force_detect = false;
-        status.candidate = status.state;
-    }
-
-    assert!(app.handle_event(AppEvent::PtyData(pane)));
-    let quiet_check_at = app.status[&pane]
-        .quiet_check_at
-        .expect("PTY output schedules its quiet boundary");
-    assert!(quiet_check_at >= before + ACTIVITY_WINDOW);
-
-    app.detection_dirty.clear();
-    assert!(
-        !app.needs_fast_runtime_tick(quiet_check_at - Duration::from_millis(1)),
-        "the activity window does not poll every 100 ms"
-    );
-    assert!(app.needs_fast_runtime_tick(quiet_check_at));
-    app.last_detect_at = quiet_check_at - DETECTION_INTERVAL;
-    app.detect_tick(quiet_check_at);
-    assert_eq!(app.status[&pane].quiet_check_at, None);
-}
-
-#[test]
-fn quiet_dwell_uses_its_exact_deadline() {
-    let (_env, mut app) = app("quiet-dwell-deadline");
-    let now = Instant::now();
-    let status = app.status.values_mut().next().unwrap();
-    status.force_detect = false;
-    status.state = State::Working;
-    status.candidate = State::Idle;
-    status.candidate_since = now;
-    status.quiet_check_at = None;
-    app.last_detection_audit_at = now + Duration::from_secs(10);
-
-    assert!(
-        !app.needs_fast_runtime_tick(now + Duration::from_millis(100)),
-        "an unfinished dwell does not poll"
-    );
-    assert_eq!(
-        app.next_runtime_deadline(now, false),
-        Some(now + QUIET_DWELL)
-    );
-    assert!(app.needs_fast_runtime_tick(now + QUIET_DWELL));
-}
-
-#[test]
-fn overdue_detection_deadlines_respect_the_detection_cooldown() {
-    let (_env, mut app) = app("detection-deadline-cooldown");
-    let now = Instant::now();
-    let status = app.status.values_mut().next().unwrap();
-    status.force_detect = false;
-    status.candidate = status.state;
-    status.quiet_check_at = Some(now - Duration::from_millis(1));
-    app.last_detection_audit_at = now;
-    app.last_detect_at = now;
-
-    assert_eq!(
-        app.next_runtime_deadline(now, false),
-        Some(now + DETECTION_INTERVAL),
-        "an overdue quiet check must sleep through the detector cooldown"
+        "an in-flight state dwell retains the fast cadence"
     );
 }
 

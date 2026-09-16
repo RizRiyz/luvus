@@ -304,20 +304,6 @@ impl GridCell for Cell {
     }
 
     #[inline]
-    fn plain_ascii_identity(&self) -> Option<u8> {
-        if self.extra.is_none()
-            && self.flags.is_empty()
-            && self.fg == Color::Named(NamedColor::Foreground)
-            && self.bg == Color::Named(NamedColor::Background)
-            && self.c.is_ascii()
-        {
-            Some(self.c as u8)
-        } else {
-            None
-        }
-    }
-
-    #[inline]
     fn reset(&mut self, template: &Self) {
         *self = Cell { bg: template.bg, ..Cell::default() };
     }
@@ -387,24 +373,6 @@ mod tests {
         assert_eq!(zerowidth.len(), MAX_ZEROWIDTH_CHARS);
         assert_eq!(zerowidth[0], '\u{300}');
         assert_eq!(zerowidth[MAX_ZEROWIDTH_CHARS - 1], '\u{308}');
-    }
-
-    #[test]
-    fn plain_ascii_identity_rejects_every_styled_cell_shape() {
-        let mut cell = Cell { c: 'x', ..Cell::default() };
-        assert_eq!(cell.plain_ascii_identity(), Some(b'x'));
-
-        cell.flags.insert(Flags::BOLD);
-        assert_eq!(cell.plain_ascii_identity(), None);
-        cell.flags = Flags::empty();
-        cell.fg = Color::Indexed(1);
-        assert_eq!(cell.plain_ascii_identity(), None);
-        cell.fg = Color::Named(NamedColor::Foreground);
-        cell.push_zerowidth('\u{301}');
-        assert_eq!(cell.plain_ascii_identity(), None);
-
-        let unicode = Cell { c: 'é', ..Cell::default() };
-        assert_eq!(unicode.plain_ascii_identity(), None);
     }
 
     #[test]

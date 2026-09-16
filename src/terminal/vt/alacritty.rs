@@ -219,7 +219,7 @@ impl AlacrittyEngine {
         }
 
         output.clear();
-        let row = grid.row(Line(line));
+        let row = &grid[Line(line)];
         for column in 0..grid.columns() {
             let cell = &row[Column(column)];
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -244,7 +244,7 @@ impl AlacrittyEngine {
         if line > grid.bottommost_line().0 || grid.columns() == 0 {
             return false;
         }
-        grid[Point::new(Line(line), Column(grid.columns() - 1))]
+        grid[Line(line)][Column(grid.columns() - 1)]
             .flags
             .contains(Flags::WRAPLINE)
     }
@@ -258,7 +258,7 @@ impl AlacrittyEngine {
 
     fn append_plain_grid_row(&self, line: Line, output: &mut String, max_bytes: usize) -> bool {
         let grid = self.term.grid();
-        let row = grid.row(line);
+        let row = &grid[line];
         let last = (0..grid.columns())
             .rfind(|column| {
                 let cell = &row[Column(*column)];
@@ -291,7 +291,7 @@ impl AlacrittyEngine {
 
     fn append_ansi_grid_row(&self, line: Line, output: &mut String, max_bytes: usize) -> bool {
         let grid = self.term.grid();
-        let row = grid.row(line);
+        let row = &grid[line];
         let last = (0..grid.columns())
             .rfind(|column| {
                 let cell = &row[Column(*column)];
@@ -589,9 +589,8 @@ impl VtEngine for AlacrittyEngine {
             damaged_row.row = row;
             let line = Line(row as i32 - display_offset);
             let mut used = 0;
-            let grid_row = grid.row(line);
             for column in 0..columns {
-                let cell = &grid_row[Column(column)];
+                let cell = &grid[line][Column(column)];
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
@@ -1048,7 +1047,7 @@ impl VtEngine for AlacrittyEngine {
     fn retained_row_layout(&self, index: usize) -> Option<RetainedRowLayout> {
         let line = self.retained_line(index)?;
         let grid = self.term.grid();
-        let row = grid.row(line);
+        let row = &grid[line];
         let mut whitespace = Vec::with_capacity(grid.columns());
         let mut previous_whitespace = true;
         let mut last_content = None;
@@ -1429,41 +1428,6 @@ mod tests {
         }
     }
 
-    /// Measure terminal parsing/scrolling and cold-history maintenance
-    /// separately from PTY syscalls.
-    #[test]
-    #[ignore]
-    fn bulk_history_ingestion_benchmark() {
-        use std::{hint::black_box, io::Write, time::Instant};
-
-        let mut corpus = Vec::new();
-        for line in 1..=7_600 {
-            write!(&mut corpus, "{line}\r\n").unwrap();
-        }
-        for chunk_bytes in [8 * 1024, 32 * 1024, 64 * 1024] {
-            for trial in 1..=3 {
-                let (tx, _rx) = channel();
-                let mut engine = AlacrittyEngine::new(27, 24, tx, 32 * 1024 * 1024);
-                let start = Instant::now();
-                for chunk in corpus.chunks(chunk_bytes) {
-                    engine.advance(chunk);
-                }
-                let ingestion = start.elapsed();
-                let maintenance_start = Instant::now();
-                engine.finish_output_batch();
-                let maintenance = maintenance_start.elapsed();
-                black_box(engine.history_len());
-                eprintln!(
-                    "bulk_history_ingestion chunk_bytes={chunk_bytes} trial={trial} rows={} ingestion_ms={:.3} maintenance_ms={:.3} total_ms={:.3}",
-                    engine.history_len(),
-                    ingestion.as_secs_f64() * 1000.0,
-                    maintenance.as_secs_f64() * 1000.0,
-                    (ingestion + maintenance).as_secs_f64() * 1000.0,
-                );
-            }
-        }
-    }
-
     #[test]
     fn incremental_history_maintenance_is_lossless_and_restarts_after_mutation() {
         fn rows(engine: &AlacrittyEngine) -> Vec<String> {
@@ -1482,7 +1446,7 @@ mod tests {
             "large backlog takes multiple turns"
         );
         let packed = engine.history_metrics().packed_rows.unwrap();
-        assert!(packed > 0 && packed <= 1_024);
+        assert!(packed > 0 && packed <= 512);
         assert_eq!(before, rows(&engine));
         engine.advance(b"new output\r\n");
         engine.resize(90, 24);
@@ -1498,7 +1462,7 @@ mod tests {
         let metrics = engine.history_metrics();
         assert_eq!(
             metrics.packed_rows.unwrap(),
-            metrics.retained_rows.saturating_sub(32)
+            metrics.retained_rows.saturating_sub(128)
         );
         assert!(
             !engine.finish_output_batch_step(),
