@@ -593,8 +593,7 @@ impl App {
         }
         let branch = task_branch_name(task, branch);
         let ready = self
-            .ready_worktree
-            .as_ref()
+            .ready_created_worktree()
             .is_some_and(|ready| ready.matches(&self.ws().cwd, &branch));
         let persisted = task
             .worktree
@@ -669,14 +668,12 @@ impl App {
                 ));
             }
             let branch_created = self
-                .ready_worktree
-                .as_ref()
+                .ready_created_worktree()
                 .filter(|ready| ready.matches(&repo, &branch))
                 .map(|ready| ready.branch_created)
                 .unwrap_or_else(|| !crate::git::local::branch_exists(&repo, &branch));
             let worktree_created = self
-                .ready_worktree
-                .as_ref()
+                .ready_created_worktree()
                 .filter(|ready| ready.matches(&repo, &branch))
                 .is_none_or(|ready| ready.worktree_created);
             let path = self

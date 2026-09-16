@@ -2260,20 +2260,6 @@ impl MenuScroll {
 pub const WORKTREE_CREATE_PENDING: &str = "__worktree_create_pending__";
 pub const WORKTREE_REMOVE_PENDING: &str = "__worktree_remove_pending__";
 
-struct ReadyWorktree {
-    repo: PathBuf,
-    path: PathBuf,
-    branch: String,
-    worktree_created: bool,
-    branch_created: bool,
-}
-
-impl ReadyWorktree {
-    fn matches(&self, repo: &std::path::Path, branch: &str) -> bool {
-        crate::platform::same_path(&self.repo, repo) && self.branch == branch
-    }
-}
-
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// One random value for this server lifetime. Harness runtimes from an old
@@ -2327,10 +2313,8 @@ pub struct App {
     config_persistence: config_persistence::ConfigPersistence,
     io_jobs: io_jobs::IoJobs,
     worktree_provider_inflight: bool,
-    pending_worktree_job: Option<crate::worktree::CreateJob>,
-    pending_worktree_remove_job: Option<crate::worktree::RemoveJob>,
-    ready_worktree: Option<ReadyWorktree>,
-    ready_worktree_remove: Option<PathBuf>,
+    pending_worktree_provider: Option<crate::worktree::ProviderJob>,
+    ready_worktree_provider: Option<crate::worktree::ProviderResult>,
     automation_persistence: automation_persistence::AutomationPersistence,
     file_metadata_inflight: bool,
     file_metadata_cursor: usize,
@@ -3124,10 +3108,8 @@ impl App {
             config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
             worktree_provider_inflight: false,
-            pending_worktree_job: None,
-            pending_worktree_remove_job: None,
-            ready_worktree: None,
-            ready_worktree_remove: None,
+            pending_worktree_provider: None,
+            ready_worktree_provider: None,
             automation_persistence: automation_persistence::AutomationPersistence::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
@@ -3810,10 +3792,8 @@ impl App {
             config_persistence: config_persistence::ConfigPersistence::default(),
             io_jobs: io_jobs::IoJobs::default(),
             worktree_provider_inflight: false,
-            pending_worktree_job: None,
-            pending_worktree_remove_job: None,
-            ready_worktree: None,
-            ready_worktree_remove: None,
+            pending_worktree_provider: None,
+            ready_worktree_provider: None,
             automation_persistence: automation_persistence::AutomationPersistence::default(),
             file_metadata_inflight: false,
             file_metadata_cursor: 0,
@@ -5533,10 +5513,17 @@ impl App {
         if !crate::git::local::is_repo(repo) {
             return Err("not a git repository".into());
         }
-        if let Some(ready) = self
-            .ready_worktree
-            .take_if(|ready| ready.matches(repo, branch))
-        {
+        let ready_matches = matches!(
+            self.ready_worktree_provider.as_ref(),
+            Some(crate::worktree::ProviderResult::Created(ready))
+                if ready.matches(repo, branch)
+        );
+        if ready_matches {
+            let Some(crate::worktree::ProviderResult::Created(ready)) =
+                self.ready_worktree_provider.take()
+            else {
+                unreachable!("matched created worktree result");
+            };
             if self.create_workspace_at(ready.path.clone()) {
                 return Ok(ready.path);
             }
@@ -5555,7 +5542,7 @@ impl App {
                 "worktree created but its workspace did not open{detail}"
             ));
         }
-        if self.ready_worktree.is_some() {
+        if self.ready_worktree_provider.is_some() {
             self.discard_ready_worktree();
             return Err("worktree target changed while the provider was running".into());
         }
@@ -5567,10 +5554,10 @@ impl App {
             repo,
             branch,
         )? {
-            if self.worktree_provider_inflight || self.pending_worktree_job.is_some() {
+            if self.worktree_provider_inflight || self.pending_worktree_provider.is_some() {
                 return Err("a worktree creation is already pending".into());
             }
-            self.pending_worktree_job = Some(job);
+            self.pending_worktree_provider = Some(job);
             return Err(WORKTREE_CREATE_PENDING.into());
         }
         // Nest under the **main** worktree's name, so every checkout of one repo
@@ -5597,13 +5584,18 @@ impl App {
         path: &std::path::Path,
         force: bool,
     ) -> Result<(), String> {
-        if self
-            .ready_worktree_remove
-            .take_if(|ready| crate::platform::same_path(ready, path))
-            .is_some()
-        {
+        let ready_matches = matches!(
+            self.ready_worktree_provider.as_ref(),
+            Some(crate::worktree::ProviderResult::Removed(ready))
+                if crate::platform::same_path(ready, path)
+        );
+        if ready_matches {
+            self.ready_worktree_provider.take();
             self.finish_explicit_worktree_remove(path);
             return Ok(());
+        }
+        if self.ready_worktree_provider.is_some() {
+            return Err("worktree target changed while the provider was running".into());
         }
         let worktrees = crate::git::local::worktrees(repo)?;
         let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -5628,13 +5620,10 @@ impl App {
                 force,
             },
         )? {
-            if self.worktree_provider_inflight
-                || self.pending_worktree_job.is_some()
-                || self.pending_worktree_remove_job.is_some()
-            {
+            if self.worktree_provider_inflight || self.pending_worktree_provider.is_some() {
                 return Err("a worktree provider operation is already pending".into());
             }
-            self.pending_worktree_remove_job = Some(job);
+            self.pending_worktree_provider = Some(job);
             return Err(WORKTREE_REMOVE_PENDING.into());
         }
         if force {
@@ -5668,30 +5657,21 @@ impl App {
         &mut self,
         finish: impl FnOnce(&mut App, Result<(), String>) -> bool + Send + 'static,
     ) -> Result<(), String> {
-        let job = self
-            .pending_worktree_remove_job
-            .take()
-            .ok_or_else(|| "worktree removal provider did not prepare a job".to_string())?;
-        self.worktree_provider_inflight = true;
-        self.io_jobs
-            .submit_parallel(self.app_tx.clone(), move |cancelled| {
-                let result = job.run(&cancelled);
-                Box::new(move |app| {
-                    app.worktree_provider_inflight = false;
-                    let result = result.map(|path| {
-                        app.ready_worktree_remove = Some(path);
-                    });
-                    finish(app, result)
-                })
-            })
-            .inspect_err(|_| {
-                self.worktree_provider_inflight = false;
-            })
-            .map_err(str::to_string)
+        self.schedule_pending_worktree_provider(crate::worktree::ProviderKind::Remove, finish)
+    }
+
+    fn ready_created_worktree(&self) -> Option<&crate::worktree::CreatedWorktree> {
+        match self.ready_worktree_provider.as_ref() {
+            Some(crate::worktree::ProviderResult::Created(ready)) => Some(ready),
+            _ => None,
+        }
     }
 
     fn discard_ready_worktree(&mut self) {
-        let Some(ready) = self.ready_worktree.take() else {
+        let Some(ready) = self.ready_worktree_provider.take() else {
+            return;
+        };
+        let crate::worktree::ProviderResult::Created(ready) = ready else {
             return;
         };
         if !ready.worktree_created {
@@ -5710,24 +5690,46 @@ impl App {
         &mut self,
         finish: impl FnOnce(&mut App, Result<(), String>) -> bool + Send + 'static,
     ) -> Result<(), String> {
+        self.schedule_pending_worktree_provider(crate::worktree::ProviderKind::Create, finish)
+    }
+
+    fn schedule_pending_worktree_provider(
+        &mut self,
+        expected: crate::worktree::ProviderKind,
+        finish: impl FnOnce(&mut App, Result<(), String>) -> bool + Send + 'static,
+    ) -> Result<(), String> {
         let job = self
-            .pending_worktree_job
+            .pending_worktree_provider
             .take()
             .ok_or_else(|| "worktree provider did not prepare a job".to_string())?;
+        let kind = job.kind();
+        if kind != expected {
+            return Err("worktree provider prepared the wrong operation".into());
+        }
         self.worktree_provider_inflight = true;
         self.io_jobs
             .submit_parallel(self.app_tx.clone(), move |cancelled| {
                 let result = job.run(&cancelled);
                 Box::new(move |app| {
                     app.worktree_provider_inflight = false;
-                    let result = result.map(|created| {
-                        app.ready_worktree = Some(ReadyWorktree {
-                            repo: created.repo,
-                            path: created.path,
-                            branch: created.branch,
-                            worktree_created: created.worktree_created,
-                            branch_created: created.branch_created,
-                        });
+                    let result = result.and_then(|ready| {
+                        let matches = matches!(
+                            (&ready, kind),
+                            (
+                                crate::worktree::ProviderResult::Created(_),
+                                crate::worktree::ProviderKind::Create
+                            ) | (
+                                crate::worktree::ProviderResult::Removed(_),
+                                crate::worktree::ProviderKind::Remove
+                            )
+                        );
+                        if !matches {
+                            return Err(
+                                "worktree provider returned the wrong operation result".into()
+                            );
+                        }
+                        app.ready_worktree_provider = Some(ready);
+                        Ok(())
                     });
                     finish(app, result)
                 })

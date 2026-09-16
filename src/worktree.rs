@@ -20,6 +20,11 @@ struct ProviderOutput {
     path: PathBuf,
 }
 
+pub struct CreateRequest {
+    pub repo: PathBuf,
+    pub branch: String,
+}
+
 pub struct RemoveRequest {
     pub repo: PathBuf,
     pub path: PathBuf,
@@ -27,69 +32,164 @@ pub struct RemoveRequest {
     pub force: bool,
 }
 
-pub struct RemoveJob {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    Create,
+    Remove,
+}
+
+pub enum ProviderOperation {
+    Create(CreateRequest),
+    Remove(RemoveRequest),
+}
+
+struct ProviderCommand {
     module: crate::module::InstalledModule,
     token: String,
     context: Value,
     argv: Vec<String>,
-    request: RemoveRequest,
 }
 
-impl RemoveJob {
-    pub fn run(self, cancelled: &std::sync::atomic::AtomicBool) -> Result<PathBuf, String> {
-        let canonical_path =
-            validate_remove_target(&self.request.repo, &self.request.path, cancelled)?;
-        let request = json!({
-            "version": PROVIDER_VERSION,
-            "operation": "remove",
-            "repository": self.request.repo.display().to_string(),
-            "path": self.request.path.display().to_string(),
-            "branch": self.request.branch,
-            "force": self.request.force,
-        });
-        let extra = vec![
+pub struct ProviderJob {
+    command: ProviderCommand,
+    operation: ProviderOperation,
+}
+
+pub enum ProviderResult {
+    Created(CreatedWorktree),
+    Removed(PathBuf),
+}
+
+impl ProviderJob {
+    pub fn kind(&self) -> ProviderKind {
+        match &self.operation {
+            ProviderOperation::Create(_) => ProviderKind::Create,
+            ProviderOperation::Remove(_) => ProviderKind::Remove,
+        }
+    }
+
+    pub fn run(self, cancelled: &std::sync::atomic::AtomicBool) -> Result<ProviderResult, String> {
+        match self.operation {
+            ProviderOperation::Create(request) => run_create(&self.command, request, cancelled),
+            ProviderOperation::Remove(request) => run_remove(&self.command, request, cancelled),
+        }
+    }
+}
+
+impl ProviderCommand {
+    fn run(
+        &self,
+        operation: &str,
+        request: Value,
+        mut env: Vec<(String, String)>,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<String, String> {
+        env.extend([
             (
                 "LUVUS_WORKTREE_PROVIDER_VERSION".into(),
                 PROVIDER_VERSION.into(),
             ),
-            ("LUVUS_WORKTREE_OPERATION".into(), "remove".into()),
-            (
-                "LUVUS_WORKTREE_REPOSITORY".into(),
-                self.request.repo.display().to_string(),
-            ),
-            (
-                "LUVUS_WORKTREE_PATH".into(),
-                self.request.path.display().to_string(),
-            ),
-            (
-                "LUVUS_WORKTREE_BRANCH".into(),
-                self.request.branch.clone().unwrap_or_default(),
-            ),
-            (
-                "LUVUS_WORKTREE_FORCE".into(),
-                self.request.force.to_string(),
-            ),
+            ("LUVUS_WORKTREE_OPERATION".into(), operation.into()),
             ("LUVUS_WORKTREE_REQUEST_JSON".into(), request.to_string()),
-        ];
-        let stdout = crate::module::runtime::run_sync(
+        ]);
+        crate::module::runtime::run_sync(
             &self.module,
             &self.token,
             &self.context,
             &self.argv,
-            extra,
+            env,
             cancelled,
-        )?;
-        if !stdout.trim().is_empty() {
-            return Err("worktree removal provider must not write to stdout".into());
-        }
-        validate_removed(
-            &self.request.repo,
-            &self.request.path,
-            &canonical_path,
-            cancelled,
-        )?;
-        Ok(self.request.path)
+        )
     }
+}
+
+fn run_create(
+    command: &ProviderCommand,
+    request: CreateRequest,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<ProviderResult, String> {
+    let branch_exists = bounded_branch_exists(&request.repo, &request.branch, cancelled)?;
+    let existing_worktrees = bounded_worktree_paths(&request.repo, cancelled)?;
+    let stdout = command.run(
+        "create",
+        json!({
+            "version": PROVIDER_VERSION,
+            "repository": request.repo.display().to_string(),
+            "branch": request.branch,
+            "branch_exists": branch_exists,
+        }),
+        vec![
+            (
+                "LUVUS_WORKTREE_REPOSITORY".into(),
+                request.repo.display().to_string(),
+            ),
+            ("LUVUS_WORKTREE_BRANCH".into(), request.branch.clone()),
+            (
+                "LUVUS_WORKTREE_BRANCH_EXISTS".into(),
+                branch_exists.to_string(),
+            ),
+        ],
+        cancelled,
+    )?;
+    let path = parse_provider_output(stdout.as_bytes())?;
+    if let Err(error) = validate_bounded(&request.repo, &path, &request.branch, cancelled) {
+        cleanup_failed_creation(
+            &request.repo,
+            &path,
+            &request.branch,
+            !branch_exists,
+            &existing_worktrees,
+        );
+        return Err(error);
+    }
+    let worktree_created = !worktree_existed(&path, &existing_worktrees);
+    Ok(ProviderResult::Created(CreatedWorktree {
+        repo: request.repo,
+        path,
+        branch: request.branch,
+        worktree_created,
+        branch_created: !branch_exists,
+    }))
+}
+
+fn run_remove(
+    command: &ProviderCommand,
+    request: RemoveRequest,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<ProviderResult, String> {
+    let canonical_path = validate_remove_target(&request.repo, &request.path, cancelled)?;
+    let stdout = command.run(
+        "remove",
+        json!({
+            "version": PROVIDER_VERSION,
+            "operation": "remove",
+            "repository": request.repo.display().to_string(),
+            "path": request.path.display().to_string(),
+            "branch": request.branch,
+            "force": request.force,
+        }),
+        vec![
+            (
+                "LUVUS_WORKTREE_REPOSITORY".into(),
+                request.repo.display().to_string(),
+            ),
+            (
+                "LUVUS_WORKTREE_PATH".into(),
+                request.path.display().to_string(),
+            ),
+            (
+                "LUVUS_WORKTREE_BRANCH".into(),
+                request.branch.clone().unwrap_or_default(),
+            ),
+            ("LUVUS_WORKTREE_FORCE".into(), request.force.to_string()),
+        ],
+        cancelled,
+    )?;
+    if !stdout.trim().is_empty() {
+        return Err("worktree removal provider must not write to stdout".into());
+    }
+    validate_removed(&request.repo, &request.path, &canonical_path, cancelled)?;
+    Ok(ProviderResult::Removed(request.path))
 }
 
 pub fn module_remove_job(
@@ -98,7 +198,7 @@ pub fn module_remove_job(
     module_tokens: &HashMap<String, String>,
     context: Value,
     request: RemoveRequest,
-) -> Result<Option<RemoveJob>, String> {
+) -> Result<Option<ProviderJob>, String> {
     let provider_id = config.provider.trim();
     if provider_id.eq_ignore_ascii_case("git") {
         return Ok(None);
@@ -110,12 +210,14 @@ pub fn module_remove_job(
     let token = module_tokens
         .get(&module.id)
         .ok_or_else(|| format!("module {provider_id} has no runtime credential"))?;
-    Ok(Some(RemoveJob {
-        module: module.clone(),
-        token: token.clone(),
-        context,
-        argv: argv.clone(),
-        request,
+    Ok(Some(ProviderJob {
+        command: ProviderCommand {
+            module: module.clone(),
+            token: token.clone(),
+            context,
+            argv: argv.clone(),
+        },
+        operation: ProviderOperation::Remove(request),
     }))
 }
 
@@ -127,69 +229,9 @@ pub struct CreatedWorktree {
     pub branch_created: bool,
 }
 
-pub struct CreateJob {
-    module: crate::module::InstalledModule,
-    token: String,
-    context: Value,
-    argv: Vec<String>,
-    repo: PathBuf,
-    branch: String,
-}
-
-impl CreateJob {
-    pub fn run(self, cancelled: &std::sync::atomic::AtomicBool) -> Result<CreatedWorktree, String> {
-        let branch_exists = bounded_branch_exists(&self.repo, &self.branch, cancelled)?;
-        let existing_worktrees = bounded_worktree_paths(&self.repo, cancelled)?;
-        let request = json!({
-            "version": PROVIDER_VERSION,
-            "repository": self.repo.display().to_string(),
-            "branch": self.branch,
-            "branch_exists": branch_exists,
-        });
-        let extra = vec![
-            (
-                "LUVUS_WORKTREE_PROVIDER_VERSION".into(),
-                PROVIDER_VERSION.into(),
-            ),
-            ("LUVUS_WORKTREE_OPERATION".into(), "create".into()),
-            (
-                "LUVUS_WORKTREE_REPOSITORY".into(),
-                self.repo.display().to_string(),
-            ),
-            ("LUVUS_WORKTREE_BRANCH".into(), self.branch.clone()),
-            (
-                "LUVUS_WORKTREE_BRANCH_EXISTS".into(),
-                branch_exists.to_string(),
-            ),
-            ("LUVUS_WORKTREE_REQUEST_JSON".into(), request.to_string()),
-        ];
-        let stdout = crate::module::runtime::run_sync(
-            &self.module,
-            &self.token,
-            &self.context,
-            &self.argv,
-            extra,
-            cancelled,
-        )?;
-        let path = parse_provider_output(stdout.as_bytes())?;
-        if let Err(error) = validate_bounded(&self.repo, &path, &self.branch, cancelled) {
-            cleanup_failed_creation(
-                &self.repo,
-                &path,
-                &self.branch,
-                !branch_exists,
-                &existing_worktrees,
-            );
-            return Err(error);
-        }
-        let worktree_created = !worktree_existed(&path, &existing_worktrees);
-        Ok(CreatedWorktree {
-            repo: self.repo,
-            path,
-            branch: self.branch,
-            worktree_created,
-            branch_created: !branch_exists,
-        })
+impl CreatedWorktree {
+    pub fn matches(&self, repo: &Path, branch: &str) -> bool {
+        crate::platform::same_path(&self.repo, repo) && self.branch == branch
     }
 }
 
@@ -200,7 +242,7 @@ pub fn module_job(
     context: Value,
     repo: &Path,
     branch: &str,
-) -> Result<Option<CreateJob>, String> {
+) -> Result<Option<ProviderJob>, String> {
     let provider_id = config.provider.trim();
     if provider_id.eq_ignore_ascii_case("git") {
         return Ok(None);
@@ -209,13 +251,17 @@ pub fn module_job(
     let token = module_tokens
         .get(&module.id)
         .ok_or_else(|| format!("module {provider_id} has no runtime credential"))?;
-    Ok(Some(CreateJob {
-        module: module.clone(),
-        token: token.clone(),
-        context,
-        argv: provider.command.clone(),
-        repo: repo.to_path_buf(),
-        branch: branch.to_string(),
+    Ok(Some(ProviderJob {
+        command: ProviderCommand {
+            module: module.clone(),
+            token: token.clone(),
+            context,
+            argv: provider.command.clone(),
+        },
+        operation: ProviderOperation::Create(CreateRequest {
+            repo: repo.to_path_buf(),
+            branch: branch.to_string(),
+        }),
     }))
 }
 
