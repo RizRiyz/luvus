@@ -59,6 +59,12 @@ struct FederationRequest {
     scope: SearchScope,
 }
 
+pub(super) struct SearchFileAction {
+    workspace_id: String,
+    workspace_cwd: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+
 pub struct GlobalSearch {
     pub instance: u64,
     pub query: String,
@@ -88,8 +94,9 @@ pub struct GlobalSearch {
     federation: Option<mpsc::Sender<FederationRequest>>,
     recent_files: Vec<SearchEntry>,
     /// Snapshot the selected file so asynchronous result merges cannot retarget
-    /// an open action menu. Focus changes only when an action is chosen.
-    pub(super) file_action: Option<SearchTarget>,
+    /// an open action menu. The stable workspace ID survives index shifts when
+    /// another workspace closes. Focus changes only when an action is chosen.
+    pub(super) file_action: Option<SearchFileAction>,
 }
 
 fn tab_name(tab: &crate::app::Tab, index: usize) -> String {
@@ -1059,15 +1066,19 @@ impl App {
             self.show_toast("File actions require a file in this session");
             return;
         };
-        if self
+        let Some(workspace) = self
             .workspaces
             .get(*ws)
-            .is_none_or(|workspace| workspace.cwd != *workspace_cwd)
-        {
+            .filter(|workspace| workspace.cwd == *workspace_cwd)
+        else {
             self.show_toast("File workspace is no longer available");
             return;
-        }
-        let target = result.entry.target.clone();
+        };
+        let target = SearchFileAction {
+            workspace_id: workspace.id.clone(),
+            workspace_cwd: workspace_cwd.clone(),
+            path: path.clone(),
+        };
         let path = path.clone();
         let anchor = search
             .rects
@@ -1081,23 +1092,16 @@ impl App {
 
     pub(super) fn finish_search_file_action(&mut self, menu_path: &std::path::Path) -> bool {
         let target = self.search.as_mut().and_then(|s| s.file_action.take());
-        let Some(SearchTarget::File {
-            ws,
-            path,
-            workspace_cwd,
-        }) = target
-        else {
+        let Some(target) = target else {
             return false;
         };
-        if path != menu_path
-            || self
-                .workspaces
-                .get(ws)
-                .is_none_or(|w| w.cwd != workspace_cwd)
-        {
+        let workspace = self.workspaces.iter().position(|workspace| {
+            workspace.id == target.workspace_id && workspace.cwd == target.workspace_cwd
+        });
+        let Some(ws) = workspace.filter(|_| target.path == menu_path) else {
             self.show_toast("File workspace is no longer available");
             return false;
-        }
+        };
         self.close_search();
         let tab = self.workspaces[ws].active_tab;
         let pane = self.workspaces[ws].tabs[tab].layout.focus;
@@ -1927,11 +1931,12 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let cwd = app.workspaces[0].cwd.clone();
-        let path = cwd.join("Cargo.toml");
+        let other_cwd = cwd.join("other");
+        let path = other_cwd.join("Cargo.toml");
         app.workspaces.push(crate::app::Workspace {
             id: "other-workspace".into(),
             name: "other".into(),
-            cwd: cwd.join("other"),
+            cwd: other_cwd.clone(),
             branch: None,
             git_ahead_behind: None,
             worktree: None,
@@ -1953,9 +1958,9 @@ mod tests {
             String::new(),
             [],
             SearchTarget::File {
-                ws: 0,
+                ws: 1,
                 path: path.clone(),
-                workspace_cwd: cwd.clone(),
+                workspace_cwd: other_cwd.clone(),
             },
             false,
         );
@@ -1964,12 +1969,12 @@ mod tests {
             score: 1,
             label_positions: Vec::new(),
         }];
-        app.workspaces[0].cwd = cwd.join("changed");
+        app.workspaces[1].cwd = other_cwd.join("changed");
         app.search_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
         assert!(app.file_menu.is_none());
         assert!(app.search.is_some());
-        app.workspaces[0].cwd = cwd;
-        let tabs = app.workspaces[0].tabs.len();
+        app.workspaces[1].cwd = other_cwd;
+        let tabs = app.workspaces[1].tabs.len();
         app.search_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
         assert_eq!(app.search.as_ref().unwrap().query, "a");
         assert_eq!(
@@ -1977,7 +1982,7 @@ mod tests {
             "opening a menu preserves the underlying view"
         );
         assert_eq!(
-            app.workspaces[0].tabs.len(),
+            app.workspaces[1].tabs.len(),
             tabs,
             "menu does not open an editor"
         );
@@ -1990,6 +1995,11 @@ mod tests {
         // A worker may replace the result list while the menu is open. The
         // action must use the menu's snapshot, not the new selected result.
         app.search.as_mut().unwrap().results.clear();
+        // Closing an earlier workspace shifts the target from index 1 to 0.
+        // The deferred action follows its stable workspace ID, not the stale
+        // result index.
+        app.close_workspace(0);
+        assert_eq!(app.workspaces[0].id, "other-workspace");
         app.file_menu_action_pub(crate::app::FileMenuItem::CopyPath);
         assert!(app.search.is_none());
         assert_eq!(app.active_ws, 0, "actions belong to the result's workspace");
