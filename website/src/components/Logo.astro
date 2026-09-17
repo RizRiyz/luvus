@@ -1,7 +1,6 @@
 ---
-// The Luvus mark. Every call site across the landing pages and docs resolves the
-// surviving canonical SVG through here, so deleted legacy artwork cannot drift
-// back into one surface.
+// The compact Luvus mark. Every call site across the landing pages and docs
+// resolves the same SVG through here so brand updates cannot drift.
 //
 // Same props as before (`width` / `height` / `class`), so no call site changed.
 interface Props {
@@ -11,7 +10,7 @@ interface Props {
   [key: string]: unknown;
 }
 
-import logoUrl from '../assets/luvus-logo.svg?url';
+import logoUrl from '../assets/icons/luvus-logo.svg?url';
 
 const { width = 32, height, class: className, ...rest } = Astro.props;
 ---
@@ -29,11 +28,7 @@ const { width = 32, height, class: className, ...rest } = Astro.props;
 
 <style>
   .bh-mark {
-    /* The artwork is a full-bleed tile, so the corners have to be cut or it
-       reads as a cropped screenshot. A percentage keeps the curve proportional
-       at every size the mark is used at. */
-    border-radius: 22%;
-    object-fit: cover;
+    object-fit: contain;
     display: block;
   }
 </style>

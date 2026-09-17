@@ -249,6 +249,8 @@ pub fn limits_json() -> Value {
         "observers": MAX_OBSERVERS,
         "observer_queue": OBSERVER_QUEUE_CAPACITY,
         "input_bytes": MAX_INPUT_BYTES,
+        "queued_input_bytes": crate::terminal::pty::input::MAX_QUEUED_BYTES,
+        "queued_input_actions": crate::terminal::pty::input::MAX_QUEUED_ACTIONS,
         "logical_keys_per_request": 1,
         "title_bytes": MAX_TITLE_BYTES,
         "notification_title_bytes": MAX_NOTIFICATION_TITLE_BYTES,

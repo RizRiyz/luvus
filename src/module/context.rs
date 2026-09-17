@@ -63,57 +63,79 @@ pub fn build_for(app: &App, source: &str, target: &Target) -> Value {
     let ws_id = target
         .workspace
         .filter(|i| *i < app.workspaces.len())
-        .unwrap_or(app.active_ws);
-    let ws = app.workspaces.get(ws_id);
+        .or_else(|| (app.active_ws < app.workspaces.len()).then_some(app.active_ws))
+        .or_else(|| (!app.workspaces.is_empty()).then_some(0));
+    let ws = ws_id.and_then(|id| app.workspaces.get(id));
     let name = ws.map(|w| w.name.clone()).unwrap_or_default();
     let ws_cwd = ws.map(|w| w.cwd.display().to_string()).unwrap_or_default();
     let branch = ws.and_then(|w| w.branch.clone()).unwrap_or_default();
-    let tab_id = ws
-        .map(|w| {
-            target
-                .tab
-                .filter(|index| *index < w.tabs.len())
-                .unwrap_or(w.active_tab)
-        })
-        .unwrap_or(0);
-    let tab_index = tab_id + 1;
+    let tab_id = ws.and_then(|w| {
+        target
+            .tab
+            .filter(|index| *index < w.tabs.len())
+            .or_else(|| (w.active_tab < w.tabs.len()).then_some(w.active_tab))
+            .or_else(|| (!w.tabs.is_empty()).then_some(0))
+    });
+    let tab_index = tab_id
+        .map(|index| (index + 1).to_string())
+        .unwrap_or_default();
     let tab_name = ws
-        .and_then(|w| w.tabs.get(tab_id))
+        .zip(tab_id)
+        .and_then(|(w, index)| w.tabs.get(index))
         .and_then(|t| t.name.clone())
         .unwrap_or_default();
 
     // A targeted pane wins, but only while it still exists (a menu can outlive
     // its pane if the process exits between the right-click and the click).
+    // During workspace creation a pane can exist briefly before its workspace
+    // is appended; during shutdown no workspace or pane may exist at all. Keep
+    // module context construction total across both transitions and never
+    // manufacture a pane ID that was not present in the app.
     let focus = target
         .pane
         .filter(|id| app.panes.contains_key(id))
         .or_else(|| {
-            target.tab.and_then(|_| {
-                ws.and_then(|w| w.tabs.get(tab_id))
-                    .map(|tab| tab.layout.focus)
-            })
+            target
+                .tab
+                .and_then(|_| ws.zip(tab_id))
+                .and_then(|(w, index)| w.tabs.get(index))
+                .map(|tab| tab.layout.focus)
+                .filter(|id| app.panes.contains_key(id))
         })
-        .unwrap_or_else(|| app.layout().focus);
-    let pane_cwd = app
-        .panes
-        .get(&focus)
+        .or_else(|| {
+            ws.zip(tab_id)
+                .and_then(|(w, index)| w.tabs.get(index))
+                .map(|tab| tab.layout.focus)
+                .filter(|id| app.panes.contains_key(id))
+        })
+        .or_else(|| {
+            app.workspaces
+                .iter()
+                .flat_map(|workspace| workspace.tabs.iter())
+                .map(|tab| tab.layout.focus)
+                .find(|id| app.panes.contains_key(id))
+        })
+        .or_else(|| app.panes.keys().copied().min_by_key(|id| id.0));
+    let pane_cwd = focus
+        .and_then(|id| app.panes.get(&id))
         .map(|p| p.cwd.display().to_string())
         .unwrap_or_default();
-    let (agent, status) = app
-        .status
-        .get(&focus)
+    let (agent, status) = focus
+        .and_then(|id| app.status.get(&id))
         .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
         .unwrap_or_default();
+    let workspace_id = ws_id.map(|id| id.to_string()).unwrap_or_default();
+    let pane_id = focus.map(|id| id.0.to_string()).unwrap_or_default();
 
     json!({
         "workspace": {
-            "id": ws_id.to_string(), "name": name.clone(),
+            "id": workspace_id.clone(), "name": name.clone(),
             "cwd": ws_cwd.clone(), "branch": branch.clone(),
         },
         // Legacy alias for modules written against the old "node" key.
-        "node": { "id": ws_id.to_string(), "name": name, "cwd": ws_cwd, "branch": branch },
-        "tab": { "index": tab_index.to_string(), "name": tab_name },
-        "pane": { "id": focus.0.to_string(), "cwd": pane_cwd, "agent": agent, "status": status },
+        "node": { "id": workspace_id, "name": name, "cwd": ws_cwd, "branch": branch },
+        "tab": { "index": tab_index, "name": tab_name },
+        "pane": { "id": pane_id, "cwd": pane_cwd, "agent": agent, "status": status },
         "selection": target.selection.clone().unwrap_or_default(),
         "invocation_source": source,
         "correlation_id": cid,
@@ -176,5 +198,35 @@ mod tests {
             app.workspaces[0].active_tab, 0,
             "building context is passive"
         );
+    }
+
+    #[test]
+    fn empty_topology_builds_context_without_fake_ids() {
+        let _env = crate::persist::test_env("module-empty-context");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces.clear();
+        app.panes.clear();
+        app.status.clear();
+        app.active_ws = usize::MAX;
+
+        let context = build(&app, "event");
+        assert_eq!(context["workspace"]["id"], "");
+        assert_eq!(context["tab"]["index"], "");
+        assert_eq!(context["pane"]["id"], "");
+    }
+
+    #[test]
+    fn stale_active_workspace_falls_back_to_surviving_topology() {
+        let _env = crate::persist::test_env("module-stale-workspace-context");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.workspaces[0].tabs[0].layout.focus;
+        app.active_ws = usize::MAX;
+
+        let context = build(&app, "event");
+        assert_eq!(context["workspace"]["id"], "0");
+        assert_eq!(context["tab"]["index"], "1");
+        assert_eq!(context["pane"]["id"], pane.0.to_string());
     }
 }

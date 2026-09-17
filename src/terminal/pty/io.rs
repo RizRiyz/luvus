@@ -11,7 +11,7 @@ use crate::event::AppEvent;
 use crate::ids::PaneId;
 use crate::terminal::vt::VtEngine;
 
-use super::{InputAction, InputSender};
+use super::{input::QueuedInput, InputSender};
 
 #[cfg(windows)]
 mod split;
@@ -19,22 +19,21 @@ mod split;
 pub(super) mod unix_actor;
 
 pub(super) struct InputReceiver {
-    receiver: mpsc::Receiver<InputAction>,
+    receiver: mpsc::Receiver<QueuedInput>,
     #[cfg(unix)]
     wake: Arc<OnceLock<Arc<unix_actor::WakePipe>>>,
 }
 
 pub(super) fn input_channel() -> (InputSender, InputReceiver) {
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = InputSender::channel();
     #[cfg(unix)]
     {
-        let wake = Arc::new(OnceLock::new());
-        let sender = InputSender::with_wake_slot(sender, wake.clone());
+        let wake = sender.wake_slot();
         (sender, InputReceiver { receiver, wake })
     }
     #[cfg(windows)]
     {
-        (InputSender::from(sender), InputReceiver { receiver })
+        (sender, InputReceiver { receiver })
     }
 }
 

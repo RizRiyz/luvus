@@ -1,4 +1,4 @@
-//! The "what's actually running in this pane?" overlay — click a pane's title.
+//! The "what's actually running in this pane?" overlay from its context menu.
 //!
 //! Agent CLIs elide long tool commands on screen (`Bash(cargo test …)`), and the
 //! elided characters are never sent to the terminal, so luvus cannot expand what

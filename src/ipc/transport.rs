@@ -99,6 +99,14 @@ fn connect_for_liveness(path: &Path) -> io::Result<Conn> {
 #[derive(Clone)]
 pub struct Conn(Arc<Stream>);
 
+#[cfg(unix)]
+impl std::os::fd::AsRawFd for Conn {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        let Stream::UdSocket(socket) = &*self.0;
+        socket.inner().as_raw_fd()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimeoutMode {
     Kernel,

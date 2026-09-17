@@ -445,7 +445,7 @@ fn load_untracked(root: &Path, file: &DiffFile) -> Result<FileDiff, String> {
             kind: DiffLineKind::Addition,
             old_line: None,
             new_line: Some(index as u32 + 1),
-            text: bounded_line(line),
+            text: bounded_line(line).into(),
         });
     }
     let retained = lines.len();
@@ -542,7 +542,7 @@ fn parse_patch(
             kind,
             old_line: old,
             new_line: new,
-            text: bounded_line(content),
+            text: bounded_line(content).into(),
         });
         retained += 1;
     }
@@ -870,8 +870,8 @@ mod tests {
         };
         let patch = b"@@ -1 +1 @@\n-old\x1b[2J\n+new\x07\n";
         let diff = parse_patch(&file, patch, false).unwrap();
-        assert_eq!(diff.hunks[0].lines[0].text, "old[2J");
-        assert_eq!(diff.hunks[0].lines[1].text, "new");
+        assert_eq!(diff.hunks[0].lines[0].text.as_ref(), "old[2J");
+        assert_eq!(diff.hunks[0].lines[1].text.as_ref(), "new");
     }
 
     struct TestRepo(PathBuf);
@@ -955,12 +955,12 @@ mod tests {
             .hunks
             .iter()
             .flat_map(|h| &h.lines)
-            .any(|line| line.text == "staged"));
+            .any(|line| line.text.as_ref() == "staged"));
         assert!(worktree_diff
             .hunks
             .iter()
             .flat_map(|h| &h.lines)
-            .any(|line| line.text == "worktree"));
+            .any(|line| line.text.as_ref() == "worktree"));
         assert_eq!(before, repo.git(&["status", "--porcelain=v2", "-z"]));
     }
 

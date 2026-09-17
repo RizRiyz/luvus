@@ -1,4 +1,7 @@
-use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
+use super::types::{
+    AgentDescriptor, AutomationLaunch, AutomationOperations, DiscoveryOperations,
+    IdentityDescriptor, SessionOperations,
+};
 
 pub(in crate::agent) mod sessions;
 #[cfg(test)]
@@ -11,6 +14,15 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     // FX reserves positional text for subcommands. `ask` is its documented
     // one-request entrypoint; keep permission approval attached to the PTY.
     task_prompt_args: &["ask", "--prompt-permissions"],
+    automation: Some(AutomationOperations {
+        read_only: None,
+        workspace: Some(AutomationLaunch {
+            args: &["ask", "--auto"],
+        }),
+        full_access: Some(AutomationLaunch {
+            args: &["ask", "--yolo"],
+        }),
+    }),
     identity: IdentityDescriptor {
         distinct: &[],
         ambiguous: &["fx"],

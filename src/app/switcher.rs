@@ -198,6 +198,13 @@ impl App {
             // Keep the established desktop action here. Mobile groups common
             // phone-safe actions in its dedicated Actions section below.
             if query.is_empty() && !self.compact {
+                if self.client_machine_capable {
+                    rows.push(SwitcherRow::Action {
+                        target: SwitcherTarget::Machines,
+                        label: self.catalog.machines.to_string(),
+                        detail: String::new(),
+                    });
+                }
                 rows.push(SwitcherRow::Action {
                     target: SwitcherTarget::NewWorkspace,
                     label: format!("+ {}", self.catalog.cmd_new_workspace),
@@ -212,6 +219,13 @@ impl App {
         }
         if self.compact && scope == SwitcherScope::All && query.is_empty() {
             rows.push(SwitcherRow::Header(self.catalog.mobile_actions.to_string()));
+            if self.client_machine_capable {
+                rows.push(SwitcherRow::Action {
+                    target: SwitcherTarget::Machines,
+                    label: self.catalog.machines.to_string(),
+                    detail: String::new(),
+                });
+            }
             rows.push(SwitcherRow::Action {
                 target: SwitcherTarget::NewTab,
                 label: format!("+ {}", self.catalog.act_new_tab),
@@ -304,16 +318,20 @@ impl App {
         match target {
             SwitcherTarget::Pane(id) => self.focus_pane_global(id),
             SwitcherTarget::Tab { ws, tab } => {
-                if let Some(w) = self.workspaces.get_mut(ws) {
-                    if tab < w.tabs.len() {
-                        w.active_tab = tab;
-                        self.active_ws = ws;
-                    }
+                if self
+                    .workspaces
+                    .get(ws)
+                    .is_some_and(|workspace| tab < workspace.tabs.len())
+                {
+                    let pane = self.workspaces[ws].tabs[tab].layout.focus;
+                    self.focus_location(ws, tab, pane);
                 }
             }
             SwitcherTarget::Workspace(i) => {
                 if i < self.workspaces.len() {
-                    self.active_ws = i;
+                    let tab = self.workspaces[i].active_tab;
+                    let pane = self.workspaces[i].tabs[tab].layout.focus;
+                    self.focus_location(i, tab, pane);
                 }
             }
             SwitcherTarget::NewWorkspace => self.open_folder_picker(),
@@ -321,6 +339,7 @@ impl App {
             SwitcherTarget::Settings => self.open_settings(),
             SwitcherTarget::MissionControl => self.open_mission_control(self.active_ws),
             SwitcherTarget::Version => self.open_changelog(),
+            SwitcherTarget::Machines => self.pending_machine_selector = true,
             SwitcherTarget::Sessions => self.open_named_session_menu(),
             SwitcherTarget::Exit => self.detach_requested = true,
         }
@@ -513,6 +532,45 @@ mod tests {
         app.switcher_activate(SwitcherTarget::Tab { ws: 0, tab: 0 });
         assert_eq!(app.ws().active_tab, 0, "switcher jumped to the tab");
         assert!(!app.switcher, "activating closes the overlay");
+    }
+
+    #[test]
+    fn switcher_navigation_starts_a_new_focus_history_branch() {
+        let _env = crate::persist::test_env("switcher-focus-history-branch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let second = crate::ids::PaneId::alloc();
+        let third = crate::ids::PaneId::alloc();
+        let fourth = crate::ids::PaneId::alloc();
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                second,
+            )));
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                third,
+            )));
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                fourth,
+            )));
+
+        app.focus_tab(1).unwrap();
+        app.focus_tab(2).unwrap();
+        app.focus_history_back();
+        assert_eq!(app.layout().focus, second);
+
+        app.switcher_activate(SwitcherTarget::Tab { ws: 0, tab: 3 });
+        assert_eq!(app.layout().focus, fourth);
+        app.focus_history_forward();
+        assert_eq!(
+            app.layout().focus,
+            fourth,
+            "switcher navigation clears the abandoned forward branch"
+        );
     }
 
     #[test]
@@ -833,5 +891,53 @@ mod tests {
         app.switcher_activate(SwitcherTarget::Exit);
         assert!(app.detach_requested, "Exit detaches the current client");
         assert!(!app.should_quit, "Exit does not stop the persistent server");
+    }
+
+    #[test]
+    fn mobile_machine_shell_is_reached_from_the_actions_menu() {
+        let _env = crate::persist::test_env("switcher-machines");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(60, 24, tx).unwrap();
+        app.compact = true;
+        app.client_machine_capable = true;
+        assert_eq!(app.client_shell_dock_rows, 0);
+        let target = app
+            .switcher_rows()
+            .into_iter()
+            .find_map(|row| match row {
+                SwitcherRow::Action {
+                    target: SwitcherTarget::Machines,
+                    ..
+                } => Some(SwitcherTarget::Machines),
+                _ => None,
+            })
+            .expect("machine-aware mobile clients expose Machines in Menu");
+        app.switcher_activate(target);
+        assert!(app.pending_machine_selector);
+    }
+
+    #[test]
+    fn desktop_machine_selector_remains_available_with_sidebar_rows() {
+        let _env = crate::persist::test_env("switcher-machines-fallback");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.client_machine_capable = true;
+        assert_eq!(app.client_shell_dock_rows, 0);
+        assert!(app.switcher_rows().into_iter().any(|row| matches!(
+            row,
+            SwitcherRow::Action {
+                target: SwitcherTarget::Machines,
+                ..
+            }
+        )));
+
+        app.client_shell_dock_rect = Some(ratatui::layout::Rect::new(0, 1, 20, 4));
+        assert!(app.switcher_rows().into_iter().any(|row| matches!(
+            row,
+            SwitcherRow::Action {
+                target: SwitcherTarget::Machines,
+                ..
+            }
+        )));
     }
 }

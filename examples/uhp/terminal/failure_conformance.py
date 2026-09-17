@@ -54,6 +54,46 @@ def locator(result):
     return {key: result[key] for key in ("server_generation", "terminal_id", "pane_id")}
 
 
+def check_input_backpressure(socket_path):
+    created = request(socket_path, {
+        "id": "blocked-create", "method": "terminal.backend.create",
+        "params": {"cwd": str(ROOT), "command": ["/bin/sh", "-c",
+            "stty raw -echo; printf INPUT_QUEUE_READY; exec sleep 30"],
+            "label": "blocked-input", "placement": {"kind": "workspace"}, "focus": False},
+    })
+    runtime = locator(created["result"])
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            captured = request(socket_path, {"id": "blocked-ready",
+                "method": "terminal.backend.capture",
+                "params": dict(runtime, mode="visible", lines=24, ansi=False)})
+            if "INPUT_QUEUE_READY" in captured["result"]["text"]:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("blocked-input child did not become ready")
+            time.sleep(0.025)
+        # At most 16 MiB even against a regressed server; never an unbounded flood.
+        for index in range(64):
+            response = request(socket_path, {"id": f"fill-{index}",
+                "method": "terminal.backend.type_literal",
+                "params": dict(runtime, text="x" * 262144)})
+            if "error" in response:
+                assert response["error"]["code"] == "send_failed"
+                assert response["error"]["dispatch"] == "rejected"
+                assert "queue is full" in response["error"]["message"]
+                break
+            assert response["result"]["dispatch"] == "queued"
+        else:
+            raise AssertionError("blocked pane never rejected excess input")
+        # The app and API must still service requests with the writer saturated.
+        response = request(socket_path, {"id": "responsive", "method": "uhp.capabilities", "params": {}})
+        assert response["result"]["terminal"]["limits"]["queued_input_bytes"] == 8388608
+    finally:
+        closed = request(socket_path, {"id": "blocked-close", "method": "terminal.backend.close", "params": runtime})
+        assert closed["result"]["dispatch"] == "executed"
+
+
 def wait_for_label(socket_path, terminal_id, expected):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
@@ -120,6 +160,7 @@ def main():
             },
         )
         generation = capability["result"]["server_generation"]
+        check_input_backpressure(socket_path)
         created = request(
             socket_path,
             {

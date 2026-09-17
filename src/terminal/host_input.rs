@@ -10,9 +10,19 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{Event, KeyCode, KeyEventKind};
 
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod console;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+pub use windows::{enable_input_mode, run_input_loop, WindowsInputModeGuard};
+
 const START_MARKER: &[char] = &['\u{1b}', '[', '2', '0', '0', '~'];
 const END_MARKER: &[char] = &['\u{1b}', '[', '2', '0', '1', '~'];
 const PREFIX_TIMEOUT: Duration = Duration::from_millis(40);
+const NATIVE_PREFIX_TIMEOUT: Duration = Duration::from_millis(100);
 const PASTE_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PASTE_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
@@ -91,9 +101,32 @@ impl HostInputDecoder {
     }
 
     fn push_at(&mut self, event: Event, now: Instant) -> DecodedEvents {
+        self.push_at_with_policy(event, now, true, PREFIX_TIMEOUT)
+    }
+
+    pub(super) fn push_native(
+        &mut self,
+        event: Event,
+        can_start_marker: bool,
+        now: Instant,
+    ) -> DecodedEvents {
+        self.push_at_with_policy(event, now, can_start_marker, NATIVE_PREFIX_TIMEOUT)
+    }
+
+    pub(super) fn is_pasting(&self) -> bool {
+        matches!(self.state, DecodeState::Paste { .. })
+    }
+
+    fn push_at_with_policy(
+        &mut self,
+        event: Event,
+        now: Instant,
+        can_start_marker: bool,
+        prefix_timeout: Duration,
+    ) -> DecodedEvents {
         let state = std::mem::replace(&mut self.state, DecodeState::Idle);
         match state {
-            DecodeState::Idle => self.push_idle(event, now),
+            DecodeState::Idle => self.push_idle(event, now, can_start_marker, prefix_timeout),
             DecodeState::Prefix {
                 mut events,
                 matched,
@@ -103,7 +136,7 @@ impl HostInputDecoder {
                     self.state = DecodeState::Prefix {
                         events,
                         matched,
-                        deadline: now + PREFIX_TIMEOUT,
+                        deadline: now + prefix_timeout,
                     };
                     return DecodedEvents::None;
                 }
@@ -131,13 +164,13 @@ impl HostInputDecoder {
                         self.state = DecodeState::Prefix {
                             events,
                             matched,
-                            deadline: now + PREFIX_TIMEOUT,
+                            deadline: now + prefix_timeout,
                         };
                     }
                     DecodedEvents::None
                 } else {
                     let replay = DecodedEvents::Many(events);
-                    replay.combine(self.push_idle(event, now))
+                    replay.combine(self.push_idle(event, now, can_start_marker, prefix_timeout))
                 }
             }
             DecodeState::Paste {
@@ -148,12 +181,18 @@ impl HostInputDecoder {
         }
     }
 
-    fn push_idle(&mut self, event: Event, now: Instant) -> DecodedEvents {
-        if marker_char(&event) == Some(START_MARKER[0]) {
+    fn push_idle(
+        &mut self,
+        event: Event,
+        now: Instant,
+        can_start_marker: bool,
+        prefix_timeout: Duration,
+    ) -> DecodedEvents {
+        if can_start_marker && marker_char(&event) == Some(START_MARKER[0]) {
             self.state = DecodeState::Prefix {
                 events: vec![event],
                 matched: 1,
-                deadline: now + PREFIX_TIMEOUT,
+                deadline: now + prefix_timeout,
             };
             DecodedEvents::None
         } else {
@@ -299,6 +338,7 @@ fn is_key_release(event: &Event) -> bool {
 fn paste_char(code: KeyCode) -> Option<char> {
     match code {
         KeyCode::Char(character) => Some(character),
+        KeyCode::Backspace => Some('\u{8}'),
         KeyCode::Enter => Some('\r'),
         KeyCode::Tab => Some('\t'),
         KeyCode::Esc => Some('\u{1b}'),

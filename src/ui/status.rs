@@ -2,6 +2,7 @@
 //! the flexible middle, and the clickable version stays fixed at the right.
 
 use super::*;
+use crate::app::SidebarListFocus;
 
 pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
     if area.height == 0 {
@@ -119,6 +120,50 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
             }
             keep -= 1;
         }
+    }
+    if let Some(menu) = app.named_session_menu.as_ref() {
+        let label = cat.named_sessions.to_uppercase();
+        left.push(mode_label(&label, t));
+        left.push(Span::raw("  "));
+        if menu.prompt.is_some() {
+            left.extend(hint("Enter", cat.act_create, t));
+        } else {
+            left.extend(hint("j/k", cat.act_move, t));
+            left.extend(hint(
+                "Enter",
+                if app.session_menu.is_some() {
+                    cat.act_select
+                } else {
+                    cat.act_open_menu
+                },
+                t,
+            ));
+            if app.session_menu.is_none() {
+                left.extend(hint("a", cat.act_right_click, t));
+            }
+        }
+        left.extend(hint("Esc", cat.act_back, t));
+        return (Line::from(left), false);
+    }
+    if let Some(focus) = app.sidebar_focus {
+        let agents = focus == SidebarListFocus::Agents;
+        left.push(mode_label(
+            if agents {
+                app.catalog.agents
+            } else {
+                app.catalog.workspaces
+            },
+            t,
+        ));
+        left.push(Span::raw("  "));
+        left.extend(hint("j/k", cat.act_move, t));
+        left.extend(hint("Enter", cat.act_open_menu, t));
+        left.extend(hint("a", cat.act_right_click, t));
+        if agents {
+            left.extend(hint("f", cat.act_filter, t));
+        }
+        left.extend(hint("Esc", cat.act_back, t));
+        return (Line::from(left), false);
     }
     if app.files_focused {
         let diff = app.files_mode == crate::diff::FilesMode::Diff;
@@ -491,6 +536,86 @@ mod tests {
                 "{mode:?} must own the leading mode label"
             );
         }
+    }
+
+    #[test]
+    fn sidebar_guidance_matches_workspace_and_agent_actions() {
+        let _env = crate::persist::test_env("bar-status-sidebar-focus");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        let theme = app.theme.clone();
+
+        app.sidebar_focus = Some(SidebarListFocus::Workspaces);
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("WORKSPACES"));
+        assert!(text.contains("Enter open"));
+        assert!(text.contains("a right click"));
+
+        app.sidebar_focus = Some(SidebarListFocus::Agents);
+        let (line, _) = fixed_guidance(&app, &theme, 120);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.contains("AGENTS"));
+        assert!(text.contains("f filter"));
+        assert!(text.contains("a right click"));
+    }
+
+    #[test]
+    fn session_guidance_tracks_the_focused_selector_and_its_action_menu() {
+        let _env = crate::persist::test_env("bar-status-session-focus");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        let theme = app.theme.clone();
+        app.named_session_menu = Some(crate::app::session_menu::NamedSessionMenu {
+            generation: 1,
+            rows: Vec::new(),
+            cursor: 0,
+            scroll: 0,
+            loading: false,
+            prompt: None,
+            error: None,
+            preparing: false,
+        });
+
+        let text = |app: &App| {
+            fixed_guidance(app, &theme, 120)
+                .0
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let focused = text(&app);
+        assert!(focused.contains("SESSIONS"));
+        assert!(focused.contains("j/k move"));
+        assert!(focused.contains("Enter open"));
+        assert!(focused.contains("a right click"));
+        assert!(focused.contains("Esc back"));
+
+        app.session_menu = Some(crate::app::SessionMenu {
+            name: "review".into(),
+            anchor: (4, 4),
+            actions: vec![crate::app::SessionMenuItem::Start],
+            items: Vec::new(),
+            selected: Some(0),
+        });
+        let actions = text(&app);
+        assert!(actions.contains("Enter select"));
+        assert!(!actions.contains("a right click"));
+
+        app.session_menu = None;
+        app.named_session_menu.as_mut().unwrap().prompt = Some(String::new());
+        let prompt = text(&app);
+        assert!(prompt.contains("Enter create"));
+        assert!(!prompt.contains("a right click"));
     }
 
     #[test]

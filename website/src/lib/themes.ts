@@ -14,16 +14,23 @@ export const THEMES: { id: string; label: string; note: string }[] = [
   { id: 'ocean', label: 'ocean', note: 'deep cmd-blue, cyan accent' },
   { id: 'dracula', label: 'dracula', note: 'indigo dark, violet accent' },
   { id: 'nord', label: 'nord', note: 'cool arctic blue-grey' },
+  { id: 'tokyo-night', label: 'tokyo night', note: 'deep night blue, clear blue accent' },
   { id: 'sky', label: 'sky', note: 'light paper, sky-blue accent' },
   { id: 'catppuccin-mocha', label: 'catppuccin mocha', note: 'darkest Catppuccin, mauve' },
   { id: 'catppuccin-macchiato', label: 'catppuccin macchiato', note: 'softer dark Catppuccin' },
   { id: 'catppuccin-frappe', label: 'catppuccin frappe', note: 'lightest dark Catppuccin' },
+  { id: 'rose-pine', label: 'rosé pine', note: 'soft dark Rosé Pine, rose accent' },
+  { id: 'rose-pine-moon', label: 'rosé pine moon', note: 'soft moonlit Rosé Pine, rose accent' },
   { id: 'gruvbox', label: 'gruvbox', note: 'retro warm dark, yellow accent' },
   { id: 'sunset', label: 'sunset', note: 'neon synthwave, hot-pink' },
   { id: 'homebrew', label: 'homebrew', note: 'classic green-on-black' },
   { id: 'grass', label: 'grass', note: 'green field, pale-yellow text' },
+  { id: 'baitong', label: 'baitong', note: 'deep teal, neon green and magenta' },
   { id: 'redsands', label: 'redsands', note: 'warm dark red, orange accent' },
   { id: 'catppuccin-latte', label: 'catppuccin latte', note: 'light Catppuccin, warm' },
+  { id: 'rose-pine-dawn', label: 'rosé pine dawn', note: 'light Rosé Pine, rose accent' },
+  { id: 'papercolor', label: 'papercolor', note: 'neutral white paper, deep blue accent' },
+  { id: 'paper', label: 'paper', note: 'warm notebook paper, black ink' },
   { id: 'gruvbox-light', label: 'gruvbox light', note: 'Gruvbox on cream, burnt orange' },
   { id: 'mono', label: 'mono', note: 'grayscale, no accent color' },
 ];
@@ -37,7 +44,14 @@ export const DEFAULT_THEME = 'quattro-rally';
  * own rules (and Expressive Code's syntax theme) off `data-theme`, so the docs
  * have to say which side of the line each palette falls on.
  */
-export const LIGHT_THEMES = ['catppuccin-latte', 'gruvbox-light', 'sky'];
+export const LIGHT_THEMES = [
+  'catppuccin-latte',
+  'gruvbox-light',
+  'paper',
+  'papercolor',
+  'rose-pine-dawn',
+  'sky',
+];
 
 /** `data-theme` for a palette: what Starlight's own light/dark rules key off. */
 export const modeOf = (id: string) => (LIGHT_THEMES.includes(id) ? 'light' : 'dark');

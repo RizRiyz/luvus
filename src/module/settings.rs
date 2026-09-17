@@ -238,6 +238,7 @@ mod tests {
             panes: vec![],
             docks: vec![],
             bars: vec![],
+            worktree_provider: None,
             settings,
         }
     }

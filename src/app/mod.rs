@@ -22,18 +22,28 @@ use crate::persist::{self, SessionSnapshot};
 use crate::terminal::pty::Pane;
 use crate::ui::theme::{State, Theme};
 
+mod automation;
+mod automation_persistence;
 mod backend;
 mod board;
+mod config_persistence;
 mod cwd;
-pub use board::agent_choices;
+pub use board::{
+    agent_choices, automation_agent_choices, automation_agent_choices_for,
+    automation_agent_supports, task_agent_choices, TaskRetryResult,
+};
 pub(crate) mod diff;
 mod dispatch;
+mod file_jobs;
 pub(crate) mod files;
 mod git;
 mod input;
+pub(crate) mod io_jobs;
 mod keys;
+pub(crate) mod line_edit;
 mod mission;
 mod modules;
+mod persistence;
 mod picker;
 mod preview;
 mod search;
@@ -53,6 +63,9 @@ pub use settings::{
 
 /// How recently a pane must have produced PTY output to read as *raw* Working.
 const ACTIVITY_WINDOW: Duration = Duration::from_millis(700);
+
+/// Shared paste-to-Enter settling policy for direct and DIFF agent messages.
+const AGENT_MESSAGE_SETTLE: Duration = Duration::from_millis(45);
 
 /// Anti-jitter dwell: how long a pane must stay *quiet* before its published
 /// status is allowed to fall back to Idle/Done. Agents stream in bursts — a
@@ -94,6 +107,23 @@ pub enum DockKind {
     /// The native file tree of the active node (docs/38).
     Files,
     Module(String),
+}
+
+/// A built-in sidebar list that currently owns normal-mode keyboard input.
+/// Pane focus stays unchanged so Esc/q can return directly to the terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SidebarListFocus {
+    Workspaces,
+    Agents,
+}
+
+/// One row in the AGENTS dock's keyboard projection, in rendered order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum AgentDockTarget {
+    Live(PaneId),
+    Automation(String),
+    Session(usize),
+    Elsewhere(PaneId),
 }
 
 impl DockKind {
@@ -143,6 +173,15 @@ pub enum Side {
 pub struct DockRow {
     pub text: String,
     pub dot: Option<String>,
+    /// Optional Luvus Bar tone name (`normal`/`muted`/`accent`/`success`/
+    /// `warning`/`error`) for the row text. Absent keeps the default row
+    /// colour, so every pre-existing module renders exactly as before.
+    pub tone: Option<String>,
+    /// Optional per-segment text with its own tone. When non-empty it is drawn
+    /// instead of `text`, left to right, each span in its tone (or the row's
+    /// `tone`, or the default row colour). `text` stays the plain fallback and
+    /// what a click hands to the action as `LUVUS_MODULE_ROW_TEXT`.
+    pub spans: Vec<DockSpan>,
     /// Action id to invoke when this row is clicked.
     pub action: Option<String>,
     /// Opaque per-row payload handed to that action as `LUVUS_MODULE_ROW_VALUE`
@@ -156,6 +195,13 @@ pub struct DockRow {
     /// module declares one per row: a device row can offer "flash this board"
     /// while a command row in the same dock offers nothing.
     pub menu: Vec<DockRowMenuItem>,
+}
+
+/// One coloured segment of a dock row's text (see [`DockRow::spans`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DockSpan {
+    pub text: String,
+    pub tone: Option<String>,
 }
 
 /// One entry in a dock row's right-click menu (docs/52). `destructive` only
@@ -211,6 +257,92 @@ pub struct DockMenu {
 pub struct ModuleDock {
     pub title: String,
     pub rows: Vec<DockRow>,
+}
+
+/// One volatile AGENTS-row title and its authenticated publishing module.
+/// `None` is reserved for direct local control-API calls.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct AgentRowTitle {
+    pub(crate) owner: Option<String>,
+    pub(crate) text: String,
+}
+
+pub(crate) const MAX_AGENT_ROW_TITLE_BYTES: usize = 256;
+pub(crate) const MAX_AGENT_ROW_TITLES: usize = 256;
+pub(crate) const MAX_AGENT_ROW_TITLE_AGENT_BYTES: usize = 64;
+
+pub(crate) fn agent_session_title_count(
+    titles: &HashMap<String, HashMap<String, AgentRowTitle>>,
+) -> usize {
+    titles.values().map(HashMap::len).sum()
+}
+
+pub(crate) fn set_owned_agent_row_title(
+    titles: &mut HashMap<PaneId, AgentRowTitle>,
+    pane: PaneId,
+    text: Option<String>,
+    owner: Option<&str>,
+) -> Result<bool, String> {
+    if let Some(existing) = titles.get(&pane) {
+        if existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another publisher".into());
+        }
+    }
+    match text {
+        Some(text) => {
+            let title = AgentRowTitle {
+                owner: owner.map(String::from),
+                text,
+            };
+            if titles.get(&pane) == Some(&title) {
+                Ok(false)
+            } else {
+                titles.insert(pane, title);
+                Ok(true)
+            }
+        }
+        None => Ok(titles.remove(&pane).is_some()),
+    }
+}
+
+pub(crate) fn set_owned_agent_session_title(
+    titles: &mut HashMap<String, HashMap<String, AgentRowTitle>>,
+    agent: String,
+    session_id: String,
+    text: Option<String>,
+    owner: Option<&str>,
+) -> Result<bool, String> {
+    let existing = titles
+        .get(&agent)
+        .and_then(|sessions| sessions.get(&session_id));
+    if let Some(existing) = existing {
+        if existing.owner.as_deref() != owner {
+            return Err("agent row title belongs to another publisher".into());
+        }
+    }
+    match text {
+        Some(text) => {
+            let title = AgentRowTitle {
+                owner: owner.map(String::from),
+                text,
+            };
+            if existing == Some(&title) {
+                return Ok(false);
+            }
+            titles.entry(agent).or_default().insert(session_id, title);
+            Ok(true)
+        }
+        None => {
+            let Some(sessions) = titles.get_mut(&agent) else {
+                return Ok(false);
+            };
+            let changed = sessions.remove(&session_id).is_some();
+            if sessions.is_empty() {
+                titles.remove(&agent);
+            }
+            Ok(changed)
+        }
+    }
 }
 
 /// One sidebar's live state: shown/hidden, width, and its ordered docks.
@@ -345,7 +477,7 @@ impl Sidebars {
             Side::Right => &mut self.right,
         }
     }
-    fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
+    pub(crate) fn from_config(cfg: &crate::config::SidebarsConfig) -> Sidebars {
         let left = SideState::from_config(&cfg.left);
         let right = SideState::from_config(&cfg.right);
         let files_side = if left.has(&DockKind::Files) {
@@ -361,7 +493,7 @@ impl Sidebars {
             files_side,
         }
     }
-    fn to_config(&self) -> crate::config::SidebarsConfig {
+    pub(crate) fn to_config(&self) -> crate::config::SidebarsConfig {
         crate::config::SidebarsConfig {
             left: self.left.to_config(),
             right: self.right.to_config(),
@@ -465,6 +597,40 @@ pub struct CmdInspect {
 pub struct TabRename {
     pub target: TabMenuTarget,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
+}
+
+/// One row of the open-worktree modal (docs/18 WT): a checkout of the repo, as
+/// reported by `git worktree list` — so every worktree shows, no matter which
+/// tool created it or where it lives on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorktreeOpenEntry {
+    pub path: PathBuf,
+    /// `None` for a detached checkout (the short head labels it instead).
+    pub branch: Option<String>,
+    pub head: String,
+    pub is_main: bool,
+    /// Already open as a workspace — resolved on the worker against the
+    /// workspaces snapshotted when the modal opened, for the row badge. The
+    /// confirm re-resolves by path against live workspaces.
+    pub open: bool,
+}
+
+/// The open-worktree list modal: `Some` ⇒ open. ⏎ opens (or focuses) the
+/// highlighted checkout, esc closes.
+///
+/// It opens `loading` and fills in when [`App::apply_worktree_list`] receives
+/// the off-loop scan (the named-session menu's shape): `generation` is the
+/// request this modal is waiting on, so a result for an earlier, since-closed
+/// or reopened modal is dropped instead of resurrecting it.
+pub struct WorktreeOpenList {
+    pub generation: u64,
+    pub loading: bool,
+    /// The git error when the scan failed; shown in place of the rows.
+    pub error: Option<String>,
+    pub entries: Vec<WorktreeOpenEntry>,
+    pub cursor: usize,
 }
 
 /// Stable-enough identity for a tab context-menu target. A tab's complete leaf
@@ -527,7 +693,10 @@ pub struct WsMenu {
     /// Every other workspace group in the same pin cohort.
     pub swap_targets: Vec<(String, String)>,
     pub swap_open: bool,
+    pub swap_selected: Option<usize>,
     pub swap_rects: Vec<(String, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13
     /// §3.8) so a registry change mid-menu can't shift what a click runs.
     pub module_actions: Vec<ModuleMenuAction>,
@@ -544,6 +713,8 @@ pub enum WsMenuItem {
     MoveUp,
     MoveDown,
     SwapWith,
+    /// Toggle the persisted cwd line for every WORKSPACES row.
+    TogglePath,
     Close,
     Rename,
     /// Delete a **linked worktree** and its files (git worktree remove + folder).
@@ -579,6 +750,7 @@ pub enum SwitcherTarget {
     Settings,
     MissionControl,
     Version,
+    Machines,
     Sessions,
     Exit,
 }
@@ -876,7 +1048,7 @@ pub enum TabRenameError {
     NameTooLong,
 }
 
-/// Why an existing agent session could not be forked into a sibling pane.
+/// Why an active agent session could not be forked into a sibling pane.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentForkError {
     PaneNotFound,
@@ -946,34 +1118,47 @@ impl PaneMenuItem {
     ];
 }
 
-/// What an [`AgentMenu`] targets: a resumable on-disk session (by list index) or
-/// a live agent pane.
-#[derive(Clone, Copy)]
+/// What an [`AgentMenu`] targets: a resumable on-disk session (by list index),
+/// a live agent pane, or an automation placeholder that does not currently own
+/// a live pane.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum AgentTarget {
     Session(usize),
     Live(PaneId),
+    Automation(String),
 }
 
 /// A right-click context menu on an AGENTS-list row. A resumable session offers
 /// **Resume** (reopen) + **Close** (remove from the list); a live agent offers
-/// **Close** (close its pane).
+/// pane actions; and a scheduled placeholder offers definition-safe automation
+/// actions until it owns a live pane.
 pub struct AgentMenu {
     pub target: AgentTarget,
     pub anchor: (u16, u16),
     pub items: Vec<(AgentMenuItem, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13 §3.8).
     pub module_actions: Vec<ModuleMenuAction>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentMenuItem {
+    /// Toggle between all workspaces and the active workspace in the AGENTS dock.
+    ToggleWorkspaceScope,
     Resume,
     /// "Rename" a live agent's pane (sets its live name). Live agents only.
     RenamePane,
     Close,
+    AutomationDetails,
+    AutomationRun,
+    AutomationToggle,
+    AutomationDelete,
     /// Pin a live agent to the top of the AGENTS list (per-session).
     Pin,
     Unpin,
+    /// Toggle the persisted path/detail line for every AGENTS row.
+    TogglePath,
     Divider,
     /// The `i`-th module action declaring `contexts = ["agent"]` (docs/13 §3.8).
     Module(usize),
@@ -985,8 +1170,31 @@ impl AgentMenu {
         match target {
             AgentTarget::Session(_) => vec![AgentMenuItem::Resume, AgentMenuItem::Close],
             AgentTarget::Live(_) => vec![AgentMenuItem::RenamePane, AgentMenuItem::Close],
+            AgentTarget::Automation(_) => vec![
+                AgentMenuItem::AutomationDetails,
+                AgentMenuItem::AutomationRun,
+                AgentMenuItem::AutomationToggle,
+                AgentMenuItem::AutomationDelete,
+            ],
         }
     }
+}
+
+/// Right-click context menu on a named-session row (sessions switcher).
+pub struct SessionMenu {
+    pub name: String,
+    pub anchor: (u16, u16),
+    pub actions: Vec<SessionMenuItem>,
+    pub items: Vec<(SessionMenuItem, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionMenuItem {
+    Start,
+    Stop,
+    Delete,
 }
 
 /// The workspace-rename modal: like [`TabRename`] but for a node's **label** (the
@@ -996,12 +1204,15 @@ pub struct WsRename {
     /// open if another workspace closes through the API.
     pub workspace_id: String,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
 }
 
 /// Cap a custom workspace name (same reasoning as [`TAB_NAME_MAX`]). Shared
 /// with the CLI so local validation and the socket mutation agree.
 pub(crate) const WS_NAME_MAX: usize = 40;
 const MAX_CLOSED_WORKSPACE_PATHS: usize = 128;
+const FOCUS_HISTORY_LIMIT: usize = 64;
 
 /// Why workspace metadata could not be changed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1017,6 +1228,8 @@ pub enum WorkspaceUpdateError {
 pub struct PaneRename {
     pub pane: PaneId,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
 }
 
 /// Cap a live pane name at the addressable-name length (`[a-z][a-z0-9_-]{0,31}`).
@@ -1024,33 +1237,472 @@ const PANE_NAME_MAX: usize = 32;
 
 /// The in-TUI **new-task form** (ORCH-7): create an orchestration task without the
 /// CLI. Fields are plain text; `paths`/`deps` are whitespace-split on submit.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormStart {
+    #[default]
+    Manual,
+    Now,
+    Once,
+    Hourly,
+    Daily,
+    Weekly,
+}
+
+impl OrchFormStart {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "Manual",
+            Self::Now => "Now",
+            Self::Once => "Once later",
+            Self::Hourly => "Hourly",
+            Self::Daily => "Daily",
+            Self::Weekly => "Weekly",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormKind {
+    #[default]
+    Task,
+    Automation,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchAutomationTarget {
+    #[default]
+    NewWorker,
+    ActiveAgent,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OrchActiveAgent {
+    pub pane: PaneId,
+    pub terminal_id: String,
+    pub agent: String,
+    pub workspace_id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchFormField {
+    #[default]
+    Title,
+    Paths,
+    Deps,
+    Gate,
+    Prompt,
+    Target,
+    ActiveAgent,
+    Agent,
+    RunIn,
+    Access,
+    Start,
+    Schedule,
+}
+
+const TASK_MANUAL_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Paths,
+    OrchFormField::Deps,
+    OrchFormField::Gate,
+    OrchFormField::Start,
+    OrchFormField::Prompt,
+];
+const TASK_NOW_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Paths,
+    OrchFormField::Deps,
+    OrchFormField::Gate,
+    OrchFormField::Start,
+    OrchFormField::Agent,
+    OrchFormField::Prompt,
+];
+const AUTOMATION_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Target,
+    OrchFormField::Paths,
+    OrchFormField::Gate,
+    OrchFormField::Agent,
+    OrchFormField::RunIn,
+    OrchFormField::Access,
+    OrchFormField::Start,
+    OrchFormField::Schedule,
+    OrchFormField::Prompt,
+];
+const ACTIVE_AGENT_AUTOMATION_FIELDS: &[OrchFormField] = &[
+    OrchFormField::Title,
+    OrchFormField::Target,
+    OrchFormField::ActiveAgent,
+    OrchFormField::Start,
+    OrchFormField::Schedule,
+    OrchFormField::Prompt,
+];
+
+struct OrchFormDraft {
+    title: String,
+    prompt: String,
+    agent: String,
+    automation_target: OrchAutomationTarget,
+    active_agent: usize,
+    mode: crate::orch::TaskWorkerMode,
+    access: crate::automation::AutomationAccess,
+    start: OrchFormStart,
+    schedule: String,
+    schedule_prefilled: bool,
+    timezone: String,
+    paths: String,
+    deps: String,
+    gate: String,
+    field: OrchFormField,
+}
+
+impl OrchFormDraft {
+    fn for_kind(kind: OrchFormKind, mode: crate::orch::TaskWorkerMode) -> Self {
+        let start = match kind {
+            OrchFormKind::Task => OrchFormStart::Manual,
+            OrchFormKind::Automation => OrchFormStart::Once,
+        };
+        let timezone = match kind {
+            OrchFormKind::Task => String::new(),
+            OrchFormKind::Automation => crate::automation::system_timezone_name(),
+        };
+        Self {
+            title: String::new(),
+            prompt: String::new(),
+            agent: if kind == OrchFormKind::Automation {
+                default_automation_agent()
+            } else {
+                String::new()
+            },
+            automation_target: OrchAutomationTarget::NewWorker,
+            active_agent: 0,
+            mode,
+            access: crate::automation::AutomationAccess::default(),
+            start,
+            schedule: if kind == OrchFormKind::Automation {
+                default_schedule(start, &timezone)
+            } else {
+                String::new()
+            },
+            schedule_prefilled: kind == OrchFormKind::Automation,
+            timezone,
+            paths: String::new(),
+            deps: String::new(),
+            gate: String::new(),
+            field: OrchFormField::Title,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct OrchForm {
+    pub kind: OrchFormKind,
     pub title: String,
+    pub prompt: String,
+    pub agent: String,
+    pub automation_target: OrchAutomationTarget,
+    pub active_agent: usize,
+    pub active_agents: Vec<OrchActiveAgent>,
+    pub mode: crate::orch::TaskWorkerMode,
+    pub access: crate::automation::AutomationAccess,
+    pub start: OrchFormStart,
+    pub schedule: String,
+    /// A generated schedule remains visible but is replaced by the user's
+    /// first edit instead of forcing them to erase it character by character.
+    pub schedule_prefilled: bool,
+    pub timezone: String,
     pub paths: String,
     pub deps: String,
     pub gate: String,
-    /// Active field: 0=title · 1=paths · 2=deps · 3=gate.
-    pub field: usize,
+    pub field: OrchFormField,
     pub error: Option<String>,
+    task_draft: Option<OrchFormDraft>,
+    automation_draft: Option<OrchFormDraft>,
 }
 
 impl OrchForm {
-    pub const FIELDS: usize = 4;
+    pub fn for_kind(kind: OrchFormKind) -> Self {
+        let mut form = Self {
+            kind,
+            ..Self::default()
+        };
+        form.restore_draft(OrchFormDraft::for_kind(kind, form.mode));
+        form
+    }
 
-    /// The currently-edited field's text.
-    pub fn active_mut(&mut self) -> &mut String {
-        match self.field {
-            0 => &mut self.title,
-            1 => &mut self.paths,
-            2 => &mut self.deps,
-            _ => &mut self.gate,
+    fn take_draft(&mut self) -> OrchFormDraft {
+        OrchFormDraft {
+            title: std::mem::take(&mut self.title),
+            prompt: std::mem::take(&mut self.prompt),
+            agent: std::mem::take(&mut self.agent),
+            automation_target: self.automation_target,
+            active_agent: self.active_agent,
+            mode: self.mode,
+            access: self.access,
+            start: self.start,
+            schedule: std::mem::take(&mut self.schedule),
+            schedule_prefilled: self.schedule_prefilled,
+            timezone: std::mem::take(&mut self.timezone),
+            paths: std::mem::take(&mut self.paths),
+            deps: std::mem::take(&mut self.deps),
+            gate: std::mem::take(&mut self.gate),
+            field: self.field,
         }
     }
 
-    /// The four fields' current values, in order, for rendering.
-    pub fn values(&self) -> [&String; 4] {
-        [&self.title, &self.paths, &self.deps, &self.gate]
+    fn restore_draft(&mut self, draft: OrchFormDraft) {
+        self.title = draft.title;
+        self.prompt = draft.prompt;
+        self.agent = draft.agent;
+        self.automation_target = draft.automation_target;
+        self.active_agent = draft.active_agent;
+        self.mode = draft.mode;
+        self.access = draft.access;
+        self.start = draft.start;
+        self.schedule = draft.schedule;
+        self.schedule_prefilled = draft.schedule_prefilled;
+        self.timezone = draft.timezone;
+        self.paths = draft.paths;
+        self.deps = draft.deps;
+        self.gate = draft.gate;
+        self.field = draft.field;
+    }
+
+    pub fn fields(&self) -> &'static [OrchFormField] {
+        match (self.kind, self.start) {
+            (OrchFormKind::Task, OrchFormStart::Now) => TASK_NOW_FIELDS,
+            (OrchFormKind::Task, _) => TASK_MANUAL_FIELDS,
+            (OrchFormKind::Automation, _)
+                if self.automation_target == OrchAutomationTarget::ActiveAgent =>
+            {
+                ACTIVE_AGENT_AUTOMATION_FIELDS
+            }
+            (OrchFormKind::Automation, _) => AUTOMATION_FIELDS,
+        }
+    }
+
+    pub fn set_kind(&mut self, kind: OrchFormKind) {
+        if self.kind == kind {
+            return;
+        }
+        let outgoing = self.take_draft();
+        match self.kind {
+            OrchFormKind::Task => self.task_draft = Some(outgoing),
+            OrchFormKind::Automation => self.automation_draft = Some(outgoing),
+        }
+        let incoming = match kind {
+            OrchFormKind::Task => self.task_draft.take(),
+            OrchFormKind::Automation => self.automation_draft.take(),
+        }
+        .unwrap_or_else(|| OrchFormDraft::for_kind(kind, self.mode));
+        self.kind = kind;
+        self.restore_draft(incoming);
+        self.error = None;
+    }
+
+    pub fn toggle_kind(&mut self) {
+        let kind = match self.kind {
+            OrchFormKind::Task => OrchFormKind::Automation,
+            OrchFormKind::Automation => OrchFormKind::Task,
+        };
+        self.set_kind(kind);
+    }
+
+    pub fn cycle_field(&mut self, backwards: bool) {
+        let fields = self.fields();
+        let index = fields
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0);
+        self.field = fields[(index + if backwards { fields.len() - 1 } else { 1 }) % fields.len()];
+    }
+
+    pub fn cycle_choice(&mut self, backwards: bool) {
+        match self.field {
+            OrchFormField::Target => {
+                self.automation_target = match self.automation_target {
+                    OrchAutomationTarget::NewWorker => OrchAutomationTarget::ActiveAgent,
+                    OrchAutomationTarget::ActiveAgent => OrchAutomationTarget::NewWorker,
+                };
+                if !self.fields().contains(&self.field) {
+                    self.field = OrchFormField::Target;
+                }
+            }
+            OrchFormField::ActiveAgent => {
+                if !self.active_agents.is_empty() {
+                    self.active_agent = (self.active_agent
+                        + if backwards {
+                            self.active_agents.len() - 1
+                        } else {
+                            1
+                        })
+                        % self.active_agents.len();
+                }
+            }
+            OrchFormField::Start => {
+                let choices: &[OrchFormStart] = match self.kind {
+                    OrchFormKind::Task => &[OrchFormStart::Manual, OrchFormStart::Now],
+                    OrchFormKind::Automation => &[
+                        OrchFormStart::Once,
+                        OrchFormStart::Hourly,
+                        OrchFormStart::Daily,
+                        OrchFormStart::Weekly,
+                    ],
+                };
+                let index = choices
+                    .iter()
+                    .position(|choice| *choice == self.start)
+                    .unwrap_or(0);
+                self.start = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()];
+                if self.start == OrchFormStart::Now && self.agent.is_empty() {
+                    self.agent = default_task_agent();
+                }
+                if self.kind == OrchFormKind::Automation {
+                    self.schedule = default_schedule(self.start, &self.timezone);
+                    self.schedule_prefilled = true;
+                }
+            }
+            OrchFormField::Agent => {
+                let choices = if self.kind == OrchFormKind::Automation {
+                    crate::app::automation_agent_choices()
+                } else {
+                    crate::app::task_agent_choices()
+                };
+                if choices.is_empty() {
+                    return;
+                }
+                let index = choices
+                    .iter()
+                    .position(|choice| choice.eq_ignore_ascii_case(&self.agent))
+                    .unwrap_or(0);
+                self.agent = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()]
+                .to_string();
+            }
+            OrchFormField::RunIn => {
+                self.mode = match self.mode {
+                    crate::orch::TaskWorkerMode::Worktree => crate::orch::TaskWorkerMode::Workspace,
+                    crate::orch::TaskWorkerMode::Workspace => crate::orch::TaskWorkerMode::Worktree,
+                };
+            }
+            OrchFormField::Access => {
+                let choices = [
+                    crate::automation::AutomationAccess::ReadOnly,
+                    crate::automation::AutomationAccess::Workspace,
+                    crate::automation::AutomationAccess::FullAccess,
+                ];
+                let index = choices
+                    .iter()
+                    .position(|choice| *choice == self.access)
+                    .unwrap_or(0);
+                self.access = choices
+                    [(index + if backwards { choices.len() - 1 } else { 1 }) % choices.len()];
+            }
+            _ => {}
+        }
+    }
+
+    /// The currently-edited field's text.
+    pub fn active_mut(&mut self) -> Option<&mut String> {
+        match self.field {
+            OrchFormField::Title => Some(&mut self.title),
+            OrchFormField::Paths => Some(&mut self.paths),
+            OrchFormField::Deps => Some(&mut self.deps),
+            OrchFormField::Gate => Some(&mut self.gate),
+            OrchFormField::Prompt => Some(&mut self.prompt),
+            OrchFormField::Target
+            | OrchFormField::ActiveAgent
+            | OrchFormField::Agent
+            | OrchFormField::RunIn
+            | OrchFormField::Access => None,
+            OrchFormField::Schedule => Some(&mut self.schedule),
+            OrchFormField::Start => None,
+        }
+    }
+
+    pub fn push_char(&mut self, value: char) {
+        if self.field == OrchFormField::Schedule && self.schedule_prefilled {
+            self.schedule.clear();
+            self.schedule_prefilled = false;
+        }
+        let limit = match self.field {
+            OrchFormField::Title => Some(crate::orch::MAX_TASK_TITLE_BYTES),
+            OrchFormField::Prompt => Some(crate::orch::MAX_TASK_PROMPT_BYTES),
+            _ => None,
+        };
+        if let Some(field) = self.active_mut() {
+            if limit.is_none_or(|limit| field.len() + value.len_utf8() <= limit) {
+                field.push(value);
+            }
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.field == OrchFormField::Schedule && self.schedule_prefilled {
+            self.schedule.clear();
+            self.schedule_prefilled = false;
+            return;
+        }
+        if let Some(field) = self.active_mut() {
+            field.pop();
+        }
+    }
+
+    pub fn value(&self, field: OrchFormField) -> &str {
+        match field {
+            OrchFormField::Title => &self.title,
+            OrchFormField::Paths => &self.paths,
+            OrchFormField::Deps => &self.deps,
+            OrchFormField::Gate => &self.gate,
+            OrchFormField::Prompt => &self.prompt,
+            OrchFormField::Target => match self.automation_target {
+                OrchAutomationTarget::NewWorker => "new_worker",
+                OrchAutomationTarget::ActiveAgent => "active_agent",
+            },
+            OrchFormField::ActiveAgent => self
+                .active_agents
+                .get(self.active_agent)
+                .map(|agent| agent.label.as_str())
+                .unwrap_or("no active agents"),
+            OrchFormField::Agent => &self.agent,
+            OrchFormField::RunIn => self.mode.as_str(),
+            OrchFormField::Access => self.access.as_str(),
+            OrchFormField::Start => self.start.label(),
+            OrchFormField::Schedule => &self.schedule,
+        }
+    }
+}
+
+fn default_task_agent() -> String {
+    crate::app::task_agent_choices()
+        .first()
+        .copied()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn default_automation_agent() -> String {
+    crate::app::automation_agent_choices_for(crate::automation::AutomationAccess::Workspace)
+        .first()
+        .copied()
+        .or_else(|| crate::app::automation_agent_choices().first().copied())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn default_schedule(start: OrchFormStart, timezone: &str) -> String {
+    match start {
+        OrchFormStart::Once => crate::automation::format_local_instant(
+            crate::automation::unix_now().saturating_add(3_600),
+            timezone,
+        )
+        .unwrap_or_default(),
+        OrchFormStart::Hourly => "00".to_string(),
+        OrchFormStart::Daily => "09:00".to_string(),
+        OrchFormStart::Weekly => "mon 09:00".to_string(),
+        OrchFormStart::Manual | OrchFormStart::Now => String::new(),
     }
 }
 
@@ -1073,6 +1725,13 @@ pub enum OrchStartStep {
     Agent,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum OrchView {
+    #[default]
+    Tasks,
+    Automations,
+}
+
 pub struct OrchStart {
     /// The task a worker is being started for.
     pub task: String,
@@ -1088,10 +1747,13 @@ pub struct OrchStart {
 /// frame, so hit testing never derives a task index from stale screen math.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OrchHit {
+    View(OrchView),
     Task(String),
+    Automation(String),
     Worker(String),
     NewTask,
-    FormField(usize),
+    FormKind(OrchFormKind),
+    FormField(OrchFormField),
     FormCreate,
     FormCancel,
     /// The new-task form surface. Kept behind the form's actionable hit
@@ -1103,6 +1765,10 @@ pub enum OrchHit {
     StartCommit,
     StartCancel,
     DetailClose,
+    /// The inert task/automation detail surface. Its backdrop closes the
+    /// overlay without allowing the click to reach the board behind it.
+    DetailModal,
+    DetailOpenTarget,
 }
 
 /// ORCH shows the selected task beside the fleet at this viewport size.
@@ -1124,6 +1790,7 @@ pub enum OrchMenuItem {
     Jump,
     Details,
     Done,
+    Retry,
     Merge,
     Release,
     CopyId,
@@ -1220,6 +1887,13 @@ pub struct PaneStatus {
     /// one-key answer. Captured **once** when the pane enters Blocked (not every
     /// tick), cleared when it leaves; `None` when the pane isn't blocked.
     pub blocked_hint: Option<String>,
+    /// Raw, non-debounced prompt-surface evidence. Prompt APIs consult this
+    /// separately from the presentation state's quiet-dwell hysteresis.
+    prompt_evidence: detect::PromptEvidence,
+    /// A server-owned launch whose CLI needs a proven composer before prompt
+    /// input. Existing panes retain the legacy permissive fallback when the
+    /// detector has neither ready nor blocked evidence.
+    prompt_evidence_required: bool,
     /// Explainable evidence from the last heuristic classification.
     pub identity_source: &'static str,
     pub state_source: &'static str,
@@ -1254,6 +1928,8 @@ impl PaneStatus {
             detected_bottom: Arc::from(""),
             force_detect: true,
             blocked_hint: None,
+            prompt_evidence: detect::PromptEvidence::Unknown,
+            prompt_evidence_required: false,
             identity_source: "command_fallback",
             state_source: "no_positive_state_evidence",
             rule_priority: None,
@@ -1489,6 +2165,7 @@ pub enum PopupId {
     File,
     Dock,
     Orch,
+    Session,
 }
 
 /// Scroll state for context menus taller than the space they are drawn in.
@@ -1591,6 +2268,13 @@ impl MenuScroll {
     }
 }
 
+pub const WORKTREE_CREATE_PENDING: &str = "__worktree_create_pending__";
+pub const WORKTREE_REMOVE_PENDING: &str = "__worktree_remove_pending__";
+
+fn is_worktree_create_pending(error: &(String, String)) -> bool {
+    error.1 == WORKTREE_CREATE_PENDING
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// One random value for this server lifetime. Harness runtimes from an old
@@ -1641,11 +2325,26 @@ pub struct App {
     /// This server's last local config snapshot. Persistence diffs against this
     /// snapshot so another named server's newer, unrelated fields survive.
     config_baseline: crate::config::Config,
+    config_persistence: config_persistence::ConfigPersistence,
+    io_jobs: io_jobs::IoJobs,
+    worktree_provider_inflight: bool,
+    pending_worktree_provider: Option<crate::worktree::ProviderJob>,
+    ready_worktree_provider: Option<crate::worktree::ProviderResult>,
+    automation_persistence: automation_persistence::AutomationPersistence,
+    file_metadata_inflight: bool,
+    file_metadata_cursor: usize,
+    file_mutation_inflight: bool,
+    pub(crate) session_save_inflight: bool,
     /// Active `key → Cmd` map for prefix mode (defaults + config overrides).
     pub keymap: std::collections::HashMap<String, Cmd>,
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
     /// authoritative unless the user opts a chord into Luvus handling.
     pub direct_keymap: keys::DirectKeymap,
+    /// Process-local pane jump history. Ordinary focus changes append to the
+    /// back stack and clear the forward stack, matching browser/Vim jump-list
+    /// branch semantics. Entries are bounded and are not persisted.
+    focus_history_back: Vec<PaneId>,
+    focus_history_forward: Vec<PaneId>,
     /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
     pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
@@ -1679,6 +2378,32 @@ pub struct App {
     /// New-worktree branch-name prompt (docs/18 WT): `Some(buf)` ⇒ the modal is
     /// open, holding the branch being typed.
     pub worktree_prompt: Option<String>,
+    /// The new-worktree prompt's modal body, set by the renderer each frame so
+    /// a click on the dimmed backdrop around it cancels the prompt (the same
+    /// gesture as the open-worktree list), while a click on the body is inert.
+    pub worktree_prompt_rect: Option<Rect>,
+    /// The open-worktree list modal (docs/18 WT): every checkout of the repo
+    /// from `git worktree list`, openable or focusable. `None` when closed.
+    pub worktree_open: Option<WorktreeOpenList>,
+    /// Bumped on every open and close of the open-worktree list, so a scan
+    /// result carrying an older value is stale and ignored.
+    worktree_open_generation: u64,
+    /// Bumped by every Go to edit, directory change, and picker close, so a
+    /// completion scan carrying an older value is stale and ignored.
+    picker_go_to_generation: u64,
+    /// A Go to listing is still draining on [`IoJobs`], including superseded
+    /// ones whose result will be discarded. Tab must not admit another until
+    /// this clears, or obsolete scans fill the shared eight-job budget.
+    picker_go_to_inflight: bool,
+    /// Tab was pressed while a superseded listing was still draining. `Some`
+    /// keeps the last Tab/BackTab direction so the deferred scan does not
+    /// always cycle forward. When that listing lands, start one scan for the
+    /// field as it is then.
+    picker_go_to_rescan: Option<bool>,
+    /// Clickable targets in the open-worktree list, set by the renderer each
+    /// frame. Rows precede the modal body in hit-test order, so a click lands on
+    /// the row under it and only a click on neither is "outside".
+    pub worktree_open_rects: Vec<(PickerHit, Rect)>,
     /// Active tab-rename modal (docs/28); `None` when closed.
     pub tab_rename: Option<TabRename>,
     /// Active tab context menu; `None` when closed.
@@ -1694,6 +2419,10 @@ pub struct App {
     pub pane_menu: Option<PaneMenu>,
     /// Active AGENTS-list context menu (right-click a row); `None` when closed.
     pub agent_menu: Option<AgentMenu>,
+    /// Context menu on a named-session row.
+    pub session_menu: Option<SessionMenu>,
+    /// A stopped named session awaiting explicit delete confirmation.
+    pub session_delete_confirm: Option<String>,
     /// Live agents pinned to the top of the AGENTS list (right-click → Pin).
     /// Per-session: pane ids are reallocated each run, so this is not persisted;
     /// pruned when a pane closes.
@@ -1716,6 +2445,26 @@ pub struct App {
     /// Left + right sidebars, their widths, and their docks (docs/29). Resolved
     /// from `config.sidebars()` at startup; runtime edits persist via `save_sidebars`.
     pub sidebars: Sidebars,
+    /// Legacy bounded-row hint carried by the version-8 machine client
+    /// capability. The complete Workspaces dock is client-owned whenever
+    /// `client_machine_capable` is true.
+    pub client_shell_dock_rows: u16,
+    /// Legacy version-8 placement hint retained for wire compatibility.
+    pub client_shell_dock_leading: bool,
+    /// Legacy version-8 indentation hint retained for wire compatibility.
+    pub client_shell_dock_indent_workspaces: bool,
+    /// Whether the active display can own remote-machine profile UI. Unlike
+    /// the endpoint row count, this remains true for an empty catalog so the
+    /// first machine can be added through the workspace picker.
+    pub client_machine_capable: bool,
+    pub client_shell_owns_workspaces: bool,
+    /// Remote endpoint frames leave this client-owned top-row slot blank and
+    /// inert. The owner-local client composes the named-session control there.
+    pub client_shell_owns_session_chrome: bool,
+    pub client_sidebar_input: bool,
+    pub client_files_visible: bool,
+    /// Exact complete Workspaces dock owned by the machine-aware thin client.
+    pub client_shell_dock_rect: Option<Rect>,
     /// Module-contributed dock content, keyed by dock id (docs/29, DOCK-4).
     /// Populated by `ui.dock.push`; rendered by the sidebar.
     pub module_docks: std::collections::HashMap<String, ModuleDock>,
@@ -1736,19 +2485,28 @@ pub struct App {
     /// Multi-agent orchestration ledger + path leases (docs/22, ORCH-1/2). Kept
     /// in its own file (`orch.json`), independent of the session snapshot.
     pub orch: crate::orch::OrchState,
-    /// Scroll offset of the orchestration board tab (docs/22, ORCH-7).
+    /// Durable agent automation definitions and bounded run history. The app
+    /// event loop remains their only mutable owner.
+    pub automation: crate::automation::AutomationState,
+    /// Scroll offset of the active orchestration board list (docs/22, ORCH-7).
     pub orch_scroll: usize,
+    /// Active ORCH dashboard projection: concrete tasks or future definitions.
+    pub orch_view: OrchView,
     /// Informational lifecycle selected in the empty-board Flow panel.
     pub orch_flow_mode: crate::orch::TaskWorkerMode,
     /// Selected task row on the board (for keyboard/mouse actions).
     pub orch_cursor: usize,
+    pub orch_automation_cursor: usize,
     /// The in-TUI new-task form, when open (ORCH-7).
     pub orch_form: Option<OrchForm>,
     /// The board's "start worker with…" agent picker, when open.
     pub orch_start: Option<OrchStart>,
-    /// Task whose detail overlay is open on the board (`o`), plus its scroll.
+    /// Task or automation whose detail overlay is open, plus its scroll.
     pub orch_detail: Option<String>,
     pub orch_detail_scroll: usize,
+    /// Next automation occurrences captured when its detail is opened. Keeping
+    /// this bounded preview out of rendering avoids calendar work per frame.
+    pub orch_automation_preview: Vec<u64>,
     /// Last agent chosen in the start picker — the next picker opens on it.
     pub orch_last_agent: usize,
     /// The board's content rect, for mouse-wheel hit-testing.
@@ -1770,6 +2528,8 @@ pub struct App {
     pub mission_scope: crate::mission::MissionScope,
     /// Click targets for the two scope tabs and visible agent rows.
     pub mission_scope_rects: Vec<(crate::mission::MissionScope, Rect)>,
+    /// Read-only automation rows in Mission Control, keyed by stable definition ID.
+    pub mission_automation_rects: Vec<(String, Rect)>,
     pub mission_row_rects: Vec<(usize, Rect)>,
     /// Click target for the explicit Mission Control usage refresh action.
     pub mission_refresh_rect: Option<Rect>,
@@ -1809,9 +2569,26 @@ pub struct App {
     /// finder. The server consumes this once and sends a logical handoff only
     /// to that client.
     pub pending_session_switch: Option<String>,
+    /// One-shot request for the attached thin client to open its owner-local
+    /// machine selector. The server never receives the machine catalog.
+    pub pending_machine_selector: bool,
+    /// One-shot request for the attached machine-aware client to open the
+    /// owner-local profile form selected from the workspace picker.
+    pub pending_machine_create: bool,
+    /// Highest owner-local machine catalog revision waiting to be announced to
+    /// attached machine-aware clients. External mutations wake the app through
+    /// the selected session's owner-only control socket; no polling is needed.
+    pub pending_machine_catalog_revision: Option<u64>,
     /// On-demand named-session menu. Its filesystem/process discovery runs only
     /// while opening or activating this surface, never on an idle timer.
     pub named_session_menu: Option<session_menu::NamedSessionMenu>,
+    /// Last validated projection retained between selector opens. Refresh stays
+    /// user-triggered, but warm opens do not wait for filesystem/socket probes.
+    pub(crate) named_session_cache: Vec<session_menu::NamedSessionRow>,
+    /// Lifecycle work already running off-loop, keyed by validated session name.
+    pub(crate) pending_named_session_actions: HashMap<String, session_menu::NamedSessionAction>,
+    /// Complete top-row interval reserved for the named-session control.
+    pub named_session_slot_rect: Option<Rect>,
     pub named_session_button_rect: Option<Rect>,
     pub named_session_menu_rect: Option<Rect>,
     pub named_session_close_rect: Option<Rect>,
@@ -1885,6 +2662,11 @@ pub struct App {
     cwd_git_hits: HashMap<PaneId, (PathBuf, u8)>,
     /// Resumable agent sessions discovered on disk (for the AGENTS sidebar).
     pub resumable: Vec<crate::agent::SessionInfo>,
+    /// Module-provided AGENTS sidebar titles for live panes. OSC still wins.
+    pub(crate) agent_title_panes: HashMap<PaneId, AgentRowTitle>,
+    /// Module-provided titles for native sessions (live idle fallback and All/history).
+    /// The nested shape permits borrowed, allocation-free lookups while rendering.
+    pub(crate) agent_title_sessions: HashMap<String, HashMap<String, AgentRowTitle>>,
     /// A resumable-session disk scan is running on a worker thread; don't start
     /// another until its `SessionsScanned` result arrives.
     sessions_scan_inflight: bool,
@@ -1894,11 +2676,37 @@ pub struct App {
     pub(crate) proc_commands: HashMap<PaneId, Vec<String>>,
     /// One process scan at a time, same guard as the session scan.
     proc_scan_inflight: bool,
+    /// A one-shot process scan explicitly requested by an API or by the first
+    /// confirmed absence of a bound agent. Unlike PTY dirtiness, this demand
+    /// survives detach and is consumed only by a successful scan.
+    proc_scan_requested: bool,
+    /// Whether the in-flight worker consumed an explicit one-shot demand.
+    proc_scan_demand_inflight: bool,
+    /// Panes whose explicit process request must be represented by the next
+    /// successful snapshot. Keeping the identities avoids treating an older
+    /// in-flight snapshot as satisfying a request for a newly created pane.
+    proc_scan_requested_panes: HashSet<PaneId>,
+    /// Requested panes assigned to the current process snapshot. Requests that
+    /// arrive while it runs join this set and are retried when absent.
+    proc_scan_demand_panes_inflight: HashSet<PaneId>,
+    /// Remaining retries after a demanded worker cannot read the process table
+    /// or its snapshot predates a requested pane. Bounded so a persistent
+    /// platform failure cannot become an idle heartbeat.
+    proc_scan_failure_retries: u8,
     /// Session ids the user removed from the sidebar list (hidden, not deleted).
     pub dismissed_sessions: HashSet<String>,
     /// Throttle for rescanning the agents' on-disk session stores.
     last_sessions_at: Instant,
     last_proc_at: Instant,
+    /// CWD/git follow-up is scheduled from PTY activity, not a 1s heartbeat.
+    runtime_cwd_dirty: bool,
+    /// Ordinary output dirties its tab only. The boolean above remains the
+    /// full-invalidation path for attach, restore, and topology changes.
+    runtime_cwd_dirty_panes: HashSet<PaneId>,
+    /// Attached PTY activity dirties process identity without creating a heartbeat.
+    runtime_proc_dirty: bool,
+    /// Resumable-session disk scans run on attach/demand, not a 4s walk.
+    runtime_sessions_dirty: bool,
     /// Mission Control usage is demand-driven: opening/focusing the dashboard,
     /// changing its scope, or choosing refresh queues one off-loop scan. No
     /// usage reader runs merely because a hidden Mission Control tab exists.
@@ -1945,6 +2753,11 @@ pub struct App {
     pub agents_scroll: usize,
     pub workspaces_area: Rect,
     pub agents_area: Rect,
+    /// Explicit keyboard ownership for WORKSPACES or AGENTS.
+    pub sidebar_focus: Option<SidebarListFocus>,
+    /// Display-order cursors for the two built-in sidebar lists.
+    pub workspace_cursor: usize,
+    pub agent_cursor: usize,
     /// The FILES dock (docs/38): the tree model, its scroll region, and the
     /// clickable rect per visible row (`(row index, rect)`), re-set each frame.
     pub file_tree: crate::files::FileTree,
@@ -2044,6 +2857,12 @@ pub struct App {
     /// AGENTS list filter: `true` shows only live (active) agents; `false`
     /// (the default) also shows the resumable session history.
     pub agents_active_only: bool,
+    /// AGENTS scope: `true` shows only the active workspace's agents and
+    /// resumable sessions; `false` (the default) shows every workspace. This is
+    /// independent of `agents_active_only` — lifecycle and scope are separate
+    /// axes. The chip is hidden while only one workspace is open, but the saved
+    /// choice still scopes resumable history by that workspace's cwd.
+    pub agents_this_workspace: bool,
     /// Last active workspace shown, to auto-reveal it on a programmatic change.
     pub last_active_ws_shown: usize,
     /// Last mouse position, for hover affordances (the session delete ✕).
@@ -2053,6 +2872,10 @@ pub struct App {
     pub menu_scroll: MenuScroll,
     app_tx: Sender<AppEvent>,
     pub last_pane_area: Rect,
+    /// Pixel size of one cell on the interactive display client. `0` means the
+    /// host did not report it; auto-split then uses the documented 2:1 fallback.
+    pub cell_width_px: u16,
+    pub cell_height_px: u16,
     // Hit-test geometry from the last render, for mouse clicks.
     pub pane_rects: Vec<(PaneId, Rect)>,
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
@@ -2096,7 +2919,14 @@ pub struct App {
     pub git_section_rects: Vec<(crate::git::Section, Rect)>,
     /// The All/Active filter toggle in the AGENTS header (`bool` = active_only).
     pub agents_filter_rects: Vec<(bool, Rect)>,
+    /// The "blocked in other workspaces" overflow line, paired with the first
+    /// hidden blocked pane so clicking jumps to an agent the view actually hid.
+    pub agents_elsewhere_rect: Option<(PaneId, Rect)>,
     pub agent_rects: Vec<(PaneId, Rect)>,
+    /// Armed automation placeholders in the AGENTS dock. Their stable IDs open
+    /// details on left click and an automation-safe AGENTS menu on right click
+    /// when no pane exists to receive the live-agent menu.
+    pub automation_rects: Vec<(String, Rect)>,
     /// Resumable-session rows in the sidebar (index into `resumable`).
     pub session_rects: Vec<(usize, Rect)>,
     /// The ✕ delete buttons on hovered resumable rows (index into `resumable`).
@@ -2151,11 +2981,16 @@ pub struct App {
     /// `(previous theme, selection revision)` restores an automatically replaced
     /// active theme only when the user has not selected another theme meanwhile.
     pub(crate) pending_theme_uninstalls: HashMap<String, Option<(String, u64)>>,
+    /// Pending removals waiting for configuration persistence, not worker completion.
+    pub(crate) deferred_theme_uninstalls: Vec<String>,
     pub(crate) theme_selection_revision: u64,
     /// Slider arrows in the modal: (control index, ±1 direction, rect).
     pub settings_arrow_rects: Vec<(usize, i32, Rect)>,
     /// Installed modules (docs/13) and the ring buffer of their command logs.
     pub modules: crate::module::ModuleRegistry,
+    /// Per-server credentials injected only into processes Luvus starts for each
+    /// module. Public API owner fields are accepted only with the matching token.
+    pub(crate) module_tokens: HashMap<String, String>,
     pub module_logs: Vec<crate::module::ModuleCommandLog>,
     /// Live module panes by pane id, untracked automatically on close (MOD-2).
     pub module_panes: HashMap<PaneId, crate::module::ModulePaneRecord>,
@@ -2174,6 +3009,20 @@ pub struct ModuleSettingEdit {
     pub title: String,
     pub buffer: String,
     pub secret: bool,
+}
+
+/// One publisher credential per registered module, valid for this server's
+/// lifetime. Every registered module gets one regardless of its enabled state,
+/// so toggling a module cannot strand a still-running module process with a
+/// stale token. Authorization is enforced per request against `is_runnable()`.
+fn module_tokens_for(
+    modules: &crate::module::ModuleRegistry,
+) -> Result<HashMap<String, String>, String> {
+    modules
+        .modules
+        .iter()
+        .map(|module| crate::terminal::backend::random_id().map(|token| (module.id.clone(), token)))
+        .collect()
 }
 
 fn child_appearance(
@@ -2198,6 +3047,7 @@ impl App {
         let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
+        let agents_this_workspace = config.agents_this_workspace;
         crate::layout::set_gaps(config.layout.col_gap, config.layout.row_gap);
         let theme_registry = crate::theme::ThemeRegistry::load();
         let theme = theme_registry.theme_or_default(&config.theme);
@@ -2209,6 +3059,7 @@ impl App {
         let direct_keymap = keys::build_direct_keymap(&config.direct_keybindings);
         let prefix = keys::PrefixSpec::parse(&config.prefix).unwrap_or_default();
         let modules = crate::module::registry::load();
+        let module_tokens = module_tokens_for(&modules).map_err(anyhow::Error::msg)?;
         let mut bar = crate::bar::BarState::default();
         bar.sync_modules(&modules);
 
@@ -2269,8 +3120,20 @@ impl App {
             catalog,
             config,
             config_baseline,
+            config_persistence: config_persistence::ConfigPersistence::default(),
+            io_jobs: io_jobs::IoJobs::default(),
+            worktree_provider_inflight: false,
+            pending_worktree_provider: None,
+            ready_worktree_provider: None,
+            automation_persistence: automation_persistence::AutomationPersistence::default(),
+            file_metadata_inflight: false,
+            file_metadata_cursor: 0,
+            file_mutation_inflight: false,
+            session_save_inflight: false,
             keymap,
             direct_keymap,
+            focus_history_back: Vec::new(),
+            focus_history_forward: Vec::new(),
             prefix,
             agent_names: HashMap::new(),
             settings: None,
@@ -2285,12 +3148,21 @@ impl App {
             cmd_inspect: None,
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
+            worktree_prompt_rect: None,
+            worktree_open: None,
+            worktree_open_generation: 0,
+            picker_go_to_generation: 0,
+            picker_go_to_inflight: false,
+            picker_go_to_rescan: None,
+            worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
             ws_menu: None,
             worktree_delete: None,
             pane_menu: None,
             agent_menu: None,
+            session_menu: None,
+            session_delete_confirm: None,
             pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
@@ -2300,6 +3172,15 @@ impl App {
             worktree_error: None,
             mode: Mode::Normal,
             sidebars,
+            client_shell_dock_rows: 0,
+            client_shell_dock_leading: false,
+            client_shell_dock_indent_workspaces: false,
+            client_machine_capable: false,
+            client_shell_owns_workspaces: false,
+            client_shell_owns_session_chrome: false,
+            client_sidebar_input: false,
+            client_files_visible: false,
+            client_shell_dock_rect: None,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
             bar,
@@ -2309,13 +3190,17 @@ impl App {
             session_dirty: true,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
+            automation: crate::automation::AutomationState::load(),
             orch_scroll: 0,
+            orch_view: OrchView::Tasks,
             orch_flow_mode: crate::orch::TaskWorkerMode::Worktree,
             orch_cursor: 0,
+            orch_automation_cursor: 0,
             orch_form: None,
             orch_start: None,
             orch_detail: None,
             orch_detail_scroll: 0,
+            orch_automation_preview: Vec::new(),
             orch_last_agent: 0,
             orch_area: Rect::ZERO,
             orch_hits: Vec::new(),
@@ -2325,6 +3210,7 @@ impl App {
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
             mission_scope_rects: Vec::new(),
+            mission_automation_rects: Vec::new(),
             mission_row_rects: Vec::new(),
             mission_refresh_rect: None,
             mission_area: Rect::ZERO,
@@ -2339,7 +3225,13 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            pending_machine_selector: false,
+            pending_machine_create: false,
+            pending_machine_catalog_revision: None,
             named_session_menu: None,
+            named_session_cache: Vec::new(),
+            pending_named_session_actions: HashMap::new(),
+            named_session_slot_rect: None,
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -2366,15 +3258,26 @@ impl App {
             cwd_scan_inflight: false,
             cwd_git_hits: HashMap::new(),
             resumable: Vec::new(),
+            agent_title_panes: HashMap::new(),
+            agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
+            proc_scan_requested: false,
+            proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
+            proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: None,
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
+            runtime_cwd_dirty: false,
+            runtime_cwd_dirty_panes: HashSet::new(),
+            runtime_proc_dirty: false,
+            runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -2395,8 +3298,12 @@ impl App {
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only,
+            agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            sidebar_focus: None,
+            workspace_cursor: 0,
+            agent_cursor: 0,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
             file_tree: {
@@ -2457,6 +3364,8 @@ impl App {
             menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
+            cell_width_px: 0,
+            cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
@@ -2473,7 +3382,9 @@ impl App {
             ws_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
+            agents_elsewhere_rect: None,
             agent_rects: Vec::new(),
+            automation_rects: Vec::new(),
             session_rects: Vec::new(),
             tab_close_rects: Vec::new(),
             new_ws_rect: None,
@@ -2497,9 +3408,11 @@ impl App {
             settings_ctl_rects: Vec::new(),
             settings_theme_remove_rects: Vec::new(),
             pending_theme_uninstalls: HashMap::new(),
+            deferred_theme_uninstalls: Vec::new(),
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
+            module_tokens,
             module_logs: Vec::new(),
             module_panes: HashMap::new(),
             module_startup_done: std::collections::HashSet::new(),
@@ -2509,6 +3422,7 @@ impl App {
         // previous server run, so rebind/clear them (same as `from_snapshot`).
         app.orch_reconcile();
         app.refresh_core_bar_widgets();
+        app.mark_runtime_scans_dirty();
         Ok(app)
     }
 
@@ -2518,6 +3432,7 @@ impl App {
             if let Some(mut app) = App::from_snapshot(snap, app_tx.clone()) {
                 // Kick off the async fetch for any restored git tabs.
                 app.refetch_git_tabs();
+                app.mark_runtime_scans_dirty();
                 return Ok(app);
             }
         }
@@ -2529,6 +3444,7 @@ impl App {
         let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
+        let agents_this_workspace = config.agents_this_workspace;
         let theme_registry = crate::theme::ThemeRegistry::load();
         let theme = theme_registry.theme_or_default(&config.theme);
         let pane_appearance = child_appearance(&theme_registry, &config.theme, &theme, None);
@@ -2538,6 +3454,7 @@ impl App {
         let shell = crate::platform::resolve_shell(&config.shell);
         let history_budget_bytes = config.scrollback_bytes();
         let modules = crate::module::registry::load();
+        let module_tokens = module_tokens_for(&modules).ok()?;
         let mut panes = HashMap::new();
         let mut status = HashMap::new();
         let mut module_panes: HashMap<PaneId, crate::module::ModulePaneRecord> = HashMap::new();
@@ -2684,10 +3601,8 @@ impl App {
                         std::thread::spawn(move || {
                             let result =
                                 crate::diff::git::load_diff(&root, &file, context).map(|diff| {
-                                    crate::diff::LoadedDiff {
-                                        diff,
-                                        reconciled_notes: Vec::new(),
-                                    }
+                                    let diff = std::sync::Arc::new(diff);
+                                    crate::diff::LoadedDiff::prepare(diff, Vec::new())
                                 });
                             let _ = tx.send(crate::event::AppEvent::DiffLoaded {
                                 id,
@@ -2721,7 +3636,7 @@ impl App {
                     // installed + runnable; otherwise it falls back to a shell.
                     let restored = ps.module.as_ref().and_then(|(mid, ep)| {
                         restore_module_pane(
-                            &modules,
+                            (&modules, &module_tokens),
                             mid,
                             ep,
                             id,
@@ -2889,8 +3804,20 @@ impl App {
             catalog,
             config,
             config_baseline,
+            config_persistence: config_persistence::ConfigPersistence::default(),
+            io_jobs: io_jobs::IoJobs::default(),
+            worktree_provider_inflight: false,
+            pending_worktree_provider: None,
+            ready_worktree_provider: None,
+            automation_persistence: automation_persistence::AutomationPersistence::default(),
+            file_metadata_inflight: false,
+            file_metadata_cursor: 0,
+            file_mutation_inflight: false,
+            session_save_inflight: false,
             keymap,
             direct_keymap,
+            focus_history_back: Vec::new(),
+            focus_history_forward: Vec::new(),
             prefix,
             agent_names,
             settings: None,
@@ -2905,12 +3832,21 @@ impl App {
             cmd_inspect: None,
             pane_title_rects: Vec::new(),
             worktree_prompt: None,
+            worktree_prompt_rect: None,
+            worktree_open: None,
+            worktree_open_generation: 0,
+            picker_go_to_generation: 0,
+            picker_go_to_inflight: false,
+            picker_go_to_rescan: None,
+            worktree_open_rects: Vec::new(),
             tab_rename: None,
             tab_menu: None,
             ws_menu: None,
             worktree_delete: None,
             pane_menu: None,
             agent_menu: None,
+            session_menu: None,
+            session_delete_confirm: None,
             pinned_agents: std::collections::HashSet::new(),
             ws_rename: None,
             pane_rename: None,
@@ -2920,6 +3856,15 @@ impl App {
             worktree_error: None,
             mode: Mode::Normal,
             sidebars,
+            client_shell_dock_rows: 0,
+            client_shell_dock_leading: false,
+            client_shell_dock_indent_workspaces: false,
+            client_machine_capable: false,
+            client_shell_owns_workspaces: false,
+            client_shell_owns_session_chrome: false,
+            client_sidebar_input: false,
+            client_files_visible: false,
+            client_shell_dock_rect: None,
             module_docks: std::collections::HashMap::new(),
             module_dock_rects: Vec::new(),
             bar,
@@ -2929,13 +3874,17 @@ impl App {
             session_dirty: false,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
+            automation: crate::automation::AutomationState::load(),
             orch_scroll: 0,
+            orch_view: OrchView::Tasks,
             orch_flow_mode: crate::orch::TaskWorkerMode::Worktree,
             orch_cursor: 0,
+            orch_automation_cursor: 0,
             orch_form: None,
             orch_start: None,
             orch_detail: None,
             orch_detail_scroll: 0,
+            orch_automation_preview: Vec::new(),
             orch_last_agent: 0,
             orch_area: Rect::ZERO,
             orch_hits: Vec::new(),
@@ -2945,6 +3894,7 @@ impl App {
             mission_cursor: 0,
             mission_scope: crate::mission::MissionScope::Workspace,
             mission_scope_rects: Vec::new(),
+            mission_automation_rects: Vec::new(),
             mission_row_rects: Vec::new(),
             mission_refresh_rect: None,
             mission_area: Rect::ZERO,
@@ -2959,7 +3909,13 @@ impl App {
             last_cursor: None,
             detach_requested: false,
             pending_session_switch: None,
+            pending_machine_selector: false,
+            pending_machine_create: false,
+            pending_machine_catalog_revision: None,
             named_session_menu: None,
+            named_session_cache: Vec::new(),
+            pending_named_session_actions: HashMap::new(),
+            named_session_slot_rect: None,
             named_session_button_rect: None,
             named_session_menu_rect: None,
             named_session_close_rect: None,
@@ -2986,15 +3942,26 @@ impl App {
             cwd_scan_inflight: false,
             cwd_git_hits: HashMap::new(),
             resumable: Vec::new(),
+            agent_title_panes: HashMap::new(),
+            agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
             proc_scan_inflight: false,
+            proc_scan_requested: false,
+            proc_scan_demand_inflight: false,
+            proc_scan_requested_panes: HashSet::new(),
+            proc_scan_demand_panes_inflight: HashSet::new(),
+            proc_scan_failure_retries: 0,
             dismissed_sessions: HashSet::new(),
             last_sessions_at: Instant::now(),
             mission_usage_requested: None,
             mission_active_workspace: None,
             usage_scan_inflight: false,
             last_proc_at: Instant::now(),
+            runtime_cwd_dirty: false,
+            runtime_cwd_dirty_panes: HashSet::new(),
+            runtime_proc_dirty: false,
+            runtime_sessions_dirty: false,
             last_detect_at: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
@@ -3015,8 +3982,12 @@ impl App {
             workspaces_scroll: 0,
             agents_scroll: 0,
             agents_active_only,
+            agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            sidebar_focus: None,
+            workspace_cursor: 0,
+            agent_cursor: 0,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
             file_tree: {
@@ -3077,6 +4048,8 @@ impl App {
             menu_scroll: MenuScroll::default(),
             app_tx,
             last_pane_area: Rect::ZERO,
+            cell_width_px: 0,
+            cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             scroll_pane: None,
@@ -3093,7 +4066,9 @@ impl App {
             ws_rects: Vec::new(),
             git_section_rects: Vec::new(),
             agents_filter_rects: Vec::new(),
+            agents_elsewhere_rect: None,
             agent_rects: Vec::new(),
+            automation_rects: Vec::new(),
             session_rects: Vec::new(),
             tab_close_rects: Vec::new(),
             new_ws_rect: None,
@@ -3117,9 +4092,11 @@ impl App {
             settings_ctl_rects: Vec::new(),
             settings_theme_remove_rects: Vec::new(),
             pending_theme_uninstalls: HashMap::new(),
+            deferred_theme_uninstalls: Vec::new(),
             theme_selection_revision: 0,
             settings_arrow_rects: Vec::new(),
             modules,
+            module_tokens,
             module_logs: Vec::new(),
             module_panes,
             module_startup_done: std::collections::HashSet::new(),
@@ -3196,32 +4173,14 @@ impl App {
     /// Write the current sidebar layout into `config` and persist it, mirroring
     /// the legacy `sidebar_width` from the left for safe downgrade (docs/29).
     pub fn save_sidebars(&mut self) {
+        // Machine-aware input operates on the originating client's layout.
+        // The IPC owner captures it after dispatch; never persist it remotely.
+        if self.client_sidebar_input {
+            return;
+        }
         self.config.sidebars = Some(self.sidebars.to_config());
         self.config.sidebar_width = self.sidebars.left.width;
         self.persist_config();
-    }
-
-    /// Merge only this server's local changes into the shared home-level config.
-    /// A failed best-effort write keeps the old baseline so the next mutation
-    /// retries every unsaved field.
-    pub(crate) fn persist_config(&mut self) {
-        if crate::config::save_changes(&self.config_baseline, &self.config) {
-            self.config_baseline = self.config.clone();
-        }
-    }
-
-    /// Persist local changes while forcing an explicit user/API patch even when
-    /// this server already held the requested value in memory.
-    pub(crate) fn persist_config_patch(&mut self, patch: &serde_json::Value) {
-        if crate::config::save_changes_with_patch(&self.config_baseline, &self.config, Some(patch))
-        {
-            self.config_baseline = self.config.clone();
-        }
-    }
-
-    /// Adopt an externally reloaded config without writing it back to disk.
-    pub(crate) fn reset_config_baseline(&mut self) {
-        self.config_baseline = self.config.clone();
     }
 
     /// Apply the AGENTS All / Active projection without performing I/O. This is
@@ -3233,6 +4192,7 @@ impl App {
         }
         self.agents_active_only = active_only;
         self.agents_scroll = 0;
+        self.agent_cursor = 0;
         true
     }
 
@@ -3246,6 +4206,344 @@ impl App {
             self.persist_config();
         }
         runtime_changed || config_changed
+    }
+
+    /// Whether the AGENTS dock is scoped to the active workspace. Rendering may
+    /// hide the chip when only one workspace is open, but the persisted choice
+    /// still applies to resumable history: lifecycle and scope preferences do
+    /// not silently change as workspaces open or close.
+    pub fn agents_scope_active(&self) -> bool {
+        self.agents_this_workspace
+    }
+
+    /// Apply the AGENTS scope projection without performing I/O. Mirrors
+    /// `apply_agents_filter` so config reloads and direct clicks agree.
+    pub(crate) fn apply_agents_scope(&mut self, this_workspace: bool) -> bool {
+        if self.agents_this_workspace == this_workspace {
+            return false;
+        }
+        self.agents_this_workspace = this_workspace;
+        self.agents_scroll = 0;
+        self.agent_cursor = 0;
+        true
+    }
+
+    /// Persist a direct scope selection. Same infrequent-write contract as
+    /// `set_agents_filter`.
+    pub(crate) fn set_agents_scope(&mut self, this_workspace: bool) -> bool {
+        let runtime_changed = self.apply_agents_scope(this_workspace);
+        let config_changed = self.config.agents_this_workspace != this_workspace;
+        if config_changed {
+            self.config.agents_this_workspace = this_workspace;
+            self.persist_config();
+        }
+        runtime_changed || config_changed
+    }
+
+    /// Mount and reveal a built-in dock so an explicit focus command is always
+    /// useful, including after the user has hidden or unmounted that dock.
+    fn reveal_builtin_dock(&mut self, kind: DockKind) -> bool {
+        if self.sidebars.side_of(&kind).is_none() {
+            let target = if self.sidebars.has_room(Side::Left) {
+                Side::Left
+            } else {
+                Side::Right
+            };
+            if !self.move_dock(&kind, target) {
+                return false;
+            }
+        }
+        let Some(side) = self.sidebars.side_of(&kind) else {
+            return false;
+        };
+        self.sidebars.get_mut(side).visible = true;
+        true
+    }
+
+    /// Give normal-mode keyboard input to the WORKSPACES list without moving
+    /// terminal-pane focus. Esc/q returns input to the same pane.
+    pub fn focus_workspaces_dock(&mut self) {
+        if !self.reveal_builtin_dock(DockKind::Workspaces) {
+            return;
+        }
+        self.files_focused = false;
+        self.sidebar_focus = Some(SidebarListFocus::Workspaces);
+        self.workspace_cursor = self.workspace_display_position(self.active_ws).unwrap_or(0);
+    }
+
+    /// Give normal-mode keyboard input to the AGENTS list. The cursor starts at
+    /// the currently focused live agent when that row is visible.
+    pub fn focus_agents_dock(&mut self) {
+        if !self.reveal_builtin_dock(DockKind::Agents) {
+            return;
+        }
+        self.files_focused = false;
+        self.sidebar_focus = Some(SidebarListFocus::Agents);
+        let current = self
+            .workspaces
+            .get(self.active_ws)
+            .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+            .map(|tab| tab.layout.focus);
+        let rows = self.agent_dock_targets();
+        self.agent_cursor = current
+            .and_then(|pane| {
+                rows.iter()
+                    .position(|target| *target == AgentDockTarget::Live(pane))
+            })
+            .unwrap_or_else(|| self.agent_cursor.min(rows.len().saturating_sub(1)));
+    }
+
+    /// Build the AGENTS rows in the same order as the renderer. This runs only
+    /// for explicit keyboard input, not on the app loop or detection path.
+    pub fn agent_dock_targets(&self) -> Vec<AgentDockTarget> {
+        let scoped = self.agents_scope_active();
+        let mut live = Vec::new();
+        let mut blocked_elsewhere = Vec::new();
+        for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
+            let visible = !scoped || workspace_index == self.active_ws;
+            for tab in &workspace.tabs {
+                for pane in tab.layout.leaves() {
+                    let Some(status) = self.status.get(&pane) else {
+                        continue;
+                    };
+                    if !self.manifests.is_agent(&status.agent) && status.agent_session.is_none() {
+                        continue;
+                    }
+                    if visible {
+                        live.push(pane);
+                    } else if status.state == State::Blocked {
+                        blocked_elsewhere.push(pane);
+                    }
+                }
+            }
+        }
+        if !self.pinned_agents.is_empty() {
+            live.sort_by_key(|pane| !self.pinned_agents.contains(pane));
+        }
+
+        let mut rows: Vec<AgentDockTarget> = live.into_iter().map(AgentDockTarget::Live).collect();
+        let mut scheduled: Vec<(u64, String)> = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| {
+                if !automation.enabled {
+                    return None;
+                }
+                let (workspace_index, _) = self
+                    .workspaces
+                    .iter()
+                    .enumerate()
+                    .find(|(_, workspace)| workspace.id == automation.task.workspace_id)?;
+                if scoped && workspace_index != self.active_ws {
+                    return None;
+                }
+                let live_run = self
+                    .automation
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| run.automation_id == automation.id && run.status.is_live());
+                let pane_backed = live_run
+                    .and_then(|run| run.task_id.as_deref())
+                    .and_then(|task| self.orch.task(task))
+                    .and_then(|task| task.assignee)
+                    .is_some_and(|pane| self.panes.contains_key(&PaneId(pane)));
+                if pane_backed
+                    || live_run.is_some_and(|run| {
+                        matches!(
+                            run.status,
+                            crate::automation::RunStatus::Running
+                                | crate::automation::RunStatus::Review
+                        )
+                    })
+                {
+                    return None;
+                }
+                let deadline = live_run
+                    .map(|run| run.scheduled_at)
+                    .or(automation.next_run_at)?;
+                Some((deadline, automation.id.clone()))
+            })
+            .collect();
+        scheduled.sort_by_key(|item| item.0);
+        rows.extend(
+            scheduled
+                .into_iter()
+                .map(|(_, id)| AgentDockTarget::Automation(id)),
+        );
+
+        if !self.agents_active_only {
+            let session_owner = |cwd: &std::path::Path| {
+                self.workspaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, workspace)| crate::platform::is_subpath(cwd, &workspace.cwd))
+                    .max_by_key(|(_, workspace)| workspace.cwd.as_os_str().len())
+                    .map(|(workspace_index, _)| workspace_index)
+            };
+            rows.extend(
+                self.resumable
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, session)| {
+                        !scoped || session_owner(&session.cwd) == Some(self.active_ws)
+                    })
+                    .map(|(index, _)| AgentDockTarget::Session(index)),
+            );
+        }
+        if scoped {
+            if let Some(pane) = blocked_elsewhere.first().copied() {
+                rows.push(AgentDockTarget::Elsewhere(pane));
+            }
+        }
+        rows
+    }
+
+    fn move_sidebar_cursor(cursor: &mut usize, len: usize, delta: isize) {
+        if len == 0 {
+            *cursor = 0;
+            return;
+        }
+        *cursor = cursor
+            .saturating_add_signed(delta)
+            .min(len.saturating_sub(1));
+    }
+
+    /// Keyboard navigation for WORKSPACES, mirroring FILES and DIFF.
+    pub fn handle_workspaces_key(&mut self, key: KeyEvent) -> bool {
+        let order = self.workspace_display_order();
+        let page = (usize::from(self.workspaces_area.height) / 2).max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), 1)
+            }
+            KeyCode::PageUp => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -page)
+            }
+            KeyCode::PageDown => {
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), page)
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.workspace_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => {
+                self.workspace_cursor = order.len().saturating_sub(1)
+            }
+            KeyCode::Enter => {
+                if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
+                    let tab = self.workspaces[workspace].active_tab;
+                    let pane = self.workspaces[workspace].tabs[tab].layout.focus;
+                    self.focus_location(workspace, tab, pane);
+                    self.sidebar_focus = None;
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
+                    let anchor = self
+                        .ws_rects
+                        .iter()
+                        .find(|(index, _)| *index == workspace)
+                        .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                        .unwrap_or((
+                            self.workspaces_area.x.saturating_add(2),
+                            self.workspaces_area.y,
+                        ));
+                    self.open_ws_menu(workspace, anchor.0, anchor.1);
+                    if let Some(menu) = self.ws_menu.as_mut() {
+                        menu.selected = Some(0);
+                    }
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Keyboard navigation for AGENTS. `f` changes All/Active and `s` changes
+    /// workspace scope; row activation matches the existing mouse behavior.
+    pub fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
+        let rows = self.agent_dock_targets();
+        let page = (usize::from(self.agents_area.height) / 2).max(1) as isize;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -1)
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), 1)
+            }
+            KeyCode::PageUp => Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -page),
+            KeyCode::PageDown => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), page)
+            }
+            KeyCode::Home | KeyCode::Char('g') => self.agent_cursor = 0,
+            KeyCode::End | KeyCode::Char('G') => self.agent_cursor = rows.len().saturating_sub(1),
+            KeyCode::Char('f') => {
+                self.set_agents_filter(!self.agents_active_only);
+                self.agent_cursor = 0;
+            }
+            KeyCode::Char('s') => {
+                self.set_agents_scope(!self.agents_this_workspace);
+                self.agent_cursor = 0;
+            }
+            KeyCode::Enter => {
+                if let Some(target) = rows.get(self.agent_cursor).cloned() {
+                    self.sidebar_focus = None;
+                    self.activate_agent_dock_target(target);
+                }
+            }
+            KeyCode::Char('a') => {
+                if let Some(target) = rows.get(self.agent_cursor).cloned() {
+                    self.open_agent_dock_action(target);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn activate_agent_dock_target(&mut self, target: AgentDockTarget) {
+        match target {
+            AgentDockTarget::Live(pane) | AgentDockTarget::Elsewhere(pane) => {
+                self.focus_pane_global(pane)
+            }
+            AgentDockTarget::Automation(id) => self.open_automation_detail(&id),
+            AgentDockTarget::Session(index) => self.resume_session(index),
+        }
+    }
+
+    fn open_agent_dock_action(&mut self, target: AgentDockTarget) {
+        match target {
+            AgentDockTarget::Live(pane) => {
+                let anchor = self
+                    .agent_rects
+                    .iter()
+                    .find(|(id, _)| *id == pane)
+                    .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                    .unwrap_or((self.agents_area.x.saturating_add(2), self.agents_area.y));
+                self.open_agent_menu(AgentTarget::Live(pane), anchor.0, anchor.1);
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(0);
+                }
+            }
+            AgentDockTarget::Session(index) => {
+                let anchor = self
+                    .session_rects
+                    .iter()
+                    .find(|(session, _)| *session == index)
+                    .map(|(_, rect)| (rect.x.saturating_add(2), rect.y))
+                    .unwrap_or((self.agents_area.x.saturating_add(2), self.agents_area.y));
+                self.open_agent_menu(AgentTarget::Session(index), anchor.0, anchor.1);
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(0);
+                }
+            }
+            AgentDockTarget::Automation(id) => self.open_automation_detail(&id),
+            AgentDockTarget::Elsewhere(pane) => self.focus_pane_global(pane),
+        }
     }
 
     /// Every mounted dock in display order: left sidebar top→bottom, then right.
@@ -3295,6 +4593,13 @@ impl App {
     /// nowhere, without dropping any module content cache (it stays in the
     /// registry and can be re-placed). Persists.
     pub fn unmount_dock(&mut self, kind: &DockKind) {
+        if matches!(
+            (self.sidebar_focus, kind),
+            (Some(SidebarListFocus::Workspaces), DockKind::Workspaces)
+                | (Some(SidebarListFocus::Agents), DockKind::Agents)
+        ) {
+            self.sidebar_focus = None;
+        }
         for side in [Side::Left, Side::Right] {
             self.sidebars.get_mut(side).remove_dock(kind);
         }
@@ -3442,7 +4747,7 @@ impl App {
     /// active tab from output owned by another tab or workspace. The server
     /// uses this to keep focused rendering responsive without repeatedly
     /// diffing an unchanged UI for background-only bursts.
-    pub fn rearm_pty_notify_by_visibility(&self) -> (bool, bool) {
+    pub fn rearm_pty_notify_by_visibility(&self) -> (bool, bool, bool) {
         let layout = self.workspaces.get(self.active_ws).and_then(|workspace| {
             workspace
                 .tabs
@@ -3451,6 +4756,7 @@ impl App {
         });
         let mut visible = false;
         let mut background = false;
+        let mut title_changed = false;
         for (id, pane) in &self.panes {
             if !pane.take_data_pending() {
                 continue;
@@ -3459,14 +4765,30 @@ impl App {
                 visible = true;
             } else {
                 background = true;
+                title_changed |= self.hidden_title_changed(*id);
             }
         }
-        (visible, background)
+        (visible, background, title_changed)
+    }
+
+    pub(crate) fn hidden_title_changed(&self, id: PaneId) -> bool {
+        self.config.layout.agent_title
+            && self.is_agent_pane(id)
+            && self
+                .panes
+                .get(&id)
+                .is_some_and(|pane| pane.take_title_change())
     }
 
     /// Whether any PTY reader is currently coalescing an output notification.
     pub fn has_pending_pty_output(&self) -> bool {
         self.panes.values().any(|pane| pane.has_data_pending())
+    }
+
+    pub(crate) fn has_history_maintenance(&self) -> bool {
+        self.panes
+            .values()
+            .any(|pane| pane.has_history_maintenance())
     }
 
     /// Whether a pane is rendered in the active tab.
@@ -3721,6 +5043,78 @@ impl App {
         let _ = self.split_pane(pane, axis, true);
     }
 
+    /// Split the focused pane along its longer side.
+    fn split_auto(&mut self) {
+        let pane = self.layout().focus;
+        let axis = self.auto_split_axis_for(pane);
+        let _ = self.split_pane(pane, axis, true);
+    }
+
+    /// Has an interactive client painted a usable pane area yet? Automatic splits
+    /// only trust reported cell geometry once one has; before that the square
+    /// logical area keeps the historical left/right default.
+    fn has_painted_area(&self) -> bool {
+        self.last_pane_area.width > 1 && self.last_pane_area.height > 1
+    }
+
+    /// Geometry used when choosing an automatic split. Prefer the last rendered
+    /// pane area so a live client decides; fall back to the square logical area
+    /// used by headless topology queries.
+    fn split_area(&self) -> Rect {
+        if self.has_painted_area() {
+            self.last_pane_area
+        } else {
+            crate::api::topology::logical_area()
+        }
+    }
+
+    pub(crate) fn set_client_cell_pixels(&mut self, width: u16, height: u16) {
+        self.cell_width_px = width;
+        self.cell_height_px = height;
+    }
+
+    fn painted_cell_aspect(&self) -> f32 {
+        if self.cell_width_px > 0 && self.cell_height_px > 0 {
+            f32::from(self.cell_height_px) / f32::from(self.cell_width_px)
+        } else {
+            crate::layout::CELL_ASPECT_HEIGHT_OVER_WIDTH
+        }
+    }
+
+    /// Axis that cuts the longer physical side of `pane` in its current tab.
+    /// Painted clients use reported cell pixels when available, else the
+    /// documented 2:1 fallback. The square logical area used before any client
+    /// has painted keeps the historical left/right split.
+    fn auto_split_axis_for(&self, pane: PaneId) -> Axis {
+        let painted = self.has_painted_area();
+        let area = self.split_area();
+        let rect = self
+            .pane_location(pane)
+            .and_then(|(workspace, tab)| {
+                self.workspaces[workspace].tabs[tab]
+                    .layout
+                    .pane_rect(area, pane)
+            })
+            .unwrap_or(area);
+        if painted {
+            crate::layout::auto_split_axis_with_cell_aspect(
+                rect.width,
+                rect.height,
+                self.painted_cell_aspect(),
+            )
+        } else {
+            crate::layout::auto_split_axis(rect.width, rect.height)
+        }
+    }
+
+    /// Attach a newly allocated leaf beside the focused pane, choosing the split
+    /// axis from that pane's current aspect ratio.
+    fn split_focused_auto(&mut self, new_id: PaneId) {
+        let focus = self.layout().focus;
+        let axis = self.auto_split_axis_for(focus);
+        self.layout_mut().split_focused(axis, new_id);
+    }
+
     /// Spawn and attach a sibling beside `target`, preserving inactive view state
     /// when the caller requests a background operation.
     fn spawn_and_attach_new_pane(
@@ -3733,6 +5127,7 @@ impl App {
         spawn: impl FnOnce(&mut Self) -> Option<PaneId>,
     ) -> Option<PaneId> {
         let previous_zoom = self.zoomed;
+        let caller_focus = self.layout().focus;
         let previous_target_focus = self.workspaces[workspace].tabs[tab].layout.focus;
         let new_id = spawn(self)?;
         {
@@ -3744,6 +5139,10 @@ impl App {
             }
         }
         if focus {
+            if caller_focus != new_id {
+                Self::push_focus_history(&mut self.focus_history_back, caller_focus);
+                self.focus_history_forward.clear();
+            }
             self.active_ws = workspace;
             self.workspaces[workspace].active_tab = tab;
             self.scroll_pane = None;
@@ -3954,6 +5353,23 @@ impl App {
     /// folder with no error anywhere — indistinguishable from luvus ignoring
     /// them. A toast is raised here so every caller reports it the same way.
     pub fn create_workspace_at(&mut self, cwd: PathBuf) -> bool {
+        self.create_workspace_at_with_focus(cwd, true)
+    }
+
+    /// Open a static workspace while optionally preserving the current selection.
+    ///
+    /// Automatic attach-open uses `focus = false`: the new workspace must exist in
+    /// the sidebar, but attaching another client must not move every client away
+    /// from the workspace the server already had selected. Remember the selection
+    /// by stable ID so this stays correct if workspace ordering changes later.
+    fn create_workspace_at_with_focus(&mut self, cwd: PathBuf, focus: bool) -> bool {
+        let previous_selection = if focus {
+            None
+        } else {
+            self.workspaces
+                .get(self.active_ws)
+                .map(|ws| (ws.id.clone(), self.zoomed))
+        };
         let name = ws_name(&cwd);
         let branch = git_branch(&cwd);
         let Some(id) = self.spawn_into(cwd.clone()) else {
@@ -3983,6 +5399,16 @@ impl App {
             crate::logging::EventKind::WorkspaceOpen,
             &[crate::logging::Field::WorkspaceIndex(ws as u64)],
         );
+        if let Some((previous_active_id, previous_zoomed)) = previous_selection {
+            if let Some(previous_active) = self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == previous_active_id)
+            {
+                self.active_ws = previous_active;
+                self.zoomed = previous_zoomed;
+            }
+        }
         true
     }
 
@@ -4198,6 +5624,53 @@ impl App {
         if !crate::git::local::is_repo(repo) {
             return Err("not a git repository".into());
         }
+        let ready_matches = matches!(
+            self.ready_worktree_provider.as_ref(),
+            Some(crate::worktree::ProviderResult::Created(ready))
+                if ready.matches(repo, branch)
+        );
+        if ready_matches {
+            let Some(crate::worktree::ProviderResult::Created(ready)) =
+                self.ready_worktree_provider.take()
+            else {
+                unreachable!("matched created worktree result");
+            };
+            if self.create_workspace_at(ready.path.clone()) {
+                return Ok(ready.path);
+            }
+            if !ready.worktree_created {
+                return Err("provider returned a worktree whose workspace did not open".into());
+            }
+            let mut cleanup = crate::git::local::worktree_remove_force(repo, &ready.path);
+            if cleanup.is_ok() && ready.branch_created {
+                cleanup = crate::git::local::branch_delete_force(repo, branch);
+            }
+            let detail = cleanup
+                .err()
+                .map(|error| format!("; cleanup failed: {error}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "worktree created but its workspace did not open{detail}"
+            ));
+        }
+        if self.ready_worktree_provider.is_some() {
+            self.discard_ready_worktree();
+            return Err("worktree target changed while the provider was running".into());
+        }
+        if let Some(job) = crate::worktree::module_job(
+            &self.config.worktree,
+            &self.modules,
+            &self.module_tokens,
+            crate::module::context::build(self, "worktree.provider"),
+            repo,
+            branch,
+        )? {
+            if self.worktree_provider_inflight || self.pending_worktree_provider.is_some() {
+                return Err("a worktree creation is already pending".into());
+            }
+            self.pending_worktree_provider = Some(job);
+            return Err(WORKTREE_CREATE_PENDING.into());
+        }
         // Nest under the **main** worktree's name, so every checkout of one repo
         // groups under a single folder even when you branch off another worktree.
         let base = worktrees_dir_for(repo);
@@ -4211,9 +5684,174 @@ impl App {
             path = base.join(format!("{slug}-{n}"));
             n += 1;
         }
-        crate::git::local::worktree_add(repo, &path, branch)?;
+        let path = crate::worktree::create_git(repo, &path, branch)?;
         self.create_workspace_at(path.clone());
         Ok(path)
+    }
+
+    pub(crate) fn remove_worktree_explicit(
+        &mut self,
+        repo: &std::path::Path,
+        path: &std::path::Path,
+        force: bool,
+    ) -> Result<(), String> {
+        let ready_matches = matches!(
+            self.ready_worktree_provider.as_ref(),
+            Some(crate::worktree::ProviderResult::Removed(ready))
+                if crate::platform::same_path(ready, path)
+        );
+        if ready_matches {
+            self.ready_worktree_provider.take();
+            self.finish_explicit_worktree_remove(path);
+            return Ok(());
+        }
+        if self.ready_worktree_provider.is_some() {
+            self.discard_ready_worktree();
+            return Err("worktree target changed while the provider was running".into());
+        }
+        let worktrees = crate::git::local::worktrees(repo)?;
+        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let target = worktrees.iter().find(|worktree| {
+            !worktree.is_main
+                && std::fs::canonicalize(&worktree.path)
+                    .map(|candidate| crate::platform::same_path(&candidate, &canonical_path))
+                    .unwrap_or(false)
+        });
+        let Some(target) = target else {
+            return Err("worktree removal target is not a linked worktree".into());
+        };
+        if let Some(job) = crate::worktree::module_remove_job(
+            &self.config.worktree,
+            &self.modules,
+            &self.module_tokens,
+            crate::module::context::build(self, "worktree.provider.remove"),
+            crate::worktree::RemoveRequest {
+                repo: repo.to_path_buf(),
+                path: path.to_path_buf(),
+                branch: target.branch.clone(),
+                force,
+            },
+        )? {
+            if self.worktree_provider_inflight || self.pending_worktree_provider.is_some() {
+                return Err("a worktree provider operation is already pending".into());
+            }
+            self.pending_worktree_provider = Some(job);
+            return Err(WORKTREE_REMOVE_PENDING.into());
+        }
+        if force {
+            crate::git::local::worktree_remove_force(repo, path)?;
+            if path.exists() {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        } else {
+            crate::git::local::worktree_remove(repo, path)?;
+        }
+        self.finish_explicit_worktree_remove(path);
+        Ok(())
+    }
+
+    fn finish_explicit_worktree_remove(&mut self, path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            if parent.starts_with(crate::persist::config_dir().join("worktrees")) {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+        if let Some(index) = self
+            .workspaces
+            .iter()
+            .position(|workspace| crate::platform::same_path(&workspace.cwd, path))
+        {
+            self.close_workspace(index);
+        }
+    }
+
+    fn schedule_pending_worktree_remove(
+        &mut self,
+        finish: impl FnOnce(&mut App, Result<(), String>) -> bool + Send + 'static,
+    ) -> Result<(), String> {
+        self.schedule_pending_worktree_provider(crate::worktree::ProviderKind::Remove, finish)
+    }
+
+    fn ready_created_worktree(&self) -> Option<&crate::worktree::CreatedWorktree> {
+        match self.ready_worktree_provider.as_ref() {
+            Some(crate::worktree::ProviderResult::Created(ready)) => Some(ready),
+            _ => None,
+        }
+    }
+
+    fn discard_ready_worktree(&mut self) {
+        let Some(ready) = self.ready_worktree_provider.take() else {
+            return;
+        };
+        let crate::worktree::ProviderResult::Created(ready) = ready else {
+            return;
+        };
+        if !ready.worktree_created {
+            return;
+        }
+        let mut cleanup = crate::git::local::worktree_remove_force(&ready.repo, &ready.path);
+        if cleanup.is_ok() && ready.branch_created {
+            cleanup = crate::git::local::branch_delete_force(&ready.repo, &ready.branch);
+        }
+        if let Err(error) = cleanup {
+            self.show_toast(format!("worktree cleanup failed: {error}"));
+        }
+    }
+
+    fn schedule_pending_worktree(
+        &mut self,
+        finish: impl FnOnce(&mut App, Result<(), String>) -> bool + Send + 'static,
+    ) -> Result<(), String> {
+        self.schedule_pending_worktree_provider(crate::worktree::ProviderKind::Create, finish)
+    }
+
+    fn schedule_pending_worktree_provider(
+        &mut self,
+        expected: crate::worktree::ProviderKind,
+        finish: impl FnOnce(&mut App, Result<(), String>) -> bool + Send + 'static,
+    ) -> Result<(), String> {
+        let job = self
+            .pending_worktree_provider
+            .take()
+            .ok_or_else(|| "worktree provider did not prepare a job".to_string())?;
+        let kind = job.kind();
+        if kind != expected {
+            return Err("worktree provider prepared the wrong operation".into());
+        }
+        self.worktree_provider_inflight = true;
+        self.io_jobs
+            .submit_parallel(self.app_tx.clone(), move |cancelled| {
+                let result = job.run(&cancelled);
+                Box::new(move |app| {
+                    app.worktree_provider_inflight = false;
+                    let result = result.and_then(|ready| {
+                        let matches = matches!(
+                            (&ready, kind),
+                            (
+                                crate::worktree::ProviderResult::Created(_),
+                                crate::worktree::ProviderKind::Create
+                            ) | (
+                                crate::worktree::ProviderResult::Removed(_),
+                                crate::worktree::ProviderKind::Remove
+                            )
+                        );
+                        if !matches {
+                            return Err(
+                                "worktree provider returned the wrong operation result".into()
+                            );
+                        }
+                        app.ready_worktree_provider = Some(ready);
+                        Ok(())
+                    });
+                    let changed = finish(app, result);
+                    app.start_pending_automation_runs(crate::automation::unix_now());
+                    changed
+                })
+            })
+            .inspect_err(|_| {
+                self.worktree_provider_inflight = false;
+            })
+            .map_err(str::to_string)
     }
 
     /// Open the new-worktree branch prompt (`Ctrl+Space G`) for the active workspace,
@@ -4234,7 +5872,12 @@ impl App {
             if tab.is_renameable() {
                 let buffer = tab.name.clone().unwrap_or_default();
                 if let Some(target) = self.tab_menu_target(workspace, index) {
-                    self.tab_rename = Some(TabRename { target, buffer });
+                    let cursor = buffer.chars().count();
+                    self.tab_rename = Some(TabRename {
+                        target,
+                        buffer,
+                        cursor,
+                    });
                 }
             }
         }
@@ -4255,19 +5898,11 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.tab_rename.as_mut() {
-                    r.buffer.pop();
+                    line_edit::edit_line(&mut r.buffer, &mut r.cursor, key, TAB_NAME_MAX, |_| true);
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.tab_rename.as_mut() {
-                    if r.buffer.chars().count() < TAB_NAME_MAX {
-                        r.buffer.push(c);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -4477,7 +6112,9 @@ impl App {
                 can_move_down,
                 swap_targets,
                 swap_open: false,
+                swap_selected: None,
                 swap_rects: Vec::new(),
+                selected: None,
                 module_actions: self.module_menu_actions("workspace"),
             });
         }
@@ -4536,6 +6173,7 @@ impl App {
             items.push(WsMenuItem::SwapWith);
         }
         items.push(pin);
+        items.push(WsMenuItem::TogglePath);
         if is_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
@@ -4615,7 +6253,7 @@ impl App {
     /// The AGENTS-list context-menu items for `target`, plus module actions
     /// declaring `contexts = ["agent"]`.
     pub fn agent_menu_items(&self, target: AgentTarget) -> Vec<AgentMenuItem> {
-        let mut items = AgentMenu::items_for(target);
+        let mut items = AgentMenu::items_for(target.clone());
         // A live agent can be pinned to the top of the AGENTS list, below its
         // Rename/Close actions (per-session, since pane ids are reallocated).
         if let AgentTarget::Live(id) = target {
@@ -4625,6 +6263,9 @@ impl App {
                 AgentMenuItem::Pin
             });
         }
+        items.push(AgentMenuItem::TogglePath);
+        items.push(AgentMenuItem::Divider);
+        items.push(AgentMenuItem::ToggleWorkspaceScope);
         let extras = self
             .agent_menu
             .as_ref()
@@ -4714,6 +6355,17 @@ impl App {
             WsMenuItem::Pin | WsMenuItem::Unpin => {
                 let _ = self.set_workspace_pinned(index, item == WsMenuItem::Pin);
             }
+            WsMenuItem::TogglePath => {
+                self.config.layout.workspace_paths = !self.config.layout.workspace_paths;
+                // A machine-aware client owns one combined Local/Machines
+                // Workspaces shell. Its per-client state is captured by the
+                // server after input dispatch and broadcast to every endpoint;
+                // do not leak that display preference into one server's
+                // persistent configuration.
+                if !self.client_sidebar_input {
+                    self.persist_config();
+                }
+            }
             // The right-clicked node, which needn't be the focused one.
             WsMenuItem::Module(i) => {
                 if let Some(a) = actions.get(i).cloned() {
@@ -4731,12 +6383,11 @@ impl App {
                     self.worktree_error = None;
                 }
             }
+            // No repo check here: it would run git on the loop, and the worker
+            // reports "not a git repository" in the modal anyway.
             WsMenuItem::OpenWorktree => {
-                if let Some(cwd) = cwd.filter(|p| crate::git::local::is_repo(p)) {
-                    // Land in this repo's worktrees folder so its checkouts list.
-                    let wt = worktrees_dir_for(&cwd);
-                    let start = if wt.is_dir() { wt } else { cwd };
-                    self.open_folder_picker_at(start);
+                if let Some(cwd) = cwd {
+                    self.open_worktree_list(&cwd);
                 }
             }
             // Both switch to the node first, then open (or focus) its dashboard.
@@ -4794,15 +6445,25 @@ impl App {
             self.show_toast("not a worktree");
             return;
         };
-        match crate::git::local::worktree_remove_force(&repo, &path) {
-            Ok(()) => {
-                if path.exists() {
-                    let _ = std::fs::remove_dir_all(&path);
+        match self.remove_worktree_explicit(&repo, &path, true) {
+            Ok(()) => self.show_toast("worktree deleted"),
+            Err(error) if error == WORKTREE_REMOVE_PENDING => {
+                self.show_toast("deleting worktree…");
+                let scheduled = self.schedule_pending_worktree_remove(move |app, result| {
+                    match result {
+                        Ok(()) => match app.remove_worktree_explicit(&repo, &path, true) {
+                            Ok(()) => app.show_toast("worktree deleted"),
+                            Err(error) => app.show_toast(format!("delete failed: {error}")),
+                        },
+                        Err(error) => app.show_toast(format!("delete failed: {error}")),
+                    }
+                    true
+                });
+                if let Err(error) = scheduled {
+                    self.show_toast(format!("delete failed: {error}"));
                 }
-                self.close_workspace(index);
-                self.show_toast("worktree deleted");
             }
-            Err(e) => self.show_toast(format!("delete failed: {e}")),
+            Err(error) => self.show_toast(format!("delete failed: {error}")),
         }
     }
 
@@ -4812,6 +6473,7 @@ impl App {
             self.ws_rename = Some(WsRename {
                 workspace_id: w.id.clone(),
                 buffer: w.name.clone(),
+                cursor: w.name.chars().count(),
             });
         }
     }
@@ -4840,7 +6502,12 @@ impl App {
             .find_map(|(name, target)| (*target == pane).then_some(name.as_str()))
             .unwrap_or("")
             .to_string();
-        self.pane_rename = Some(PaneRename { pane, buffer });
+        let cursor = buffer.chars().count();
+        self.pane_rename = Some(PaneRename {
+            pane,
+            buffer,
+            cursor,
+        });
     }
 
     /// Key handling while the pane-rename modal is open. `Enter` applies the name
@@ -4855,24 +6522,33 @@ impl App {
                     self.set_agent_name(r.pane, (!name.is_empty()).then_some(name));
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.pane_rename.as_mut() {
-                    r.buffer.pop();
+                    let key = match key.code {
+                        KeyCode::Char(c) => {
+                            KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), key.modifiers)
+                        }
+                        _ => key,
+                    };
+                    // Every edit must keep the name addressable: a letter first,
+                    // then letters, digits, `_`, or `-`. Deleting a leading letter
+                    // that would expose a digit is refused like a bad keystroke.
+                    let addressable = |name: &str| {
+                        let mut chars = name.chars();
+                        chars.next().is_none_or(|c| c.is_ascii_lowercase())
+                            && chars.all(|c| {
+                                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
+                            })
+                    };
+                    line_edit::edit_line(
+                        &mut r.buffer,
+                        &mut r.cursor,
+                        key,
+                        PANE_NAME_MAX,
+                        addressable,
+                    );
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.pane_rename.as_mut() {
-                    let c = c.to_ascii_lowercase();
-                    let char_ok =
-                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
-                    // A name must start with a letter.
-                    let first_ok = !r.buffer.is_empty() || c.is_ascii_lowercase();
-                    if char_ok && first_ok && r.buffer.chars().count() < PANE_NAME_MAX {
-                        r.buffer.push(c);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -4893,26 +6569,104 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.ws_rename.as_mut() {
-                    r.buffer.pop();
+                    line_edit::edit_line(&mut r.buffer, &mut r.cursor, key, WS_NAME_MAX, |_| true);
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.ws_rename.as_mut() {
-                    if r.buffer.chars().count() < WS_NAME_MAX {
-                        r.buffer.push(c);
+        }
+    }
+
+    /// Keyboard navigation for the workspace context menu. Dividers are skipped;
+    /// mouse-opened menus acquire a selection on the first navigation key.
+    pub fn handle_ws_menu_key(&mut self, key: KeyEvent) {
+        let Some(index) = self.ws_menu_target_index() else {
+            self.ws_menu = None;
+            return;
+        };
+        if self.ws_menu.as_ref().is_some_and(|menu| menu.swap_open) {
+            let menu = self.ws_menu.as_mut().unwrap();
+            let count = menu.swap_targets.len();
+            match key.code {
+                KeyCode::Esc | KeyCode::Left => {
+                    menu.swap_open = false;
+                    menu.swap_selected = None;
+                    menu.swap_rects.clear();
+                }
+                KeyCode::Char('q') => self.ws_menu = None,
+                KeyCode::Down | KeyCode::Char('j') if count > 0 => {
+                    menu.swap_selected = Some(menu.swap_selected.map_or(0, |i| (i + 1) % count));
+                }
+                KeyCode::Up | KeyCode::Char('k') if count > 0 => {
+                    menu.swap_selected = Some(
+                        menu.swap_selected
+                            .unwrap_or(0)
+                            .checked_sub(1)
+                            .unwrap_or(count - 1),
+                    );
+                }
+                KeyCode::Enter => {
+                    let target = menu
+                        .swap_selected
+                        .and_then(|i| menu.swap_targets.get(i))
+                        .map(|(id, _)| id.clone());
+                    if let Some(target) = target {
+                        self.ws_menu = None;
+                        if let Some(target) = self
+                            .workspaces
+                            .iter()
+                            .position(|workspace| workspace.id == target)
+                        {
+                            self.swap_workspace_groups(index, target);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        let items = self.ws_menu_items(index);
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (*item != WsMenuItem::Divider).then_some(index))
+            .collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.ws_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if selectable.is_empty() {
+                    return;
+                }
+                let current = self
+                    .ws_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|selected| selectable.iter().position(|index| *index == selected));
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|position| position.checked_sub(1).unwrap_or(selectable.len() - 1))
+                        .unwrap_or(selectable.len() - 1)
+                } else {
+                    current.map_or(0, |position| (position + 1) % selectable.len())
+                };
+                if let Some(menu) = self.ws_menu.as_mut() {
+                    menu.selected = Some(selectable[next]);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.ws_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
+                    if item == WsMenuItem::SwapWith {
+                        if let Some(menu) = self.ws_menu.as_mut() {
+                            menu.swap_open = true;
+                            menu.swap_selected = Some(0);
+                        }
+                    } else {
+                        self.ws_menu_action(item);
                     }
                 }
             }
             _ => {}
-        }
-    }
-
-    /// Key handling while the workspace context menu is open: `Esc` closes it.
-    pub fn handle_ws_menu_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            self.ws_menu = None;
         }
     }
 
@@ -5331,18 +7085,18 @@ impl App {
         }
     }
 
-    /// Open the AGENTS-list context menu for `target` (a resumable session or a
-    /// live agent), anchored at the click.
+    /// Open the AGENTS-list context menu for `target`, anchored at the click.
     pub fn open_agent_menu(&mut self, target: AgentTarget, col: u16, row: u16) {
         // Only a live agent has a pane for an action to act on.
-        let module_actions = match target {
+        let module_actions = match &target {
             AgentTarget::Live(_) => self.module_menu_actions("agent"),
-            AgentTarget::Session(_) => Vec::new(),
+            AgentTarget::Session(_) | AgentTarget::Automation(_) => Vec::new(),
         };
         self.agent_menu = Some(AgentMenu {
             target,
             anchor: (col, row),
             items: Vec::new(),
+            selected: None,
             module_actions,
         });
     }
@@ -5362,53 +7116,313 @@ impl App {
         }
     }
 
-    /// Run an AGENTS-menu action, then close the menu. Resume/Close act on a
-    /// session; Close on a live agent jumps to and closes its pane.
+    /// Run an AGENTS-menu action, then close the menu. Pane and automation
+    /// actions remain distinct so a scheduled placeholder cannot mutate an
+    /// unrelated live pane.
     pub fn agent_menu_action(&mut self, item: AgentMenuItem) {
         let Some((target, actions)) = self
             .agent_menu
             .as_ref()
-            .map(|m| (m.target, m.module_actions.clone()))
+            .map(|m| (m.target.clone(), m.module_actions.clone()))
         else {
             return;
         };
         self.agent_menu = None;
         match (item, target) {
+            (AgentMenuItem::ToggleWorkspaceScope, _) => {
+                self.set_agents_scope(!self.agents_this_workspace);
+            }
+            (AgentMenuItem::TogglePath, _) => {
+                self.config.layout.agent_paths = !self.config.layout.agent_paths;
+                self.persist_config();
+            }
             (AgentMenuItem::Resume, AgentTarget::Session(i)) => self.resume_session(i),
             (AgentMenuItem::Close, AgentTarget::Session(i)) => self.dismiss_session(i),
             (AgentMenuItem::Close, AgentTarget::Live(id)) => {
                 self.focus_pane_global(id); // switch to its tab so close targets it
                 self.close_pane(id);
             }
+            (AgentMenuItem::Close, AgentTarget::Automation(_)) => {}
+            (AgentMenuItem::AutomationDetails, AgentTarget::Automation(id)) => {
+                self.open_automation_detail(&id);
+            }
+            (AgentMenuItem::AutomationRun, AgentTarget::Automation(id)) => {
+                self.orch_run_automation(&id);
+            }
+            (AgentMenuItem::AutomationToggle, AgentTarget::Automation(id)) => {
+                self.orch_toggle_automation(&id);
+            }
+            (AgentMenuItem::AutomationDelete, AgentTarget::Automation(id)) => {
+                self.orch_delete_automation(&id);
+            }
             (AgentMenuItem::RenamePane, AgentTarget::Live(id)) => self.open_pane_rename(id),
-            (AgentMenuItem::RenamePane, AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::RenamePane, AgentTarget::Session(_) | AgentTarget::Automation(_)) => {}
             (AgentMenuItem::Pin, AgentTarget::Live(id)) => {
                 self.pinned_agents.insert(id);
             }
             (AgentMenuItem::Unpin, AgentTarget::Live(id)) => {
                 self.pinned_agents.remove(&id);
             }
-            (AgentMenuItem::Pin | AgentMenuItem::Unpin, AgentTarget::Session(_)) => {} // no pane
-            (AgentMenuItem::Resume, AgentTarget::Live(_)) => {} // n/a for a live agent
+            (
+                AgentMenuItem::Pin | AgentMenuItem::Unpin,
+                AgentTarget::Session(_) | AgentTarget::Automation(_),
+            ) => {}
+            (AgentMenuItem::Resume, AgentTarget::Live(_) | AgentTarget::Automation(_)) => {}
             (AgentMenuItem::Module(i), AgentTarget::Live(id)) => {
                 if let Some(a) = actions.get(i).cloned() {
                     self.run_module_menu_action("agent", a, Target::pane(id));
                 }
             }
-            (AgentMenuItem::Module(_), AgentTarget::Session(_)) => {} // no live pane
+            (AgentMenuItem::Module(_), AgentTarget::Session(_) | AgentTarget::Automation(_)) => {}
+            (
+                AgentMenuItem::AutomationDetails
+                | AgentMenuItem::AutomationRun
+                | AgentMenuItem::AutomationToggle
+                | AgentMenuItem::AutomationDelete,
+                AgentTarget::Session(_) | AgentTarget::Live(_),
+            ) => {}
             (AgentMenuItem::Divider, _) => {}
         }
     }
 
-    /// Key handling while the AGENTS menu is open: `Esc` closes it.
+    /// Keyboard navigation for the AGENTS menu, with the same wrapping and
+    /// divider-skipping behavior as FILES and DIFF menus.
     pub fn handle_agent_menu_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            self.agent_menu = None;
+        let Some(target) = self.agent_menu.as_ref().map(|menu| menu.target.clone()) else {
+            return;
+        };
+        let items = self.agent_menu_items(target);
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (*item != AgentMenuItem::Divider).then_some(index))
+            .collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.agent_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if selectable.is_empty() {
+                    return;
+                }
+                let current = self
+                    .agent_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|selected| selectable.iter().position(|index| *index == selected));
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|position| position.checked_sub(1).unwrap_or(selectable.len() - 1))
+                        .unwrap_or(selectable.len() - 1)
+                } else {
+                    current.map_or(0, |position| (position + 1) % selectable.len())
+                };
+                if let Some(menu) = self.agent_menu.as_mut() {
+                    menu.selected = Some(selectable[next]);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.agent_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
+                    self.agent_menu_action(item);
+                }
+            }
+            _ => {}
         }
+    }
+
+    pub fn open_session_menu(
+        &mut self,
+        name: String,
+        col: u16,
+        row: u16,
+        running: bool,
+        current: bool,
+    ) {
+        if current || self.pending_named_session_actions.contains_key(&name) {
+            self.session_menu = None;
+            return;
+        }
+        let actions = if running {
+            vec![SessionMenuItem::Stop]
+        } else {
+            let mut actions = vec![SessionMenuItem::Start];
+            if name != crate::session::DEFAULT_SESSION_NAME {
+                actions.push(SessionMenuItem::Delete);
+            }
+            actions
+        };
+        self.session_menu = Some(SessionMenu {
+            name,
+            anchor: (col, row),
+            actions,
+            items: Vec::new(),
+            selected: None,
+        });
+    }
+
+    pub fn open_session_menu_for_row(&mut self, index: usize, col: u16, row: u16) {
+        let candidate = self
+            .named_session_menu
+            .as_ref()
+            .filter(|menu| !menu.preparing && index > 0)
+            .and_then(|menu| menu.rows.get(index - 1))
+            .map(|row| (row.name.clone(), row.running, row.current));
+        if let Some((name, running, current)) = candidate {
+            self.open_session_menu(name, col, row, running, current);
+        } else {
+            self.session_menu = None;
+        }
+    }
+
+    pub fn session_menu_click(&mut self, col: u16, row: u16) {
+        let hit = self.session_menu.as_ref().and_then(|m| {
+            m.items
+                .iter()
+                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .map(|(it, _)| *it)
+        });
+        match hit {
+            Some(it) => self.session_menu_action(it),
+            None => self.session_menu = None,
+        }
+    }
+
+    pub fn session_menu_action(&mut self, item: SessionMenuItem) {
+        let Some(menu) = self.session_menu.take() else {
+            return;
+        };
+        match item {
+            SessionMenuItem::Start => self.prepare_named_session(menu.name, false),
+            SessionMenuItem::Stop => self.stop_named_session(menu.name),
+            SessionMenuItem::Delete => self.session_delete_confirm = Some(menu.name),
+        }
+    }
+
+    pub fn handle_session_menu_key(&mut self, key: KeyEvent) {
+        let Some(actions) = self.session_menu.as_ref().map(|menu| menu.actions.clone()) else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.session_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if actions.is_empty() {
+                    return;
+                }
+                let current = self.session_menu.as_ref().and_then(|menu| menu.selected);
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|index| index.checked_sub(1).unwrap_or(actions.len() - 1))
+                        .unwrap_or(actions.len() - 1)
+                } else {
+                    current.map_or(0, |index| (index + 1) % actions.len())
+                };
+                if let Some(menu) = self.session_menu.as_mut() {
+                    menu.selected = Some(next);
+                }
+            }
+            KeyCode::Enter => {
+                let selected = self.session_menu.as_ref().and_then(|menu| menu.selected);
+                if let Some(item) = selected.and_then(|index| actions.get(index)).copied() {
+                    self.session_menu_action(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn stop_named_session(&mut self, name: String) {
+        // Must match CLI behavior: stop only the named session, never the
+        // current one. Current is already excluded at open time, but keep
+        // a second guard here.
+        let current = crate::session::display_name();
+        if name == current {
+            self.show_toast(self.catalog.session_open_failed);
+            return;
+        }
+        let Some(generation) =
+            self.begin_named_session_action(&name, session_menu::NamedSessionAction::Stop)
+        else {
+            return;
+        };
+        let tx = self.app_tx.clone();
+        self.show_toast(format!("{} {name}…", self.catalog.menu_stop_session));
+        // Keep the sessions list visible while stopping; close the context menu
+        // but not the sessions popup itself.
+        std::thread::spawn(move || {
+            let result = crate::session::stop_session(Some(&name))
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(crate::event::AppEvent::NamedSessionStopped {
+                generation,
+                name,
+                result,
+            });
+        });
+    }
+
+    pub fn session_delete_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                self.confirm_named_session_delete()
+            }
+            _ => self.session_delete_confirm = None,
+        }
+    }
+
+    fn confirm_named_session_delete(&mut self) {
+        let Some(name) = self.session_delete_confirm.take() else {
+            return;
+        };
+        let current = crate::session::display_name();
+        if name == current || name == crate::session::DEFAULT_SESSION_NAME {
+            self.show_toast(self.catalog.session_open_failed);
+            return;
+        }
+        let Some(generation) =
+            self.begin_named_session_action(&name, session_menu::NamedSessionAction::Delete)
+        else {
+            return;
+        };
+        let tx = self.app_tx.clone();
+        self.show_toast(format!("{} {name}…", self.catalog.act_delete));
+        std::thread::spawn(move || {
+            let result = crate::session::delete_session(&name)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let _ = tx.send(crate::event::AppEvent::NamedSessionDeleted {
+                generation,
+                name,
+                result,
+            });
+        });
+    }
+
+    /// Register one lifecycle mutation and invalidate an older list refresh.
+    /// The action result becomes authoritative for its row without a second
+    /// filesystem or socket scan.
+    fn begin_named_session_action(
+        &mut self,
+        name: &str,
+        action: session_menu::NamedSessionAction,
+    ) -> Option<u64> {
+        if self
+            .pending_named_session_actions
+            .insert(name.to_string(), action)
+            .is_some()
+        {
+            return None;
+        }
+        self.invalidate_named_session_discovery();
+        Some(self.named_session_generation)
     }
 
     /// Key handling while the new-worktree prompt is open.
     pub fn handle_worktree_prompt_key(&mut self, key: KeyEvent) {
+        if self.worktree_provider_inflight
+            && self.worktree_error.as_deref() == Some("creating worktree…")
+            && key.code != KeyCode::Esc
+        {
+            return;
+        }
         match key.code {
             KeyCode::Esc => {
                 self.worktree_prompt = None;
@@ -5424,6 +7438,40 @@ impl App {
                             self.worktree_prompt = None;
                             self.worktree_repo = None;
                             self.worktree_error = None;
+                        }
+                        Err(e) if e == WORKTREE_CREATE_PENDING => {
+                            self.worktree_error = Some("creating worktree…".into());
+                            let expected_repo = repo.clone();
+                            let expected_branch = branch.clone();
+                            let scheduled = self.schedule_pending_worktree(move |app, result| {
+                                let still_pending =
+                                    app.worktree_repo.as_ref().is_some_and(|current| {
+                                        crate::platform::same_path(current, &expected_repo)
+                                    }) && app.worktree_prompt.as_deref()
+                                        == Some(expected_branch.as_str());
+                                if !still_pending {
+                                    app.discard_ready_worktree();
+                                    return true;
+                                }
+                                match result {
+                                    Ok(()) => match app.create_worktree(&repo, &branch) {
+                                        Ok(_) => {
+                                            app.worktree_prompt = None;
+                                            app.worktree_repo = None;
+                                            app.worktree_error = None;
+                                        }
+                                        Err(error) => {
+                                            app.discard_ready_worktree();
+                                            app.worktree_error = Some(error);
+                                        }
+                                    },
+                                    Err(error) => app.worktree_error = Some(error),
+                                }
+                                true
+                            });
+                            if let Err(error) = scheduled {
+                                self.worktree_error = Some(error);
+                            }
                         }
                         // Failure (branch already checked out, dirty tree, empty
                         // name…): keep the prompt open and show why, so it's never
@@ -5448,6 +7496,147 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The workspace menu's "Open Worktree": list every checkout of the repo at
+    /// `cwd` (`git worktree list`) in a picker modal. The modal opens at once in
+    /// its loading state; the scan runs on the bounded filesystem executor and
+    /// lands through [`AppEvent::IoCompleted`] → [`App::apply_worktree_list`].
+    /// It must not run on the loop: git stats every checkout to flag prunable
+    /// ones, and a sibling checkout can sit on a stale network mount, which
+    /// would freeze every attached client for as long as that stat hangs. The
+    /// bound also prevents repeated close/reopen gestures from accumulating one
+    /// blocked OS thread and git process per attempt.
+    pub fn open_worktree_list(&mut self, cwd: &std::path::Path) {
+        let generation = self.begin_worktree_list();
+        let cwd = cwd.to_path_buf();
+        // Snapshot the open workspace roots: the "already open" badge needs a
+        // canonicalize per checkout, which is exactly the kind of stat the
+        // worker exists to keep off the loop. A workspace opened mid-scan is
+        // only missed on the badge — ⏎ re-resolves against live workspaces.
+        let open_cwds: Vec<PathBuf> = self.workspaces.iter().map(|w| w.cwd.clone()).collect();
+        let accepted = self.io_jobs.submit(self.app_tx.clone(), move || {
+            let result = openable_worktrees(&cwd, &open_cwds);
+            Box::new(move |app| app.apply_worktree_list(generation, result))
+        });
+        if let Err(error) = accepted {
+            self.apply_worktree_list(generation, Err(error.to_string()));
+        }
+    }
+
+    /// Establish one loading generation separately from worker admission so
+    /// focused tests can apply a deterministic scan without scheduling a
+    /// duplicate filesystem job.
+    fn begin_worktree_list(&mut self) -> u64 {
+        self.worktree_open_generation = self.worktree_open_generation.wrapping_add(1);
+        let generation = self.worktree_open_generation;
+        self.worktree_open = Some(WorktreeOpenList {
+            generation,
+            loading: true,
+            error: None,
+            entries: Vec::new(),
+            cursor: 0,
+        });
+        generation
+    }
+
+    /// Close the open-worktree list. Bumps the generation so a scan still in
+    /// flight for it is discarded on arrival rather than reopening the modal.
+    pub fn close_worktree_list(&mut self) {
+        self.worktree_open_generation = self.worktree_open_generation.wrapping_add(1);
+        self.worktree_open = None;
+    }
+
+    /// Fill the open-worktree list with the scan started by
+    /// [`App::open_worktree_list`]. A result whose `generation` isn't the one
+    /// the current modal waits on (closed, or reopened since) is dropped. An
+    /// empty listing closes the modal with a toast, as there's nothing to pick;
+    /// a git failure shows in the modal so the user sees what went wrong. The
+    /// entries arrive fully resolved; nothing here touches the filesystem.
+    pub fn apply_worktree_list(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<WorktreeOpenEntry>, String>,
+    ) -> bool {
+        if self
+            .worktree_open
+            .as_ref()
+            .is_none_or(|list| list.generation != generation)
+        {
+            return false;
+        }
+        let entries = match result {
+            Ok(entries) => entries,
+            Err(e) => {
+                if let Some(list) = self.worktree_open.as_mut() {
+                    list.loading = false;
+                    list.error = Some(e);
+                }
+                return true;
+            }
+        };
+        if entries.is_empty() {
+            self.close_worktree_list();
+            self.show_toast(self.catalog.no_worktrees_found);
+            return true;
+        }
+        if let Some(list) = self.worktree_open.as_mut() {
+            list.loading = false;
+            list.entries = entries;
+            list.cursor = 0;
+        }
+        true
+    }
+
+    /// The workspace already showing `path`, if any (see [`checkout_idx_in`]).
+    /// Stats `path` and every workspace root, so it's for the user's own pick
+    /// on ⏎ — the listing resolves its badges on the worker instead.
+    fn workspace_idx_for_path(&self, path: &std::path::Path) -> Option<usize> {
+        checkout_idx_in(path, self.workspaces.iter().map(|w| w.cwd.as_path()))
+    }
+
+    /// Keys for the open-worktree list modal: ↑/↓ (or k/j) move, ⏎ opens the
+    /// highlighted checkout — focusing the existing workspace when it's already
+    /// open, a worktree is one place — esc closes.
+    pub fn handle_worktree_open_key(&mut self, key: KeyEvent) {
+        let Some(list) = self.worktree_open.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.close_worktree_list(),
+            KeyCode::Up | KeyCode::Char('k') => list.cursor = list.cursor.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                list.cursor = (list.cursor + 1).min(list.entries.len().saturating_sub(1));
+            }
+            // Nothing to pick yet; the rows are still being listed.
+            KeyCode::Enter if list.loading => {}
+            KeyCode::Enter => {
+                let path = list.entries.get(list.cursor).map(|e| e.path.clone());
+                self.close_worktree_list();
+                if let Some(path) = path {
+                    if let Some(idx) = self.workspace_idx_for_path(&path) {
+                        self.active_ws = idx;
+                    } else {
+                        self.create_workspace_at(path);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A click on open-worktree list row `i`: highlight it, then open it by the
+    /// same path ⏎ takes, so the mouse and the keyboard can't diverge. An index
+    /// from a stale frame is ignored rather than opening the wrong checkout.
+    pub fn worktree_open_click(&mut self, i: usize) {
+        let Some(list) = self.worktree_open.as_mut() else {
+            return;
+        };
+        if i >= list.entries.len() {
+            return;
+        }
+        list.cursor = i;
+        self.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     }
 
     /// Focus an exact zero-based tab position in the active workspace.
@@ -5496,8 +7685,8 @@ impl App {
         {
             return Err(TabFocusError::PositionOutOfRange);
         }
-        self.active_ws = workspace;
-        self.workspaces[workspace].active_tab = index;
+        let pane = self.workspaces[workspace].tabs[index].layout.focus;
+        self.focus_location(workspace, index, pane);
         Ok(())
     }
 
@@ -5506,10 +7695,13 @@ impl App {
     }
 
     fn cycle_tab(&mut self, delta: isize) {
-        let ws = &mut self.workspaces[self.active_ws];
+        let workspace = self.active_ws;
+        let ws = &self.workspaces[workspace];
         let n = ws.tabs.len() as isize;
         if n > 0 {
-            ws.active_tab = (((ws.active_tab as isize + delta) % n + n) % n) as usize;
+            let tab = (((ws.active_tab as isize + delta) % n + n) % n) as usize;
+            let pane = ws.tabs[tab].layout.focus;
+            self.focus_location(workspace, tab, pane);
         }
     }
 
@@ -5533,13 +7725,63 @@ impl App {
     /// agent back to text-only detection.
     pub(crate) fn apply_proc_scan(&mut self, found: Option<HashMap<u32, Vec<String>>>) -> bool {
         self.proc_scan_inflight = false;
-        let Some(by_pid) = found else { return false };
+        let demand_inflight = std::mem::take(&mut self.proc_scan_demand_inflight);
+        let demanded_panes = std::mem::take(&mut self.proc_scan_demand_panes_inflight);
+        let Some(by_pid) = found else {
+            if demand_inflight && self.proc_scan_failure_retries > 0 {
+                self.proc_scan_failure_retries -= 1;
+                self.proc_scan_requested = true;
+                self.proc_scan_requested_panes.extend(
+                    demanded_panes
+                        .into_iter()
+                        .filter(|id| self.panes.contains_key(id)),
+                );
+            } else {
+                self.proc_scan_failure_retries = 0;
+                let affected = self
+                    .automation
+                    .automations
+                    .iter()
+                    .filter_map(|automation| match automation.target {
+                        crate::automation::AutomationTarget::ActiveAgent {
+                            pane_id,
+                            durable: Some(_),
+                            ..
+                        } if demanded_panes.contains(&PaneId(pane_id)) => {
+                            Some(automation.id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let changed = !affected.is_empty();
+                for id in affected {
+                    self.automation.ready_active_targets.remove(&id);
+                    self.automation
+                        .active_target_states
+                        .insert(id, crate::automation::ActiveTargetState::NeedsRebind);
+                }
+                return changed;
+            }
+            return false;
+        };
         let mut next: HashMap<PaneId, Vec<String>> = HashMap::new();
         for (id, pane) in self.panes.iter() {
             let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
             if let Some(cmds) = (pid != 0).then(|| by_pid.get(&pid)).flatten() {
                 next.insert(*id, cmds.clone());
             }
+        }
+        let missing_demanded_panes: Vec<PaneId> = demanded_panes
+            .into_iter()
+            .filter(|id| self.panes.contains_key(id) && !next.contains_key(id))
+            .collect();
+        if !missing_demanded_panes.is_empty() && self.proc_scan_failure_retries > 0 {
+            self.proc_scan_failure_retries -= 1;
+            self.proc_scan_requested = true;
+            self.proc_scan_requested_panes
+                .extend(missing_demanded_panes);
+        } else if demand_inflight {
+            self.proc_scan_failure_retries = 0;
         }
         let mut lifecycle_changed = false;
         for (id, cmds) in &next {
@@ -5568,6 +7810,8 @@ impl App {
 
             st.agent_absent_scans = st.agent_absent_scans.saturating_add(1);
             if st.agent_absent_scans < 2 {
+                self.proc_scan_requested = true;
+                self.proc_scan_failure_retries = dispatch::PROC_SCAN_FAILURE_RETRIES;
                 continue;
             }
 
@@ -5625,6 +7869,49 @@ impl App {
                 .any(|(a, b)| a.session_id != b.session_id);
         self.resumable = fresh;
         changed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_agent_row_title_for_session(
+        &mut self,
+        agent: String,
+        session_id: String,
+        title: Option<String>,
+    ) -> bool {
+        set_owned_agent_session_title(
+            &mut self.agent_title_sessions,
+            agent,
+            session_id,
+            title,
+            None,
+        )
+        .expect("the test helper writes only unowned title keys")
+    }
+
+    pub(crate) fn clear_agent_row_titles_for_owner(&mut self, owner: &str) -> bool {
+        let pane_count = self.agent_title_panes.len();
+        self.agent_title_panes
+            .retain(|_, title| title.owner.as_deref() != Some(owner));
+        let session_count = agent_session_title_count(&self.agent_title_sessions);
+        self.agent_title_sessions.retain(|_, sessions| {
+            sessions.retain(|_, title| title.owner.as_deref() != Some(owner));
+            !sessions.is_empty()
+        });
+        pane_count != self.agent_title_panes.len()
+            || session_count != agent_session_title_count(&self.agent_title_sessions)
+    }
+
+    pub(crate) fn agent_row_title_for_session(
+        &self,
+        agent: &str,
+        session_id: &str,
+    ) -> Option<&str> {
+        let agent = crate::agent::canonical_builtin(agent)?;
+        self.agent_title_sessions
+            .get(agent)?
+            .get(session_id)
+            .map(|title| title.text.as_str())
+            .filter(|title| !title.is_empty())
     }
 
     /// Remove a resumable session from the sidebar list. Hides it for the rest of
@@ -5711,8 +7998,39 @@ impl App {
         })
     }
 
+    fn push_focus_history(history: &mut Vec<PaneId>, id: PaneId) {
+        if history.last() == Some(&id) {
+            return;
+        }
+        if history.len() == FOCUS_HISTORY_LIMIT {
+            history.remove(0);
+        }
+        history.push(id);
+    }
+
+    fn set_focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+        self.active_ws = workspace;
+        self.workspaces[workspace].active_tab = tab;
+        self.workspaces[workspace].tabs[tab].layout.focus = id;
+        self.scroll_pane = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+        let current = self.layout().focus;
+        let location_changed = self.active_ws != workspace
+            || self.workspaces[workspace].active_tab != tab
+            || current != id;
+        if location_changed {
+            Self::push_focus_history(&mut self.focus_history_back, current);
+            self.focus_history_forward.clear();
+            self.set_focus_location(workspace, tab, id);
+        } else {
+            self.mode = Mode::Normal;
+        }
+    }
+
     fn focus_pane_global(&mut self, id: PaneId) {
-        let changed = self.layout().focus != id;
         let mut found = None;
         for (wi, ws) in self.workspaces.iter().enumerate() {
             for (ti, tab) in ws.tabs.iter().enumerate() {
@@ -5722,26 +8040,59 @@ impl App {
             }
         }
         if let Some((wi, ti)) = found {
-            self.active_ws = wi;
-            self.workspaces[wi].active_tab = ti;
-            self.workspaces[wi].tabs[ti].layout.focus = id;
-            if changed {
-                self.scroll_pane = None;
+            self.focus_location(wi, ti, id);
+        }
+    }
+
+    /// Move backward through pane focus history. Dead panes are discarded
+    /// lazily, so closing a tab or workspace cannot strand navigation.
+    fn focus_history_back(&mut self) {
+        let current = self.layout().focus;
+        while let Some(target) = self.focus_history_back.pop() {
+            if target == current {
+                continue;
             }
-            self.mode = Mode::Normal;
+            if let Some((workspace, tab)) = self.pane_location(target) {
+                Self::push_focus_history(&mut self.focus_history_forward, current);
+                self.set_focus_location(workspace, tab, target);
+                return;
+            }
+        }
+    }
+
+    /// Move forward after one or more history-back jumps. Any ordinary focus
+    /// change clears this stack and begins a new history branch.
+    fn focus_history_forward(&mut self) {
+        let current = self.layout().focus;
+        while let Some(target) = self.focus_history_forward.pop() {
+            if target == current {
+                continue;
+            }
+            if let Some((workspace, tab)) = self.pane_location(target) {
+                Self::push_focus_history(&mut self.focus_history_back, current);
+                self.set_focus_location(workspace, tab, target);
+                return;
+            }
         }
     }
 
     fn cycle_workspace(&mut self, delta: isize) {
         let n = self.workspaces.len() as isize;
         if n > 0 {
-            self.active_ws = (((self.active_ws as isize + delta) % n + n) % n) as usize;
+            let workspace = (((self.active_ws as isize + delta) % n + n) % n) as usize;
+            let tab = self.workspaces[workspace].active_tab;
+            let pane = self.workspaces[workspace].tabs[tab].layout.focus;
+            self.focus_pane_global(pane);
         }
     }
 
     fn focus_dir(&mut self, dir: Dir) {
         let area = self.last_pane_area;
+        let current = self.layout().focus;
         self.layout_mut().focus_dir(area, dir);
+        let next = self.layout().focus;
+        self.layout_mut().focus = current;
+        self.focus_pane_global(next);
     }
 
     /// Cycle focus within the current tab's leaf order, wrapping at both ends.
@@ -5755,9 +8106,7 @@ impl App {
         let idx = leaves.iter().position(|&id| id == focus).unwrap_or(0);
         let len = leaves.len() as isize;
         let next = leaves[((idx as isize + delta) % len + len) as usize % leaves.len()];
-        self.layout_mut().focus = next;
-        self.scroll_pane = None;
-        self.mode = Mode::Normal;
+        self.focus_pane_global(next);
     }
 
     fn focus_next_pane(&mut self) {
@@ -5772,13 +8121,12 @@ impl App {
     /// which for a stacked pane lands exactly on the horizontal divider. Resize
     /// must yield there, or the divider grab zone swallows every click on the ✕
     /// and the pane can't be closed by mouse.
-    /// True if `(c, r)` lands on a pane's interactive **border chrome**: a title
-    /// strip (the command-inspector button), the ⤢/⤡ zoom toggle, or the ✕ close
-    /// button. These live on the top border row — exactly the cells a resize grab
-    /// band would otherwise swallow — so every resize path (grab, Ctrl-grab, hover
-    /// highlight) excludes them: the seam between panes stays grabbable, but a
-    /// click on a title or button always wins. On a stacked split this matters
-    /// most, since the divider line *is* the lower pane's top border.
+    /// True if `(c, r)` lands on pane **border chrome**: a title strip, the ⤢/⤡
+    /// zoom toggle, or the ✕ close button. These live on the top border row,
+    /// exactly where a resize grab band would otherwise claim the press, so every
+    /// resize path excludes them. A title click can then focus its pane without
+    /// unexpectedly starting a resize. On a stacked split this matters most,
+    /// since the divider line is the lower pane's top border.
     fn on_pane_chrome(&self, c: u16, r: u16) -> bool {
         fn hit(rc: Rect, c: u16, r: u16) -> bool {
             c >= rc.x && c < rc.right() && r >= rc.y && r < rc.bottom()
@@ -5790,10 +8138,8 @@ impl App {
 
     pub fn begin_resize(&mut self, c: u16, r: u16) -> bool {
         // Pane border chrome (title, ⤢ zoom, ✕ close) always wins the click, even
-        // though it sits on the seam a resize would otherwise grab — see
-        // `on_pane_chrome`. This is what makes those buttons and the title
-        // clickable on a stacked split, where the divider line lands on the lower
-        // pane's top border row.
+        // though it sits on the seam a resize would otherwise grab. This keeps
+        // title focus and the two buttons reliable on stacked splits.
         if self.active_is_git() || self.active_is_orch() || self.on_pane_chrome(c, r) {
             return false;
         }
@@ -6104,6 +8450,7 @@ impl App {
         self.emit_backend_terminal_event(id, "terminal.closed", serde_json::json!({}));
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
+        self.agent_title_panes.remove(&id);
         self.cancel_backend_revision_waits(id);
         let reported = self
             .reported_usage
@@ -6163,7 +8510,44 @@ impl App {
     }
 
     fn close_pane(&mut self, id: PaneId) {
+        self.focus_history_back.retain(|pane| *pane != id);
+        self.focus_history_forward.retain(|pane| *pane != id);
+        crate::orch::worker::discard(id);
         let owner = self.pane_location(id);
+        let durable = self
+            .automation
+            .automations
+            .iter()
+            .filter_map(|automation| match automation.target {
+                crate::automation::AutomationTarget::ActiveAgent {
+                    pane_id,
+                    durable: Some(_),
+                    ..
+                } if pane_id == id.0 => Some(automation.id.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for automation_id in durable {
+            self.automation.ready_active_targets.remove(&automation_id);
+            self.automation.active_target_states.insert(
+                automation_id.clone(),
+                crate::automation::ActiveTargetState::NeedsRebind,
+            );
+            if let Some(automation) = self.automation.automation(&automation_id).cloned() {
+                self.emit_event(
+                    "automation.rebound",
+                    crate::automation::definition_target_event(
+                        &automation,
+                        crate::automation::ActiveTargetState::NeedsRebind,
+                    ),
+                );
+            }
+        }
+        self.expire_active_agent_targets(
+            Some(id),
+            "active-agent automation target pane closed",
+            crate::automation::unix_now(),
+        );
         self.drop_leaf_runtime(id);
         self.release_leaf_ownership(id);
         self.session_dirty = true;
@@ -6244,6 +8628,7 @@ impl App {
             removed = true;
         }
         if removed {
+            self.repair_active_workspace_after_removal(workspace_index);
             self.emit_event(
                 "workspace.closed",
                 serde_json::json!({"workspace": workspace_index.to_string()}),
@@ -6254,11 +8639,6 @@ impl App {
                     workspace_index as u64,
                 )],
             );
-        }
-        if self.workspaces.is_empty() {
-            self.all_workspaces_closed();
-        } else if self.active_ws >= self.workspaces.len() {
-            self.active_ws = self.workspaces.len() - 1;
         }
     }
 
@@ -6315,6 +8695,7 @@ impl App {
         if suppress_reopen {
             self.remember_closed_workspace_path(closed_root);
         }
+        self.repair_active_workspace_after_removal(index);
         self.emit_event(
             "workspace.closed",
             serde_json::json!({"workspace": index.to_string()}),
@@ -6323,8 +8704,16 @@ impl App {
             crate::logging::EventKind::WorkspaceClose,
             &[crate::logging::Field::WorkspaceIndex(index as u64)],
         );
+    }
+
+    /// Restore a valid active selection before workspace-removal observers run.
+    /// Module hooks build their context synchronously during `emit_event`, so
+    /// publishing the shortened list with the old index can panic immediately.
+    fn repair_active_workspace_after_removal(&mut self, removed_index: usize) {
         if self.workspaces.is_empty() {
             self.all_workspaces_closed();
+        } else if self.active_ws > removed_index {
+            self.active_ws -= 1;
         } else if self.active_ws >= self.workspaces.len() {
             self.active_ws = self.workspaces.len() - 1;
         }
@@ -6419,6 +8808,47 @@ fn group_worktrees(nodes: &[(Option<&std::path::Path>, bool)]) -> Vec<(usize, bo
     out
 }
 
+/// The checkouts of the repo at `cwd` a user can open as a workspace: every
+/// entry of `git worktree list` except bare ones (no working files) and
+/// prunable leftovers whose folder is already gone, each flagged `open` when
+/// one of `open_cwds` (the workspace roots) is the same checkout. Runs git,
+/// a stat and a canonicalize per entry, so callers on the app loop hand it to
+/// a worker thread.
+fn openable_worktrees(
+    cwd: &std::path::Path,
+    open_cwds: &[PathBuf],
+) -> Result<Vec<WorktreeOpenEntry>, String> {
+    let wts = crate::git::local::worktrees(cwd)?;
+    Ok(wts
+        .into_iter()
+        .filter(|w| !w.bare && w.path.is_dir())
+        .map(|w| WorktreeOpenEntry {
+            open: checkout_idx_in(&w.path, open_cwds.iter().map(PathBuf::as_path)).is_some(),
+            path: w.path,
+            branch: w.branch,
+            head: w.head,
+            is_main: w.is_main,
+        })
+        .collect())
+}
+
+/// The position in `cwds` of the folder that is the same checkout as `path`,
+/// if any. Both sides are canonicalized so a symlinked cwd (macOS `/tmp`)
+/// still matches, and the final comparison is [`crate::platform::same_path`]
+/// so spelling variance (Windows case, separators, the `\\?\` prefix) can't
+/// read as "not open" when canonicalization falls back to the raw path
+/// (docs/43 WIN-6). Stats every path it's given: keep it off the app loop
+/// unless the paths are the user's own pick.
+fn checkout_idx_in<'a>(
+    path: &std::path::Path,
+    cwds: impl IntoIterator<Item = &'a std::path::Path>,
+) -> Option<usize> {
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = canon(path);
+    cwds.into_iter()
+        .position(|cwd| crate::platform::same_path(&canon(cwd), &target))
+}
+
 /// `~/.luvus/worktrees/<repo>/` — the folder that holds all of `repo`'s luvus
 /// worktrees. Nested under the **main** worktree's name so every checkout of one
 /// repo groups under a single folder (same rule `create_worktree` uses).
@@ -6451,7 +8881,7 @@ pub(crate) fn worktree_membership(cwd: &std::path::Path) -> Option<crate::git::W
 /// Re-spawn a saved module pane if its module is still installed + runnable;
 /// returns the pane + its tracking record, or `None` to fall back to a shell.
 fn restore_module_pane(
-    modules: &crate::module::ModuleRegistry,
+    module_runtime: (&crate::module::ModuleRegistry, &HashMap<String, String>),
     mid: &str,
     ep: &str,
     id: PaneId,
@@ -6459,6 +8889,7 @@ fn restore_module_pane(
     history_budget_bytes: usize,
     appearance: crate::terminal::appearance::PaneAppearance,
 ) -> Option<(Pane, crate::module::ModulePaneRecord)> {
+    let (modules, module_tokens) = module_runtime;
     let m = modules.find(mid).filter(|m| m.is_runnable())?;
     let argv = m
         .manifest
@@ -6469,6 +8900,9 @@ fn restore_module_pane(
     let ctx = serde_json::json!({ "invocation_source": "restore" });
     let env = crate::module::runtime::env(
         m,
+        // A snapshot may name the module by its install shorthand, which
+        // `find` accepts but the token map (keyed by manifest id) does not.
+        module_tokens.get(m.id.as_str())?,
         &ctx,
         vec![("LUVUS_MODULE_ENTRYPOINT_ID".to_string(), ep.to_string())],
     );
@@ -6487,7 +8921,7 @@ fn restore_module_pane(
     Some((
         pane,
         crate::module::ModulePaneRecord {
-            module_id: mid.to_string(),
+            module_id: m.id.clone(),
             entrypoint: ep.to_string(),
         },
     ))
@@ -6528,6 +8962,43 @@ mod tests {
     use std::sync::mpsc;
 
     use crate::persist::TEST_ENV_LOCK as ENV_GUARD;
+
+    #[test]
+    fn worktree_create_pending_is_carried_in_the_error_message() {
+        assert!(is_worktree_create_pending(&(
+            "git_error".into(),
+            WORKTREE_CREATE_PENDING.into()
+        )));
+        assert!(!is_worktree_create_pending(&(
+            WORKTREE_CREATE_PENDING.into(),
+            "ordinary error".into()
+        )));
+    }
+
+    #[cfg(unix)]
+    fn api_call_with_workers(
+        app: &mut App,
+        events: &mpsc::Receiver<AppEvent>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let (reply, response) = mpsc::channel();
+        app.handle_event(AppEvent::Api(ApiRequest {
+            id: "test".into(),
+            method: method.into(),
+            params,
+            reply,
+        }));
+        loop {
+            if let Ok(response) = response.try_recv() {
+                return serde_json::from_str(&response).unwrap();
+            }
+            let event = events
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("API worker completion");
+            app.handle_event(event);
+        }
+    }
 
     /// Exercise guards for a restore/spawn failure that leaves no layout. Normal
     /// user close paths immediately create a neutral home terminal instead.
@@ -6756,6 +9227,19 @@ mod tests {
     }
 
     #[test]
+    fn pane_osc52_store_queues_pending_clipboard() {
+        let _env = crate::persist::test_env("pane-osc52-clipboard");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        if let Ok(mut engine) = app.panes.get(&id).unwrap().engine.lock() {
+            engine.advance(b"\x1b]52;c;aGVsbG8tb3NjNTI=\x07");
+        }
+        assert!(app.handle_event(AppEvent::PtyData(id)));
+        assert_eq!(app.pending_clipboard.as_deref(), Some("hello-osc52"));
+    }
+
+    #[test]
     fn paste_fills_an_open_text_input_modal_not_the_pane() {
         // Regression: pasting (e.g. an nsec) into a Settings string field leaked
         // to the focused pane instead of the field. A paste while a text-input
@@ -6811,6 +9295,10 @@ mod tests {
             !app.agents_active_only,
             "missing preference defaults to All"
         );
+        assert!(
+            !app.agents_this_workspace,
+            "missing scope defaults to All workspaces"
+        );
         let snapshot = serde_json::to_string(&persist::snapshot(&app)).unwrap();
 
         let (tx2, _rx2) = std::sync::mpsc::channel();
@@ -6819,20 +9307,33 @@ mod tests {
             !restored.agents_active_only,
             "snapshot restoration also defaults to All"
         );
+        assert!(
+            !restored.agents_this_workspace,
+            "snapshot restoration also defaults to All workspaces"
+        );
 
         let mut config = crate::config::load();
         config.agents_active_only = true;
+        config.agents_this_workspace = true;
         crate::config::save(&config);
 
         let (tx3, _rx3) = std::sync::mpsc::channel();
         let fresh = App::new(80, 24, tx3).unwrap();
         assert!(fresh.agents_active_only, "fresh construction reads Active");
+        assert!(
+            fresh.agents_this_workspace,
+            "fresh construction reads This workspace"
+        );
 
         let (tx4, _rx4) = std::sync::mpsc::channel();
         let restored = App::from_snapshot(serde_json::from_str(&snapshot).unwrap(), tx4).unwrap();
         assert!(
             restored.agents_active_only,
             "snapshot restoration reads config instead of snapshot state"
+        );
+        assert!(
+            restored.agents_this_workspace,
+            "snapshot restoration reads scope from config"
         );
     }
 
@@ -6854,6 +9355,8 @@ mod tests {
 
         alpha.apply_theme("quattro-rally");
         assert!(beta.set_agents_filter(true));
+        alpha.flush_config_for_test(&_alpha_rx);
+        beta.flush_config_for_test(&_beta_rx);
 
         let merged = crate::config::load();
         assert_eq!(merged.theme, "quattro-rally");
@@ -7031,6 +9534,9 @@ mod tests {
             cursor: 0,
             creating: None,
             going_to: None,
+            go_to_cycle: None,
+            go_to_generation: 0,
+            go_to_scanning: None,
             error: None,
             is_repo,
             show_hidden: false,
@@ -7087,6 +9593,1063 @@ mod tests {
         // Esc tears the whole prompt down.
         app.handle_worktree_prompt_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.worktree_prompt.is_none() && app.worktree_repo.is_none());
+    }
+
+    /// Build a repo with one commit and a **sibling-path** worktree — the layout
+    /// the old "Open Worktree" folder picker (which only browsed
+    /// `~/.luvus/worktrees/`) never showed. Returns `(base, repo, worktree)`.
+    fn repo_with_sibling_worktree(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("luvus-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ]);
+        let wt = base.join("wt-feature");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ]);
+        (base, repo, wt)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_worktree_create_uses_configured_module_provider() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = crate::persist::test_env("module-provider-api-create");
+        let (base, repo, _sibling) = repo_with_sibling_worktree("module-provider-api-create");
+        let path = base.join("wt-topic");
+        let module = base.join("module");
+        std::fs::create_dir_all(&module).unwrap();
+        let fake = module.join("create-worktree");
+        std::fs::write(
+            &fake,
+            r#"#!/bin/sh
+if env | grep -q '^LUVUS_WORKTREE_'; then
+  printf '%s\n' 'legacy worktree request environment was set' >&2
+  exit 3
+fi
+request="$LUVUS_MODULE_STATE_DIR/request.json"
+cat > "$request"
+repo=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repository"])' "$request")
+branch=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["branch"])' "$request")
+branch_exists=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["branch_exists"]).lower())' "$request")
+if [ "$branch" = hook-error ]; then
+  printf '%s\n' 'provider needs interactive approval' >&2
+  exit 2
+fi
+if [ "$branch_exists" = false ]; then create='-b'; fi
+safe=$(printf '%s' "$branch" | tr '/ ' '--')
+target="$(dirname "$repo")/wt-$safe"
+git -C "$repo" worktree add -q $create "$branch" "$target"
+if [ "$branch" = post-create-error ]; then
+  printf '%s\n' 'uncommitted provider work' > "$target/uncommitted.txt"
+  printf '%s\n' 'provider failed after creating the worktree' >&2
+  exit 2
+fi
+if [ "$branch" = invalid-json ]; then
+  printf '%s\n' 'uncommitted provider work' > "$target/uncommitted.txt"
+  printf '%s\n' 'provider log on stdout'
+  exit 0
+fi
+printf '%s\n' "{\"path\":\"$target\"}"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            module.join("luvus-module.toml"),
+            r#"id = "example.worktree"
+name = "Worktree provider"
+version = "0.1.0"
+min_luvus_version = "0.14.0"
+[worktree_provider]
+command = ["./create-worktree"]
+remove_command = ["./remove-worktree"]
+"#,
+        )
+        .unwrap();
+        let remove = module.join("remove-worktree");
+        std::fs::write(
+            &remove,
+            r#"#!/bin/sh
+if env | grep -q '^LUVUS_WORKTREE_'; then
+  printf '%s\n' 'legacy worktree request environment was set' >&2
+  exit 3
+fi
+request="$LUVUS_MODULE_STATE_DIR/remove-request.json"
+cat > "$request"
+repo=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["repository"])' "$request")
+path=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$request")
+branch=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["branch"])' "$request")
+force=$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["force"]).lower())' "$request")
+if [ "$branch" = stdout-remove ]; then
+  git -C "$repo" worktree remove "$path"
+  printf noise
+  exit 0
+fi
+if [ "$branch" = stdout-no-remove ]; then printf noise; exit 0; fi
+if [ "$branch" = no-remove ]; then exit 0; fi
+if [ "$force" = true ]; then force_arg='--force'; fi
+git -C "$repo" worktree remove $force_arg "$path"
+if [ "$branch" = post-remove-error ]; then
+  printf '%s\n' 'provider failed after removing the worktree' >&2
+  exit 2
+fi
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&remove, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, events) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.module_link_with(&module, true, None).unwrap();
+        let info = api_call(
+            &mut app,
+            "module.info",
+            serde_json::json!({"id":"example.worktree"}),
+        );
+        assert_eq!(info["result"]["worktree_provider"], true);
+        assert_eq!(info["result"]["worktree_remove_provider"], true);
+        app.workspaces[0].cwd = repo.clone();
+        app.config.worktree = crate::config::WorktreeConfig {
+            provider: "example.worktree".into(),
+        };
+        let (reply, response) = mpsc::channel();
+        app.handle_event(AppEvent::Api(ApiRequest {
+            id: "create".into(),
+            method: "worktree.create".into(),
+            params: serde_json::json!({"branch":"topic"}),
+            reply,
+        }));
+        assert!(response.try_recv().is_err(), "provider request is parked");
+        let ping = api_call(&mut app, "ping", serde_json::json!({}));
+        assert_eq!(ping["result"]["type"], "pong");
+        let response = loop {
+            if let Ok(response) = response.try_recv() {
+                break serde_json::from_str::<serde_json::Value>(&response).unwrap();
+            }
+            app.handle_event(
+                events
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("provider completion"),
+            );
+        };
+        assert_eq!(
+            response["result"]["path"],
+            path.display().to_string(),
+            "{response}"
+        );
+        assert!(crate::platform::same_path(&app.ws().cwd, &path));
+        let request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                crate::module::paths::state_dir("example.worktree").join("request.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(request["version"], 1);
+        assert_eq!(request["operation"], "create");
+        assert_eq!(request["repository"], repo.display().to_string());
+        assert_eq!(request["branch"], "topic");
+        assert_eq!(request["branch_exists"], false);
+
+        app.orch
+            .add_task("module worker".into(), vec![], vec![], None)
+            .unwrap();
+        let workspace_id = app.ws().id.clone();
+        let started = api_call_with_workers(
+            &mut app,
+            &events,
+            "task.start",
+            serde_json::json!({
+                "id":"t1",
+                "mode":"worktree",
+                "workspace_id":workspace_id
+            }),
+        );
+        assert_eq!(started["result"]["branch"], "luvus/t1");
+        assert_eq!(started["result"]["mode"], "worktree");
+        assert!(started["result"]["pane"].as_str().is_some());
+        let task_path = std::path::PathBuf::from(started["result"]["worktree"].as_str().unwrap());
+        assert!(crate::platform::same_path(&app.ws().cwd, &task_path));
+
+        let topic_workspace = app
+            .workspaces
+            .iter()
+            .find(|workspace| crate::platform::same_path(&workspace.cwd, &path))
+            .unwrap()
+            .id
+            .clone();
+        assert!(path.exists(), "topic worktree still exists before removal");
+        let listed = crate::git::local::worktrees(&repo).unwrap();
+        let canonical_topic = std::fs::canonicalize(&path).unwrap();
+        assert!(
+            listed.iter().any(|worktree| {
+                !worktree.is_main
+                    && std::fs::canonicalize(&worktree.path)
+                        .map(|candidate| crate::platform::same_path(&candidate, &canonical_topic))
+                        .unwrap_or(false)
+            }),
+            "topic worktree is registered: {listed:?}"
+        );
+        let removed = api_call_with_workers(
+            &mut app,
+            &events,
+            "worktree.remove",
+            serde_json::json!({"path":path}),
+        );
+        assert_eq!(removed["result"]["type"], "ok", "{removed}");
+        assert!(!path.exists());
+        assert!(!app
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == topic_workspace));
+        let remove_request: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                crate::module::paths::state_dir("example.worktree").join("remove-request.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(remove_request["version"], 1);
+        assert_eq!(remove_request["operation"], "remove");
+        assert_eq!(
+            std::fs::canonicalize(remove_request["repository"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&repo).unwrap(),
+        );
+        assert_eq!(
+            std::path::Path::new(remove_request["path"].as_str().unwrap()),
+            std::path::Path::new(&path),
+        );
+        assert_eq!(remove_request["branch"], "topic");
+        assert_eq!(remove_request["force"], false);
+
+        let add_worktree = |branch: &str| {
+            let target = base.join(format!("wt-{branch}"));
+            let output = std::process::Command::new("git")
+                .args(["worktree", "add", "-q", "-b", branch])
+                .arg(&target)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            target
+        };
+        let stdout_removed = add_worktree("stdout-remove");
+        let stdout_workspace = app.workspaces[0].id.clone();
+        app.workspaces[0].cwd = stdout_removed.clone();
+        let removed_with_stdout = api_call_with_workers(
+            &mut app,
+            &events,
+            "worktree.remove",
+            serde_json::json!({"path":stdout_removed}),
+        );
+        assert_eq!(removed_with_stdout["result"]["type"], "ok");
+        assert!(!stdout_removed.exists());
+        assert!(!app
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == stdout_workspace));
+        crate::git::local::branch_delete_force(&repo, "stdout-remove").unwrap();
+        app.active_ws = app
+            .workspaces
+            .iter()
+            .position(|workspace| crate::platform::same_path(&workspace.cwd, &task_path))
+            .unwrap();
+
+        let failed_after_remove = add_worktree("post-remove-error");
+        let post_remove_result = api_call_with_workers(
+            &mut app,
+            &events,
+            "worktree.remove",
+            serde_json::json!({"path":failed_after_remove}),
+        );
+        assert_eq!(post_remove_result["result"]["type"], "ok");
+        assert!(!failed_after_remove.exists());
+        crate::git::local::branch_delete_force(&repo, "post-remove-error").unwrap();
+
+        for (branch, expected) in [
+            ("stdout-no-remove", "must not write to stdout"),
+            ("no-remove", "left the directory in place"),
+        ] {
+            let target = add_worktree(branch);
+            let failed_remove = api_call_with_workers(
+                &mut app,
+                &events,
+                "worktree.remove",
+                serde_json::json!({"path":target}),
+            );
+            assert!(
+                failed_remove["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected),
+                "{failed_remove}"
+            );
+            assert!(target.exists());
+            crate::git::local::worktree_remove_force(&repo, &target).unwrap();
+            crate::git::local::branch_delete_force(&repo, branch).unwrap();
+        }
+
+        let revision_remove = add_worktree("revision-remove");
+        let expected_revision = crate::ipc::api::current_sequence(&app.events);
+        let (reply, revision_remove_response) = mpsc::channel();
+        app.handle_event(AppEvent::Api(ApiRequest {
+            id: "revision-remove".into(),
+            method: "worktree.remove".into(),
+            params: serde_json::json!({
+                "path":revision_remove,
+                "if_revision":expected_revision
+            }),
+            reply,
+        }));
+        assert!(revision_remove_response.try_recv().is_err());
+        app.emit_event("test.remove-revision", serde_json::json!({}));
+        let revision_removed = loop {
+            if let Ok(response) = revision_remove_response.try_recv() {
+                break serde_json::from_str::<serde_json::Value>(&response).unwrap();
+            }
+            app.handle_event(
+                events
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("revisioned remove provider completion"),
+            );
+        };
+        assert_eq!(
+            revision_removed["result"]["type"], "ok",
+            "{revision_removed}"
+        );
+        assert!(!revision_remove.exists());
+        crate::git::local::branch_delete_force(&repo, "revision-remove").unwrap();
+
+        let fallback = add_worktree("fallback-remove");
+        app.modules
+            .find_mut("example.worktree")
+            .unwrap()
+            .manifest
+            .worktree_provider
+            .as_mut()
+            .unwrap()
+            .remove_command = None;
+        let fallback_result = api_call(
+            &mut app,
+            "worktree.remove",
+            serde_json::json!({"path":fallback}),
+        );
+        assert_eq!(fallback_result["result"]["type"], "ok");
+        assert!(!fallback.exists());
+        crate::git::local::branch_delete_force(&repo, "fallback-remove").unwrap();
+
+        app.modules.find_mut("example.worktree").unwrap().enabled = false;
+        let disabled = api_call(
+            &mut app,
+            "worktree.create",
+            serde_json::json!({"branch":"disabled-topic"}),
+        );
+        assert!(
+            disabled["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not enabled"),
+            "{disabled}"
+        );
+        app.modules.find_mut("example.worktree").unwrap().enabled = true;
+
+        let failed = api_call_with_workers(
+            &mut app,
+            &events,
+            "worktree.create",
+            serde_json::json!({"branch":"hook-error"}),
+        );
+        assert_eq!(
+            failed["error"]["message"],
+            "provider needs interactive approval"
+        );
+
+        for branch in ["post-create-error", "invalid-json"] {
+            let failed = api_call_with_workers(
+                &mut app,
+                &events,
+                "worktree.create",
+                serde_json::json!({"branch":branch}),
+            );
+            let message = failed["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains("ownership could not be proven"),
+                "{failed}"
+            );
+            let orphan = base.join(format!("wt-{branch}"));
+            assert!(orphan.exists());
+            assert_eq!(
+                std::fs::read_to_string(orphan.join("uncommitted.txt")).unwrap(),
+                "uncommitted provider work\n"
+            );
+            assert!(crate::git::local::branch_exists(&repo, branch));
+            crate::git::local::worktree_remove_force(&repo, &orphan).unwrap();
+            crate::git::local::branch_delete_force(&repo, branch).unwrap();
+        }
+
+        let expected_revision = crate::ipc::api::current_sequence(&app.events);
+        let (reply, revision_response) = mpsc::channel();
+        app.handle_event(AppEvent::Api(ApiRequest {
+            id: "revision".into(),
+            method: "worktree.create".into(),
+            params: serde_json::json!({
+                "branch":"revision-topic",
+                "if_revision":expected_revision
+            }),
+            reply,
+        }));
+        assert!(revision_response.try_recv().is_err());
+        app.emit_event("test.revision", serde_json::json!({}));
+        let conflict = loop {
+            if let Ok(response) = revision_response.try_recv() {
+                break serde_json::from_str::<serde_json::Value>(&response).unwrap();
+            }
+            app.handle_event(
+                events
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("revisioned provider completion"),
+            );
+        };
+        assert_eq!(conflict["error"]["code"], "revision_conflict");
+        assert!(!base.join("wt-revision-topic").exists());
+        assert!(!crate::git::local::branch_exists(&repo, "revision-topic"));
+
+        app.config.worktree.provider = "missing.provider".into();
+        let rejected = api_call(
+            &mut app,
+            "worktree.create",
+            serde_json::json!({"branch":"another-topic"}),
+        );
+        assert!(rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not installed"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Open the worktree list and apply its scan inline — the bounded worker's
+    /// job, done synchronously so a test can assert on the rows at once without
+    /// scheduling duplicate filesystem work.
+    fn open_worktree_list_now(app: &mut App, repo: &std::path::Path) {
+        let generation = app.begin_worktree_list();
+        let cwds: Vec<PathBuf> = app.workspaces.iter().map(|w| w.cwd.clone()).collect();
+        app.apply_worktree_list(generation, openable_worktrees(repo, &cwds));
+    }
+
+    #[test]
+    fn open_worktree_list_scans_off_loop_on_the_bounded_executor() {
+        let _env = crate::persist::test_env("worktree-open-event");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtevent");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+        let list = app.worktree_open.as_ref().expect("modal opens at once");
+        assert!(list.loading, "rows arrive later; the modal shows loading");
+        assert!(list.entries.is_empty());
+
+        // ⏎ while loading is a no-op: there's nothing to pick yet, and the
+        // modal must not close under the user.
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_some());
+
+        // The bounded worker's completion comes back through the app event
+        // channel (other events may be interleaved; wait for ours) and fills
+        // the rows on the single-writer loop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let ev = rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("worktree scan result arrives");
+            let ours = matches!(&ev, AppEvent::IoCompleted(_));
+            app.handle_event(ev);
+            if ours {
+                break;
+            }
+        }
+        let list = app.worktree_open.as_ref().expect("modal stays open");
+        assert!(!list.loading);
+        assert_eq!(list.entries.len(), 2, "main + sibling worktree both list");
+        assert!(list.entries[0].is_main);
+        assert_eq!(list.entries[1].branch.as_deref(), Some("feature"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_list_reports_a_full_filesystem_queue() {
+        let _env = crate::persist::test_env("worktree-open-queue-full");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // Completed-but-unapplied jobs retain their permits, so this reaches
+        // the executor's real admission bound without timing assumptions.
+        loop {
+            if app
+                .io_jobs
+                .submit(app.app_tx.clone(), || Box::new(|_| false))
+                .is_err()
+            {
+                break;
+            }
+        }
+
+        app.open_worktree_list(std::path::Path::new("/not/read/when-full"));
+        let list = app.worktree_open.as_ref().expect("modal remains visible");
+        assert!(!list.loading, "rejected work must not load forever");
+        assert_eq!(list.error.as_deref(), Some("filesystem work queue is full"));
+        app.drain_io_jobs();
+    }
+
+    #[test]
+    fn stale_worktree_list_result_is_dropped() {
+        let _env = crate::persist::test_env("worktree-open-stale");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtstale");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+
+        // Closed before the scan landed: the result must not reopen the modal.
+        let first = app.begin_worktree_list();
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+        assert!(!app.apply_worktree_list(first, openable_worktrees(&repo, &[])));
+        assert!(app.worktree_open.is_none(), "a closed modal stays closed");
+
+        // Reopened before the first scan landed: the old result is ignored and
+        // the modal keeps waiting for its own.
+        let stale = app.begin_worktree_list();
+        let second = app.begin_worktree_list();
+        assert_ne!(first, second);
+        assert_ne!(stale, second);
+        assert!(!app.apply_worktree_list(stale, openable_worktrees(&repo, &[])));
+        assert!(app.worktree_open.as_ref().unwrap().loading, "still waiting");
+        assert!(app.apply_worktree_list(second, openable_worktrees(&repo, &[])));
+        let list = app.worktree_open.as_ref().unwrap();
+        assert!(!list.loading);
+        assert_eq!(list.entries.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktree_list_shows_the_git_error_in_the_modal() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("worktree-open-error");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let generation = app.begin_worktree_list();
+        app.apply_worktree_list(generation, Err("fatal: not a git repository".into()));
+        let list = app
+            .worktree_open
+            .as_ref()
+            .expect("modal stays open with the error");
+        assert!(!list.loading);
+        assert_eq!(list.error.as_deref(), Some("fatal: not a git repository"));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            screen.contains("not a git repository"),
+            "error renders in the modal"
+        );
+
+        // ⏎ on an empty (errored) list just closes it.
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+    }
+
+    #[test]
+    fn worktree_list_resolves_the_open_badge_on_the_worker() {
+        // The badge is matched against the workspace roots snapshotted at
+        // request time, on the worker — nothing in `apply_worktree_list`
+        // stats a path. A symlinked spelling of the root still matches.
+        let _env = crate::persist::test_env("worktree-open-badge");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtbadge");
+        let feature = |entries: &[WorktreeOpenEntry]| {
+            entries
+                .iter()
+                .find(|e| e.branch.as_deref() == Some("feature"))
+                .map(|e| e.open)
+                .expect("sibling worktree listed")
+        };
+        assert!(!feature(&openable_worktrees(&repo, &[]).unwrap()));
+        assert!(feature(
+            &openable_worktrees(&repo, std::slice::from_ref(&wt)).unwrap()
+        ));
+        #[cfg(unix)]
+        {
+            let link = base.join("wt-link");
+            std::os::unix::fs::symlink(&wt, &link).unwrap();
+            assert!(feature(&openable_worktrees(&repo, &[link]).unwrap()));
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktree_list_renders_control_characters_in_paths_visibly() {
+        use ratatui::{backend::TestBackend, Terminal};
+        // `git worktree list -z` keeps a newline inside a path; the cell
+        // writer would drop it, gluing the halves together. It renders as
+        // its escape instead, so the row shows what the path really is.
+        let _env = crate::persist::test_env("worktree-open-ctrl");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.worktree_open = Some(WorktreeOpenList {
+            generation: 1,
+            loading: false,
+            error: None,
+            entries: vec![WorktreeOpenEntry {
+                path: PathBuf::from("/repo/odd\nname"),
+                branch: Some("odd".into()),
+                head: "bbbb2222".into(),
+                is_main: false,
+                open: false,
+            }],
+            cursor: 0,
+        });
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            screen.contains("/repo/odd\\nname"),
+            "newline shows as its escape"
+        );
+        assert!(
+            !screen.contains("/repo/oddname"),
+            "halves are not glued together"
+        );
+    }
+
+    #[test]
+    fn worktree_list_renders_its_loading_row() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let _env = crate::persist::test_env("worktree-open-loading");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtloading");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_worktree_list(&repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(screen.contains(app.catalog.menu_open_worktree));
+        assert!(screen.contains(app.catalog.worktree_loading));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_lists_every_checkout_and_opens_one() {
+        let _env = crate::persist::test_env("worktree-open-list");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtopen");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        open_worktree_list_now(&mut app, &repo);
+        let list = app.worktree_open.as_ref().expect("modal opens");
+        assert_eq!(list.entries.len(), 2, "main + sibling worktree both list");
+        assert!(list.entries[0].is_main);
+        assert_eq!(list.entries[1].branch.as_deref(), Some("feature"));
+        assert!(!list.entries[1].open);
+
+        // ⏎ on the sibling worktree opens it as a workspace.
+        let before = app.workspaces.len();
+        app.worktree_open.as_mut().unwrap().cursor = 1;
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none(), "modal closes");
+        assert_eq!(app.workspaces.len(), before + 1);
+        assert_eq!(
+            std::fs::canonicalize(&app.workspaces.last().unwrap().cwd).unwrap(),
+            std::fs::canonicalize(&wt).unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_click_opens_the_row_under_the_pointer() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-click");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtclick");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        open_worktree_list_now(&mut app, &repo);
+
+        // Render once so the modal records its clickable rects.
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let row1 = app
+            .worktree_open_rects
+            .iter()
+            .find_map(|(hit, rect)| matches!(*hit, PickerHit::Row(1)).then_some(*rect))
+            .expect("the sibling worktree row is clickable");
+
+        // The keyboard cursor still sits on row 0, so a click that opened the
+        // *highlighted* row instead of the clicked one would fail here.
+        let before = app.workspaces.len();
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row1.x + 2,
+            row: row1.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.worktree_open.is_none(), "modal closes");
+        assert_eq!(app.workspaces.len(), before + 1);
+        assert_eq!(
+            std::fs::canonicalize(&app.workspaces.last().unwrap().cwd).unwrap(),
+            std::fs::canonicalize(&wt).unwrap()
+        );
+
+        // The dimmed backdrop cancels, like the folder picker's.
+        open_worktree_list_now(&mut app, &repo);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let after = app.workspaces.len();
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.worktree_open.is_none(), "backdrop click cancels");
+        assert_eq!(app.workspaces.len(), after, "cancelling opens nothing");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The new-worktree prompt cancels on a backdrop click like the
+    /// open-worktree list does, so the two worktree modals share one gesture. A
+    /// click on the modal body (off the footer buttons) is inert: it must not
+    /// close the prompt or lose what was typed.
+    #[test]
+    fn new_worktree_prompt_backdrop_click_cancels_but_body_click_is_inert() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-prompt-click");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.worktree_prompt = Some("feature".into());
+        app.worktree_repo = Some(std::path::PathBuf::from("/definitely/not/a/repo"));
+
+        // Render once so the prompt records its modal rect.
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let modal = app
+            .worktree_prompt_rect
+            .expect("prompt records its modal rect");
+        let click = |column, row| {
+            AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        // The title row of the modal body: neither a footer button nor backdrop.
+        app.handle_event(click(modal.x + 2, modal.y + 1));
+        assert_eq!(
+            app.worktree_prompt.as_deref(),
+            Some("feature"),
+            "a click on the modal body keeps the prompt and its text"
+        );
+
+        // The dimmed backdrop cancels, like the open-worktree list's.
+        assert!(
+            modal.x > 0 && modal.y > 0,
+            "the modal is centered, so (0,0) is backdrop"
+        );
+        app.handle_event(click(0, 0));
+        assert!(app.worktree_prompt.is_none(), "backdrop click cancels");
+        assert!(
+            app.worktree_repo.is_none(),
+            "cancel clears the pending repo"
+        );
+        assert!(app.worktree_error.is_none());
+    }
+
+    #[test]
+    fn open_worktree_modal_hovering_a_row_repaints_it() {
+        use ratatui::crossterm::event::{MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-hover");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wthover");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        open_worktree_list_now(&mut app, &repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let row_rect = |app: &App, i: usize| {
+            app.worktree_open_rects
+                .iter()
+                .find_map(|(hit, rect)| {
+                    matches!(*hit, PickerHit::Row(n) if n == i).then_some(*rect)
+                })
+                .expect("row is recorded")
+        };
+        let (row0, row1) = (row_rect(&app, 0), row_rect(&app, 1));
+
+        // Moving onto a row is a changed frame: without it the highlight would
+        // never repaint, which is what "hover does nothing" looked like.
+        let moved = |column, row| {
+            AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert!(
+            app.handle_event(moved(row1.x + 2, row1.y)),
+            "moving onto a row redraws"
+        );
+        assert!(
+            !app.handle_event(moved(row1.x + 5, row1.y)),
+            "moving within one row does not"
+        );
+        assert!(
+            app.handle_event(moved(row0.x + 2, row0.y)),
+            "crossing to another row redraws"
+        );
+
+        // And the hovered row is actually painted: the pointer sits on row 0,
+        // the keyboard cursor too, so hovering row 1 must light a *second* row.
+        app.handle_event(moved(row1.x + 2, row1.y));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let bg_of = |rect: Rect| buf[(rect.x + 2, rect.y)].bg;
+        assert_ne!(
+            bg_of(row1),
+            bg_of(row0),
+            "the hovered row is filled differently from the cursor row"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_enter_focuses_an_already_open_checkout() {
+        let _env = crate::persist::test_env("worktree-open-focus");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtfocus");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // The worktree is already open as workspace 0; the repo is workspace 1
+        // (and focused, so the ⏎ below must actually switch focus).
+        app.workspaces[0].cwd = wt.clone();
+        assert!(app.create_workspace_at(repo.clone()));
+        assert_eq!(app.active_ws, 1);
+
+        open_worktree_list_now(&mut app, &repo);
+        let list = app.worktree_open.as_ref().expect("modal opens");
+        let idx = list
+            .entries
+            .iter()
+            .position(|e| e.branch.as_deref() == Some("feature"))
+            .unwrap();
+        assert!(list.entries[idx].open, "already-open checkout is badged");
+
+        let before = app.workspaces.len();
+        app.worktree_open.as_mut().unwrap().cursor = idx;
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.workspaces.len(), before, "no duplicate workspace");
+        assert_eq!(app.active_ws, 0, "the existing workspace is focused");
+
+        // Esc just closes the modal.
+        open_worktree_list_now(&mut app, &repo);
+        app.handle_worktree_open_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.worktree_open.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_renders_branches_and_badges() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-render");
+        let (base, repo, wt) = repo_with_sibling_worktree("wtrender");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = wt; // the sibling worktree is already open
+        open_worktree_list_now(&mut app, &repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Open Worktree"), "modal title renders");
+        assert!(screen.contains("feature"), "the sibling worktree row lists");
+        assert!(screen.contains("● open"), "already-open badge renders");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_truncates_wide_glyph_paths_by_columns() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-cjk");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtcjk");
+        // A worktree whose path is mostly double-width glyphs: 40 CJK chars are
+        // 80 columns, far past the row's path budget, so the path must be
+        // truncated by *columns* — char-count truncation overflows the row and
+        // clips the trailing "open" badge.
+        let cjk = base.join(format!("树{}", "宽".repeat(40)));
+        let out = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "wide", cjk.to_str().unwrap()])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = cjk; // the wide-path worktree is already open
+        open_worktree_list_now(&mut app, &repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("wide"), "the wide-path worktree row lists");
+        assert!(
+            screen.contains("● open"),
+            "badge survives a wide-glyph path (column-aware truncation)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn open_worktree_modal_keeps_path_and_badge_under_a_long_branch_name() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("worktree-open-long-branch");
+        let (base, repo, _wt) = repo_with_sibling_worktree("wtlong");
+        // A 70-column branch name is wider than the whole row budget. The label
+        // must be truncated to share the row with the path's tail and the
+        // "open" badge — an untruncated label pushes both off the row.
+        let branch = format!("topic/{}", "x".repeat(64));
+        let long = base.join("wt-long");
+        let out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &branch,
+                long.to_str().unwrap(),
+            ])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = long; // the long-branch worktree is already open
+        open_worktree_list_now(&mut app, &repo);
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let screen: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            screen.contains("topic/xxx"),
+            "the branch label still leads the row"
+        );
+        assert!(
+            screen.contains("wt-long"),
+            "the path's tail survives a long branch name"
+        );
+        assert!(
+            screen.contains("● open"),
+            "the badge survives a long branch name"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -7341,6 +10904,86 @@ mod tests {
         );
         // A stale exit from the old PTY remains harmless after re-entry.
         app.handle_event(AppEvent::PtyExit(id));
+    }
+
+    #[test]
+    fn closing_an_auto_opened_workspace_keeps_restored_focus_renderable() {
+        let _env = crate::persist::test_env("close-auto-opened-workspace");
+        let root = std::env::temp_dir().join(format!(
+            "luvus-close-auto-opened-workspace-{}",
+            std::process::id()
+        ));
+        let retained = root.join("retained");
+        let automatic = root.join("automatic");
+        std::fs::create_dir_all(&retained).unwrap();
+        std::fs::create_dir_all(&automatic).unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(retained.clone()));
+        let selected_id = app.ws().id.clone();
+        let snapshot = crate::persist::snapshot(&app);
+        drop(app);
+
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let mut app = App::from_snapshot(snapshot, tx2).expect("workspaces restore");
+        assert_eq!(app.ws().id, selected_id);
+
+        let open = |app: &mut App, focus: bool| {
+            let (reply, _rx) = mpsc::channel();
+            let response = app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: "workspace.open".into(),
+                params: json!({
+                    "path": automatic.display().to_string(),
+                    "focus": focus,
+                }),
+                reply,
+            });
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert!(response.get("error").is_none(), "open failed: {response}");
+        };
+
+        open(&mut app, false);
+        assert_eq!(
+            app.ws().id,
+            selected_id,
+            "automatic creation preserves the restored selection"
+        );
+        let automatic_pane = app
+            .workspaces
+            .iter()
+            .find(|workspace| crate::platform::same_path(&workspace.cwd, &automatic))
+            .map(|workspace| workspace.tabs[workspace.active_tab].layout.focus)
+            .expect("automatic workspace exists");
+
+        // A background shell can exit before the next detection tick. Closing it
+        // must leave the restored selection valid for the immediate render.
+        app.handle_event(AppEvent::PtyExit(automatic_pane));
+        assert_eq!(app.ws().id, selected_id);
+        assert!(app.panes.contains_key(&app.layout().focus));
+
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        // The explicitly focused form follows the same close path and must also
+        // fall back to a surviving workspace without waiting for repair.
+        open(&mut app, true);
+        let focused = app.layout().focus;
+        app.handle_event(AppEvent::PtyExit(focused));
+        assert!(app.active_ws < app.workspaces.len());
+        assert!(app.ws().active_tab < app.ws().tabs.len());
+        assert!(app.panes.contains_key(&app.layout().focus));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -7613,6 +11256,92 @@ mod tests {
     }
 
     #[test]
+    fn reported_session_release_is_idempotent_identity_fenced_and_persistent() {
+        let _env = crate::persist::test_env("reported-session-release");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let report = |session: &str| {
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": "opencode",
+                "session_id": session,
+                "usage": {
+                    "model": "openai/gpt-5",
+                    "tokens_in": 10,
+                    "tokens_out": 5,
+                    "cache_read": 2,
+                    "cache_write": 1,
+                    "cost": 0.01,
+                    "updated_at": 100
+                }
+            })
+        };
+        let release = |agent: &str, session: &str| {
+            json!({
+                "pane": pane.0.to_string(),
+                "agent": agent,
+                "session_id": session,
+            })
+        };
+
+        assert_eq!(
+            api_call(&mut app, "pane.report_session", report("ses_a"))["result"]["type"],
+            "ok"
+        );
+        let stale = api_call(
+            &mut app,
+            "pane.release_session",
+            release("opencode", "ses_old"),
+        );
+        assert_eq!(stale["error"]["code"], "ownership_conflict");
+        assert_eq!(
+            app.status[&pane].agent_session.as_ref().unwrap().session_id,
+            "ses_a"
+        );
+
+        assert_eq!(
+            api_call(&mut app, "pane.report_session", report("ses_b"))["result"]["type"],
+            "ok"
+        );
+        let delayed = api_call(
+            &mut app,
+            "pane.release_session",
+            release("opencode", "ses_a"),
+        );
+        assert_eq!(delayed["error"]["code"], "ownership_conflict");
+        assert_eq!(
+            app.status[&pane].agent_session.as_ref().unwrap().session_id,
+            "ses_b"
+        );
+
+        let released = api_call(
+            &mut app,
+            "pane.release_session",
+            release("opencode2", "ses_b"),
+        );
+        assert_eq!(released["result"]["released"], true);
+        assert!(app.status[&pane].agent_session.is_none());
+        assert!(!app
+            .reported_usage
+            .contains_key(&crate::mission::UsageKey::new("opencode", "ses_b")));
+
+        let repeated = api_call(
+            &mut app,
+            "pane.release_session",
+            release("opencode", "ses_b"),
+        );
+        assert_eq!(repeated["result"]["released"], false);
+
+        let snapshot = persist::snapshot(&app);
+        let (restored_tx, _restored_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restored_tx).unwrap();
+        assert!(restored.status[&restored.layout().focus]
+            .agent_session
+            .is_none());
+    }
+
+    #[test]
     fn reported_session_has_one_owner_and_closing_that_pane_prunes_its_usage() {
         let _env = crate::persist::test_env("reported-session-owner");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -7718,12 +11447,30 @@ mod tests {
         // One shell-only observation is not enough: an agent may be starting or
         // re-execing. Seeing it again resets the exit candidate, even when a
         // different recognised agent appears earlier in the same process tree.
+        let first_absence_at = Instant::now();
+        app.last_proc_at = first_absence_at;
         assert!(
             !app.apply_proc_scan(scan(&[&shell])),
             "the first missing scan only updates the process cache"
         );
         assert!(app.status.get(&id).unwrap().agent_session.is_some());
         assert_eq!(app.status.get(&id).unwrap().agent_absent_scans, 1);
+        assert!(
+            app.proc_scan_requested,
+            "the first confirmed absence queues exactly one follow-up scan"
+        );
+        for status in app.status.values_mut() {
+            status.force_detect = false;
+            status.candidate = status.state;
+            status.last_activity = first_absence_at - Duration::from_secs(60);
+        }
+        app.last_detection_audit_at = first_absence_at;
+        let follow_up = app
+            .next_runtime_deadline(first_absence_at, false)
+            .expect("the follow-up scan must wake a detached server");
+        assert!(follow_up > first_absence_at);
+        assert!(follow_up <= first_absence_at + Duration::from_secs(2));
+        app.proc_scan_requested = false;
         assert!(
             !app.apply_proc_scan(scan(&[&shell, "codex", "claude"])),
             "seeing the bound agent again does not change visible lifecycle state"
@@ -7737,6 +11484,11 @@ mod tests {
         app.session_dirty = false;
         assert!(!app.handle_event(AppEvent::ProcScanned(scan(&[&shell]))));
         assert!(app.status.get(&id).unwrap().agent_session.is_some());
+        assert!(
+            app.proc_scan_requested,
+            "the first absence re-arms confirmation"
+        );
+        app.proc_scan_requested = false;
         assert!(
             app.handle_event(AppEvent::ProcScanned(scan(&[&shell]))),
             "the confirmed exit dirties the sidebar through the event path"
@@ -7845,6 +11597,41 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_path_toggles_persist_independently() {
+        let _env = crate::persist::test_env("sidebar-path-toggles");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+
+        assert!(app.config.layout.workspace_paths);
+        assert!(app.config.layout.agent_paths);
+        assert!(app.ws_menu_items(0).contains(&WsMenuItem::TogglePath));
+        assert!(app
+            .agent_menu_items(AgentTarget::Live(pane))
+            .contains(&AgentMenuItem::TogglePath));
+
+        app.open_ws_menu(0, 0, 0);
+        app.ws_menu_action(WsMenuItem::TogglePath);
+        app.flush_config_for_test(&_rx);
+        let stored = crate::config::load();
+        assert!(!stored.layout.workspace_paths);
+        assert!(stored.layout.agent_paths);
+
+        app.open_agent_menu(AgentTarget::Live(pane), 0, 0);
+        app.agent_menu_action(AgentMenuItem::TogglePath);
+        app.flush_config_for_test(&_rx);
+        let stored = crate::config::load();
+        assert!(!stored.layout.workspace_paths);
+        assert!(!stored.layout.agent_paths);
+
+        drop(app);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let restarted = App::new(80, 24, tx).unwrap();
+        assert!(!restarted.config.layout.workspace_paths);
+        assert!(!restarted.config.layout.agent_paths);
+    }
+
+    #[test]
     fn open_workspace_menu_reuses_snapshotted_repo_capability() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -7861,7 +11648,9 @@ mod tests {
             can_move_down: false,
             swap_targets: Vec::new(),
             swap_open: false,
+            swap_selected: None,
             swap_rects: Vec::new(),
+            selected: None,
             module_actions: Vec::new(),
         });
 
@@ -7924,6 +11713,37 @@ mod tests {
 
         assert_eq!(app.workspaces[0].id, target_id);
         assert_eq!(app.workspaces[0].name, "renamed");
+    }
+
+    #[test]
+    fn workspace_rename_arrows_move_the_caret_instead_of_typing_at_the_end() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].name = "Recall issue".into();
+        app.open_ws_rename(0);
+        let press =
+            |app: &mut App, code| app.handle_ws_rename_key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        for _ in 0.."issue".len() {
+            press(&mut app, KeyCode::Left);
+        }
+        for c in "bot ".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Delete);
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Char('s'));
+        let rename = app.ws_rename.as_ref().expect("rename modal stays open");
+        assert_eq!(rename.buffer, "recall bot issues");
+        assert!(
+            app.ws_menu.is_none() && app.sidebar_focus.is_none(),
+            "no navigation"
+        );
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.workspaces[0].name, "recall bot issues");
     }
 
     #[test]
@@ -8050,6 +11870,65 @@ mod tests {
         let old: persist::PaneSnap =
             serde_json::from_str(r#"{"cwd":"/tmp/x","command":"sh"}"#).unwrap();
         assert_eq!(old.agent_launch, None);
+    }
+
+    /// A Devin pane restores from the exact binding Luvus persisted (it has no
+    /// session discovery), and the restore never replays the `-- <briefing>`
+    /// the pane was launched with: only the options before the separator come
+    /// back.
+    #[test]
+    fn devin_restores_its_exact_binding_without_replaying_the_briefing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let focus = app.layout().focus;
+        let st = app.status.get_mut(&focus).unwrap();
+        st.agent = "devin".into();
+        st.agent_session = Some(AgentSession {
+            agent: "devin".into(),
+            session_id: "quiet-meadow".into(),
+        });
+        app.proc_commands.insert(
+            focus,
+            vec!["devin --permission-mode auto -- fix the login bug".into()],
+        );
+
+        let snap = persist::snapshot(&app);
+        let ps = snap
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.tabs)
+            .flat_map(|t| &t.panes)
+            .find(|(id, _)| *id == focus.0)
+            .map(|(_, ps)| ps)
+            .unwrap();
+        assert_eq!(
+            ps.agent_session,
+            Some(("devin".to_string(), "quiet-meadow".to_string()))
+        );
+        assert_eq!(
+            ps.agent_launch.as_deref(),
+            Some(
+                &[
+                    "--permission-mode".to_string(),
+                    "auto".into(),
+                    "--".into(),
+                    "fix".into(),
+                    "the".into(),
+                    "login".into(),
+                    "bug".into(),
+                ][..]
+            )
+        );
+
+        let (agent, sid) = ps.agent_session.clone().unwrap();
+        assert_eq!(
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), true).as_deref(),
+            Some("devin --resume 'quiet-meadow' '--permission-mode' 'auto'\r")
+        );
+        assert_eq!(
+            crate::agent::resume_for(&agent, &sid, ps.agent_launch.as_deref(), false).as_deref(),
+            Some("devin --resume 'quiet-meadow'\r")
+        );
     }
 
     /// The captured CLI options are **per pane**, not one global set (docs/62).
@@ -8832,6 +12711,7 @@ mod tests {
             "the left sidebar widened by the drag distance"
         );
         // Released width is persisted for the next launch.
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().sidebars.unwrap().left.width,
             before + 6,
@@ -9303,9 +13183,9 @@ mod tests {
     }
 
     /// End-to-end through the real mouse pipeline (`handle_event`), the user's
-    /// exact report: on a stacked split, clicking the bottom pane's title opens
-    /// its command overlay, clicking its ⤢ zoom toggles zoom, and clicking its
-    /// content focuses it — none of them get eaten by a divider resize.
+    /// exact report: on a stacked split, clicking the bottom pane's title focuses
+    /// it, clicking its ⤢ zoom toggles zoom, and clicking its content focuses it.
+    /// None of them get eaten by a divider resize.
     #[test]
     fn stacked_bottom_pane_title_zoom_and_body_are_all_clickable() {
         let _env = crate::persist::test_env("stacked-clickable");
@@ -9342,19 +13222,17 @@ mod tests {
         app.zoomed = false;
         render(&mut app, &mut term);
 
-        // 2. The title strip opens the running-command overlay.
+        // 2. The title strip focuses its pane without opening an overlay.
         let (_, title) = *app
             .pane_title_rects
             .iter()
             .max_by_key(|(_, rc)| rc.y)
             .expect("bottom pane has a title strip");
+        app.layout_mut().focus = top;
         click(&mut app, title.x + 1, title.y);
-        assert!(
-            app.cmd_inspect.is_some(),
-            "clicking the title opened the command overlay"
-        );
+        assert_eq!(app.layout().focus, bottom, "title click focused its pane");
+        assert!(app.cmd_inspect.is_none(), "title click opened no overlay");
         assert!(app.resize_drag.is_none(), "title did not start a resize");
-        app.close_cmd_inspect();
         render(&mut app, &mut term);
 
         // 3. Focus the top pane, then a click in the bottom pane's *body* focuses
@@ -9991,6 +13869,7 @@ mod tests {
         app.files_area = junk;
         app.file_tree_rects = vec![(0, junk)];
         app.agents_filter_rects = vec![(true, junk)];
+        app.agents_elsewhere_rect = Some((app.layout().focus, junk));
         app.module_dock_rects = vec![("example.buzz".into(), 0, junk)]; // a user module dock
 
         // Hide both sidebars so no dock draws this frame — the worst stale case.
@@ -10005,6 +13884,10 @@ mod tests {
         assert_eq!(app.files_area, Rect::ZERO, "FILES area cleared");
         assert!(app.file_tree_rects.is_empty(), "FILES row rects cleared");
         assert!(app.agents_filter_rects.is_empty(), "AGENTS filter cleared");
+        assert!(
+            app.agents_elsewhere_rect.is_none(),
+            "AGENTS overflow line cleared"
+        );
         assert!(
             app.module_dock_rects.is_empty(),
             "user module dock rects cleared — a stale module dock can't fire"
@@ -10072,6 +13955,8 @@ mod tests {
         let row = |text: &str, value: &str, menu: Vec<DockRowMenuItem>| DockRow {
             text: text.into(),
             dot: None,
+            tone: None,
+            spans: Vec::new(),
             action: Some("select".into()),
             value: Some(value.into()),
             menu,
@@ -10185,6 +14070,8 @@ mod tests {
                 DockRow {
                     text: "esp32s3".into(),
                     dot: Some("done".into()),
+                    tone: None,
+                    spans: Vec::new(),
                     action: Some("select".into()),
                     value: Some("/dev/ttyA".into()),
                     menu: vec![DockRowMenuItem {
@@ -10197,6 +14084,8 @@ mod tests {
                 DockRow {
                     text: "build".into(),
                     dot: None,
+                    tone: None,
+                    spans: Vec::new(),
                     action: Some("build".into()),
                     value: None,
                     menu: Vec::new(),
@@ -10667,10 +14556,24 @@ mod tests {
         let r = call(
             &mut app,
             "task.add",
-            json!({"title":"auth","paths":["src/auth/**"]}),
+            json!({
+                "title":"auth",
+                "prompt":"Review the API.\nInclude rollback coverage.",
+                "paths":["src/auth/**"]
+            }),
         );
         assert_eq!(r["result"]["task"]["id"], "t1");
+        assert_eq!(
+            r["result"]["task"]["prompt"],
+            "Review the API.\nInclude rollback coverage."
+        );
         call(&mut app, "task.add", json!({"title":"api","deps":["t1"]}));
+        let r = call(
+            &mut app,
+            "task.update",
+            json!({"id":"t2", "prompt":"Implement the API client."}),
+        );
+        assert_eq!(r["result"]["task"]["prompt"], "Implement the API client.");
 
         // t2 can't be claimed while its dependency is unfinished.
         let r = call(
@@ -10687,6 +14590,16 @@ mod tests {
             json!({"id":"t1","pane": a.0.to_string()}),
         );
         assert_eq!(r["result"]["task"]["status"], "claimed");
+        let r = call(
+            &mut app,
+            "task.update",
+            json!({"id":"t1", "prompt":"too late"}),
+        );
+        assert_eq!(r["error"]["code"], "task_active");
+        assert_eq!(
+            app.orch.task("t1").unwrap().prompt.as_deref(),
+            Some("Review the API.\nInclude rollback coverage.")
+        );
         let r = call(
             &mut app,
             "lease.acquire",
@@ -10721,6 +14634,178 @@ mod tests {
             r.get("result").is_some(),
             "lease should be granted after release: {r}"
         );
+    }
+
+    #[test]
+    fn orchestration_routes_tasks_and_leases_by_project() {
+        let _env = crate::persist::test_env("orch-project-scope");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspace_a = app.ws().id.clone();
+        let other_root = crate::persist::config_dir().join("other-project");
+        std::fs::create_dir_all(&other_root).unwrap();
+        assert!(app.create_workspace_at(other_root));
+        let workspace_b = app.ws().id.clone();
+        let pane_b = app.layout().focus;
+
+        fn call(app: &mut App, method: &str, params: Value) -> Value {
+            let (reply, _rx) = mpsc::channel();
+            let response = app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: method.into(),
+                params,
+                reply,
+            });
+            serde_json::from_str(&response).unwrap()
+        }
+
+        let ambiguous = call(&mut app, "task.add", json!({"title":"ambiguous"}));
+        assert_eq!(ambiguous["error"]["code"], "workspace_required");
+
+        let task_a = call(
+            &mut app,
+            "task.add",
+            json!({"title":"A", "paths":["src/**"], "workspace_id":workspace_a}),
+        );
+        let task_b = call(
+            &mut app,
+            "task.add",
+            json!({"title":"B", "paths":["src/**"], "workspace_id":workspace_b}),
+        );
+        assert_eq!(
+            task_a["result"]["task"]["project"]["workspace_id"],
+            workspace_a
+        );
+        assert_eq!(
+            task_b["result"]["task"]["project"]["workspace_id"],
+            workspace_b
+        );
+
+        let ambiguous_next = call(&mut app, "task.next", json!({}));
+        assert_eq!(ambiguous_next["error"]["code"], "workspace_required");
+
+        let wrong_project = call(
+            &mut app,
+            "task.start",
+            json!({"id":"t1", "mode":"workspace", "workspace_id":workspace_b}),
+        );
+        assert_eq!(wrong_project["error"]["code"], "workspace_mismatch");
+
+        // `task.next` must validate its focused-pane fallback against the
+        // selected workspace before claiming the next task.
+        app.active_ws = 0;
+        let mismatched_next = call(&mut app, "task.next", json!({"workspace_id":workspace_b}));
+        assert_eq!(mismatched_next["error"]["code"], "workspace_mismatch");
+        assert_eq!(
+            app.orch.task("t2").unwrap().status,
+            crate::orch::TaskStatus::Queued
+        );
+
+        let next_b = call(
+            &mut app,
+            "task.next",
+            json!({"workspace_id":workspace_b, "pane":pane_b.0.to_string()}),
+        );
+        assert_eq!(next_b["result"]["task"]["id"], "t2");
+
+        app.orch
+            .add_task("legacy".into(), vec![], vec![], None)
+            .unwrap();
+        app.active_ws = 0;
+        let rejected_legacy = call(&mut app, "task.next", json!({"workspace_id":workspace_b}));
+        assert_eq!(rejected_legacy["error"]["code"], "workspace_mismatch");
+        let legacy = app.orch.task("t3").unwrap();
+        assert_eq!(legacy.status, crate::orch::TaskStatus::Queued);
+        assert!(legacy.project.is_none());
+        let persisted = serde_json::to_value(&app.orch).unwrap();
+        assert!(persisted["tasks"][2]["project"].is_null());
+
+        let lease_b = call(
+            &mut app,
+            "lease.acquire",
+            json!({"task":"t2", "paths":["src/**"], "pane":pane_b.0.to_string()}),
+        );
+        assert!(lease_b.get("result").is_some(), "{lease_b}");
+
+        let start_a = call(
+            &mut app,
+            "task.start",
+            json!({"id":"t1", "mode":"workspace"}),
+        );
+        assert_eq!(start_a["result"]["workspace_id"], workspace_a);
+        assert_eq!(start_a["result"]["task"]["status"], "running");
+        assert_eq!(app.orch.leases.len(), 2);
+        assert!(app.orch.leases.iter().any(|lease| lease.pane == pane_b.0));
+        assert!(app.orch.leases.iter().any(|lease| lease.pane != pane_b.0));
+    }
+
+    #[test]
+    fn orchestration_uses_the_focused_repository_beside_a_non_repo_workspace() {
+        let _env = crate::persist::test_env("orch-focused-repository");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].cwd = crate::persist::config_dir().join("launch-home");
+        app.workspaces[0].worktree = None;
+        assert!(app.ws().worktree.is_none());
+
+        let repo = crate::persist::config_dir().join("solo");
+        let repo_id = crate::ids::public_id("workspace");
+        app.workspaces.push(Workspace {
+            id: repo_id.clone(),
+            name: "solo".into(),
+            cwd: repo.clone(),
+            branch: Some("main".into()),
+            git_ahead_behind: None,
+            worktree: Some(crate::git::WorktreeMembership {
+                common_dir: repo.join(".git"),
+                linked: false,
+            }),
+            tabs: vec![],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.active_ws = 1;
+
+        let call = |app: &mut App, method: &str, params: Value| {
+            let (reply, _rx) = mpsc::channel();
+            let response = app.handle_api(&ApiRequest {
+                id: "1".into(),
+                method: method.into(),
+                params,
+                reply,
+            });
+            serde_json::from_str::<Value>(&response).unwrap()
+        };
+        let added = call(&mut app, "task.add", json!({"title":"repository work"}));
+        assert_eq!(added["result"]["task"]["project"]["workspace_id"], repo_id);
+
+        app.active_ws = 0;
+        let ambiguous = call(&mut app, "task.add", json!({"title":"ambiguous"}));
+        assert_eq!(ambiguous["error"]["code"], "workspace_required");
+
+        let other_repo = crate::persist::config_dir().join("other-project");
+        app.workspaces.push(Workspace {
+            id: crate::ids::public_id("workspace"),
+            name: "other-project".into(),
+            cwd: other_repo.clone(),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.active_ws = 1;
+        let multiple_non_git = call(&mut app, "task.add", json!({"title":"non-Git ambiguity"}));
+        assert_eq!(multiple_non_git["error"]["code"], "workspace_required");
+
+        app.workspaces[2].branch = Some("main".into());
+        app.workspaces[2].worktree = Some(crate::git::WorktreeMembership {
+            common_dir: other_repo.join(".git"),
+            linked: false,
+        });
+        let two_repositories = call(&mut app, "task.add", json!({"title":"still ambiguous"}));
+        assert_eq!(two_repositories["error"]["code"], "workspace_required");
     }
 
     #[test]
@@ -10825,9 +14910,42 @@ mod tests {
             "focus:false kept the active workspace on reopen"
         );
 
+        // Adding a previously unknown folder must preserve the same selection.
+        // The already-open assertion above used to pass while this case still
+        // activated the appended workspace unconditionally.
+        let background = std::env::temp_dir().join(format!(
+            "luvus-attach-open-background-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&background).unwrap();
+        let selected_id = app.ws().id.clone();
+        let before = app.workspaces.len();
+        app.zoomed = true;
+        open(&mut app, &background, false);
+        assert_eq!(app.workspaces.len(), before + 1, "new folder is added");
+        assert_eq!(
+            app.ws().id,
+            selected_id,
+            "focus:false preserves selection when it creates a workspace"
+        );
+        assert!(
+            app.zoomed,
+            "focus:false preserves the selected workspace's zoom state"
+        );
+        assert!(app
+            .workspaces
+            .iter()
+            .any(|workspace| crate::platform::same_path(&workspace.cwd, &background)));
+
+        // Explicit open keeps the existing focus behavior for the same folder.
+        open(&mut app, &background, true);
+        assert!(crate::platform::same_path(&app.ws().cwd, &background));
+
         // An explicit open (focus:true) still focuses the folder.
         open(&mut app, &first, true);
         assert_eq!(app.ws().cwd, first, "explicit open still focuses");
+        drop(app);
+        let _ = std::fs::remove_dir_all(background);
     }
 
     #[test]
@@ -10890,6 +15008,78 @@ mod tests {
 
         drop(restored);
         let _ = std::fs::remove_dir_all(other);
+    }
+
+    #[test]
+    fn module_agent_title_owners_cannot_overwrite_or_clear_each_other() {
+        let _env = crate::persist::test_env("module-agent-title-owners");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "shared".into(),
+            Some("Alpha".into()),
+            Some("module.alpha"),
+        )
+        .unwrap();
+        assert!(set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "shared".into(),
+            Some("Beta".into()),
+            Some("module.beta"),
+        )
+        .is_err());
+        set_owned_agent_session_title(
+            &mut app.agent_title_sessions,
+            "pi".into(),
+            "beta-only".into(),
+            Some("Beta".into()),
+            Some("module.beta"),
+        )
+        .unwrap();
+        assert!(app.clear_agent_row_titles_for_owner("module.alpha"));
+        assert!(app.agent_row_title_for_session("pi", "shared").is_none());
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "beta-only"),
+            Some("Beta")
+        );
+    }
+
+    #[test]
+    fn module_agent_titles_apply_to_live_and_resumable_without_using_alias() {
+        let _env = crate::persist::test_env("module-agent-titles");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        {
+            let status = app.status.get_mut(&pane).unwrap();
+            status.agent = "pi".into();
+            status.agent_session = Some(AgentSession {
+                agent: "pi".into(),
+                session_id: "live-1".into(),
+            });
+        }
+        app.agent_names.insert("chezmoi".into(), pane);
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "live-1".into(),
+            Some("Live module title".into()),
+        ));
+        assert!(app.set_agent_row_title_for_session(
+            "pi".into(),
+            "old-1".into(),
+            Some("History title".into()),
+        ));
+        assert_eq!(app.pane_title(pane).as_deref(), Some("Live module title"));
+        assert_eq!(app.agent_name_for(pane), Some("chezmoi"));
+        assert_eq!(
+            app.agent_row_title_for_session("pi", "old-1"),
+            Some("History title")
+        );
+        assert!(app.set_agent_row_title_for_session("pi".into(), "live-1".into(), None));
+        assert!(app.pane_title(pane).is_none());
     }
 
     #[test]
@@ -11196,6 +15386,37 @@ mod tests {
     }
 
     #[test]
+    fn workspace_menu_keyboard_swap_preserves_upstream_navigation() {
+        let _env = crate::persist::test_env("workspace-keyboard-swap");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.new_workspace();
+        app.new_workspace();
+        for (workspace, name) in app.workspaces.iter_mut().zip(["alpha", "beta", "gamma"]) {
+            workspace.name = name.into();
+            workspace.worktree = None;
+        }
+        app.open_ws_menu(0, 0, 0);
+        let items = app.ws_menu_items(0);
+        assert!(items.contains(&WsMenuItem::TogglePath));
+        app.ws_menu.as_mut().unwrap().selected =
+            items.iter().position(|item| *item == WsMenuItem::SwapWith);
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.ws_menu.as_ref().unwrap().swap_open);
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.ws_menu.is_none());
+        assert_eq!(
+            app.workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            ["gamma", "beta", "alpha"]
+        );
+        assert_eq!(app.ws().name, "gamma");
+    }
+
+    #[test]
     fn workspace_menu_moves_a_linked_worktree_group_as_one_unit() {
         let _env = crate::persist::test_env("workspace-worktree-group-menu");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -11283,6 +15504,8 @@ mod tests {
         use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
 
+        let _env = crate::persist::test_env("agent-menu-resume-dismiss");
+
         let sess = |id: &str, p: &str| crate::agent::SessionInfo {
             agent: "claude".into(),
             session_id: id.into(),
@@ -11297,7 +15520,8 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(80, 20)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
 
-        // Right-click the second session row → an AGENTS menu with Resume + Close.
+        // Right-click the second session row → its normal actions plus the
+        // workspace-scope toggle.
         let row = app.session_rects.iter().find(|(i, _)| *i == 1).unwrap().1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Right),
@@ -11311,11 +15535,48 @@ mod tests {
         );
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let items = &app.agent_menu.as_ref().unwrap().items;
-        assert_eq!(items.len(), 2, "session menu has Resume + Close");
+        assert_eq!(
+            items.len(),
+            5,
+            "session menu has Resume + Close + path + divider + workspace scope"
+        );
         assert_eq!(items[0].0, AgentMenuItem::Resume);
+        assert_eq!(items[2].0, AgentMenuItem::TogglePath);
+        assert_eq!(items[3].0, AgentMenuItem::Divider);
+        assert_eq!(items[4].0, AgentMenuItem::ToggleWorkspaceScope);
+        let rendered = |term: &Terminal<TestBackend>| {
+            term.backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        assert!(rendered(&term).contains("Show Workspace Only"));
 
-        // Click "Close" → the session leaves the list and stays dismissed.
-        let close = items[1].1;
+        // The scope row describes the action that will be taken. Clicking it
+        // persists the choice; reopening any AGENTS row offers the inverse.
+        let scope = items[4].1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: scope.x + 1,
+            row: scope.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.agents_this_workspace);
+        app.flush_config_for_test(&_rx);
+        assert!(crate::config::load().agents_this_workspace);
+        app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(rendered(&term).contains("Show All Workspaces"));
+        app.agent_menu_action(AgentMenuItem::ToggleWorkspaceScope);
+        assert!(!app.agents_this_workspace);
+
+        // Reopen the row menu and click Close: the session leaves the list and
+        // stays dismissed.
+        app.open_agent_menu(AgentTarget::Session(1), row.x + 1, row.y);
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let close = app.agent_menu.as_ref().unwrap().items[1].1;
         app.handle_event(AppEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: close.x + 1,
@@ -11601,6 +15862,7 @@ mod tests {
             crate::i18n::by_code(&app.config.language).workspaces,
             "catalog swapped live"
         );
+        app.flush_config_for_test(&_rx);
         assert_eq!(
             crate::config::load().language,
             app.config.language,
@@ -11727,19 +15989,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // Clicking a pane's title opens the running-command overlay. The point is
-    // that the command comes from the OS, not the screen: an agent's own UI
-    // elides long commands and those characters never reach luvus at all.
+    // The pane context menu keeps the running-command overlay available. The
+    // command comes from the OS, not the screen, because an agent's own UI can
+    // elide characters before they ever reach luvus.
     #[test]
-    fn clicking_a_pane_title_shows_the_real_command() {
-        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    fn pane_menu_shows_the_real_running_command() {
         use ratatui::{backend::TestBackend, Terminal};
         let _env = crate::persist::test_env("cmd-inspect");
         let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
 
-        // Titles (and borders) only render on split panes, so split first — the
-        // single-pane case is covered by the pane context menu instead.
+        // Split first so this continues to exercise the same live child process
+        // setup as the pane-title regression tests.
         app.split(Axis::Col);
         let id = app.layout().focus;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -11755,22 +16016,16 @@ mod tests {
                 Err(error) => panic!("the split pane never became ready: {error}"),
             }
         }
-        // Render once so the title strips are registered as click targets.
+        // The right-click menu action remains the explicit path to inspection.
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        let (_, title) = *app
-            .pane_title_rects
-            .iter()
-            .find(|(pid, _)| *pid == id)
-            .expect("the focused pane has a clickable title");
-
         assert!(app.cmd_inspect.is_none());
-        app.handle_event(AppEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: title.x + 1,
-            row: title.y,
-            modifiers: KeyModifiers::NONE,
-        }));
+        app.open_pane_menu(id, 1, 1);
+        assert!(
+            app.pane_menu_items().contains(&PaneMenuItem::RunningCmd),
+            "the pane menu offers running-command inspection"
+        );
+        app.pane_menu_action(PaneMenuItem::RunningCmd);
         let c = app.cmd_inspect.as_ref().expect("the overlay opened");
         assert_eq!(c.pane, id);
         // The pane's own shell is the root of the tree, with its real argv.
@@ -11999,7 +16254,7 @@ mod tests {
     // burst must not flip an idle pane to a lingering "working". Detection is
     // frozen for `RESIZE_GRACE` after a resize, then resumes normally.
     #[test]
-    fn resize_grace_suppresses_a_transient_working_after_a_switch() {
+    fn resize_grace_expiry_wakes_and_reclassifies_once() {
         use crate::ui::theme::State;
         let _env = crate::persist::test_env("resize-grace");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -12024,6 +16279,8 @@ mod tests {
             "a repaint right after a resize must not flip the pane to working"
         );
 
+        let considered = app.detection_panes_considered;
+
         // Past the grace window the same reading commits normally.
         let t1 = t0 + RESIZE_GRACE + std::time::Duration::from_millis(150);
         {
@@ -12031,13 +16288,19 @@ mod tests {
             s.last_activity = t1;
             s.last_input = t1 - std::time::Duration::from_secs(5);
         }
-        app.detection_dirty.insert(id);
+        assert_eq!(
+            app.next_runtime_deadline(t1, false),
+            Some(t1),
+            "expired resize grace is a due event even without a TUI"
+        );
         app.detect_tick(t1);
         assert_eq!(
             app.status.get(&id).unwrap().state,
             State::Working,
             "once the grid settles, a genuinely active pane reads working again"
         );
+        assert_eq!(app.status.get(&id).unwrap().last_resize, None);
+        assert_eq!(app.detection_panes_considered, considered + 1);
     }
 
     // docs/29: config with no `sidebars` migrates to today's default layout.
@@ -12087,6 +16350,8 @@ mod tests {
             vec![DockRow {
                 text: "build ok".into(),
                 dot: Some("done".into()),
+                tone: None,
+                spans: Vec::new(),
                 action: None,
                 value: None,
                 menu: Vec::new(),

@@ -1,4 +1,5 @@
 {
+  "$comment": "Effective Access permissions are returned by uhp.capabilities on the Access endpoint only; no new event or event-sequence semantics. session.snapshot terminal agent_name is a read projection of operator aliases. agent.name changes aliases without emitting an event or advancing event_sequence. pane.rename updates the same map, emits pane.renamed, and advances event_sequence, including when clearing a name. Consumers refresh snapshots to observe aliases; the sequence is not an alias ETag because agent.name is silent.",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://luvus.dev/protocol/uhp/v1/event-catalog.schema.json",
   "title": "Luvus Universal Harness Protocol general event payload catalog",
@@ -9,6 +10,18 @@
     "agent.authority_released",
     "agent.authority_reported",
     "agent.hook",
+    "automation.created",
+    "automation.deleted",
+    "automation.disabled",
+    "automation.enabled",
+    "automation.rebound",
+    "automation.run_failed",
+    "automation.run_finished",
+    "automation.run_materialized",
+    "automation.run_queued",
+    "automation.run_started",
+    "automation.run_updated",
+    "automation.updated",
     "config.changed",
     "events.resync_required",
     "layout.applied",
@@ -43,6 +56,7 @@
     "task.needs_compaction",
     "task.ready",
     "task.released",
+    "task.retried",
     "task.started",
     "task.updated",
     "terminal.closed",
@@ -61,6 +75,18 @@
     "agent.authority_released": { "$ref": "#/$defs/authority_released" },
     "agent.authority_reported": { "$ref": "#/$defs/authority_reported" },
     "agent.hook": { "$ref": "#/$defs/agent_hook" },
+    "automation.created": { "$ref": "#/$defs/automation_definition" },
+    "automation.deleted": { "$ref": "#/$defs/id_only" },
+    "automation.disabled": { "$ref": "#/$defs/automation_definition" },
+    "automation.enabled": { "$ref": "#/$defs/automation_definition" },
+    "automation.rebound": { "$ref": "#/$defs/automation_definition" },
+    "automation.run_failed": { "$ref": "#/$defs/automation_run" },
+    "automation.run_finished": { "$ref": "#/$defs/automation_run" },
+    "automation.run_materialized": { "$ref": "#/$defs/automation_run" },
+    "automation.run_queued": { "$ref": "#/$defs/automation_run" },
+    "automation.run_started": { "$ref": "#/$defs/automation_run" },
+    "automation.run_updated": { "$ref": "#/$defs/automation_run" },
+    "automation.updated": { "$ref": "#/$defs/automation_definition" },
     "config.changed": { "$ref": "#/$defs/empty" },
     "events.resync_required": { "$ref": "#/$defs/resync_required" },
     "layout.applied": { "$ref": "#/$defs/layout_applied" },
@@ -95,6 +121,7 @@
     "task.needs_compaction": { "$ref": "#/$defs/task_needs_compaction" },
     "task.ready": { "$ref": "#/$defs/id_only" },
     "task.released": { "$ref": "#/$defs/task_released" },
+    "task.retried": { "$ref": "#/$defs/task_retried" },
     "task.started": { "$ref": "#/$defs/task_started" },
     "task.updated": { "$ref": "#/$defs/task" },
     "terminal.closed": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
@@ -110,6 +137,64 @@
     "workspace.moved": { "$ref": "#/$defs/workspace_moved" }
   },
   "$defs": {
+    "automation_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "enabled", "trigger", "task", "next_run_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "trigger": { "type": "object" },
+        "target_state": { "enum": ["bound", "restoring", "needs_rebind"] },
+        "target": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false, "required": ["kind"],
+              "properties": { "kind": { "const": "new_worker" } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "pane_id", "terminal_id", "if_busy", "binding"],
+              "properties": {
+                "kind": { "const": "active_agent" },
+                "pane_id": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+                "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+                "if_busy": { "enum": ["wait", "skip"] },
+                "binding": { "enum": ["process_bound", "durable"] }
+              }
+            }
+          ]
+        },
+        "task": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["agent_id", "workspace_id", "mode", "access"],
+          "properties": {
+            "agent_id": { "type": "string" },
+            "workspace_id": { "type": "string" },
+            "mode": { "enum": ["worktree", "workspace"] },
+            "access": { "enum": ["read_only", "workspace", "full_access"] }
+          }
+        },
+        "next_run_at": { "type": ["integer", "null"] }
+      }
+    },
+    "automation_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automation_id", "run_id"],
+      "properties": {
+        "automation_id": { "type": "string" },
+        "run_id": { "type": "string" },
+        "retry_of": { "type": "string" },
+        "task_id": { "type": "string" },
+        "pane": { "type": "string" },
+        "scheduled_at": { "type": "integer", "minimum": 0 },
+        "status": { "type": "string" },
+        "code": { "type": "string" }
+      }
+    },
     "empty": {
       "type": "object",
       "additionalProperties": false
@@ -251,6 +336,7 @@
       }
     },
     "agent_status": {
+      "description": "This event can represent identity or metadata changes with unchanged status. Such events cannot complete agent.prompt wait=true. The agent_prompt response and prompt-failure data, not this event payload, carry observed_state for a new working or blocked transition; this is not confirmation that prompt text was consumed.",
       "type": "object",
       "additionalProperties": false,
       "required": ["pane", "status", "agent", "cwd", "project", "branch", "authority"],
@@ -309,10 +395,11 @@
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "title", "status", "assignee", "deps", "paths", "gate", "outputs", "notes", "worktree", "branch", "context", "created", "updated"],
+      "required": ["id", "title", "status", "assignee", "deps", "paths", "gate", "outputs", "notes", "worktree", "branch", "context", "attempt", "previous_attempts", "created", "updated"],
       "properties": {
         "id": { "type": "string" },
         "title": { "type": "string" },
+        "prompt": { "type": ["string", "null"] },
         "status": { "enum": ["queued", "claimed", "running", "blocked", "review", "done", "merging", "merged", "failed"] },
         "assignee": { "type": ["integer", "null"], "minimum": 1 },
         "deps": { "type": "array", "items": { "type": "string" } },
@@ -324,9 +411,30 @@
         "branch": { "type": ["string", "null"] },
         "mode": { "enum": ["worktree", "workspace"] },
         "workspace_worker": { "$ref": "#/$defs/workspace_worker" },
+        "project": { "$ref": "#/$defs/task_project" },
         "context": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "previous_attempts": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/$defs/task_attempt" }
+        },
         "created": { "type": "integer", "minimum": 0 },
         "updated": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "task_attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "final_status", "finished_at"],
+      "properties": {
+        "number": { "type": "integer", "minimum": 1 },
+        "final_status": { "enum": ["blocked", "review", "done", "failed"] },
+        "branch": { "type": "string" },
+        "worktree": { "type": "string" },
+        "started_at": { "type": "integer", "minimum": 0 },
+        "finished_at": { "type": "integer", "minimum": 0 },
+        "completion_source": { "enum": ["command", "gate", "automation"] }
       }
     },
     "workspace_worker": {
@@ -339,11 +447,29 @@
         "root": { "type": "string" }
       }
     },
+    "task_project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_id", "root"],
+      "properties": {
+        "workspace_id": { "type": "string" },
+        "root": { "type": "string" }
+      }
+    },
     "task_released": {
       "oneOf": [
         { "$ref": "#/$defs/task" },
         { "$ref": "#/$defs/id_only" }
       ]
+    },
+    "task_retried": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "attempt"],
+      "properties": {
+        "id": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 2 }
+      }
     },
     "task_started": {
       "type": "object",
@@ -366,7 +492,10 @@
       "required": ["id", "context"],
       "properties": {
         "id": { "type": "string" },
-        "context": { "type": "number", "minimum": 0, "maximum": 1 }
+        "context": {
+          "type": "number", "minimum": 0, "maximum": 1,
+          "description": "Fraction of the model context window already consumed. This is not task-completion progress."
+        }
       }
     },
     "task_merge_started": {

@@ -38,6 +38,11 @@ remains compatible with older Luvus releases.
   leases before claiming, starting, updating, completing, releasing, deleting,
   or merging. A merge is serialized through `luvus/integration`; wait for the
   returned `merged` or `conflict` outcome instead of retrying blindly.
+  Tasks and leases are project-scoped. Inside a Luvus pane the CLI supplies its
+  workspace automatically. Outside a pane, pass `--workspace-id` when multiple
+  repositories or multiple non-Git projects are open. A sole focused Git
+  project stays unambiguous beside a non-Git launch-directory workspace. Never
+  drain another project's queue by omitting the target.
   Branch-backed dependencies unblock only after they are merged. Release
   requeues the task and releases leases without stopping its worker pane.
 - Inspect module metadata, actions, settings, and logs before changing module

@@ -35,16 +35,33 @@ Then any of these tables, each declaring an argv `command` (a list, run as-is, c
 - **`[[actions]]`** `id`, `title`, `command`, optional `contexts` — a runnable action. With `contexts = ["pane"|"workspace"|"node"|"agent"|"tab"]` it also appears in that right-click menu, acting on **what was clicked**. Without `contexts` it is CLI-only (`luvus module run <id> <action>`). Dock rows also invoke an action on click.
 - **`[[panes]]`** `id`, `title`, `command`, `placement` (`split` | `overlay` | `tab`) — a real pane running your command (`luvus module pane open <id> <entrypoint>`).
 - **`[[settings]]`** `key`, `title`, `type` (`bool` | `string` | `number` | `enum`), plus `default`, `options` (enum), `min`/`max`/`step` (number), `secret` (mask + hide the value). Rendered in Settings → Modules; values reach every command as env (below).
+- **`[worktree_provider]`** one optional fixed creation `command`, optional fixed `remove_command`, and optional `platforms`. The user selects the module id in `config.json` at `worktree.provider`; config cannot replace either command.
+
+A worktree provider reads one versioned JSON request from stdin. Creation gets
+`version`, `operation`, `repository`, `branch`, and `branch_exists`, and must
+print only `{"path":"/absolute/worktree/path"}` on stdout. Removal gets
+`version`, `operation`, `repository`, `path`, `branch`, and `force`; it must
+print nothing, exit successfully, and unregister and remove the target. If a
+provider violates its exit or stdout contract after deletion already completed,
+Luvus reconciles the proven Git/filesystem state instead of retaining a stale
+workspace; stdout remains unsupported. Human logs go to stderr. This command is
+synchronous and must not call back into the Luvus CLI/API while the server
+waits. Luvus verifies the returned path is a
+registered worktree of the source repository on the exact requested branch
+before opening a workspace; explicit removal is verified before and after the
+command. Internal rollback and task merge remain Git-backed.
 
 ## What your command receives (no JSON parsing needed)
 
 luvus puts context in the environment, flat, so a bash module never parses JSON:
 
 - `LUVUS_MODULE_ID`, `LUVUS_MODULE_ROOT` (the module dir), `LUVUS_MODULE_VERSION`
+- `LUVUS_MODULE_TOKEN` — UI-publisher credential for this server; the Luvus CLI forwards it automatically, so do not persist or override it
 - `LUVUS_MODULE_CONFIG_DIR`, `LUVUS_MODULE_STATE_DIR` — writable per-module dirs
 - `LUVUS_WORKSPACE_ID`, `LUVUS_WORKSPACE_CWD`, `LUVUS_TAB_INDEX`
 - `LUVUS_PANE_ID`, `LUVUS_PANE_CWD`, `LUVUS_PANE_AGENT`, `LUVUS_PANE_STATUS` (the clicked/target pane)
 - `LUVUS_SETTING_<KEY>` for each declared setting (uppercased key), plus the whole set as JSON
+- `[worktree_provider]` commands read their versioned operation request as JSON from stdin
 - Dock-row clicks add `LUVUS_MODULE_DOCK_ID`, `LUVUS_MODULE_ROW_ACTION`, `LUVUS_MODULE_ROW_VALUE`, `LUVUS_MODULE_ROW_TEXT`, `LUVUS_MODULE_ROW_INDEX`
 - Bar-segment clicks add `LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and optional `LUVUS_MODULE_BAR_VALUE`
 - `LUVUS_MODULE_CONTEXT_JSON` — the full snapshot, if you want structured data
@@ -54,10 +71,11 @@ luvus puts context in the environment, flat, so a bash module never parses JSON:
 
 Run the `luvus` CLI from inside the command; it talks to the running server over `$LUVUS_SOCKET_PATH`. Use `"$LUVUS_BIN_PATH"` to guarantee the same binary as the session. Module-facing methods:
 
-- `luvus ui dock push --id <dock> --rows <json>` (or pipe the JSON on stdin) — fill your dock. Rows are `{text, action?, value?}`; a row's `action` invokes one of your `[[actions]]` on click, with the row's `value` in `LUVUS_MODULE_ROW_VALUE`.
+- `luvus ui dock push --id <dock> --rows <json>` (or pipe the JSON on stdin) — fill your dock. Rows are `{text, dot?, tone?, spans?, action?, value?, menu?}`; a row's `action` invokes one of your `[[actions]]` on click, with the row's `value` in `LUVUS_MODULE_ROW_VALUE`. `tone` is a Luvus Bar tone name (`normal`, `muted`, `accent`, `success`, `warning`, `error`) for the text, and `spans` is `[{text, tone?}]` to color segments of one row with the same tone names (a span without a tone takes the row's). Both are optional and theme-bound, raw colors and ANSI are not accepted. Omitting `tone` gives the default row color, which is not the same as `normal`.
 - `luvus bar push --id <widget> --content <json>` — atomically publish structured `text`, `symbol`, `state`, `badge`, `progress`, `spacer`, and `separator` segments. Add `--compact-content`; an `action` must name one of your `[[actions]]`.
 - `luvus ui notification push --text <text> --level info|success|warning|error` — publish bounded transient status; use `--dedupe-key` for replacement.
 - `luvus ui toast "<text>"` — flash a one-line confirmation.
+- `luvus ui agent-title push --titles <json>` — publish AGENTS sidebar titles for live panes (`pane`) and resumable sessions (built-in `agent` + `session_id`). OSC still wins; never send a Luvus `=alias` as the title. `luvus ui agent-title clear` drops one key or every title owned by your module. The CLI authenticates ownership automatically.
 - `luvus ui sidebar` / `ui dock list` / `ui dock move` — sidebar/dock control.
 - `luvus tab rename <name>` / `tab list` — tabs.
 - `luvus module settings <id>` / `module settings <id> <key>` — read your settings exactly (values are masked in `settings list` when `secret`, but exact in `settings get`).
@@ -90,6 +108,6 @@ Iterate: edit the script, re-run the action or trigger the event, watch `module 
 ## Conventions
 
 - One module, one job. Keep commands fast and quiet — luvus caps a command's output (64 KiB) and runs at most 32 at a time.
-- Identity env (`LUVUS_MODULE_ID`, socket path) is injected and cannot be overridden.
+- Identity env (`LUVUS_MODULE_ID`, `LUVUS_MODULE_TOKEN`, socket path) is injected and cannot be overridden. Never log or persist the token.
 - Use `platforms` on the manifest or any item to skip a build step / hook / pane / action where it does not apply.
 - To share it: `luvus module install <owner>/<repo>` clones + builds + registers from GitHub; tag the repo with the `luvus-module` topic so `luvus module search` finds it.

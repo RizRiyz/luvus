@@ -54,7 +54,7 @@ static INSTALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub enum SkillHost {
     Claude,
     /// The open `~/.agents/skills` location shared by Codex, Copilot, Gemini,
-    /// Pi, Cursor, Amp, Droid, and fx.
+    /// Pi, Cursor, Amp, Droid, fx, Kilo Code, and Devin.
     Shared,
     Opencode,
     Kimi,
@@ -63,10 +63,11 @@ pub enum SkillHost {
     Kiro,
     Omp,
     Hermes,
+    Letta,
 }
 
 impl SkillHost {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Shared,
         Self::Claude,
         Self::Opencode,
@@ -76,6 +77,7 @@ impl SkillHost {
         Self::Kiro,
         Self::Omp,
         Self::Hermes,
+        Self::Letta,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -89,6 +91,7 @@ impl SkillHost {
             Self::Kiro => "kiro",
             Self::Omp => "omp",
             Self::Hermes => "hermes",
+            Self::Letta => "letta",
         }
     }
 
@@ -388,6 +391,7 @@ fn target_dir_at(host: SkillHost, home: &Path, xdg_config: Option<&Path>) -> Pat
         SkillHost::Kiro => home.join(".kiro").join("skills").join("luvus"),
         SkillHost::Omp => crate::agent::omp::default_skill_dir_at(home),
         SkillHost::Hermes => home.join(".hermes").join("skills").join("luvus"),
+        SkillHost::Letta => home.join(".letta").join("skills").join("luvus"),
     }
 }
 
@@ -541,14 +545,18 @@ fn host_commands(host: SkillHost) -> &'static [&'static str] {
             "amp",
             "droid",
             "fx",
+            "kilo",
+            "kilocode",
+            "devin",
         ],
-        SkillHost::Opencode => &["opencode"],
+        SkillHost::Opencode => &["opencode", "opencode2"],
         SkillHost::Kimi => &["kimi"],
         SkillHost::Grok => &["grok"],
         SkillHost::Qwen => &["qwen"],
         SkillHost::Kiro => &["kiro", "kiro-cli"],
         SkillHost::Omp => &["omp"],
         SkillHost::Hermes => &["hermes"],
+        SkillHost::Letta => &["letta"],
     }
 }
 
@@ -580,6 +588,8 @@ fn host_config_dirs(
             xdg.join("amp"),
             home.join(".factory"),
             home.join(".fx"),
+            home.join(".kilo"),
+            xdg.join("devin"),
         ],
         SkillHost::Opencode => vec![xdg.join("opencode")],
         SkillHost::Kimi => vec![kimi_home
@@ -592,6 +602,7 @@ fn host_config_dirs(
         SkillHost::Hermes => vec![hermes_home
             .map(Path::to_path_buf)
             .unwrap_or_else(|| home.join(".hermes"))],
+        SkillHost::Letta => vec![home.join(".letta")],
     }
 }
 
@@ -1124,6 +1135,10 @@ mod tests {
             PathBuf::from("/xdg/config/opencode/skills/luvus")
         );
         assert_eq!(
+            host_commands(SkillHost::Opencode),
+            ["opencode", "opencode2"]
+        );
+        assert_eq!(
             target_dir_at(SkillHost::Kimi, home, None),
             PathBuf::from("/home/tester/.kimi-code/skills/luvus")
         );
@@ -1142,6 +1157,10 @@ mod tests {
         assert_eq!(
             target_dir_at(SkillHost::Hermes, home, None),
             PathBuf::from("/home/tester/.hermes/skills/luvus")
+        );
+        assert_eq!(
+            target_dir_at(SkillHost::Letta, home, None),
+            PathBuf::from("/home/tester/.letta/skills/luvus")
         );
         assert_eq!(SkillHost::Shared.state_key(), "codex");
     }
@@ -1171,12 +1190,16 @@ mod tests {
             "amp",
             "droid",
             "fx",
+            "kilo",
+            "kilocode",
+            "devin",
         ] {
             assert!(
                 shared.contains(&agent),
                 "missing shared host detection for {agent}"
             );
         }
+        assert_eq!(host_commands(SkillHost::Letta), &["letta"]);
     }
 
     #[test]

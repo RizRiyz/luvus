@@ -1,6 +1,9 @@
+mod builtin;
 pub mod format;
 pub mod install;
 pub mod registry;
+
+pub use builtin::{file as builtin_file, theme as builtin_theme};
 
 use std::fs;
 use std::path::PathBuf;

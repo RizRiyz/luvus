@@ -488,7 +488,7 @@ pub fn anchor_context(
             DiffSide::New => line.new_line,
         };
         if let Some(number) = number {
-            source.entry(number).or_insert(line.text.as_str());
+            source.entry(number).or_insert(line.text.as_ref());
         }
     }
     if (start..=end).any(|line| !source.contains_key(&line)) {

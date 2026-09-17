@@ -24,7 +24,9 @@ luvus --session api pane focus 7
 ```
 
 The skill preserves the inherited socket inside a managed pane. Outside a
-pane, an explicit `--session` wins over any inherited socket. It does not run
+pane, an explicit `--session` wins over any inherited socket. When that selector
+targets another server, Luvus also discards the caller's inherited pane id;
+pane ids are valid only in the session that issued them. It does not run
 `session list`, `help`, or `ping` before an ordinary operation, so named-session
 routing adds no discovery round trip to the fast command path.
 
@@ -41,9 +43,10 @@ luvus skill enable
 The command makes no network request. It detects supported coding-agent
 environments and installs the one bundled Luvus skill through their native
 skill directories. The shared `~/.agents/skills/luvus/` destination serves
-Codex, GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, and fx.
-Claude Code, OpenCode, Kimi Code CLI, Grok Build, Hermes CLI, Qwen Code, and
-Kiro use their native dedicated destinations. It does not add an always-on
+Codex, GitHub Copilot CLI, Gemini CLI, Pi, Cursor, Amp, Droid, fx, Kilo Code,
+and Devin.
+Claude Code, OpenCode, Kimi Code CLI, Grok Build, Hermes CLI, Letta Code, Qwen
+Code, and Kiro use their native dedicated destinations. It does not add an always-on
 pointer to `~/.codex/AGENTS.md`, and it never overwrites an installation it
 does not own.
 
@@ -176,7 +179,7 @@ luvus agent fork reviewer --name experiment --no-focus
 ```
 
 The fork inherits the source conversation and receives its own new session.
-Native forks currently support Claude, Grok, Codex, Pi, and OMP. If the target is
+Native forks currently support Claude, Grok, Codex, Kilo Code, Pi, and OMP. If the target is
 unsupported, its session cannot be resolved, or its pane cannot start, the
 skill reports Luvus's structured error instead of substituting a split, new
 agent, or resume operation that could lose or reuse the wrong context.
@@ -241,7 +244,8 @@ for waiting on a specific lifecycle state after work has been sent.
 
 From an external Codex terminal, `agent start --anchor <pane-id>` creates the
 new no-focus sibling beside an explicit pane and completes the launch in one
-invocation. Omit `--down` for a right-side split and add it for a split below.
+invocation. Omit direction flags to split along the longer side of the anchor
+pane; pass `--right` or `--down` to force a direction.
 On an older installed release without `--anchor`, the skill uses `pane split
 <pane-id> --no-focus` followed by `agent start --pane <new-pane-id>`. This keeps
 Cargo, Homebrew, and `install.sh` releases compatible while newer versions use

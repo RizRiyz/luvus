@@ -1,4 +1,7 @@
-use super::types::{AgentDescriptor, DiscoveryOperations, IdentityDescriptor, SessionOperations};
+use super::types::{
+    AgentDescriptor, AutomationLaunch, AutomationOperations, DiscoveryOperations,
+    IdentityDescriptor, SessionOperations,
+};
 
 mod integration;
 pub(in crate::agent) mod sessions;
@@ -10,6 +13,15 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     aliases: &[],
     launch_command: "kimi",
     task_prompt_args: &["--prompt"],
+    automation: Some(AutomationOperations {
+        read_only: None,
+        workspace: Some(AutomationLaunch {
+            args: &["--auto", "--prompt"],
+        }),
+        full_access: Some(AutomationLaunch {
+            args: &["--yolo", "--prompt"],
+        }),
+    }),
     identity: IdentityDescriptor {
         distinct: &["kimi"],
         ambiguous: &[],

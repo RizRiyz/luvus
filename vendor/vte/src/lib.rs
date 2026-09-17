@@ -144,14 +144,24 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     ) -> usize {
         let mut i = 0;
 
-        // Handle partial codepoints from previous calls to `advance`.
-        if self.partial_utf8_len != 0 {
-            i += self.advance_partial_utf8(performer, bytes);
-        }
-
         while i != bytes.len() && !performer.terminated() {
+            if self.partial_utf8_len != 0 {
+                i += self.advance_partial_utf8(performer, &bytes[i..i + 1]);
+                continue;
+            }
             match self.state {
-                State::Ground => i += self.advance_ground(performer, &bytes[i..]),
+                State::Ground if performer.ascii_print_never_terminates()
+                    && matches!(bytes[i], b' '..=b'~') =>
+                {
+                    let start = i;
+                    while i < bytes.len() && matches!(bytes[i], b' '..=b'~') {
+                        i += 1;
+                    }
+                    performer.print_ascii(&bytes[start..i]);
+                },
+                // A performer may terminate on any printed character or
+                // control byte. Do not consume the remainder of a text run.
+                State::Ground => i += self.advance_ground(performer, &bytes[i..i + 1]),
                 _ => {
                     // Inlining it results in worse codegen.
                     let byte = bytes[i];
@@ -720,11 +730,28 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// Handle ground dispatch of print/execute for all characters in a string.
     #[inline]
     fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
-        for c in text.chars() {
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if matches!(bytes[index], b' '..=b'~') {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && matches!(bytes[index], b' '..=b'~') {
+                    index += 1;
+                }
+                performer.print_ascii(&bytes[start..index]);
+                continue;
+            }
+
+            let c = text[index..]
+                .chars()
+                .next()
+                .expect("ground text index remains on a character boundary");
             match c {
                 '\x00'..='\x1f' | '\u{80}'..='\u{9f}' => performer.execute(c as u8),
                 _ => performer.print(c),
             }
+            index += c.len_utf8();
         }
     }
 }
@@ -761,6 +788,24 @@ enum State {
 pub trait Perform {
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
+
+    /// Draw a contiguous run of printable ASCII characters.
+    ///
+    /// The default retains the exact per-character contract. Terminal
+    /// implementations can override this to avoid repeating UTF-8 and width
+    /// classification for the overwhelmingly common shell-output path.
+    fn print_ascii(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.print(char::from(*byte));
+        }
+    }
+
+    /// Opt into ASCII batching in the terminating parser only when printing
+    /// printable ASCII can never change `terminated()` from false to true.
+    /// Control characters and escape sequences still check termination.
+    fn ascii_print_never_terminates(&self) -> bool {
+        false
+    }
 
     /// Execute a C0 or C1 control function.
     fn execute(&mut self, _byte: u8) {}
@@ -834,6 +879,50 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
+
+    #[test]
+    fn termination_preserves_unconsumed_text() {
+        struct StopOn {
+            stop: char,
+            text: std::string::String,
+        }
+        impl Perform for StopOn {
+            fn print(&mut self, c: char) {
+                self.text.push(c);
+            }
+            fn terminated(&self) -> bool {
+                self.text.ends_with(self.stop)
+            }
+        }
+        for (input, stop, expected) in [("abcdef", 'c', "abc"), ("aé終z", '終', "aé終")] {
+            let mut parser = Parser::new();
+            let mut performer = StopOn { stop, text: std::string::String::new() };
+            let consumed = parser.advance_until_terminated(&mut performer, input.as_bytes());
+            assert_eq!(consumed, expected.len());
+            assert_eq!(performer.text, expected);
+            parser.advance(&mut performer, &input.as_bytes()[consumed..]);
+            assert_eq!(performer.text, input);
+        }
+    }
+
+    #[test]
+    fn terminating_parser_batches_opted_in_ascii_but_stops_at_control() {
+        #[derive(Default)]
+        struct Batch {
+            runs: Vec<Vec<u8>>,
+            stopped: bool,
+        }
+        impl Perform for Batch {
+            fn ascii_print_never_terminates(&self) -> bool { true }
+            fn print_ascii(&mut self, bytes: &[u8]) { self.runs.push(bytes.to_vec()); }
+            fn execute(&mut self, _: u8) { self.stopped = true; }
+            fn terminated(&self) -> bool { self.stopped }
+        }
+        let mut parser = Parser::new();
+        let mut performer = Batch::default();
+        assert_eq!(parser.advance_until_terminated(&mut performer, b"abc\ndef"), 4);
+        assert_eq!(performer.runs, vec![b"abc".to_vec()]);
+    }
 
     const OSC_BYTES: &[u8] = &[
         0x1B, 0x5D, // Begin OSC

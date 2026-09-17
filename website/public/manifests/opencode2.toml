@@ -1,0 +1,8 @@
+# Official Luvus detection manifest for the OpenCode 2 preview CLI.
+# This provides detection-only compatibility to older identity-enabled Luvus
+# versions. Native launch, exact-ID resume, and automation support ship in the
+# Luvus binary.
+agent = "opencode2"
+
+[identity]
+distinct = ["opencode2"]

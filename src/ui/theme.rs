@@ -663,16 +663,23 @@ pub const THEMES: &[&str] = &[
     "ocean",
     "dracula",
     "nord",
+    "tokyo-night",
     "sky",
     "catppuccin-mocha",
     "catppuccin-macchiato",
     "catppuccin-frappe",
+    "rose-pine",
+    "rose-pine-moon",
     "gruvbox",
     "sunset",
     "homebrew",
     "grass",
+    "baitong",
     "redsands",
     "catppuccin-latte",
+    "rose-pine-dawn",
+    "papercolor",
+    "paper",
     "gruvbox-light",
     "mono",
     // Terminal is capability-derived rather than a bundled palette, and is
@@ -695,6 +702,9 @@ pub fn canonical(name: &str) -> &str {
 }
 
 pub fn by_name(name: &str) -> Theme {
+    if let Some(theme) = crate::theme::builtin_theme(canonical(name)) {
+        return theme;
+    }
     match name {
         // The client-supplied RGB palette is applied after startup. Until then,
         // use terminal-native Reset/ANSI colors rather than a bundled palette.
@@ -722,6 +732,9 @@ pub fn by_name(name: &str) -> Theme {
 }
 
 pub fn describe(name: &str) -> &'static str {
+    if let Some(file) = crate::theme::builtin_file(canonical(name)) {
+        return file.description.as_str();
+    }
     match name {
         "terminal" => "inferred from your terminal",
         "ocean" => "deep cmd-blue, cyan accent",

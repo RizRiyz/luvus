@@ -8,19 +8,23 @@
 //! All mutation happens on the single-writer app loop (via `app/dispatch.rs`), so
 //! claims and leases are race-free by construction; this module holds no locks.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+pub(crate) mod worker;
 
 /// Human-friendly, CLI-typeable task id (`t1`, `t2`, …).
 pub type TaskId = String;
 
 /// Where an orchestration worker owns its working files. Worktree remains the
 /// default; workspace mode is an explicit shared-checkout choice.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskWorkerMode {
+    #[default]
     Worktree,
     Workspace,
 }
@@ -51,6 +55,27 @@ pub struct WorkspaceWorkerBinding {
     pub root: String,
 }
 
+/// Durable project ownership captured when a task enters the ledger.
+///
+/// `workspace_id` is the preferred routing target. `root` is the collision
+/// scope: Git worktrees share their repository common directory, while a
+/// non-Git workspace uses its stored root.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskProject {
+    pub workspace_id: String,
+    pub root: String,
+}
+
+/// Durable link from one concrete ORCH task to the automation occurrence that
+/// created it. The run id is unique, so restart reconciliation can never create
+/// a second task for the same occurrence.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AutomationProvenance {
+    pub automation_id: String,
+    pub run_id: String,
+    pub scheduled_at: u64,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -63,6 +88,33 @@ pub enum TaskStatus {
     Merging,
     Merged,
     Failed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCompletionSource {
+    Command,
+    Gate,
+    Automation,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskAttempt {
+    pub number: u32,
+    pub final_status: TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    pub finished_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_source: Option<TaskCompletionSource>,
+}
+
+const fn default_task_attempt() -> u32 {
+    1
 }
 
 impl TaskStatus {
@@ -99,6 +151,9 @@ impl TaskStatus {
 pub struct Task {
     pub id: TaskId,
     pub title: String,
+    /// Optional detailed briefing. Manual legacy tasks continue to use `title`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     pub status: TaskStatus,
     /// Owning pane's raw id (`PaneId.0`), once claimed.
     pub assignee: Option<u32>,
@@ -110,6 +165,10 @@ pub struct Task {
     pub outputs: Vec<String>,
     /// Learnings persisted for the next agent (pushed live on the bus).
     pub notes: Vec<String>,
+    /// Ledgers written before project-aware orchestration leave this unset and
+    /// are bound conservatively on first use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<TaskProject>,
     /// Worktree path the task's worker runs in (ORCH-3), once started.
     #[serde(default)]
     pub worktree: Option<String>,
@@ -132,6 +191,22 @@ pub struct Task {
     /// gate). Above the threshold, completion is blocked until it compacts.
     #[serde(default)]
     pub context: Option<f64>,
+    /// Present only when this task was materialized by Agent Automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<AutomationProvenance>,
+    /// Monotonic user-visible attempt number. Old ledgers deserialize as the
+    /// original first attempt.
+    #[serde(default = "default_task_attempt")]
+    pub attempt: u32,
+    /// Bounded immutable summaries of attempts replaced through `task.retry`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_attempts: Vec<TaskAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_finished_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_source: Option<TaskCompletionSource>,
     pub created: u64,
     pub updated: u64,
 }
@@ -144,8 +219,14 @@ pub const COMPACTION_THRESHOLD: f64 = 0.85;
 /// `orch.json` on disk, and the UHP can drive it programmatically — so
 /// nothing may grow without bound. Limits far above real use, well below harm.
 pub const MAX_TASKS: usize = 1000;
+/// Task titles remain compact board labels while still allowing descriptive names.
+pub const MAX_TASK_TITLE_BYTES: usize = 256;
+/// Detailed worker briefings share the reviewed automation prompt budget.
+pub const MAX_TASK_PROMPT_BYTES: usize = 32 * 1024;
 /// Per-task `outputs` / `notes` keep only the most recent entries…
 pub const MAX_TASK_LOG: usize = 100;
+/// Retried attempts remain useful history without growing `orch.json` forever.
+pub const MAX_TASK_ATTEMPTS: usize = 16;
 /// …and each entry is truncated to this many bytes (a runaway agent piping a
 /// build log into `task update --output` can't balloon the ledger).
 pub const MAX_LOG_ENTRY: usize = 4 * 1024;
@@ -155,6 +236,48 @@ pub const MAX_LEASES: usize = 1024;
 pub const MAX_LEASE_PATHS: usize = 64;
 /// Maximum UTF-8 byte length of one path pattern.
 pub const MAX_LEASE_PATH_BYTES: usize = 1024;
+
+/// Shell-facing fields cannot contain any terminal control character.
+pub(crate) fn contains_terminal_control(value: &str) -> bool {
+    value.chars().any(char::is_control)
+}
+
+/// Structured briefings retain LF line breaks but reject every other control.
+pub(crate) fn contains_multiline_control(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| character.is_control() && character != '\n')
+}
+
+/// Reject terminal actions while optionally retaining ordinary line breaks.
+fn validate_text_controls(field: &'static str, value: &str, multiline: bool) -> OrchResult<()> {
+    if if multiline {
+        contains_multiline_control(value)
+    } else {
+        contains_terminal_control(value)
+    } {
+        return Err(Reject::new(
+            "bad_request",
+            format!("{field} contains an unsupported control character"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_task_text(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+    multiline: bool,
+) -> OrchResult<()> {
+    if value.len() > max_bytes {
+        return Err(Reject::new(
+            "bad_request",
+            format!("{field} exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+    validate_text_controls(field, value, multiline)
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lease {
@@ -213,8 +336,37 @@ impl OrchState {
         deps: Vec<TaskId>,
         gate: Option<String>,
     ) -> OrchResult<Task> {
+        self.add_task_with_prompt(title, None, paths, deps, gate)
+    }
+
+    /// Add a task and its optional detailed worker briefing atomically.
+    pub fn add_task_with_prompt(
+        &mut self,
+        title: String,
+        prompt: Option<String>,
+        paths: Vec<String>,
+        deps: Vec<TaskId>,
+        gate: Option<String>,
+    ) -> OrchResult<Task> {
+        self.add_task_with_prompt_in_project(title, prompt, paths, deps, gate, None)
+    }
+
+    /// Add a task and bind its owning project in the same mutation.
+    pub fn add_task_with_prompt_in_project(
+        &mut self,
+        title: String,
+        prompt: Option<String>,
+        paths: Vec<String>,
+        deps: Vec<TaskId>,
+        gate: Option<String>,
+        project: Option<TaskProject>,
+    ) -> OrchResult<Task> {
         if title.trim().is_empty() {
             return Err(Reject::new("bad_request", "task title is required"));
+        }
+        validate_task_text("task title", &title, MAX_TASK_TITLE_BYTES, false)?;
+        if let Some(prompt) = &prompt {
+            validate_task_text("task prompt", prompt, MAX_TASK_PROMPT_BYTES, true)?;
         }
         if self.tasks.len() >= MAX_TASKS {
             return Err(Reject::new(
@@ -233,6 +385,7 @@ impl OrchState {
         let task = Task {
             id: format!("t{}", self.next_task),
             title,
+            prompt: prompt.filter(|value| !value.trim().is_empty()),
             status: TaskStatus::Queued,
             assignee: None,
             deps,
@@ -240,11 +393,18 @@ impl OrchState {
             gate,
             outputs: Vec::new(),
             notes: Vec::new(),
+            project,
             worktree: None,
             branch: None,
             worker_mode: None,
             workspace_worker: None,
             context: None,
+            automation: None,
+            attempt: 1,
+            previous_attempts: Vec::new(),
+            attempt_started_at: None,
+            attempt_finished_at: None,
+            completion_source: None,
             created: now,
             updated: now,
         };
@@ -252,8 +412,92 @@ impl OrchState {
         Ok(task)
     }
 
+    /// Bind a legacy task to a project, or verify an existing binding. Another
+    /// workspace is accepted only when it resolves to the same project root.
+    pub fn bind_project(&mut self, id: &str, project: TaskProject) -> OrchResult<Task> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if let Some(existing) = task.project.as_ref() {
+            if !same_project(existing, &project) {
+                return Err(Reject::new(
+                    "workspace_mismatch",
+                    format!("{id} belongs to another project"),
+                ));
+            }
+            return Ok(task.clone());
+        }
+        task.project = Some(project);
+        task.updated = unix_now();
+        Ok(task.clone())
+    }
+
+    /// Attach the immutable automation briefing and occurrence provenance to a
+    /// freshly added task. Reusing `run_id` is rejected to preserve exactly-once
+    /// materialization across retries and restarts.
+    pub fn attach_automation(
+        &mut self,
+        id: &str,
+        prompt: String,
+        provenance: AutomationProvenance,
+    ) -> OrchResult<Task> {
+        validate_task_text("task prompt", &prompt, MAX_TASK_PROMPT_BYTES, true)?;
+        if self.tasks.iter().any(|task| {
+            task.id != id
+                && task
+                    .automation
+                    .as_ref()
+                    .is_some_and(|existing| existing.run_id == provenance.run_id)
+        }) {
+            return Err(Reject::new(
+                "duplicate_automation_run",
+                format!("automation run {} already has a task", provenance.run_id),
+            ));
+        }
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        task.prompt = Some(prompt);
+        task.automation = Some(provenance);
+        task.updated = unix_now();
+        Ok(task.clone())
+    }
+
+    pub fn task_for_automation_run(&self, run_id: &str) -> Option<&Task> {
+        self.tasks.iter().find(|task| {
+            task.automation
+                .as_ref()
+                .is_some_and(|automation| automation.run_id == run_id)
+        })
+    }
+
     pub fn task(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|t| t.id == id)
+    }
+
+    pub fn set_prompt(&mut self, id: &str, prompt: Option<String>) -> OrchResult<Task> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if task.status != TaskStatus::Queued || task.assignee.is_some() || task.automation.is_some()
+        {
+            return Err(Reject::new(
+                "task_active",
+                "task prompt can only be edited before a manual task starts",
+            ));
+        }
+        if let Some(prompt) = &prompt {
+            validate_task_text("task prompt", prompt, MAX_TASK_PROMPT_BYTES, true)?;
+        }
+        task.prompt = prompt.filter(|value| !value.trim().is_empty());
+        task.updated = unix_now();
+        Ok(task.clone())
     }
 
     /// A task is *ready* to claim when every dependency is available in the
@@ -275,11 +519,29 @@ impl OrchState {
 
     /// The next claimable task — queued with all deps done, earliest first
     /// (ORCH-4 scheduler: `task next` for an agent loop to drain the queue).
+    #[cfg(test)]
     pub fn next_ready(&self) -> Option<TaskId> {
         self.tasks
             .iter()
             .find(|t| t.status == TaskStatus::Queued && self.ready(&t.id))
             .map(|t| t.id.clone())
+    }
+
+    /// The next claimable task for one project. Projectless legacy tasks remain
+    /// eligible only so the app can bind them after an explicit, unambiguous
+    /// workspace resolution.
+    pub fn next_ready_in_project(&self, project: &TaskProject) -> Option<TaskId> {
+        self.tasks
+            .iter()
+            .find(|task| {
+                task.status == TaskStatus::Queued
+                    && self.ready(&task.id)
+                    && task
+                        .project
+                        .as_ref()
+                        .is_none_or(|owned| same_project(owned, project))
+            })
+            .map(|task| task.id.clone())
     }
 
     /// Record a worker's context-window usage (ORCH-5 compaction gate). Returns
@@ -344,6 +606,7 @@ impl OrchState {
         }
         t.assignee = Some(pane);
         t.status = TaskStatus::Claimed;
+        t.attempt_started_at.get_or_insert(now);
         t.updated = now;
         Ok(t.clone())
     }
@@ -356,11 +619,115 @@ impl OrchState {
             .find(|t| t.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
         t.status = status;
+        t.attempt_finished_at = matches!(
+            status,
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Review | TaskStatus::Blocked
+        )
+        .then_some(now);
         t.updated = now;
         let task = t.clone();
         // Only `begin_merge` may create a durable integration reservation.
         self.merge_previous.remove(id);
         Ok(task)
+    }
+
+    /// Queue a fresh manual attempt while preserving the previous worker and
+    /// worktree as immutable history. The caller persists the returned state
+    /// before replacing the live ledger.
+    pub fn retry_task(&mut self, id: &str) -> OrchResult<Task> {
+        let task = self.validate_retry(id)?;
+        if task.automation.is_some() {
+            return Err(Reject::new(
+                "automation_task",
+                "automation-owned tasks must be retried as a new automation run",
+            ));
+        }
+        self.retry_validated_task(id)
+    }
+
+    pub fn validate_retry(&self, id: &str) -> OrchResult<&Task> {
+        let task = self
+            .task(id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        if !matches!(
+            task.status,
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Review | TaskStatus::Blocked
+        ) {
+            return Err(Reject::new(
+                "not_retryable",
+                format!("{id} cannot be retried while {}", task.status.as_str()),
+            ));
+        }
+        if let Some(dependent) = self.tasks.iter().find(|candidate| {
+            candidate.deps.iter().any(|dep| dep == id)
+                && (candidate.status != TaskStatus::Queued
+                    || candidate.attempt_started_at.is_some()
+                    || candidate.assignee.is_some()
+                    || candidate.worktree.is_some()
+                    || candidate.workspace_worker.is_some())
+        }) {
+            return Err(Reject::new(
+                "dependent_started",
+                format!(
+                    "{} already left the queue and depends on {id}",
+                    dependent.id
+                ),
+            ));
+        }
+        Ok(task)
+    }
+
+    fn retry_validated_task(&mut self, id: &str) -> OrchResult<Task> {
+        let now = unix_now();
+        let retried = {
+            let task = self.tasks.iter_mut().find(|task| task.id == id).unwrap();
+            task.previous_attempts.push(TaskAttempt {
+                number: task.attempt,
+                final_status: task.status,
+                branch: task.branch.clone(),
+                worktree: task.worktree.clone(),
+                started_at: task.attempt_started_at,
+                finished_at: task.attempt_finished_at.unwrap_or(task.updated),
+                completion_source: task.completion_source,
+            });
+            if task.previous_attempts.len() > MAX_TASK_ATTEMPTS {
+                let excess = task.previous_attempts.len() - MAX_TASK_ATTEMPTS;
+                task.previous_attempts.drain(..excess);
+            }
+            task.attempt = task.attempt.saturating_add(1);
+            task.assignee = None;
+            task.status = TaskStatus::Queued;
+            task.worktree = None;
+            task.branch = None;
+            task.workspace_worker = None;
+            task.context = None;
+            task.attempt_started_at = None;
+            task.attempt_finished_at = None;
+            task.completion_source = None;
+            task.updated = now;
+            push_log(
+                &mut task.outputs,
+                format!("attempt {} queued after retry", task.attempt),
+            );
+            task.clone()
+        };
+        self.merge_previous.remove(id);
+        self.release_task_leases(id);
+        Ok(retried)
+    }
+
+    pub fn set_completion_source(
+        &mut self,
+        id: &str,
+        source: TaskCompletionSource,
+    ) -> OrchResult<()> {
+        let task = self
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        task.completion_source = Some(source);
+        Ok(())
     }
 
     /// Reserve the shared integration branch for one task. The actual Git work
@@ -447,6 +814,10 @@ impl OrchState {
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or_else(|| Reject::new("not_found", format!("no such task: {id}")))?;
+        // Notes may be multiline progress summaries and the latest note is
+        // included in a future worker briefing. Reject terminal actions at the
+        // mutation boundary while allowing ordinary LF paragraph boundaries.
+        validate_text_controls("task note", &note, true)?;
         push_log(&mut t.notes, note);
         t.updated = unix_now();
         Ok(())
@@ -556,11 +927,11 @@ impl OrchState {
                 format!("ledger is at its {MAX_LEASES}-lease cap"),
             ));
         }
-        if let Some(holder) = self
-            .leases
-            .iter()
-            .find(|lease| lease.task != task && leases_overlap(&lease.paths, &paths))
-        {
+        if let Some(holder) = self.leases.iter().find(|lease| {
+            lease.task != task
+                && tasks_share_lease_scope(&self.tasks, task, &lease.task)
+                && leases_overlap(&lease.paths, &paths)
+        }) {
             return Err(lease_conflict(holder));
         }
         Ok(())
@@ -627,7 +998,9 @@ impl OrchState {
             lease.paths = paths;
             if leases.len() >= MAX_LEASES
                 || leases.iter().any(|held| {
-                    held.task != lease.task && leases_overlap(&held.paths, &lease.paths)
+                    held.task != lease.task
+                        && tasks_share_lease_scope(&self.tasks, &held.task, &lease.task)
+                        && leases_overlap(&held.paths, &lease.paths)
                 })
             {
                 changed = true;
@@ -675,11 +1048,11 @@ impl OrchState {
             ));
         }
         let paths = validate_paths(paths, false)?;
-        if let Some(holder) = self
-            .leases
-            .iter()
-            .find(|lease| lease.task != task && leases_overlap(&lease.paths, &paths))
-        {
+        if let Some(holder) = self.leases.iter().find(|lease| {
+            lease.task != task
+                && tasks_share_lease_scope(&self.tasks, &task, &lease.task)
+                && leases_overlap(&lease.paths, &paths)
+        }) {
             return Err(lease_conflict(holder));
         }
         self.next_lease += 1;
@@ -758,6 +1131,11 @@ impl OrchState {
             if task.worker_mode.is_none() && task.worktree.is_some() {
                 task.worker_mode = Some(TaskWorkerMode::Worktree);
             }
+            task.attempt = task.attempt.max(1);
+            if task.previous_attempts.len() > MAX_TASK_ATTEMPTS {
+                let excess = task.previous_attempts.len() - MAX_TASK_ATTEMPTS;
+                task.previous_attempts.drain(..excess);
+            }
         }
         // A process exit can interrupt a background Git job after the durable
         // `merging` reservation was written. No job survives a server restart,
@@ -769,19 +1147,31 @@ impl OrchState {
     /// Atomic save (temp + rename), best-effort — a failed write never breaks
     /// the app; the ledger is a convenience layer, not core session state.
     pub fn save(&self) {
+        let _ = self.try_save();
+    }
+
+    /// Fallible persistence used by Agent Automation before it launches work.
+    /// A scheduled occurrence must not start unless its ORCH provenance reached
+    /// disk, otherwise a restart could materialize it twice.
+    pub fn try_save(&self) -> std::io::Result<()> {
         let Some(path) = self.persist_path.as_ref() else {
-            return;
+            return Ok(());
         };
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
-        let Ok(json) = serde_json::to_string_pretty(self) else {
-            return;
-        };
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        crate::platform::atomic_replace_file(&tmp, path)?;
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
         }
+        Ok(())
     }
 
     fn recover_interrupted_merges(&mut self) {
@@ -826,6 +1216,32 @@ fn push_log(log: &mut Vec<String>, mut entry: String) {
     if log.len() > MAX_TASK_LOG {
         let excess = log.len() - MAX_TASK_LOG;
         log.drain(..excess);
+    }
+}
+
+fn same_project(first: &TaskProject, second: &TaskProject) -> bool {
+    first.workspace_id == second.workspace_id
+        || crate::platform::same_path(
+            std::path::Path::new(&first.root),
+            std::path::Path::new(&second.root),
+        )
+}
+
+/// Legacy projectless tasks keep the old global collision behavior. That is a
+/// fail-closed migration rule: old ledgers never become less safe merely
+/// because their tasks predate project ownership.
+fn tasks_share_lease_scope(tasks: &[Task], first: &str, second: &str) -> bool {
+    let first = tasks
+        .iter()
+        .find(|task| task.id == first)
+        .and_then(|task| task.project.as_ref());
+    let second = tasks
+        .iter()
+        .find(|task| task.id == second)
+        .and_then(|task| task.project.as_ref());
+    match (first, second) {
+        (Some(first), Some(second)) => same_project(first, second),
+        _ => true,
     }
 }
 
@@ -969,6 +1385,93 @@ mod tests {
         let stored = s.task("t2").unwrap().outputs.last().unwrap().clone();
         assert!(stored.len() <= MAX_LOG_ENTRY + '…'.len_utf8());
         assert!(stored.ends_with('…'));
+    }
+
+    #[test]
+    fn task_notes_allow_lines_but_reject_terminal_actions() {
+        let mut state = OrchState::default();
+        state
+            .add_task("Review".into(), vec![], vec![], None)
+            .unwrap();
+        state
+            .add_note("t1", "First line\nSecond line".into())
+            .unwrap();
+        assert_eq!(
+            state.task("t1").unwrap().notes.last().map(String::as_str),
+            Some("First line\nSecond line")
+        );
+
+        let error = state
+            .add_note("t1", "unsafe\u{1b}[2Jnote".into())
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert_eq!(state.task("t1").unwrap().notes.len(), 1);
+    }
+
+    #[test]
+    fn task_title_and_prompt_are_bounded_and_created_atomically() {
+        let mut state = OrchState::default();
+        let task = state
+            .add_task_with_prompt(
+                "Review the authentication migration".into(),
+                Some("Check the API contract.\nCover rollback behavior.".into()),
+                vec!["src/auth/**".into()],
+                vec![],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            task.prompt.as_deref(),
+            Some("Check the API contract.\nCover rollback behavior.")
+        );
+
+        let too_long_title = "x".repeat(MAX_TASK_TITLE_BYTES + 1);
+        let error = state
+            .add_task(too_long_title, vec![], vec![], None)
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+
+        let too_long_prompt = "x".repeat(MAX_TASK_PROMPT_BYTES + 1);
+        let error = state
+            .add_task_with_prompt(
+                "not inserted".into(),
+                Some(too_long_prompt),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "bad_request");
+        assert_eq!(state.tasks.len(), 1, "a rejected prompt creates no task");
+    }
+
+    #[test]
+    fn manual_prompt_is_editable_only_before_start() {
+        let mut state = OrchState::default();
+        state
+            .add_task_with_prompt(
+                "Review".into(),
+                Some("First briefing".into()),
+                vec![],
+                vec![],
+                None,
+            )
+            .unwrap();
+        state
+            .set_prompt("t1", Some("Updated\nbriefing".into()))
+            .unwrap();
+        assert_eq!(
+            state.task("t1").unwrap().prompt.as_deref(),
+            Some("Updated\nbriefing")
+        );
+
+        state.claim("t1", 7).unwrap();
+        let error = state.set_prompt("t1", Some("too late".into())).unwrap_err();
+        assert_eq!(error.code, "task_active");
+        assert_eq!(
+            state.task("t1").unwrap().prompt.as_deref(),
+            Some("Updated\nbriefing")
+        );
     }
 
     #[test]
@@ -1141,6 +1644,112 @@ mod tests {
     }
 
     #[test]
+    fn retry_archives_the_attempt_and_clears_only_live_binding() {
+        let mut state = OrchState::default();
+        state
+            .add_task("retry me".into(), vec!["src/**".into()], vec![], None)
+            .unwrap();
+        state.claim("t1", 7).unwrap();
+        state.bind_worktree(
+            "t1",
+            Some("/repo/.luvus/worktrees/t1".into()),
+            Some("luvus/t1".into()),
+        );
+        state.bind_task_paths("t1", 7, &["src/**".into()]).unwrap();
+        state
+            .set_completion_source("t1", TaskCompletionSource::Command)
+            .unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+
+        let retried = state.retry_task("t1").unwrap();
+        assert_eq!(retried.status, TaskStatus::Queued);
+        assert_eq!(retried.attempt, 2);
+        assert_eq!(retried.assignee, None);
+        assert_eq!(retried.branch, None);
+        assert_eq!(retried.worktree, None);
+        assert_eq!(retried.worker_mode, Some(TaskWorkerMode::Worktree));
+        assert!(state.leases.is_empty());
+        let archived = retried.previous_attempts.last().unwrap();
+        assert_eq!(archived.number, 1);
+        assert_eq!(archived.final_status, TaskStatus::Done);
+        assert_eq!(archived.branch.as_deref(), Some("luvus/t1"));
+        assert_eq!(
+            archived.worktree.as_deref(),
+            Some("/repo/.luvus/worktrees/t1")
+        );
+        assert_eq!(
+            archived.completion_source,
+            Some(TaskCompletionSource::Command)
+        );
+    }
+
+    #[test]
+    fn retry_rejects_active_integrated_and_started_dependency_states() {
+        for status in [
+            TaskStatus::Queued,
+            TaskStatus::Claimed,
+            TaskStatus::Running,
+            TaskStatus::Merging,
+            TaskStatus::Merged,
+        ] {
+            let mut state = OrchState::default();
+            state.add_task("task".into(), vec![], vec![], None).unwrap();
+            state.set_status("t1", status).unwrap();
+            assert_eq!(state.retry_task("t1").unwrap_err().code, "not_retryable");
+        }
+
+        let mut state = OrchState::default();
+        state.add_task("base".into(), vec![], vec![], None).unwrap();
+        state
+            .add_task("dependent".into(), vec![], vec!["t1".into()], None)
+            .unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+        state.set_status("t2", TaskStatus::Running).unwrap();
+        assert_eq!(
+            state.retry_task("t1").unwrap_err().code,
+            "dependent_started"
+        );
+        assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn retry_rejects_a_released_dependent_that_already_started() {
+        let mut state = OrchState::default();
+        state.add_task("base".into(), vec![], vec![], None).unwrap();
+        state
+            .add_task("dependent".into(), vec![], vec!["t1".into()], None)
+            .unwrap();
+        state.set_status("t1", TaskStatus::Done).unwrap();
+        state.claim("t2", 7).unwrap();
+        state.bind_worktree(
+            "t2",
+            Some("/repo/.luvus/worktrees/t2".into()),
+            Some("luvus/t2".into()),
+        );
+        state.release_task("t2").unwrap();
+
+        assert_eq!(state.task("t2").unwrap().status, TaskStatus::Queued);
+        assert_eq!(
+            state.retry_task("t1").unwrap_err().code,
+            "dependent_started"
+        );
+    }
+
+    #[test]
+    fn legacy_tasks_deserialize_as_attempt_one() {
+        let value = serde_json::json!({
+            "id":"t1", "title":"legacy", "status":"done", "assignee":null,
+            "deps":[], "paths":[], "gate":null, "outputs":[], "notes":[],
+            "worktree":null, "branch":null, "context":null,
+            "created":1, "updated":2
+        });
+        let task: Task = serde_json::from_value(value).unwrap();
+        assert_eq!(task.attempt, 1);
+        assert!(task.previous_attempts.is_empty());
+        assert!(task.project.is_none());
+    }
+
+    #[test]
     fn deps_gate_claimability() {
         let mut s = OrchState::default();
         s.add_task("base".into(), vec![], vec![], None).unwrap(); // t1
@@ -1184,6 +1793,86 @@ mod tests {
         s.set_status("t1", TaskStatus::Done).unwrap();
         // Now t2 (dep satisfied) and t3 are ready; earliest = t2.
         assert_eq!(s.next_ready().as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn next_ready_is_scoped_to_the_requested_project() {
+        let mut state = OrchState::default();
+        let project_a = TaskProject {
+            workspace_id: "workspace-a".into(),
+            root: "/repos/a/.git".into(),
+        };
+        let project_b = TaskProject {
+            workspace_id: "workspace-b".into(),
+            root: "/repos/b/.git".into(),
+        };
+        state
+            .add_task_with_prompt_in_project(
+                "A".into(),
+                None,
+                vec![],
+                vec![],
+                None,
+                Some(project_a.clone()),
+            )
+            .unwrap();
+        state
+            .add_task_with_prompt_in_project(
+                "B".into(),
+                None,
+                vec![],
+                vec![],
+                None,
+                Some(project_b.clone()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.next_ready_in_project(&project_b).as_deref(),
+            Some("t2")
+        );
+        assert_eq!(
+            state.next_ready_in_project(&project_a).as_deref(),
+            Some("t1")
+        );
+    }
+
+    #[test]
+    fn path_leases_conflict_within_a_project_not_across_projects() {
+        let mut state = OrchState::default();
+        for (workspace, root) in [
+            ("workspace-a", "/repos/a/.git"),
+            ("workspace-b", "/repos/b/.git"),
+            ("workspace-a-worktree", "/repos/a/.git"),
+        ] {
+            state
+                .add_task_with_prompt_in_project(
+                    workspace.into(),
+                    None,
+                    vec![],
+                    vec![],
+                    None,
+                    Some(TaskProject {
+                        workspace_id: workspace.into(),
+                        root: root.into(),
+                    }),
+                )
+                .unwrap();
+        }
+        state
+            .acquire_lease(1, "t1".into(), vec!["src/**".into()])
+            .unwrap();
+        state
+            .acquire_lease(2, "t2".into(), vec!["src/lib.rs".into()])
+            .expect("another project has an independent path namespace");
+        assert_eq!(
+            state
+                .acquire_lease(3, "t3".into(), vec!["src/lib.rs".into()])
+                .unwrap_err()
+                .code,
+            "lease_conflict",
+            "worktrees of one repository must still coordinate"
+        );
     }
 
     #[test]

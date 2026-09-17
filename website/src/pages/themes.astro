@@ -6,10 +6,9 @@ import '@fontsource/ibm-plex-mono/500.css';
 import '@fontsource/ibm-plex-mono/600.css';
 import '@fontsource/orbit/400.css';
 import '../styles/themes.css';
-import { NAV_MARK } from '../lib/mark';
 import { THEMES, DEFAULT_THEME } from '../lib/themes';
 import { MAKER_THEMES, THEME_FIELDS, THEME_GROUPS, THEME_FILE_VERSION, THEME_MIN_LUVUS } from '../lib/theme-schema';
-import XLogo from '../components/XLogo.astro';
+import MarketingNav from '../components/MarketingNav.astro';
 
 const makerStyle = (theme: (typeof MAKER_THEMES)[number]) =>
   THEME_FIELDS.map((field) => `${field.css}:${theme.colors[field.id]}`).join(';');
@@ -17,7 +16,6 @@ const makerStyle = (theme: (typeof MAKER_THEMES)[number]) =>
 const title = 'Luvus Theme Maker';
 const description = 'Choose a Luvus theme, edit every semantic color, preview the real interface instantly, and export a portable TOML theme.';
 const GITHUB = 'https://github.com/RizRiyz/luvus';
-const X = 'https://x.com/luvusdev';
 ---
 
 <!doctype html>
@@ -50,25 +48,7 @@ const X = 'https://x.com/luvusdev';
     </script>
   </head>
   <body>
-    <nav>
-      <div class="nav-inner">
-        <a class="brand" href="/">
-          <span class="mark mark-luvus" aria-hidden="true" set:html={NAV_MARK}></span>
-          <span>Luvus</span>
-        </a>
-        <div class="nav-links">
-          <a href="/docs/">Docs</a>
-          <a href="/modules/">Modules</a>
-          <a href="/themes/" aria-current="page">Themes</a>
-          <a href="/blog/">Blog</a>
-          <a href="/changelog/">Changelog</a>
-          <a href={GITHUB} class="gh" aria-label="Luvus on GitHub" title="GitHub">
-            <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>
-          </a>
-          <a href={X} class="gh" aria-label="Luvus on X" title="X"><XLogo /></a>
-        </div>
-      </div>
-    </nav>
+    <MarketingNav active="themes" />
 
     <main>
       <header class="intro">
@@ -560,42 +540,6 @@ const X = 'https://x.com/luvusdev';
   button, select { cursor: pointer; }
   a { color: inherit; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  nav {
-    background: rgb(from var(--bg) r g b / 0.85);
-    border-bottom: 1px solid var(--line);
-  }
-  .nav-inner {
-    display: flex; justify-content: space-between; align-items: center;
-    max-width: 1440px; margin: 0 auto; padding: 0.3rem var(--gut);
-    min-height: 3.8rem;
-  }
-  .brand {
-    display: flex; align-items: center; gap: 0.35rem;
-    color: var(--text); font-size: 1.7rem; letter-spacing: -0.05em;
-    text-decoration: none;
-  }
-  .brand span {
-    font-family: 'Orbit', var(--display); font-weight: 400; line-height: normal;
-    transform: translateY(-0.06em);
-  }
-  .mark { display: block; flex-shrink: 0; }
-  .mark-luvus { width: 42px; height: 42px; }
-  .mark-luvus svg { width: 100%; height: 100%; display: block; }
-  .nav-links {
-    display: flex; align-items: center; gap: 1.4rem;
-    color: var(--sub); font: 0.88rem 'IBM Plex Mono', ui-monospace, monospace;
-    letter-spacing: -0.01em;
-  }
-  .nav-links a { color: inherit; text-decoration: none; }
-  .nav-links a:hover { color: var(--text); }
-  .nav-links a[aria-current='page'] { color: var(--accent); }
-  .gh {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 33px; height: 33px; flex: 0 0 33px; box-sizing: border-box;
-    border: 1px solid var(--line); padding: 0;
-    transition: border-color 0.15s, color 0.15s;
-  }
-  .gh:hover { border-color: var(--accent); color: var(--accent); }
   main { width: 100%; max-width: 1440px; margin: 0 auto; padding: 3.2rem var(--gut) 4rem; }
   .intro { display: flex; justify-content: space-between; align-items: end; gap: 2rem; margin-bottom: 2rem; }
   .eyebrow, .panel-kicker { color: var(--accent); text-transform: uppercase; letter-spacing: .13em; font: 600 .7rem var(--display); margin: 0 0 .55rem; }
@@ -699,7 +643,7 @@ const X = 'https://x.com/luvusdev';
   @media (max-width: 1050px) { .maker { grid-template-columns: 330px minmax(0, 1fr); }.sidebar { width: 165px; }.panes { grid-template-columns: 1fr; }.pane:not(.pane-focused) { display: none; }.starter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 900px) { :root { --gut: 1.6rem; } }
   @media (max-width: 780px) { main { padding-top: 2rem; }.intro { align-items: start; flex-direction: column; }.maker { display: flex; flex-direction: column; }.editor { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); }.stage { padding: .65rem; }.preview-wrap { padding: .5rem; }.stage-head { align-items: end; }.intro-actions { width: 100%; }.intro-actions .button { flex: 1; }.export-head { align-items: start; flex-direction: column; }.export-actions { width: 100%; }.export-actions .small-button { flex: 1; } }
-  @media (max-width: 560px) { :root { --gut: 1.15rem; }.nav-inner { flex-wrap: wrap; row-gap: .45rem; padding-top: .7rem; padding-bottom: .7rem; }.nav-links { gap: .9rem; font-size: .78rem; flex-wrap: wrap; justify-content: flex-end; }.starter-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 560px) { :root { --gut: 1.15rem; }.starter-grid { grid-template-columns: 1fr; } }
   @media (max-width: 480px) { .intro-actions { flex-direction: column; } footer { flex-direction: column; gap: .5rem; } }
   @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
 </style>

@@ -22,11 +22,9 @@ import '@fontsource/ibm-plex-mono/600.css';
 import '@fontsource/ibm-plex-mono/700.css';
 import '@fontsource/orbit/400.css'; // the wordmark face
 import Logo from '../components/Logo.astro';
-import XLogo from '../components/XLogo.astro';
-import { NAV_MARK } from '../lib/mark';
+import MarketingNav from '../components/MarketingNav.astro';
 
 const GITHUB = 'https://github.com/RizRiyz/luvus';
-const X = 'https://x.com/luvusdev';
 const TOPIC = 'luvus-module';
 const TOPIC_URL = `https://github.com/topics/${TOPIC}`;
 const SEARCH_API = `https://api.github.com/search/repositories?q=topic:${TOPIC}&sort=stars&order=desc&per_page=60`;
@@ -214,31 +212,7 @@ const examples = [
     </script>
   </head>
   <body>
-    <nav>
-      <div class="nav-inner">
-        <a class="brand" href="/">
-          <span class="mark mark-luvus" aria-hidden="true" set:html={NAV_MARK}></span>
-          <span>Luvus</span>
-        </a>
-        <div class="nav-links">
-          <a href="/docs/">Docs</a>
-          <a href="/modules/" aria-current="page">Modules</a>
-          <a href="/themes/">Themes</a>
-          <a href="/blog/">Blog</a>
-          <a href="/changelog/">Changelog</a>
-  
-        <a href={GITHUB} class="gh" aria-label="luvus on GitHub" title="GitHub">
-            <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"
-              ><path
-                fill="currentColor"
-                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
-              ></path></svg
-            >
-            </a>
-          <a href={X} class="gh" aria-label="Luvus on X" title="X"><XLogo /></a>
-        </div>
-      </div>
-    </nav>
+    <MarketingNav active="modules" />
 
     <div class="page-frame">
 
@@ -672,55 +646,7 @@ const examples = [
       ::selection { background: var(--sel); color: var(--text); }
       code { font-family: 'JetBrains Mono Variable', ui-monospace, monospace; }
 
-      /* nav */
-      nav {
-        background: rgb(from var(--bg) r g b / 0.85);
-        border-bottom: 1px solid var(--line);
-      }
-      .nav-inner {
-        display: flex; justify-content: space-between; align-items: center;
-        max-width: 1440px; margin: 0 auto; padding: 0.3rem var(--gut);
-        /* The bar's height is stated, not inherited from whatever is in it. It
-           used to be 34px of mark plus 0.85rem of padding; pinning that means the
-           mark and wordmark can be resized without the header growing. */
-        min-height: 3.8rem;
-      }
-      /* The lockup: mark and wordmark share one `color`, so they can never read as
-         two different whites. Tight gap so the word sits against the mark rather
-         than floating beside it. */
-      .brand { display: flex; align-items: center; gap: 0.35rem; font-size: 1.7rem; letter-spacing: -0.05em; color: var(--text); }
-      /* Orbit, for the wordmark and nothing else. It ships one 400 weight, so the
-         brand is never asked for a bold it does not have; the tight tracking is
-         what keeps it from reading as body text at this size. */
-      .brand span {
-        font-family: 'Orbit', var(--bh-display, ui-monospace), monospace;
-        font-weight: 400;
-        /* `normal` so the glyph sits centred in a box the face actually asked
-           for; the page's 1.75 body leading would otherwise make the wordmark a
-           tall item that only looks centred by accident. */
-        line-height: normal;
-        /* Orbit carries a deep descender, so its *optical* centre sits below the
-           box centre that flexbox aligns on: next to the mark the word reads low.
-           A transform, not a margin, so nothing reflows and the bar keeps its
-           height. Tune with one number. */
-        transform: translateY(var(--brand-nudge, -0.06em));
-      }
       .mark { display: block; flex-shrink: 0; }
-      .mark-luvus { width: 42px; height: 42px; }
-      .mark-luvus svg { width: 100%; height: 100%; display: block; }
-      .nav-links {
-        display: flex; align-items: center; gap: 1.4rem; color: var(--sub); font-size: 0.88rem;
-        font-family: 'IBM Plex Mono', ui-monospace, monospace; letter-spacing: -0.01em;
-      }
-      .nav-links a:hover { color: var(--text); }
-      .nav-links a[aria-current='page'] { color: var(--accent); }
-      .gh {
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 33px; height: 33px; flex: 0 0 33px; box-sizing: border-box;
-        border: 1px solid var(--line); padding: 0;
-        transition: border-color 0.15s, color 0.15s;
-      }
-      .gh:hover { border-color: var(--accent); color: var(--accent); }
 
       /* hero */
       .page-hero { text-align: center; position: relative; padding-top: 4.5rem; padding-bottom: 1.5rem; }
@@ -960,15 +886,7 @@ const examples = [
       @media (max-width: 640px) {
         section, header.page-hero { padding: 3rem 1.25rem; }
         .steps, .grid { grid-template-columns: 1fr; }
-        .nav-links { gap: 1rem; font-size: 0.82rem; }
         .pub-copy, .pub-side { padding: 1.5rem 1.4rem; }
-      }
-
-      /* Four nav links + the GitHub pill no longer fit a phone in one row:
-         let them wrap rather than widen the page. */
-      @media (max-width: 560px) {
-        .nav-inner { flex-wrap: wrap; row-gap: 0.45rem; padding-top: 0.7rem; padding-bottom: 0.7rem; }
-        .nav-links { gap: 0.9rem; font-size: 0.78rem; flex-wrap: wrap; justify-content: flex-end; }
       }
 
       /* Brand context menu (right-click the wordmark). Same square, hairline
@@ -988,8 +906,6 @@ const examples = [
       .bm-item:hover, .bm-item:focus-visible {
         background: rgb(from var(--accent) r g b / 0.14); color: var(--text); outline: none;
       }
-      .brand { cursor: pointer; }
-
       /* Theme picker · floating dock, bottom-right, opening upward. Names only:
          descriptions wrapped and forced scrollbars, and the list is short enough
          to show all palettes at once, so there is nothing to scroll. Hovering a
@@ -1153,7 +1069,7 @@ const examples = [
       // `download` links; the copy reads the built SVG and writes the markup to
       // the clipboard so it can be pasted straight into a design tool.
       (() => {
-        const brand = document.querySelector('.brand');
+        const brand = document.querySelector('[data-site-nav-brand]');
         const menu = document.getElementById('brandmenu');
         const copy = document.getElementById('bm-copy');
         if (!brand || !menu) return;

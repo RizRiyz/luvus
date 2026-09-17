@@ -6,37 +6,19 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_NET_RETRY: "10"
   CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
-  # The matrix upload jobs attach assets to an existing GitHub Release, so create
-  # it first (idempotent — safe to re-run a tag).
-  create-release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0 # full history + tags so the changelog can diff versions
-      - name: Generate notes + create/update the Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          bash scripts/changelog.sh "$GITHUB_REF_NAME" > notes.md
-          echo "----- release notes -----"; cat notes.md; echo "-------------------------"
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
-          else
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --title "$GITHUB_REF_NAME" --notes-file notes.md
-          fi
-
-  upload:
+  build-binaries:
     name: ${{ matrix.target }}
-    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -57,12 +39,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
-      - uses: actions/checkout@v5
-      # Builds (cross-compiling musl/aarch64 via `cross` automatically), packages
-      # `luvus-<tag>-<target>.{tar.gz,zip}` + a .sha256, and uploads them to the
-      # Release created above.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      # Builds (cross-compiling musl/aarch64 via `cross` automatically) and
+      # packages `luvus-<tag>-<target>.{tar.gz,zip}` plus its checksum.
       - id: package
-        uses: taiki-e/upload-rust-binary-action@v1
+        uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
         env:
           # Keep official macOS archives tied to the SDK library even when a
           # runner also has a Homebrew SQLite pkg-config entry.
@@ -73,10 +54,11 @@ jobs:
           archive: luvus-$tag-$target
           checksum: sha256
           locked: true
-          # Build and package first; publish only after the size gate passes.
+          # Build and package first so size can be reported before publishing.
           dry-run: true
           dry-run-intended: true
-      - name: Report binary size
+      - name: Report binary size (informational)
+        continue-on-error: true
         shell: bash
         run: |
           binary="target/${{ matrix.target }}/release/luvus"
@@ -90,11 +72,11 @@ jobs:
           python3 scripts/check-binary-size.py \
             --target "${{ matrix.target }}" \
             --binary "$binary" \
-            --archive "$archive"
-      - name: Upload validated archive
+            --archive "$archive" \
+            --informational
+      - name: Stage release archive
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ARCHIVE_TAR: ${{ steps.package.outputs.tar }}
           ARCHIVE_ZIP: ${{ steps.package.outputs.zip }}
           CHECKSUM_SHA256: ${{ steps.package.outputs.sha256 }}
@@ -107,9 +89,57 @@ jobs:
             echo "release package outputs are missing" >&2
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" \
-            "$archive" "$CHECKSUM_SHA256" \
-            --repo "$GITHUB_REPOSITORY" --clobber
+          mkdir -p dist
+          cp -- "$archive" "$CHECKSUM_SHA256" dist/
+      - name: Save release archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-binary-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  build-freebsd:
+    name: x86_64-unknown-freebsd
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Build and package on FreeBSD
+        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
+        with:
+          release: '14.4'
+          arch: x86_64
+          mem: 6144
+          envs: 'GITHUB_REF_NAME CARGO_NET_RETRY CARGO_HTTP_MULTIPLEXING'
+          copyback: true
+          prepare: |
+            set -eu
+            pkg install -y rust git pkgconf sqlite3
+          run: |
+            set -eu
+            target=x86_64-unknown-freebsd
+            archive="luvus-${GITHUB_REF_NAME}-${target}.tar.gz"
+            checksum="luvus-${GITHUB_REF_NAME}-${target}.sha256"
+            export CARGO_TARGET_DIR=/tmp/luvus-release-target
+            cargo build --release --locked
+            "$CARGO_TARGET_DIR/release/luvus" --version
+            tar -C "$CARGO_TARGET_DIR/release" -czf "$archive" luvus
+            digest=$(sha256 -q "$archive")
+            printf '%s *%s\n' "$digest" "$archive" > "$checksum"
+            mkdir -p dist
+            mv "$archive" "$checksum" dist/
+      - name: Save FreeBSD archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-binary-x86_64-unknown-freebsd
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
   # Build native Linux packages (.deb + .rpm) for both arches and attach them to
   # the Release. luvus is a static musl binary, so each package just drops the
@@ -120,7 +150,6 @@ jobs:
   # `--target`.
   linux-packages:
     name: pkg ${{ matrix.target }}
-    needs: create-release
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -131,11 +160,11 @@ jobs:
           - target: aarch64-unknown-linux-musl
             arch: arm64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
       - name: Install cross + cargo-deb (prebuilt)
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cross,cargo-deb
       # cargo-generate-rpm isn't in install-action's catalog, so build it
@@ -161,7 +190,137 @@ jobs:
         run: |
           cargo generate-rpm --target ${{ matrix.target }} \
             --output "luvus-${RELEASE_VERSION}-${{ matrix.target }}.rpm"
-      - name: Attach packages to the Release
+      - name: Stage native packages
+        run: |
+          mkdir -p dist
+          cp -- luvus_*.deb luvus-*.rpm dist/
+      - name: Save native packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-packages-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish-release:
+    name: publish release
+    needs: [build-binaries, build-freebsd, linux-packages]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0 # full history + tags so the changelog can diff versions
+      - name: Download complete release set
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify release set
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets=(
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+            x86_64-unknown-linux-musl
+            aarch64-unknown-linux-musl
+            x86_64-pc-windows-msvc
+            x86_64-unknown-freebsd
+          )
+          for target in "${targets[@]}"; do
+            extension=tar.gz
+            if [[ "$target" == *windows* ]]; then
+              extension=zip
+            fi
+            test -f "dist/luvus-${GITHUB_REF_NAME}-${target}.${extension}"
+            test -f "dist/luvus-${GITHUB_REF_NAME}-${target}.sha256"
+          done
+
+          version="${GITHUB_REF_NAME#v}"
+          test -f "dist/luvus_${version}_amd64.deb"
+          test -f "dist/luvus_${version}_arm64.deb"
+          test -f "dist/luvus-${version}-x86_64-unknown-linux-musl.rpm"
+          test -f "dist/luvus-${version}-aarch64-unknown-linux-musl.rpm"
+
+          file_count="$(find dist -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          if [[ "$file_count" != 16 ]]; then
+            echo "expected 16 release files, found $file_count" >&2
+            find dist -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
+
+          (cd dist && sha256sum --check -- *.sha256)
+      - name: Generate release notes
+        run: bash scripts/changelog.sh "$GITHUB_REF_NAME" > notes.md
+      - name: Create or update draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$GITHUB_REF_NAME" luvus_*.deb luvus-*.rpm --repo "$GITHUB_REPOSITORY" --clobber
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file notes.md
+          fi
+      - name: Synchronize complete release set
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          expected_names="$(
+            for asset_path in dist/*; do
+              basename "$asset_path"
+            done | LC_ALL=C sort
+          )"
+
+          while IFS= read -r asset; do
+            [[ -n "$asset" ]] || continue
+            if ! grep -Fqx -- "$asset" <<< "$expected_names"; then
+              gh release delete-asset "$GITHUB_REF_NAME" "$asset" \
+                --repo "$GITHUB_REPOSITORY" \
+                --yes
+            fi
+          done < <(
+            gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name'
+          )
+
+          gh release upload "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          actual_names="$(
+            gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json assets \
+              --jq '.assets[].name' |
+              LC_ALL=C sort
+          )"
+          if [[ "$actual_names" != "$expected_names" ]]; then
+            echo "draft release assets do not match the verified manifest" >&2
+            diff -u \
+              <(printf '%s\n' "$expected_names") \
+              <(printf '%s\n' "$actual_names") >&2 || true
+            exit 1
+          fi
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false

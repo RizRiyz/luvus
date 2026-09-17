@@ -11,7 +11,7 @@ use crate::files::preview::{
     self, DocumentView, LayoutKey, PreviewKind, PreviewLayout, PreviewLoad,
 };
 use crate::ids::PaneId;
-use crate::layout::{Axis, TileLayout};
+use crate::layout::TileLayout;
 
 impl App {
     /// Open or focus an explicit preview from the Files dock. This always owns a
@@ -65,7 +65,7 @@ impl App {
             workspace.tabs.push(Tab::panes(TileLayout::new(id)));
             workspace.active_tab = workspace.tabs.len() - 1;
         } else {
-            self.layout_mut().split_focused(Axis::Col, id);
+            self.split_focused_auto(id);
             self.layout_mut().focus = id;
         }
         self.schedule_preview_read(id, path);

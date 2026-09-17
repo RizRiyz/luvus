@@ -77,21 +77,11 @@ pub(super) fn draw_diff_view(
         area.width,
         area.height.saturating_sub(1 + u16::from(show_footer)),
     );
-    let effective = if view.wrap {
-        DiffLayoutPreference::Stack
-    } else {
-        effective_layout(view.preference, area.width)
-    };
+    let effective = effective_layout(view.preference, area.width);
     let narrow_fallback = view.preference == DiffLayoutPreference::Split
         && effective == DiffLayoutPreference::Stack
-        && !view.wrap;
-    let layout = if view.wrap && view.preference != DiffLayoutPreference::Stack {
-        match view.preference {
-            DiffLayoutPreference::Auto => "AUTO → STACK (wrap)",
-            DiffLayoutPreference::Split => "SPLIT → STACK (wrap)",
-            DiffLayoutPreference::Stack => unreachable!(),
-        }
-    } else if narrow_fallback {
+        && area.width < SPLIT_MIN_WIDTH;
+    let layout = if narrow_fallback {
         "SPLIT → STACK (narrow)"
     } else {
         effective.as_str()
@@ -266,9 +256,8 @@ fn draw_stack(
         let style = line_style(line.kind, selected, options.color_mode, t);
         let gutter_width = bar.chars().count() + numbers.chars().count() + symbol.chars().count();
         let text_w = area.width.saturating_sub(gutter_width as u16);
-        if view.wrap {
-            let fragments = wrapped_text(&line.text, text_w.max(1));
-            for (fragment_index, text) in fragments.into_iter().enumerate() {
+        if view.effective_wrap(area.width) {
+            for (fragment_index, text) in wrapped_text(&line.text, text_w.max(1)).enumerate() {
                 if y >= area.bottom() {
                     break;
                 }
@@ -386,46 +375,66 @@ fn draw_split(
         } else {
             selected
         };
-        let old_rect = Rect::new(area.x, y, half, 1);
-        let new_rect = Rect::new(area.x + half + 1, y, area.width.saturating_sub(half + 1), 1);
-        draw_split_side(
-            f,
-            old_rect,
-            row.old.as_ref(),
-            true,
-            old_selected,
-            view,
-            options,
-            t,
-        );
-        if let Some(cell) = f.buffer_mut().cell_mut((area.x + half, y)) {
-            cell.set_symbol("│").set_fg(t.overlay0);
-        }
-        draw_split_side(
-            f,
-            new_rect,
-            row.new.as_ref(),
-            false,
-            new_selected,
-            view,
-            options,
-            t,
-        );
-        if hits.interactive {
-            if let Some(number) = row.old.as_ref().and_then(|line| line.old_line) {
-                if let Some(index) = view.stack_indices.get(&(DiffSide::Old, number)) {
-                    hits.source
-                        .push((hits.pane, *index, DiffSide::Old, old_rect));
+        let old_width = half;
+        let new_width = area.width.saturating_sub(half + 1);
+        let mut old_fragments = split_side_fragments(row.old.as_ref(), view, options, old_width);
+        let mut new_fragments = split_side_fragments(row.new.as_ref(), view, options, new_width);
+        let mut fragment_index = 0;
+        loop {
+            if y >= area.bottom() {
+                break;
+            }
+            let old_fragment = old_fragments.as_mut().and_then(Iterator::next);
+            let new_fragment = new_fragments.as_mut().and_then(Iterator::next);
+            if fragment_index > 0 && old_fragment.is_none() && new_fragment.is_none() {
+                break;
+            }
+            let old_rect = Rect::new(area.x, y, old_width, 1);
+            let new_rect = Rect::new(area.x + half + 1, y, new_width, 1);
+            draw_split_side(
+                f,
+                old_rect,
+                row.old.as_ref(),
+                old_fragment,
+                true,
+                fragment_index == 0,
+                old_selected,
+                view,
+                options,
+                t,
+            );
+            if let Some(cell) = f.buffer_mut().cell_mut((area.x + half, y)) {
+                cell.set_symbol("│").set_fg(t.overlay0);
+            }
+            draw_split_side(
+                f,
+                new_rect,
+                row.new.as_ref(),
+                new_fragment,
+                false,
+                fragment_index == 0,
+                new_selected,
+                view,
+                options,
+                t,
+            );
+            if hits.interactive {
+                if let Some(number) = row.old.as_ref().and_then(|line| line.old_line) {
+                    if let Some(index) = view.stack_indices.get(&(DiffSide::Old, number)) {
+                        hits.source
+                            .push((hits.pane, *index, DiffSide::Old, old_rect));
+                    }
+                }
+                if let Some(number) = row.new.as_ref().and_then(|line| line.new_line) {
+                    if let Some(index) = view.stack_indices.get(&(DiffSide::New, number)) {
+                        hits.source
+                            .push((hits.pane, *index, DiffSide::New, new_rect));
+                    }
                 }
             }
-            if let Some(number) = row.new.as_ref().and_then(|line| line.new_line) {
-                if let Some(index) = view.stack_indices.get(&(DiffSide::New, number)) {
-                    hits.source
-                        .push((hits.pane, *index, DiffSide::New, new_rect));
-                }
-            }
+            y = y.saturating_add(1);
+            fragment_index += 1;
         }
-        y = y.saturating_add(1);
         if let Some(line) = row.old.as_ref() {
             y = draw_notes_for_anchor(
                 f,
@@ -722,7 +731,7 @@ fn note_range_label(side: DiffSide, start: u32, end: u32) -> String {
 
 fn note_editor_lines(text: &str, width: u16) -> Vec<String> {
     text.split('\n')
-        .flat_map(|line| wrapped_text(line, width))
+        .flat_map(|line| wrapped_text(line, width).map(str::to_owned))
         .collect()
 }
 
@@ -783,7 +792,9 @@ fn draw_split_side(
     f: &mut RenderTarget,
     area: Rect,
     line: Option<&DiffLine>,
+    fragment: Option<&str>,
     old_side: bool,
+    first_fragment: bool,
     selected: bool,
     view: &DiffView,
     options: DiffRenderOptions,
@@ -798,20 +809,23 @@ fn draw_split_side(
     } else {
         line.new_line
     };
-    let number = if view.show_line_numbers {
+    let number = if first_fragment && view.show_line_numbers {
         format!("{:>5} ", number.map_or(String::new(), |n| n.to_string()))
+    } else if view.show_line_numbers {
+        " ".repeat(6)
     } else {
         String::new()
     };
     let (bar, symbol) = gutter_markers(line.kind, options.marker_style);
+    let (bar, symbol) = if first_fragment {
+        (bar, symbol)
+    } else {
+        (
+            " ".repeat(bar.chars().count()),
+            " ".repeat(symbol.chars().count()),
+        )
+    };
     let style = line_style(line.kind, selected, options.color_mode, t);
-    let text = horizontal_text(
-        &line.text,
-        view.horizontal,
-        area.width.saturating_sub(
-            (bar.chars().count() + number.chars().count() + symbol.chars().count()) as u16,
-        ),
-    );
     fill_bg(f, area, style.bg);
     f.buffer_mut().set_line(
         area.x,
@@ -820,10 +834,28 @@ fn draw_split_side(
             Span::styled(bar, Style::new().fg(style.marker).bg(style.bg).bold()),
             Span::styled(number, Style::new().fg(t.overlay1).bg(style.bg)),
             Span::styled(symbol, Style::new().fg(style.marker).bg(style.bg).bold()),
-            Span::styled(text, Style::new().fg(style.text).bg(style.bg)),
+            Span::styled(
+                fragment.unwrap_or_default(),
+                Style::new().fg(style.text).bg(style.bg),
+            ),
         ]),
         area.width,
     );
+}
+
+fn split_side_fragments<'a>(
+    line: Option<&'a DiffLine>,
+    view: &DiffView,
+    options: DiffRenderOptions,
+    width: u16,
+) -> Option<WrappedText<'a>> {
+    let line = line?;
+    let number_width = if view.show_line_numbers { 6 } else { 0 };
+    let bar_width = usize::from(options.marker_style.shows_bars());
+    let symbol_width = usize::from(options.marker_style.shows_symbols()) * 2;
+    let gutter_width = number_width + bar_width + symbol_width;
+    let text_width = width.saturating_sub(gutter_width as u16).max(1);
+    Some(wrapped_text(&line.text, text_width))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -931,16 +963,53 @@ fn horizontal_text(text: &str, offset: usize, width: u16) -> String {
     text.chars().skip(offset).take(width as usize).collect()
 }
 
-fn wrapped_text(text: &str, width: u16) -> Vec<String> {
-    let width = width.max(1) as usize;
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return vec![String::new()];
+struct WrappedText<'a> {
+    text: &'a str,
+    width: usize,
+    offset: usize,
+    emitted_empty: bool,
+}
+
+impl<'a> Iterator for WrappedText<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.text.is_empty() {
+            if self.emitted_empty {
+                return None;
+            }
+            self.emitted_empty = true;
+            return Some("");
+        }
+        if self.offset >= self.text.len() {
+            return None;
+        }
+
+        let start = self.offset;
+        let mut end = start;
+        let mut used = 0;
+        for (relative, character) in self.text[start..].char_indices() {
+            let mut encoded = [0; 4];
+            let character_width = super::display_width(character.encode_utf8(&mut encoded));
+            if end > start && used + character_width > self.width {
+                break;
+            }
+            end = start + relative + character.len_utf8();
+            used += character_width;
+        }
+
+        self.offset = end;
+        Some(&self.text[start..end])
     }
-    chars
-        .chunks(width)
-        .map(|chunk| chunk.iter().collect())
-        .collect()
+}
+
+fn wrapped_text(text: &str, width: u16) -> WrappedText<'_> {
+    WrappedText {
+        text,
+        width: width.max(1) as usize,
+        offset: 0,
+        emitted_empty: false,
+    }
 }
 
 fn center(f: &mut RenderTarget, area: Rect, text: &str, color: Color) {
@@ -967,6 +1036,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::diff::model::{DiffHunk, FileDiff};
     use crate::diff::{DiffKey, DiffLayer, RepoPath};
 
     fn test_view(rows: Vec<DiffLine>) -> DiffView {
@@ -1036,8 +1106,20 @@ mod tests {
 
     #[test]
     fn wrapping_is_unicode_safe_and_never_returns_zero_rows() {
-        assert_eq!(wrapped_text("", 0), vec![""]);
-        assert_eq!(wrapped_text("abçd", 2), vec!["ab", "çd"]);
+        assert_eq!(wrapped_text("", 0).collect::<Vec<_>>(), vec![""]);
+        assert_eq!(
+            wrapped_text("abçd", 2).collect::<Vec<_>>(),
+            vec!["ab", "çd"]
+        );
+        assert_eq!(
+            wrapped_text("a界b", 3).collect::<Vec<_>>(),
+            vec!["a界", "b"]
+        );
+
+        let long = "x".repeat(crate::diff::PATCH_LINE_BYTE_CAP);
+        let mut fragments = wrapped_text(&long, 8);
+        assert_eq!(fragments.next(), Some("xxxxxxxx"));
+        assert_eq!(fragments.offset, 8, "the unseen tail remains unscanned");
     }
 
     #[test]
@@ -1333,6 +1415,8 @@ mod tests {
                 &mut target,
                 Rect::new(0, 0, 10, 1),
                 Some(&deletion),
+                Some("old"),
+                true,
                 true,
                 false,
                 &view,
@@ -1343,7 +1427,9 @@ mod tests {
                 &mut target,
                 Rect::new(11, 0, 10, 1),
                 Some(&addition),
+                Some("new"),
                 false,
+                true,
                 false,
                 &view,
                 options(DiffMarkerStyle::Symbols),
@@ -1361,6 +1447,123 @@ mod tests {
             buffer[(20, 0)].bg,
             line_style(DiffLineKind::Addition, false, DiffColorMode::Theme, &theme).bg
         );
+    }
+
+    #[test]
+    fn split_wraps_both_sides_inside_their_columns_and_aligns_row_groups() {
+        let theme = Theme::quattro_rally();
+        let old = DiffLine {
+            kind: DiffLineKind::Deletion,
+            old_line: Some(7),
+            new_line: None,
+            text: "abcdefghijklmnopqrst".into(),
+        };
+        let new = DiffLine {
+            kind: DiffLineKind::Addition,
+            old_line: None,
+            new_line: Some(8),
+            text: "new".into(),
+        };
+        let mut view = test_view(vec![old.clone(), new.clone()]);
+        view.preference = DiffLayoutPreference::Split;
+        view.split_rows.push(crate::diff::rows::SplitRow {
+            old: Some(old),
+            new: Some(new),
+        });
+        let area = Rect::new(0, 0, 21, 3);
+        let pane = crate::ids::PaneId(12);
+        let mut buffer = Buffer::empty(area);
+        let mut rects = Vec::new();
+        {
+            let mut target = RenderTarget::new(&mut buffer, area);
+            let mut note_rects = Vec::new();
+            let mut hits = DiffInteractionHits {
+                pane,
+                interactive: true,
+                source: &mut rects,
+                notes: &mut note_rects,
+            };
+            draw_split(
+                &mut target,
+                area,
+                &view,
+                &DiffState::default(),
+                options(DiffMarkerStyle::Symbols),
+                &mut hits,
+                &theme,
+            );
+        }
+        let row_text = |y| -> String { (0..area.width).map(|x| buffer[(x, y)].symbol()).collect() };
+
+        assert_eq!(row_text(0), "- abcdefgh│+ new     ");
+        assert_eq!(row_text(1), "  ijklmnop│          ");
+        assert_eq!(row_text(2), "  qrst    │          ");
+        assert_eq!(rects.len(), 6, "both sides own every aligned visual row");
+        assert!(rects.iter().all(|(_, _, _, rect)| rect.width == 10));
+        assert!(
+            (0..area.height).all(|y| buffer[(10, y)].symbol() == "│"),
+            "the center divider remains intact across wrapped rows"
+        );
+    }
+
+    #[test]
+    fn narrow_split_fallback_wraps_stack_rows_without_the_wrap_setting() {
+        let theme = Theme::quattro_rally();
+        let line = DiffLine {
+            kind: DiffLineKind::Addition,
+            old_line: None,
+            new_line: Some(8),
+            text: "abcdefghijklmnopqrst".into(),
+        };
+        let mut view = test_view(vec![line]);
+        view.preference = DiffLayoutPreference::Split;
+        view.wrap = false;
+        view.load = DiffLoad::Ready(std::sync::Arc::new(FileDiff {
+            key: view.key.clone(),
+            status: crate::diff::DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: vec![DiffHunk {
+                id: "hunk".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@ -1 +1 @@".into(),
+                lines: Vec::new(),
+            }],
+        }));
+        let area = Rect::new(0, 0, 10, 5);
+        let pane = crate::ids::PaneId(12);
+        let mut buffer = Buffer::empty(area);
+        let mut source_rects = Vec::new();
+        let mut note_rects = Vec::new();
+        {
+            let mut target = RenderTarget::new(&mut buffer, area);
+            draw_diff_view(
+                &mut target,
+                area,
+                pane,
+                &view,
+                DiffRenderContext {
+                    state: &DiffState::default(),
+                    picker: None,
+                    marker_style: DiffMarkerStyle::Symbols,
+                    color_mode: DiffColorMode::Theme,
+                    mobile: false,
+                    source_hits: &mut source_rects,
+                    note_hits: &mut note_rects,
+                },
+                &theme,
+            );
+        }
+        let row_text = |y| -> String { (0..area.width).map(|x| buffer[(x, y)].symbol()).collect() };
+
+        assert_eq!(row_text(1), "+ abcdefgh");
+        assert_eq!(row_text(2), "  ijklmnop");
+        assert_eq!(row_text(3), "  qrst    ");
+        assert_eq!(source_rects.len(), 3);
     }
 
     #[test]

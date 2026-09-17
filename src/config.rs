@@ -41,6 +41,10 @@ pub struct Config {
     pub layout: LayoutConfig,
     #[serde(default)]
     pub notifications: NotifyConfig,
+    /// Allow launching an interactive Luvus client from a Luvus pane.
+    /// Disabled by default because nested clients compete for terminal input.
+    #[serde(default)]
+    pub allow_nested: bool,
     /// Check `luvus.dev/latest.json` in the background for a newer release and
     /// show an indicator by the version number. A single periodic `curl`/`wget`
     /// GET; on by default, toggled in Settings → General. Notify-only — luvus
@@ -66,6 +70,13 @@ pub struct Config {
     /// upgrade. The visible All / Active control updates this preference.
     #[serde(default)]
     pub agents_active_only: bool,
+    /// Scope the AGENTS dock to the active workspace. This is a second axis,
+    /// independent of All / Active: that one selects lifecycle, this one selects
+    /// which project's rows are visible. Missing values keep the All-workspaces
+    /// default, so an upgrade never hides rows the user was already seeing. The
+    /// visible scope chip updates this preference.
+    #[serde(default)]
+    pub agents_this_workspace: bool,
     /// Custom keybindings: command id → key string (overrides the defaults).
     /// An empty value means the command is explicitly unbound.
     #[serde(default)]
@@ -97,10 +108,34 @@ pub struct Config {
     /// or restart. This set keeps an off dock off; re-placing it clears the flag.
     #[serde(default)]
     pub docks_off: Vec<String>,
+    /// Worktree creation backend. The built-in Git provider remains the default;
+    /// third-party tools integrate through a selected module provider.
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
     /// Luvus Bar placement groups. Dynamic content is never persisted here;
     /// only presentation preferences survive a restart.
     #[serde(default)]
     pub bars: BarConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeConfig {
+    /// `git` (default) or the canonical id of an enabled module whose manifest
+    /// declares `[worktree_provider]`.
+    #[serde(default = "default_worktree_provider")]
+    pub provider: String,
+}
+
+fn default_worktree_provider() -> String {
+    "git".to_string()
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_worktree_provider(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -205,12 +240,22 @@ pub struct LayoutConfig {
     /// its name, an unnamed pane its path (the original behavior).
     #[serde(default)]
     pub pane_title_path: bool,
-    /// In the AGENTS sidebar, show each agent's live session title (the OSC title
-    /// it sets, e.g. "Ship the desktop release…") in place of the `wsname · =<id>`
-    /// meta line. Off by default; falls back to the meta line when an agent set no
-    /// useful title.
+    /// In the AGENTS sidebar, show each agent's session title in place of the
+    /// `wsname · =<id>` meta line (live) or the project folder (resumable).
+    /// OSC title wins when the agent set one; otherwise a module-provided title
+    /// from `ui.agent_title.push`. Off by default. Luvus pane aliases are never
+    /// used as a title.
     #[serde(default)]
     pub agent_title: bool,
+    /// Show the cwd line beneath each WORKSPACES entry. On by default to retain
+    /// the established two-row presentation; the row context menu persists the
+    /// compact one-row preference when this is disabled.
+    #[serde(default = "yes")]
+    pub workspace_paths: bool,
+    /// Show the workspace/path detail line beneath each AGENTS entry. On by
+    /// default; the row context menu can hide it for a denser one-row list.
+    #[serde(default = "yes")]
+    pub agent_paths: bool,
     /// Resume a session into its own workspace (else a new tab in the current one).
     #[serde(default = "yes", alias = "resume_in_new_node")]
     pub resume_in_new_workspace: bool,
@@ -275,12 +320,14 @@ pub struct LayoutConfig {
     /// client's viewport. `0` disables mobile presentation entirely.
     #[serde(default = "default_mobile_width", alias = "compact_width")]
     pub mobile_width: u16,
-    /// What luvus forwards to a pane for **Shift/Alt+Enter** ("new line, don't
-    /// submit"). A keyword from [`SHIFT_ENTER_CHOICES`]; default `esc-cr`
-    /// (`ESC CR`, the sequence Claude Code's `/terminal-setup` installs). Exposed
-    /// because agents/terminals disagree on which byte sequence they treat as a
-    /// newline — notably some Windows agents want a bare `LF` where macOS wants
-    /// `ESC CR`. Set once, applied to every pane's keystroke encoding.
+    /// What luvus forwards to a pane for modified Enter when the child has not
+    /// negotiated the Kitty keyboard protocol. A keyword from
+    /// [`SHIFT_ENTER_CHOICES`]; default `esc-cr` (`ESC CR`, the sequence Claude
+    /// Code's `/terminal-setup` installs). Kitty modes preserve the real
+    /// modifiers instead, so Shift+Enter and Alt+Enter remain distinct. Exposed
+    /// because agents/terminals disagree on which legacy byte sequence they
+    /// treat as a newline — notably some Windows agents want a bare `LF` where
+    /// macOS wants `ESC CR`. Set once, applied to every pane's key encoding.
     #[serde(default = "default_shift_enter")]
     pub shift_enter: String,
 }
@@ -297,12 +344,13 @@ fn default_shift_enter() -> String {
     SHIFT_ENTER_CHOICES[0].0.to_string()
 }
 
-/// Ordered choices for what Shift/Alt+Enter sends to a pane: `(keyword, label,
+/// Ordered choices for the legacy modified-Enter fallback: `(keyword, label,
 /// bytes)`. The keyword is the stable `config.layout.shift_enter` value; the
 /// label is shown in the Settings chooser; the bytes are what `encode_key`
-/// forwards. `ESC CR` leads because it is what agent CLIs expect out of the box
-/// (Claude Code's `/terminal-setup`). The others cover agents/terminals that
-/// bind a plain `LF` or the CSI-u modified-Enter form instead.
+/// forwards when no Kitty keyboard mode is active. `ESC CR` leads because it is
+/// what agent CLIs expect out of the box (Claude Code's `/terminal-setup`). The
+/// others cover agents/terminals that bind a plain `LF` or the CSI-u Shift+Enter
+/// form instead.
 pub const SHIFT_ENTER_CHOICES: &[(&str, &str, &[u8])] = &[
     ("esc-cr", "ESC CR (default)", b"\x1b\r"),
     ("lf", "LF (newline)", b"\n"),
@@ -311,7 +359,7 @@ pub const SHIFT_ENTER_CHOICES: &[(&str, &str, &[u8])] = &[
 ];
 
 /// Left + right sidebar layout (docs/29). Serialized under `sidebars`.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SidebarsConfig {
     #[serde(default = "SideConfig::left_default")]
     pub left: SideConfig,
@@ -324,7 +372,7 @@ pub struct SidebarsConfig {
 }
 
 /// One sidebar's persisted state: shown/hidden, width, and its ordered dock ids.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SideConfig {
     #[serde(default = "yes")]
     pub visible: bool,
@@ -455,15 +503,18 @@ impl Default for Config {
             sidebars: None,
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
+            allow_nested: false,
             check_updates: true,
             resume_launch_flags: false,
             agents_active_only: false,
+            agents_this_workspace: false,
             keybindings: std::collections::HashMap::new(),
             direct_keybindings: std::collections::HashMap::new(),
             prefix: default_prefix(),
             mission_pricing: std::collections::HashMap::new(),
             mission_budget: None,
             docks_off: Vec::new(),
+            worktree: WorktreeConfig::default(),
             bars: BarConfig::default(),
         }
     }
@@ -477,6 +528,8 @@ impl Default for LayoutConfig {
             show_titles: true,
             pane_title_path: false,
             agent_title: false,
+            workspace_paths: true,
+            agent_paths: true,
             resume_in_new_workspace: true,
             new_pane_to_workspace_root: false,
             file_open: default_file_open(),
@@ -560,10 +613,6 @@ fn config_path() -> PathBuf {
     crate::persist::config_dir().join("config.json")
 }
 
-fn config_lock_path() -> PathBuf {
-    crate::persist::config_dir().join("config.lock")
-}
-
 /// Load the config, or defaults if missing / unparsable.
 pub fn load() -> Config {
     fs::read_to_string(config_path())
@@ -620,7 +669,8 @@ static CONFIG_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// server may hold an older copy of fields changed by another server.
 #[cfg(test)]
 pub fn save(cfg: &Config) {
-    let _ = with_config_lock(|| write_config_atomic(cfg));
+    let path = config_path();
+    let _ = with_config_lock(&path, || write_config_atomic(cfg, &path));
 }
 
 /// Persist only fields changed between one server's last local config and its
@@ -631,6 +681,7 @@ pub fn save(cfg: &Config) {
 /// Returns `true` after either a successful write or a no-op. Callers retain
 /// their old baseline on `false`, allowing the next change to retry everything
 /// that has not reached disk yet.
+#[cfg(test)]
 pub fn save_changes(base: &Config, desired: &Config) -> bool {
     save_changes_with_patch(base, desired, None)
 }
@@ -640,6 +691,43 @@ pub fn save_changes(base: &Config, desired: &Config) -> bool {
 /// already has in memory: there may be no local delta, but the shared file must
 /// still record the user's choice.
 pub fn save_changes_with_patch(base: &Config, desired: &Config, explicit: Option<&Value>) -> bool {
+    SaveRequest::new(base.clone(), desired.clone(), explicit.cloned()).write()
+}
+
+/// Owned save inputs with a pinned path; workers never resolve session globals.
+pub(crate) struct SaveRequest {
+    base: Config,
+    desired: Config,
+    explicit: Option<Value>,
+    path: PathBuf,
+}
+
+impl SaveRequest {
+    pub(crate) fn new(base: Config, desired: Config, explicit: Option<Value>) -> Self {
+        Self {
+            base,
+            desired,
+            explicit,
+            path: config_path(),
+        }
+    }
+
+    pub(crate) fn write(self) -> bool {
+        save_changes_at(
+            &self.path,
+            &self.base,
+            &self.desired,
+            self.explicit.as_ref(),
+        )
+    }
+}
+
+fn save_changes_at(
+    path: &std::path::Path,
+    base: &Config,
+    desired: &Config,
+    explicit: Option<&Value>,
+) -> bool {
     let Ok(base) = serde_json::to_value(base) else {
         return false;
     };
@@ -651,8 +739,13 @@ pub fn save_changes_with_patch(base: &Config, desired: &Config, explicit: Option
         return true;
     }
 
-    with_config_lock(|| {
-        let mut latest = serde_json::to_value(load()).map_err(io::Error::other)?;
+    with_config_lock(path, || {
+        let latest: Config = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .map(normalize_config)
+            .unwrap_or_default();
+        let mut latest = serde_json::to_value(latest).map_err(io::Error::other)?;
         if let Some(delta) = &delta {
             apply_delta(&mut latest, delta);
         }
@@ -660,13 +753,26 @@ pub fn save_changes_with_patch(base: &Config, desired: &Config, explicit: Option
             apply_delta(&mut latest, explicit);
         }
         let merged: Config = serde_json::from_value(latest).map_err(io::Error::other)?;
-        write_config_atomic(&normalize_config(merged))
+        write_config_atomic(&normalize_config(merged), path)
     })
     .is_ok()
 }
 
-fn with_config_lock<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
-    let dir = crate::persist::ensure_config_dir();
+fn with_config_lock<T>(
+    path: &std::path::Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing configuration directory"))?;
+    fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if Some(dir) != crate::platform::home_dir().as_deref() {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+    }
     if !dir.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -678,14 +784,25 @@ fn with_config_lock<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<
         .read(true)
         .write(true)
         .truncate(false)
-        .open(config_lock_path())?;
-    lock.lock_exclusive()?;
+        .open(dir.join("config.lock"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
     operation()
 }
 
-fn write_config_atomic(cfg: &Config) -> io::Result<()> {
+fn write_config_atomic(cfg: &Config, path: &std::path::Path) -> io::Result<()> {
     let json = serde_json::to_vec_pretty(cfg).map_err(io::Error::other)?;
-    let path = config_path();
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -714,7 +831,7 @@ fn write_config_atomic(cfg: &Config) -> io::Result<()> {
         file.write_all(&json)?;
         file.flush()?;
         drop(file);
-        crate::platform::atomic_replace_file(&temporary, &path)
+        crate::platform::atomic_replace_file(&temporary, path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -778,14 +895,20 @@ mod tests {
     #[test]
     fn defaults_and_roundtrip() {
         let c = Config::default();
+        assert!(!c.allow_nested);
         assert_eq!(c.theme, "quattro-rally");
         assert!(c.layout.show_titles);
+        assert!(c.layout.workspace_paths);
+        assert!(c.layout.agent_paths);
         assert_eq!(c.layout.col_gap, 1);
         assert_eq!(c.layout.mobile_width, crate::app::MOBILE_WIDTH);
         // Empty object → all defaults (forward/back compat).
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
+        assert!(!from_empty.allow_nested);
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
+        assert!(from_empty.layout.workspace_paths);
+        assert!(from_empty.layout.agent_paths);
         assert!(
             from_empty.direct_keybindings.is_empty(),
             "existing configs do not gain input-stealing direct shortcuts"
@@ -794,12 +917,25 @@ mod tests {
             !from_empty.agents_active_only,
             "old configs retain the All agents default"
         );
+        assert!(
+            !from_empty.agents_this_workspace,
+            "old configs retain the All-workspaces agents scope"
+        );
         assert_eq!(
             from_empty.bars.bottom_right,
             vec![crate::bar::CORE_RUNTIME.to_string()],
             "old configs gain the default runtime bar"
         );
         assert!(from_empty.bars.top_right.is_empty());
+        assert_eq!(from_empty.worktree, WorktreeConfig::default());
+        let module_provider: Config =
+            serde_json::from_str(r#"{"worktree":{"provider":"example.provider"}}"#).unwrap();
+        assert_eq!(module_provider.worktree.provider, "example.provider");
+        let forward: Config = serde_json::from_str(
+            r#"{"worktree":{"provider":"future-provider","future_option":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(forward.worktree.provider, "future-provider");
         // Round-trip preserves values.
         // Scrollback defaults to a per-pane 10 MiB budget. The legacy line
         // field remains only so old config can migrate safely.
@@ -863,6 +999,15 @@ mod tests {
         assert!(back.notifications.sound_on_done);
         assert!(!back.notifications.sound_on_blocked);
         assert_eq!(back.notifications.sound_style, crate::sound::STYLE_RETRO);
+        // Nested clients are opt-in and survive serialization.
+        let mut nested = c2.clone();
+        nested.allow_nested = true;
+        let nested_json = serde_json::to_string(&nested).unwrap();
+        assert!(
+            serde_json::from_str::<Config>(&nested_json)
+                .unwrap()
+                .allow_nested
+        );
 
         // Configs written before sound styles existed retain the original cue.
         let old: Config = serde_json::from_str(
@@ -870,6 +1015,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.notifications.sound_style, crate::sound::STYLE_RETRO);
+    }
+
+    #[test]
+    fn agents_scope_preference_persists_both_choices() {
+        let _env = crate::persist::test_env("config-agents-scope");
+        let mut config = Config::default();
+        assert!(!config.agents_this_workspace);
+
+        config.agents_this_workspace = true;
+        save(&config);
+        assert!(load().agents_this_workspace);
+
+        config.agents_this_workspace = false;
+        save(&config);
+        assert!(!load().agents_this_workspace);
     }
 
     #[test]

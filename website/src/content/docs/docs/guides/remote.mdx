@@ -21,6 +21,7 @@ port, configure SSH forwarding, or require another daemon.
 |---|---|
 | Open the full remote Luvus interface from a computer with Luvus installed | `luvus --remote devbox` |
 | Open a specific named session | `luvus --session api --remote devbox` |
+| Save and switch several SSH machines in one TUI | [Multiple Machines](/docs/guides/machines/) |
 | Connect from a phone that only has an SSH app | SSH to the host, then run `luvus` there |
 | Send one JSON automation request | Pipe the request through `ssh devbox luvus uhp proxy` |
 | Build an independent remote or mobile client | Use [`luvus uhp access`](/docs/uhp/remote-access/) with a secure transport provider |
@@ -184,9 +185,17 @@ ssh devbox luvus session list
 ssh devbox luvus session list --json
 ```
 
-Inside a remote TUI, `Ctrl+Space t` opens the session switcher. Choosing a
+Inside a remote TUI, `Ctrl+Space t` focuses the session switcher. Choosing a
 different session starts it when needed and moves only the current client. The
-previous session and its panes stay alive.
+previous session and its panes stay alive. Press `a` on a selected row to open
+the same actions available by right click.
+
+To stop another running session from the switcher, open its actions and select
+**Stop**. This ends that session and its live panes without detaching the
+current client. A stopped session offers **Start**; a stopped named session also
+offers **Delete**, with confirmation, to remove its saved state. The current
+session cannot be stopped from this menu, and the default session cannot be
+deleted.
 
 ## Detach and reconnect
 
@@ -234,9 +243,16 @@ With `luvus --remote`, the local attached client owns effects that should happen
 where you are sitting:
 
 - copied text goes to the local clipboard
+- on Windows, an explicit image paste reads the local clipboard and stages the
+  private PNG on the remote Luvus server before pasting that remote path into
+  the focused pane
 - notifications and sounds play locally
 - detected links open in the local browser
 - each attached client uses its own terminal size and mobile or desktop layout
+
+Image bytes travel inside the existing encrypted SSH connection. Luvus does not
+open another port or write the image to the local machine's Luvus server. If no
+supported image is present, the original paste key continues unchanged.
 
 The global finder searches the selected remote Luvus home. It does not mix
 local workspaces or sessions into remote results.

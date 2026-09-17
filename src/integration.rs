@@ -27,6 +27,9 @@ pub(crate) fn agent_hook_script(agent: &str) -> String {
 # on the hook's event name so modules and API clients get precise transitions.
 [ -n "$LUVUS_ENV" ] || exit 0
 [ -n "$LUVUS_SOCKET_PATH" ] || exit 0
+# Devin imports Claude-format hooks (global and project `.claude/settings.json`)
+# and marks every hook process it spawns. Never report its sessions as ours.
+[ -z "$DEVIN_PROJECT_DIR" ] || exit 0
 luvus_bin="${{LUVUS_BIN_PATH:-}}"
 [ -n "$luvus_bin" ] && [ -x "$luvus_bin" ] || luvus_bin="$(command -v luvus 2>/dev/null || true)"
 [ -n "$luvus_bin" ] || exit 0
@@ -376,6 +379,9 @@ mod tests {
         assert!(operation("antigravity")
             .and_then(|operations| operations.hook)
             .is_some());
+        assert!(operation("letta")
+            .and_then(|operations| operations.hook)
+            .is_some());
         assert!(operation("agy")
             .and_then(|operations| operations.hook)
             .is_some());
@@ -452,6 +458,11 @@ mod tests {
 
         let script = tmp.join("luvus-agent-hook.sh");
         assert!(script.exists());
+        let body = fs::read_to_string(&script).unwrap();
+        // Devin imports Claude-format hooks and marks its hook processes; the
+        // script must bail on that marker and otherwise still report as claude.
+        assert!(body.contains("DEVIN_PROJECT_DIR"), "devin guard");
+        assert!(body.contains("--agent claude"), "reports as claude");
         let settings: Value =
             serde_json::from_str(&fs::read_to_string(tmp.join("settings.json")).unwrap()).unwrap();
         let groups = settings["hooks"]["SessionStart"].as_array().unwrap();
@@ -529,6 +540,7 @@ mod tests {
 
         let script = fs::read_to_string(tmp.join("luvus-agent-hook.sh")).unwrap();
         assert!(script.contains("--agent copilot"), "reports as copilot");
+        assert!(script.contains("DEVIN_PROJECT_DIR"), "shared devin guard");
         let settings: Value =
             serde_json::from_str(&fs::read_to_string(tmp.join("settings.json")).unwrap()).unwrap();
         // Copilot uses the camelCase event key (docs/23).
@@ -812,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_installs_a_tui_plugin_without_process_spawns() {
+    fn opencode_installs_the_current_v2_cli_plugin_without_touching_neighbors() {
         let _env = crate::persist::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -822,14 +834,22 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         let old = std::env::var_os("XDG_CONFIG_HOME");
         let old_tui = std::env::var_os("OPENCODE_TUI_CONFIG");
+        let old_path = std::env::var_os("PATH");
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
         std::env::remove_var("OPENCODE_TUI_CONFIG");
+        // Make the no-binary fallback deterministic even on a maintainer host
+        // that still has OpenCode V1 installed.
+        std::env::set_var("PATH", &tmp);
 
         install("opencode").unwrap();
-        let plugin = tmp.join("opencode").join("luvus-tui.mjs");
+        let plugin = tmp.join("opencode/luvus-v2/tui.js");
         let js = fs::read_to_string(&plugin).unwrap();
-        assert!(js.contains("session.created"), "hooks the session event");
+        assert!(js.contains("session.updated"), "hooks the session event");
         assert!(js.contains("pane.report_session"), "reports the session");
+        assert!(
+            js.contains("pane.release_session"),
+            "releases old ownership"
+        );
         assert!(
             js.contains("net.createConnection"),
             "uses direct bounded local transport"
@@ -845,6 +865,10 @@ mod tests {
         match old_tui {
             Some(value) => std::env::set_var("OPENCODE_TUI_CONFIG", value),
             None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
+        }
+        match old_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1175,5 +1199,81 @@ console.log(JSON.stringify(calls));
             "no named-pipe enumeration: reports must target the inherited \
              session socket via the luvus CLI"
         );
+    }
+
+    /// The hook script, run for real: a Claude `SessionStart` payload reaches
+    /// `luvus pane report --agent claude`, and the same payload under Devin's
+    /// hook environment reports nothing, so a Devin pane can never be persisted
+    /// as Claude. Needs bash and python3, exactly like the script itself.
+    #[cfg(unix)]
+    #[test]
+    fn hook_script_reports_claude_but_never_a_devin_host() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let have = |bin: &str| {
+            Command::new("sh")
+                .args(["-c", &format!("command -v {bin} >/dev/null 2>&1")])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if !have("bash") || !have("python3") {
+            eprintln!("skipping: the hook script needs bash and python3");
+            return;
+        }
+
+        let tmp = std::env::temp_dir().join(format!("luvus-hook-run-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let script = tmp.join("luvus-agent-hook.sh");
+        fs::write(&script, agent_hook_script("claude")).unwrap();
+        // A stand-in `luvus` that records its argv instead of talking to a socket.
+        let log = tmp.join("calls.log");
+        let fake = tmp.join("luvus");
+        fs::write(
+            &fake,
+            format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let run = |devin_host: bool| -> String {
+            let _ = fs::remove_file(&log);
+            let mut cmd = Command::new("bash");
+            cmd.arg(&script)
+                .env("LUVUS_ENV", "1")
+                .env("LUVUS_SOCKET_PATH", tmp.join("sock"))
+                .env("LUVUS_BIN_PATH", &fake)
+                .env_remove("DEVIN_PROJECT_DIR")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if devin_host {
+                cmd.env("DEVIN_PROJECT_DIR", "/work/project");
+            }
+            let mut child = cmd.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(br#"{"hook_event_name":"SessionStart","session_id":"abc-123"}"#)
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+            fs::read_to_string(&log).unwrap_or_default()
+        };
+
+        assert_eq!(
+            run(false).trim(),
+            "pane report --agent claude --session abc-123",
+            "a Claude payload is reported as claude"
+        );
+        assert_eq!(run(true), "", "a Devin host is never reported");
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

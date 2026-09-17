@@ -40,6 +40,58 @@ pub fn option_modifier_pressed() -> bool {
     false
 }
 
+/// Read and normalize a local Windows clipboard image after an explicit paste
+/// gesture. Other platforms preserve their existing terminal and agent-native
+/// clipboard behavior and never probe the clipboard here.
+#[cfg(windows)]
+pub fn clipboard_image() -> Option<Vec<u8>> {
+    windows::clipboard_image()
+}
+
+#[cfg(not(windows))]
+pub fn clipboard_image() -> Option<Vec<u8>> {
+    None
+}
+
+/// Pixel size of one terminal cell on the local display, when the host reports it.
+///
+/// Unix uses `TIOCGWINSZ` `ws_xpixel`/`ws_ypixel`. Windows uses the current
+/// console font. Many hosts leave these fields at zero; callers must fall back.
+#[cfg(unix)]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    unix_terminal_cell_pixels()
+}
+
+#[cfg(windows)]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    windows::terminal_cell_pixels()
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn terminal_cell_pixels() -> Option<(u16, u16)> {
+    None
+}
+
+#[cfg(unix)]
+fn unix_terminal_cell_pixels() -> Option<(u16, u16)> {
+    for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO, libc::STDIN_FILENO] {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } != 0 {
+            continue;
+        }
+        if size.ws_col == 0 || size.ws_row == 0 || size.ws_xpixel == 0 || size.ws_ypixel == 0 {
+            continue;
+        }
+        let width = size.ws_xpixel / size.ws_col;
+        let height = size.ws_ypixel / size.ws_row;
+        if width == 0 || height == 0 {
+            continue;
+        }
+        return Some((width, height));
+    }
+    None
+}
+
 /// Do two paths name the same folder? (docs/43 WIN-6.)
 ///
 /// Node lookup used to compare `PathBuf`s with `==`, so any difference in
@@ -108,6 +160,123 @@ pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command 
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// Spawn a non-interactive Windows child suspended so it can enter a Job Object
+/// before any module code or descendant process runs.
+pub fn suspend_for_child_tree(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// Own a spawned process tree so dropping the guard terminates descendants.
+///
+/// Windows descendants can retain inherited output handles after their direct
+/// parent exits. A kill-on-close Job Object gives bounded command runners a
+/// stable tree handle instead of relying on an already-reaped parent PID.
+pub struct ChildTreeGuard {
+    #[cfg(windows)]
+    handle: Option<windows_sys::Win32::Foundation::HANDLE>,
+}
+
+impl ChildTreeGuard {
+    pub fn attach(child: &mut std::process::Child) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::JobObjects::*;
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut guard = Self {
+                handle: Some(handle),
+            };
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const _,
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            } == 0
+                || unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) } == 0
+            {
+                let error = std::io::Error::last_os_error();
+                guard.terminate();
+                return Err(error);
+            }
+            if let Err(error) = resume_suspended_process(child.id()) {
+                guard.terminate();
+                return Err(error);
+            }
+            Ok(guard)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            Ok(Self {})
+        }
+    }
+
+    pub fn terminate(&mut self) {
+        #[cfg(windows)]
+        if let Some(handle) = self.handle.take() {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+        }
+    }
+}
+
+impl Drop for ChildTreeGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut found = None;
+    let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    while more {
+        if entry.th32OwnerProcessID == pid {
+            found = Some(entry.th32ThreadID);
+            break;
+        }
+        more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    let thread_id = found.ok_or_else(std::io::Error::last_os_error)?;
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    if thread.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let resumed = unsafe { ResumeThread(thread) };
+    unsafe { CloseHandle(thread) };
+    if resumed == u32::MAX {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// The user's home directory, cross-platform (`$HOME`, else `%USERPROFILE%`).
@@ -788,13 +957,28 @@ pub struct PaneCwdEvidence {
 /// Resolve CWD evidence and, optionally, process identities from one platform
 /// snapshot. The optional command projection is used only when the independent
 /// agent-detection deadline coincides with this CWD scan.
+#[cfg(test)]
 pub fn scan_pane_runtime(
     roots: &[u32],
     include_commands: bool,
 ) -> (Vec<PaneCwdEvidence>, Option<ProcessCommands>) {
+    scan_pane_runtime_scoped(roots, include_commands.then_some(roots))
+}
+
+/// One OS snapshot, with independent CWD and command-projection demands.
+pub fn scan_pane_runtime_scoped(
+    cwd_roots: &[u32],
+    command_roots: Option<&[u32]>,
+) -> (Vec<PaneCwdEvidence>, Option<ProcessCommands>) {
+    let mut roots = cwd_roots.to_vec();
+    if let Some(commands) = command_roots {
+        roots.extend_from_slice(commands);
+        roots.sort_unstable();
+        roots.dedup();
+    }
     let mut cache = std::collections::HashMap::new();
-    let (trees, commands) = pane_process_snapshot(roots, true, include_commands);
-    let evidence = roots
+    let (trees, commands) = pane_process_snapshot(&roots, true, command_roots.is_some());
+    let evidence = cwd_roots
         .iter()
         .map(|&root| {
             let nodes = trees.get(&root).map(Vec::as_slice).unwrap_or(&[]);
@@ -1079,6 +1263,15 @@ mod tests {
         let (cwd_only, commands) = super::scan_pane_runtime(&[pid], false);
         assert_eq!(cwd_only.len(), 1);
         assert!(commands.is_none(), "command projection is demand-driven");
+        let (no_cwds, commands) = super::scan_pane_runtime_scoped(&[], Some(&[pid]));
+        assert!(
+            no_cwds.is_empty(),
+            "unrequested CWDs do not receive Git probes"
+        );
+        assert!(
+            commands.unwrap().contains_key(&pid),
+            "independent process demand remains represented"
+        );
     }
 
     #[cfg(unix)]
@@ -1097,19 +1290,43 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("test executable directory");
         let executable = dir.join("luvus");
         let _ = std::fs::remove_file(&executable);
-        std::fs::copy("/bin/sleep", &executable).expect("luvus-named executable");
+        // Copying a macOS platform binary such as /bin/sleep out of /bin is
+        // SIGKILL'd by AMFI (exit 137), so the kill guard never sees a live
+        // process. Compile a tiny unsigned helper named `luvus` instead.
+        let mut compile = std::process::Command::new("cc")
+            .arg("-o")
+            .arg(&executable)
+            .args(["-x", "c", "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn cc for luvus-named helper");
+        {
+            use std::io::Write;
+            let mut stdin = compile.stdin.take().expect("cc stdin");
+            stdin
+                .write_all(b"#include <unistd.h>\nint main(void) { for (;;) pause(); }\n")
+                .expect("write helper source");
+        }
+        let output = compile.wait_with_output().expect("wait cc");
+        assert!(
+            output.status.success(),
+            "cc failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let mut child = std::process::Command::new(&executable)
             .arg("30")
             .spawn()
             .expect("spawn luvus-named process");
 
         let mut stoppable = false;
-        for _ in 0..20 {
+        for _ in 0..50 {
             if super::is_stoppable_luvus_pid(child.id()) {
                 stoppable = true;
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
         let _ = child.kill();

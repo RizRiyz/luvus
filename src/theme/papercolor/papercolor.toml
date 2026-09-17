@@ -1,0 +1,33 @@
+# Luvus semantic adaptation of the PaperColor light palette by Nikyle Nguyen.
+# Source: https://github.com/NLKNguyen/papercolor-theme
+# Copyright (c) 2015-2020 Nikyle Nguyen. Licensed under the MIT License.
+
+schema = 1
+id = "papercolor"
+display_name = "PaperColor"
+description = "Neutral white paper with dark ink and a deep blue accent."
+author = "Nikyle Nguyen"
+license = "MIT"
+version = "1.0.0"
+requires_luvus = ">=0.13.4"
+appearance = "light"
+
+[colors]
+crust = "#ffffff"
+mantle = "#eeeeee"
+base = "#e4e4e4"
+surface0 = "#dadada"
+surface1 = "#d0d0d0"
+overlay0 = "#c6c6c6"
+overlay1 = "#bcbcbc"
+subtext0 = "#6c6c6c"
+subtext1 = "#555555"
+text = "#444444"
+accent = "#005f87"
+sel_bg = "#afd7ff"
+border = "#bcbcbc"
+border_focus = "#005f87"
+green = "#008700"
+mint = "#0087af"
+amber = "#af5f00"
+coral = "#af0000"

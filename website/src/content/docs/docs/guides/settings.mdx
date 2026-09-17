@@ -6,6 +6,12 @@ description: Themes, layout, notifications, keybindings, language, and integrati
 Open with the **Menu** button (top right) or `Ctrl+Space =`. Every change
 applies live and persists to `~/.luvus/config.json`.
 
+Persistence runs off the UI loop. Rapid edits coalesce while an earlier write
+finishes, and unrelated settings saved by another named session are preserved.
+If storage is busy or a write fails, Luvus retains the changes for retry and
+reports the failure. Socket-based config reload waits for pending saves rather
+than replacing the live settings with an older disk copy.
+
 | Tab | What's there |
 |---|---|
 | **General** | **Open files with** (read-only or an editor you have installed) and **File click behavior** (**Preview**, the default, or **Open in tab**), see [Browsing & Opening Files](/docs/guides/files/), then a **Notify** section with Retro, Soft, and Pulse sound styles, separate done and blocked toggles, and a test row for each cue |

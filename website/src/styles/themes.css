@@ -107,6 +107,27 @@ html[data-bh-theme='nord'] {
   --coral: #bf616a;
 }
 .td-sw[data-theme='nord'] { background: #88c0d0; }
+html[data-bh-theme='tokyo-night'] {
+  --bg: #16161e;
+  --bg2: #1a1b26;
+  --base: #1f2335;
+  --surface: #24283b;
+  --line: #292e42;
+  --border: #32344a;
+  --border-focus: #7da6ff;
+  --overlay0: #32344a;
+  --overlay1: #444b6a;
+  --sub: #787c99;
+  --sub2: #acb0d0;
+  --text: #a9b1d6;
+  --accent: #7aa2f7;
+  --sel: #292e42;
+  --green: #9ece6a;
+  --mint: #0db9d7;
+  --amber: #e0af68;
+  --coral: #f7768e;
+}
+.td-sw[data-theme='tokyo-night'] { background: #7aa2f7; }
 html[data-bh-theme='sky'] {
   --bg: #f5f8fc;
   --bg2: #ebf1f9;
@@ -191,6 +212,48 @@ html[data-bh-theme='catppuccin-frappe'] {
   --coral: #e78284;
 }
 .td-sw[data-theme='catppuccin-frappe'] { background: #ca9ee6; }
+html[data-bh-theme='rose-pine'] {
+  --bg: #16141f;
+  --bg2: #191724;
+  --base: #1f1d2e;
+  --surface: #21202e;
+  --line: #26233a;
+  --border: #403d52;
+  --border-focus: #908caa;
+  --overlay0: #403d52;
+  --overlay1: #524f67;
+  --sub: #6e6a86;
+  --sub2: #908caa;
+  --text: #e0def4;
+  --accent: #ebbcba;
+  --sel: #403d52;
+  --green: #95b1ac;
+  --mint: #9ccfd8;
+  --amber: #f6c177;
+  --coral: #eb6f92;
+}
+.td-sw[data-theme='rose-pine'] { background: #ebbcba; }
+html[data-bh-theme='rose-pine-moon'] {
+  --bg: #1f1d30;
+  --bg2: #232136;
+  --base: #2a273f;
+  --surface: #2a283e;
+  --line: #393552;
+  --border: #44415a;
+  --border-focus: #908caa;
+  --overlay0: #44415a;
+  --overlay1: #56526e;
+  --sub: #6e6a86;
+  --sub2: #908caa;
+  --text: #e0def4;
+  --accent: #ea9a97;
+  --sel: #44415a;
+  --green: #95b1ac;
+  --mint: #9ccfd8;
+  --amber: #f6c177;
+  --coral: #eb6f92;
+}
+.td-sw[data-theme='rose-pine-moon'] { background: #ea9a97; }
 html[data-bh-theme='gruvbox'] {
   --bg: #1d2021;
   --bg2: #282828;
@@ -275,6 +338,27 @@ html[data-bh-theme='grass'] {
   --coral: #f06a5a;
 }
 .td-sw[data-theme='grass'] { background: #bee632; }
+html[data-bh-theme='baitong'] {
+  --bg: #081b1b;
+  --bg2: #112a2a;
+  --base: #173838;
+  --surface: #1d4646;
+  --line: #255454;
+  --border: #326b6b;
+  --border-focus: #ff66ff;
+  --overlay0: #326b6b;
+  --overlay1: #4b8585;
+  --sub: #6fa5a5;
+  --sub2: #87cefa;
+  --text: #33ff33;
+  --accent: #ff00ff;
+  --sel: #254d32;
+  --green: #33ff33;
+  --mint: #68fdfe;
+  --amber: #1ae642;
+  --coral: #f77272;
+}
+.td-sw[data-theme='baitong'] { background: #ff00ff; }
 html[data-bh-theme='redsands'] {
   --bg: #1f0a06;
   --bg2: #38120c;
@@ -317,6 +401,69 @@ html[data-bh-theme='catppuccin-latte'] {
   --coral: #d20f39;
 }
 .td-sw[data-theme='catppuccin-latte'] { background: #40a02b; }
+html[data-bh-theme='rose-pine-dawn'] {
+  --bg: #fffaf3;
+  --bg2: #faf4ed;
+  --base: #f8f0e7;
+  --surface: #f4ede8;
+  --line: #f2e9e1;
+  --border: #cecacd;
+  --border-focus: #797593;
+  --overlay0: #dfdad9;
+  --overlay1: #cecacd;
+  --sub: #9893a5;
+  --sub2: #797593;
+  --text: #464261;
+  --accent: #d7827e;
+  --sel: #dfdad9;
+  --green: #6d8f89;
+  --mint: #56949f;
+  --amber: #ea9d34;
+  --coral: #b4637a;
+}
+.td-sw[data-theme='rose-pine-dawn'] { background: #d7827e; }
+html[data-bh-theme='papercolor'] {
+  --bg: #ffffff;
+  --bg2: #eeeeee;
+  --base: #e4e4e4;
+  --surface: #dadada;
+  --line: #d0d0d0;
+  --border: #bcbcbc;
+  --border-focus: #005f87;
+  --overlay0: #c6c6c6;
+  --overlay1: #bcbcbc;
+  --sub: #6c6c6c;
+  --sub2: #555555;
+  --text: #444444;
+  --accent: #005f87;
+  --sel: #afd7ff;
+  --green: #008700;
+  --mint: #0087af;
+  --amber: #af5f00;
+  --coral: #af0000;
+}
+.td-sw[data-theme='papercolor'] { background: #005f87; }
+html[data-bh-theme='paper'] {
+  --bg: #fffdf5;
+  --bg2: #f2eede;
+  --base: #e9e5d7;
+  --surface: #e0dccf;
+  --line: #d8d5c7;
+  --border: #c8c4b7;
+  --border-focus: #1e6fcc;
+  --overlay0: #c8c4b7;
+  --overlay1: #aaaaaa;
+  --sub: #77746c;
+  --sub2: #555555;
+  --text: #000000;
+  --accent: #1e6fcc;
+  --sel: #d8d5c7;
+  --green: #216609;
+  --mint: #158c86;
+  --amber: #b58900;
+  --coral: #cc3e28;
+}
+.td-sw[data-theme='paper'] { background: #1e6fcc; }
 html[data-bh-theme='gruvbox-light'] {
   --bg: #fbf1c7;
   --bg2: #f2e5bc;

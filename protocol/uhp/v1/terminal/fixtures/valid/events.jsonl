@@ -2,3 +2,4 @@
 {"event":"terminal.output_ready","sequence":13,"data":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","content_revision":5,"workspace":1,"tab":2,"detail":{}}}
 {"event":"terminal.resync_required","sequence":14,"data":{"reason":"subscriber_overflow"}}
 {"event":"terminal.frame","sequence":15,"data":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","content_revision":5,"mode":"visible","ansi":true,"text":"ready","lines":1,"bytes":5,"truncated":false}}
+{"event":"terminal.frame","sequence":16,"data":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","content_revision":6,"mode":"visible","ansi":true,"text":"ready\nfinal","lines":2,"bytes":11,"truncated":false}}

@@ -1,6 +1,6 @@
 [package]
 name = "luvus"
-version = "0.13.4"
+version = "0.14.2"
 edition = "2021"
 # ratatui 0.30 (and ratatui-core) use Rust edition 2024, so the dependency tree
 # needs rustc 1.88+. Keep this honest — a lower value makes `cargo install` fail
@@ -55,14 +55,18 @@ dev-tools = []
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["serde"] }
 portable-pty = "0.9"
+bitflags = "=2.13.0"
 alacritty_terminal = { package = "luvus-alacritty-terminal", version = "0.26" }
 unicode-width = "0.2"
 # Explicit terminal-native document previews. The parser is pure Rust and only
 # runs after the user chooses a Markdown/Mermaid preview action.
 pulldown-cmark = { version = "0.13", default-features = false }
 anyhow = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+# Manual ORCH worker commands accept an executable plus quoted argv without
+# routing the task briefing back through an interactive shell.
+shell-words = "1.1"
 # SHA-256 tracks managed skill files and verifies release, theme, and diff
 # artifacts. The canonical Luvus skill itself is bundled with this release.
 semver = "1"
@@ -81,7 +85,10 @@ fs2 = "0.4"
 # protocol. This calls the operating-system RNG directly; identifiers are not
 # derived from pane routes, PIDs, clocks, or process-global counters.
 getrandom = "0.3"
-
+# Calendar-safe IANA timezone conversion for daily and weekly automations.
+# Jiff is local-only: it reads the OS timezone database (with a Windows bundle)
+# and performs no runtime network access.
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 # `libc` (setsid + macOS proc_pidinfo) is only needed on Unix.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -100,7 +107,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Console",
+    "Win32_System_DataExchange",
     "Win32_System_Kernel",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
     "Win32_System_Threading",
 ] }
 

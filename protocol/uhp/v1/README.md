@@ -24,3 +24,12 @@ delegated session tokens and is not part of remote `uhp access`.
 All requests use the `luvus-uhp` `1.0` identity. Method namespaces organize the
 surface but do not define separate protocols or capability handshakes.
 Optional delegated `auth` tokens contain 1 to 256 printable ASCII bytes.
+
+The `automation.*` family controls durable agent schedules through the same
+session-server contract. Calendar triggers retain an IANA timezone while wire
+deadlines and occurrence keys use UTC Unix seconds. Read-only inspection uses
+the `read` scope; definition changes and run requests require `orchestration`.
+Create and run requests support bounded idempotency keys for safe retries.
+Targets default to a fresh ORCH worker. `active_agent` targets bind to an
+exact pane and 128-bit terminal lifetime, fail closed on identity drift, and
+expire when that pane or server lifetime ends.

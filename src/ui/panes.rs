@@ -109,7 +109,8 @@ pub(super) fn draw_pane_titles(
         ]);
         let title_rect = Rect::new(rect.x + 1, rect.y, text_w, 1);
         f.render_widget(Paragraph::new(title), title_rect);
-        // Clicking the title opens the running-command overlay.
+        // Keep the title geometry so clicks focus the pane and never become an
+        // accidental divider resize on a stacked layout.
         title_rects.push((*id, title_rect));
         draw_title_buttons(f, *rect, focused, app.zoomed, title_w, bg, t);
     }

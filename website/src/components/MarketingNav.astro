@@ -1,0 +1,328 @@
+---
+import XLogo from './XLogo.astro';
+import { NAV_MARK } from '../lib/mark';
+
+interface Props {
+  active?: 'modules' | 'themes' | 'compare' | 'blog' | 'changelog';
+  showCompare?: boolean;
+}
+
+const { active, showCompare = active === 'compare' } = Astro.props;
+const links = [
+  { id: 'docs', label: 'Docs', href: '/docs/' },
+  { id: 'modules', label: 'Modules', href: '/modules/' },
+  { id: 'themes', label: 'Themes', href: '/themes/' },
+  ...(showCompare ? [{ id: 'compare', label: 'Compare', href: '/compare/' }] : []),
+  { id: 'blog', label: 'Blog', href: '/blog/' },
+  { id: 'changelog', label: 'Changelog', href: '/changelog/' },
+];
+---
+
+<nav class="site-nav" data-site-nav aria-label="Primary navigation">
+  <div class="site-nav__inner">
+    <a class="site-nav__brand" href="/" aria-label="Luvus home" data-site-nav-brand>
+      <span class="site-nav__mark" aria-hidden="true" set:html={NAV_MARK}></span>
+      <span>Luvus</span>
+    </a>
+
+    <button
+      class="site-nav__toggle"
+      type="button"
+      aria-expanded="false"
+      aria-controls="site-nav-panel"
+      aria-label="Open navigation menu"
+      data-site-nav-toggle
+    >
+      <span class="site-nav__toggle-label" aria-hidden="true">Menu</span>
+      <span class="site-nav__toggle-icon" aria-hidden="true">
+        <i></i><i></i><i></i>
+      </span>
+    </button>
+
+    <div class="site-nav__panel" id="site-nav-panel" data-site-nav-panel>
+      <div class="site-nav__links">
+        {links.map((link) => (
+          <a
+            class="site-nav__link"
+            href={link.href}
+            aria-current={active === link.id ? 'page' : undefined}
+          >
+            <span>{link.label}</span>
+            <span class="site-nav__arrow" aria-hidden="true">›</span>
+          </a>
+        ))}
+      </div>
+      <div class="site-nav__social" aria-label="Luvus social links">
+        <span class="site-nav__social-label">Follow Luvus</span>
+        <a
+          href="https://github.com/RizRiyz/luvus"
+          class="site-nav__social-link"
+          aria-label="Luvus on GitHub"
+          title="GitHub"
+        >
+          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+            ></path>
+          </svg>
+        </a>
+        <a
+          href="https://x.com/luvusdev"
+          class="site-nav__social-link"
+          aria-label="Luvus on X"
+          title="X"
+        ><XLogo /></a>
+      </div>
+    </div>
+  </div>
+</nav>
+
+<script>
+  const desktop = window.matchMedia('(min-width: 45.01rem)');
+
+  for (const nav of document.querySelectorAll<HTMLElement>('[data-site-nav]')) {
+    const toggle = nav.querySelector<HTMLButtonElement>('[data-site-nav-toggle]');
+    const panel = nav.querySelector<HTMLElement>('[data-site-nav-panel]');
+    if (!toggle || !panel) continue;
+
+    const setOpen = (open: boolean, restoreFocus = false) => {
+      nav.toggleAttribute('data-open', open);
+      toggle.setAttribute('aria-expanded', String(open));
+      toggle.setAttribute('aria-label', open ? 'Close navigation menu' : 'Open navigation menu');
+      if (restoreFocus) toggle.focus();
+    };
+
+    nav.setAttribute('data-ready', '');
+    toggle.addEventListener('click', () => setOpen(!nav.hasAttribute('data-open')));
+    panel.addEventListener('click', (event) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('a')) setOpen(false);
+    });
+    document.addEventListener('pointerdown', (event) => {
+      if (nav.hasAttribute('data-open') && !nav.contains(event.target as Node)) setOpen(false);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && nav.hasAttribute('data-open')) setOpen(false, true);
+    });
+    desktop.addEventListener('change', () => setOpen(false));
+  }
+</script>
+
+<style>
+  .site-nav {
+    position: relative;
+    z-index: 30;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  .site-nav__inner {
+    position: relative;
+    display: flex;
+    max-width: 1440px;
+    min-height: 3.8rem;
+    margin: 0 auto;
+    padding: 0.3rem var(--gut, 1.5rem);
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .site-nav__brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--text);
+    font-family: 'Orbit', var(--bh-display, ui-monospace), monospace;
+    font-size: 1.7rem;
+    font-weight: 400;
+    line-height: normal;
+    letter-spacing: -0.05em;
+    text-decoration: none;
+  }
+  .site-nav__brand > span:last-child {
+    transform: translateY(var(--brand-nudge, -0.06em));
+  }
+  .site-nav__mark {
+    display: block;
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+  }
+  .site-nav__mark :global(svg) {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+  .site-nav__panel,
+  .site-nav__links,
+  .site-nav__social {
+    display: flex;
+    align-items: center;
+  }
+  .site-nav__panel { gap: 1.4rem; }
+  .site-nav__links { gap: 1.4rem; }
+  .site-nav__link {
+    color: var(--sub);
+    font: 0.88rem/1.3 'IBM Plex Mono', ui-monospace, monospace;
+    letter-spacing: -0.01em;
+    text-decoration: none;
+    transition: color 150ms ease;
+  }
+  .site-nav__link:hover { color: var(--text); }
+  .site-nav__link[aria-current='page'] { color: var(--accent); }
+  .site-nav__arrow { display: none; }
+  .site-nav__social { gap: 0.55rem; }
+  .site-nav__social-label { display: none; }
+  .site-nav__social-link {
+    display: inline-flex;
+    width: 33px;
+    height: 33px;
+    flex: 0 0 33px;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line);
+    color: var(--sub);
+    text-decoration: none;
+    transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+  }
+  .site-nav__social-link:hover {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    color: var(--accent);
+  }
+  .site-nav__toggle { display: none; }
+
+  @media (max-width: 45rem) {
+    .site-nav__inner {
+      min-height: 3.65rem;
+      padding-block: 0.3rem;
+    }
+    .site-nav__brand { font-size: 1.5rem; }
+    .site-nav__mark { width: 38px; height: 38px; flex-basis: 38px; }
+    .site-nav[data-ready] .site-nav__toggle {
+      display: inline-flex;
+      min-width: 76px;
+      min-height: 42px;
+      padding: 0 0.75rem;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.65rem;
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, var(--bg2) 82%, transparent);
+      color: var(--text);
+      font: 600 0.7rem/1 'IBM Plex Mono', ui-monospace, monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      transition: border-color 150ms ease, background 150ms ease;
+    }
+    .site-nav[data-ready] .site-nav__toggle:hover,
+    .site-nav[data-open] .site-nav__toggle {
+      border-color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 10%, var(--bg2));
+    }
+    .site-nav__toggle-icon {
+      position: relative;
+      display: block;
+      width: 16px;
+      height: 12px;
+    }
+    .site-nav__toggle-icon i {
+      position: absolute;
+      left: 0;
+      display: block;
+      width: 16px;
+      height: 1px;
+      background: currentColor;
+      transform-origin: center;
+      transition: top 160ms ease, transform 160ms ease, opacity 120ms ease;
+    }
+    .site-nav__toggle-icon i:nth-child(1) { top: 1px; }
+    .site-nav__toggle-icon i:nth-child(2) { top: 6px; }
+    .site-nav__toggle-icon i:nth-child(3) { top: 11px; }
+    .site-nav[data-open] .site-nav__toggle-icon i:nth-child(1) { top: 6px; transform: rotate(45deg); }
+    .site-nav[data-open] .site-nav__toggle-icon i:nth-child(2) { opacity: 0; }
+    .site-nav[data-open] .site-nav__toggle-icon i:nth-child(3) { top: 6px; transform: rotate(-45deg); }
+
+    .site-nav__panel {
+      width: 100%;
+      padding: 0.5rem 0 0.85rem;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.65rem;
+    }
+    .site-nav[data-ready] .site-nav__panel {
+      position: absolute;
+      top: calc(100% + 1px);
+      right: var(--gut, 1.15rem);
+      width: min(22rem, calc(100vw - (2 * var(--gut, 1.15rem))));
+      padding: 0.55rem;
+      border: 1px solid var(--line);
+      background: var(--bg2);
+      box-shadow: 0 18px 44px rgb(0 0 0 / 0.32);
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-0.4rem);
+      pointer-events: none;
+      transition: opacity 150ms ease, transform 150ms ease, visibility 150ms;
+    }
+    .site-nav[data-ready][data-open] .site-nav__panel {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+    .site-nav__links {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0;
+    }
+    .site-nav__link {
+      display: flex;
+      min-height: 47px;
+      padding: 0 0.8rem;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--line);
+      color: var(--text);
+      font-size: 0.84rem;
+    }
+    .site-nav__link:hover,
+    .site-nav__link:focus-visible {
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      color: var(--accent);
+      outline: none;
+    }
+    .site-nav__link[aria-current='page'] {
+      box-shadow: inset 2px 0 0 var(--accent);
+      background: color-mix(in srgb, var(--accent) 7%, transparent);
+    }
+    .site-nav__arrow {
+      display: inline;
+      color: var(--overlay1);
+      font-size: 1.2rem;
+    }
+    .site-nav__social {
+      min-height: 45px;
+      padding: 0.15rem 0.35rem 0.1rem 0.8rem;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+    .site-nav__social-label {
+      display: block;
+      margin-right: auto;
+      color: var(--sub);
+      font: 0.68rem/1 'IBM Plex Mono', ui-monospace, monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .site-nav__social-link { width: 38px; height: 38px; flex-basis: 38px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .site-nav__panel,
+    .site-nav__toggle-icon i { transition: none !important; }
+  }
+</style>

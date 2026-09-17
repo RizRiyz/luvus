@@ -8,13 +8,13 @@ owner-only (`0700`).
 
 | File | Contents |
 |---|---|
-| `config.json` | theme, language, shell, layout, notifications, keybindings, `sidebars`, and Luvus Bar placement |
+| `config.json` | theme, language, shell, layout, notifications, keybindings, worktree creation provider, `sidebars`, and Luvus Bar placement |
 | `session.json` | the auto-saved session snapshot (workspaces → tabs → panes) |
 | `orch.json` | the orchestration task ledger + leases |
 | `modules.json` + `modules/` | installed extensions and their state |
 | `themes/*.toml` | installed data-only themes, shared by named sessions |
 | `themes/*.source.json` | source URL/path, SHA-256 digest, and install timestamp for managed theme installs |
-| `worktrees/` | worktrees created by luvus, nested per repo |
+| `worktrees/` | worktrees created by the default Git provider, nested per repo; module providers may choose other locations |
 | `reviews/` | private local DIFF notes and viewed fingerprints, keyed by hashed repository and worktree identity |
 | `luvus.sock` / `luvus-client.sock` | the control + render sockets (owner-only) |
 
@@ -27,14 +27,17 @@ cleanly across versions because unknown fields get defaults.
 | Key | Effect |
 |---|---|
 | `theme` | active bundled, installed, or virtual theme ID. A missing installed ID falls back visually without erasing the stored value. |
+| `allow_nested` | allow opening an interactive Luvus client from a Luvus pane; defaults to `false` because nested clients compete for terminal input |
 | `layout.scrollback_bytes` | approximate memory budget per pane's retained history; defaults to `10485760` (10 MiB). The legacy `layout.scrollback` line count is read for compatibility. (See [Scrollback](/docs/guides/scrollback/).) |
 | `layout.mobile_width` | inclusive viewport width for automatic mobile presentation; defaults to `64`, and `0` disables it. The legacy `layout.compact_width` key is accepted and migrated. (See [Mobile Sessions](/docs/guides/mobile/).) |
 | `layout.show_titles` | show the title on each pane border |
 | `layout.resume_in_new_workspace` | resume a session into its own workspace instead of a new tab |
 | `layout.file_open` | which viewer opens a file: `readonly` (default) or an editor command such as `vim` (see [Browsing & Opening Files](/docs/guides/files/)) |
 | `layout.file_click` | what a plain click in the FILES dock does: `preview` (default) reuses one read-only preview pane, `tab` opens a whole tab through `layout.file_open`. Only `tab` can launch an editor. |
+| `layout.workspace_paths` | show the cwd line beneath WORKSPACES rows; defaults to `true` and can be toggled from any workspace row menu |
+| `layout.agent_paths` | show the workspace/path detail line beneath AGENTS rows; defaults to `true` and can be toggled from any agent row menu |
 | `layout.diff_layout` | default native DIFF layout: `auto`, `split`, or `stack` |
-| `layout.diff_wrap` | wrap long diff rows instead of using horizontal navigation |
+| `layout.diff_wrap` | wrap long rows in an explicitly selected Stack layout; Split and Auto always wrap at every responsive width |
 | `layout.diff_context_lines` | unchanged Git context lines per hunk, from `0` to `20` |
 | `layout.diff_show_line_numbers` | show old and new source line gutters |
 | `layout.diff_marker_style` | changed-line indicator: `symbols` (default), `bars`, or `both` |
@@ -44,10 +47,12 @@ cleanly across versions because unknown fields get defaults.
 | `notifications.sound_on_done` | play the selected done cue after an agent finishes; defaults to `false` |
 | `notifications.sound_on_blocked` | play the selected blocked cue when an agent needs attention; defaults to `false` |
 | `agents_active_only` | show only live agents in the AGENTS dock when `true`; defaults to `false`, which also shows resumable sessions |
+| `agents_this_workspace` | scope live agents and resumable sessions to the active workspace; defaults to `false` and is independent of `agents_active_only`. Toggle it with prefix `A` or the dynamic workspace-scope action in any AGENTS row's right-click menu. |
 | `sidebars.files_side` | last side used by the FILES dock (`left` or `right`), retained while the dock is hidden |
 | `prefix` | the command-mode prefix (default `ctrl+space`). Accepts `f1`–`f12` as safe single keys, or a character/Space chord containing `Ctrl` or `Alt`, such as `ctrl+b`, `alt+\`, or `shift+f12` (see [Keybindings](/docs/reference/keybindings/)) |
 | `keybindings` | command id → key, overriding the defaults |
 | `direct_keybindings` | opt-in command id → modified semantic chord handled without the prefix. It is empty by default; configured chords are intercepted instead of reaching the focused pane (see [Keybindings](/docs/reference/keybindings/#opt-in-direct-shortcuts)). |
+| `worktree.provider` | worktree backend: `git` (default, backward-compatible) or the canonical id of an enabled module declaring `[worktree_provider]`. Configuration cannot supply executable or argv. Creation applies to CLI/API, TUI, and ORCH task worktrees. A module's optional `remove_command` handles explicit API/TUI removal; otherwise removal falls back to Git. Internal rollback and task merge remain Git-backed. |
 | `bars.top_right` / `bars.bottom_right` / `bars.off` | canonical widget ids (`module:id`) in each Luvus Bar placement. `core:runtime-status` defaults to Bottom. Live content and notifications are never persisted. |
 
 ## Environment variables

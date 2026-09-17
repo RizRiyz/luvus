@@ -1,0 +1,33 @@
+# Adapted from the official Rosé Pine Moon palette.
+# https://github.com/rose-pine/rose-pine-theme
+# Copyright (c) 2023 Rosé Pine. Licensed under the MIT License.
+
+schema = 1
+id = "rose-pine-moon"
+display_name = "Rosé Pine Moon"
+description = "Soft moonlit Rosé Pine with a rose accent."
+author = "Rosé Pine"
+license = "MIT"
+version = "1.0.0"
+requires_luvus = ">=0.13.4"
+appearance = "dark"
+
+[colors]
+crust = "#1f1d30"
+mantle = "#232136"
+base = "#2a273f"
+surface0 = "#2a283e"
+surface1 = "#393552"
+overlay0 = "#44415a"
+overlay1 = "#56526e"
+subtext0 = "#6e6a86"
+subtext1 = "#908caa"
+text = "#e0def4"
+accent = "#ea9a97"
+sel_bg = "#44415a"
+border = "#44415a"
+border_focus = "#908caa"
+green = "#95b1ac"
+mint = "#9ccfd8"
+amber = "#f6c177"
+coral = "#eb6f92"

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::hash::{Hash, Hasher};
 
 use arrayvec::ArrayVec;
 use bitflags::bitflags;
@@ -135,6 +136,14 @@ pub struct CellExtra {
     hyperlink: Option<Hyperlink>,
 }
 
+impl Hash for CellExtra {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.zerowidth.hash(state);
+        hash_color_option(self.underline_color, state);
+        self.hyperlink.hash(state);
+    }
+}
+
 /// Content and attributes of a single cell in the terminal grid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -144,6 +153,45 @@ pub struct Cell {
     pub bg: Color,
     pub flags: Flags,
     pub extra: Option<Arc<CellExtra>>,
+}
+
+impl Hash for Cell {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.c.hash(state);
+        hash_color(self.fg, state);
+        hash_color(self.bg, state);
+        self.flags.hash(state);
+        self.extra.hash(state);
+    }
+}
+
+fn hash_color<H: Hasher>(color: Color, state: &mut H) {
+    match color {
+        Color::Named(color) => {
+            0u8.hash(state);
+            (color as u16).hash(state);
+        },
+        Color::Spec(color) => {
+            1u8.hash(state);
+            color.r.hash(state);
+            color.g.hash(state);
+            color.b.hash(state);
+        },
+        Color::Indexed(color) => {
+            2u8.hash(state);
+            color.hash(state);
+        },
+    }
+}
+
+fn hash_color_option<H: Hasher>(color: Option<Color>, state: &mut H) {
+    match color {
+        Some(color) => {
+            true.hash(state);
+            hash_color(color, state);
+        },
+        None => false.hash(state),
+    }
 }
 
 impl Default for Cell {

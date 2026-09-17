@@ -1,0 +1,33 @@
+# Adapted from the official Rosé Pine main palette.
+# https://github.com/rose-pine/rose-pine-theme
+# Copyright (c) 2023 Rosé Pine. Licensed under the MIT License.
+
+schema = 1
+id = "rose-pine"
+display_name = "Rosé Pine"
+description = "Soft dark Rosé Pine with a rose accent."
+author = "Rosé Pine"
+license = "MIT"
+version = "1.0.0"
+requires_luvus = ">=0.13.4"
+appearance = "dark"
+
+[colors]
+crust = "#16141f"
+mantle = "#191724"
+base = "#1f1d2e"
+surface0 = "#21202e"
+surface1 = "#26233a"
+overlay0 = "#403d52"
+overlay1 = "#524f67"
+subtext0 = "#6e6a86"
+subtext1 = "#908caa"
+text = "#e0def4"
+accent = "#ebbcba"
+sel_bg = "#403d52"
+border = "#403d52"
+border_focus = "#908caa"
+green = "#95b1ac"
+mint = "#9ccfd8"
+amber = "#f6c177"
+coral = "#eb6f92"

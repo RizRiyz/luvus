@@ -1,10 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::ids::PaneId;
+
+type StackRowIndices = HashMap<(DiffSide, u32), usize>;
+type SplitRowIndices = Vec<(Option<usize>, Option<usize>)>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -553,32 +557,32 @@ impl DiffState {
         key: &DiffKey,
         context: u16,
         fingerprint: &str,
-    ) -> Option<FileDiff> {
+    ) -> Option<Arc<FileDiff>> {
         self.cache.get(key, context, fingerprint)
     }
 
-    pub fn cache_insert(&mut self, context: u16, fingerprint: String, diff: FileDiff) {
+    pub fn cache_insert(&mut self, context: u16, fingerprint: String, diff: Arc<FileDiff>) {
         self.cache.insert(context, fingerprint, diff);
     }
 }
 
 #[derive(Debug, Default)]
 struct DiffCache {
-    entries: HashMap<(DiffKey, u16, String), (FileDiff, usize)>,
+    entries: HashMap<(DiffKey, u16, String), (Arc<FileDiff>, usize)>,
     order: VecDeque<(DiffKey, u16, String)>,
     bytes: usize,
 }
 
 impl DiffCache {
-    fn get(&mut self, key: &DiffKey, context: u16, fingerprint: &str) -> Option<FileDiff> {
+    fn get(&mut self, key: &DiffKey, context: u16, fingerprint: &str) -> Option<Arc<FileDiff>> {
         let cache_key = (key.clone(), context, fingerprint.to_string());
-        let value = self.entries.get(&cache_key)?.0.clone();
+        let value = Arc::clone(&self.entries.get(&cache_key)?.0);
         self.order.retain(|existing| existing != &cache_key);
         self.order.push_back(cache_key);
         Some(value)
     }
 
-    fn insert(&mut self, context: u16, fingerprint: String, diff: FileDiff) {
+    fn insert(&mut self, context: u16, fingerprint: String, diff: Arc<FileDiff>) {
         let key = (diff.key.clone(), context, fingerprint);
         let size = estimate_diff_bytes(&diff);
         if size > crate::diff::DIFF_CACHE_BYTE_CAP {
@@ -635,7 +639,7 @@ pub struct DiffLine {
     pub kind: DiffLineKind,
     pub old_line: Option<u32>,
     pub new_line: Option<u32>,
-    pub text: String,
+    pub text: Arc<str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -661,14 +665,34 @@ pub struct FileDiff {
 
 #[derive(Clone, Debug)]
 pub struct LoadedDiff {
-    pub diff: FileDiff,
+    pub diff: Arc<FileDiff>,
+    pub stack_rows: Vec<DiffLine>,
+    pub split_rows: Vec<crate::diff::rows::SplitRow>,
+    pub stack_indices: StackRowIndices,
+    pub split_indices: SplitRowIndices,
     pub reconciled_notes: Vec<crate::diff::ReviewNote>,
+}
+
+impl LoadedDiff {
+    pub fn prepare(diff: Arc<FileDiff>, reconciled_notes: Vec<crate::diff::ReviewNote>) -> Self {
+        let stack_rows = crate::diff::rows::stack_rows(&diff);
+        let split_rows = crate::diff::rows::split_rows(&diff);
+        let (stack_indices, split_indices) = build_row_indices(&stack_rows, &split_rows);
+        Self {
+            diff,
+            stack_rows,
+            split_rows,
+            stack_indices,
+            split_indices,
+            reconciled_notes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DiffLoad {
     Loading,
-    Ready(Box<FileDiff>),
+    Ready(Arc<FileDiff>),
     Conflict(String),
     Error(String),
 }
@@ -688,8 +712,8 @@ pub struct DiffView {
     pub load: DiffLoad,
     pub stack_rows: Vec<DiffLine>,
     pub split_rows: Vec<crate::diff::rows::SplitRow>,
-    pub stack_indices: HashMap<(DiffSide, u32), usize>,
-    pub split_indices: Vec<(Option<usize>, Option<usize>)>,
+    pub stack_indices: StackRowIndices,
+    pub split_indices: SplitRowIndices,
     pub request_token: u64,
     pub preference: DiffLayoutPreference,
     pub scroll: usize,
@@ -751,6 +775,10 @@ impl DiffView {
         marker_style: DiffMarkerStyle,
         split: bool,
     ) {
+        if split || self.effective_wrap(pane_width) {
+            self.horizontal = 0;
+            return;
+        }
         let Some(line) = self.stack_rows.get(self.selected) else {
             return;
         };
@@ -759,12 +787,7 @@ impl DiffView {
         let symbol_w = if marker_style.shows_symbols() { 2 } else { 0 };
         let numbers_w = if self.show_line_numbers { 12 } else { 0 };
         let gutter_w = bar_w + symbol_w + numbers_w;
-        let side_width = if split {
-            (pane_width.saturating_sub(1)) / 2
-        } else {
-            pane_width
-        };
-        let text_w = side_width.saturating_sub(gutter_w as u16) as usize;
+        let text_w = pane_width.saturating_sub(gutter_w as u16) as usize;
         if text_w == 0 {
             return;
         }
@@ -778,59 +801,28 @@ impl DiffView {
     }
 
     pub fn effective_split(&self, pane_width: u16) -> bool {
-        !self.wrap
-            && matches!(
-                self.preference,
-                DiffLayoutPreference::Split | DiffLayoutPreference::Auto
-            )
-            && pane_width >= 96
+        matches!(
+            self.preference,
+            DiffLayoutPreference::Split | DiffLayoutPreference::Auto
+        ) && pane_width >= 96
     }
 
-    pub fn rebuild_row_indices(&mut self) {
-        self.stack_indices.clear();
-        let mut headers = Vec::new();
-        for (index, line) in self.stack_rows.iter().enumerate() {
-            if line.kind == DiffLineKind::Header {
-                headers.push(index);
-            }
-            if let Some(number) = line.old_line {
-                self.stack_indices.insert((DiffSide::Old, number), index);
-            }
-            if let Some(number) = line.new_line {
-                self.stack_indices.insert((DiffSide::New, number), index);
-            }
-        }
+    /// Whether source text wraps in the current viewport.
+    ///
+    /// Split and Auto are responsive layouts. Their two-column form wraps each
+    /// side independently, and their narrow Stack fallback must keep wrapping
+    /// too. Only an explicitly selected Stack layout may opt into horizontal
+    /// scrolling by disabling the Wrap preference.
+    pub fn effective_wrap(&self, pane_width: u16) -> bool {
+        self.wrap
+            || self.effective_split(pane_width)
+            || !matches!(self.preference, DiffLayoutPreference::Stack)
+    }
 
-        let mut header = 0;
-        self.split_indices = self
-            .split_rows
-            .iter()
-            .map(|row| {
-                if row
-                    .old
-                    .as_ref()
-                    .or(row.new.as_ref())
-                    .is_some_and(|line| line.kind == DiffLineKind::Header)
-                {
-                    let index = headers.get(header).copied();
-                    header += 1;
-                    return (index, index);
-                }
-                let old = row
-                    .old
-                    .as_ref()
-                    .and_then(|line| line.old_line)
-                    .and_then(|number| self.stack_indices.get(&(DiffSide::Old, number)))
-                    .copied();
-                let new = row
-                    .new
-                    .as_ref()
-                    .and_then(|line| line.new_line)
-                    .and_then(|number| self.stack_indices.get(&(DiffSide::New, number)))
-                    .copied();
-                (old, new)
-            })
-            .collect();
+    #[cfg(test)]
+    pub fn rebuild_row_indices(&mut self) {
+        (self.stack_indices, self.split_indices) =
+            build_row_indices(&self.stack_rows, &self.split_rows);
     }
 
     pub fn split_row_for_stack(&self, stack: usize) -> usize {
@@ -847,6 +839,56 @@ impl DiffView {
             DiffSide::New => new.or(old),
         }
     }
+}
+
+fn build_row_indices(
+    stack_rows: &[DiffLine],
+    split_rows: &[crate::diff::rows::SplitRow],
+) -> (StackRowIndices, SplitRowIndices) {
+    let mut stack_indices = HashMap::new();
+    let mut headers = Vec::new();
+    for (index, line) in stack_rows.iter().enumerate() {
+        if line.kind == DiffLineKind::Header {
+            headers.push(index);
+        }
+        if let Some(number) = line.old_line {
+            stack_indices.insert((DiffSide::Old, number), index);
+        }
+        if let Some(number) = line.new_line {
+            stack_indices.insert((DiffSide::New, number), index);
+        }
+    }
+
+    let mut header = 0;
+    let split_indices = split_rows
+        .iter()
+        .map(|row| {
+            if row
+                .old
+                .as_ref()
+                .or(row.new.as_ref())
+                .is_some_and(|line| line.kind == DiffLineKind::Header)
+            {
+                let index = headers.get(header).copied();
+                header += 1;
+                return (index, index);
+            }
+            let old = row
+                .old
+                .as_ref()
+                .and_then(|line| line.old_line)
+                .and_then(|number| stack_indices.get(&(DiffSide::Old, number)))
+                .copied();
+            let new = row
+                .new
+                .as_ref()
+                .and_then(|line| line.new_line)
+                .and_then(|number| stack_indices.get(&(DiffSide::New, number)))
+                .copied();
+            (old, new)
+        })
+        .collect();
+    (stack_indices, split_indices)
 }
 
 #[cfg(test)]
@@ -885,11 +927,57 @@ mod tests {
             omitted_lines: 0,
             hunks: Vec::new(),
         };
+        let diff = Arc::new(diff);
         let mut state = DiffState::default();
-        state.cache_insert(3, "before".into(), diff);
-        assert!(state.cache_get(&key, 3, "before").is_some());
+        state.cache_insert(3, "before".into(), Arc::clone(&diff));
+        let cached = state.cache_get(&key, 3, "before").unwrap();
+        assert!(Arc::ptr_eq(&cached, &diff));
         assert!(state.cache_get(&key, 3, "after").is_none());
         assert!(state.cache_get(&key, 4, "before").is_none());
+    }
+
+    #[test]
+    fn prepared_diff_shares_text_and_builds_navigation_indices() {
+        let line = DiffLine {
+            kind: DiffLineKind::Addition,
+            old_line: None,
+            new_line: Some(7),
+            text: "shared source text".into(),
+        };
+        let diff = Arc::new(FileDiff {
+            key: test_key(),
+            status: DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: vec![DiffHunk {
+                id: "h1".into(),
+                old_start: 7,
+                new_start: 7,
+                header: "@@ -7,0 +7 @@".into(),
+                lines: vec![line],
+            }],
+        });
+
+        let loaded = LoadedDiff::prepare(Arc::clone(&diff), Vec::new());
+
+        assert!(Arc::ptr_eq(&loaded.diff, &diff));
+        assert!(Arc::ptr_eq(
+            &loaded.diff.hunks[0].lines[0].text,
+            &loaded.stack_rows[1].text,
+        ));
+        assert!(Arc::ptr_eq(
+            &loaded.stack_rows[1].text,
+            &loaded.split_rows[1].new.as_ref().unwrap().text,
+        ));
+        assert_eq!(
+            serde_json::to_value(&loaded.diff.hunks[0].lines[0]).unwrap()["text"],
+            "shared source text"
+        );
+        assert_eq!(loaded.stack_indices[&(DiffSide::New, 7)], 1);
+        assert_eq!(loaded.split_indices[1], (None, Some(1)));
     }
 
     #[test]
@@ -976,6 +1064,51 @@ mod tests {
         assert_eq!(view.stack_row_for_split(1), Some(1));
         assert_eq!(view.stack_row_for_split(2), Some(2));
         assert_eq!(view.split_row_for_stack(3), 1);
+    }
+
+    #[test]
+    fn wrapping_does_not_force_a_wide_split_view_into_stack() {
+        let mut view = DiffView::new(
+            PathBuf::from("/repo"),
+            test_key(),
+            DiffLayoutPreference::Split,
+            3,
+            true,
+            true,
+        );
+
+        assert!(view.effective_split(96));
+        assert!(!view.effective_split(95));
+        view.horizontal = 12;
+        view.ensure_horizontal_visible(120, DiffMarkerStyle::Symbols, true);
+        assert_eq!(view.horizontal, 0);
+        view.preference = DiffLayoutPreference::Stack;
+        assert!(!view.effective_split(120));
+    }
+
+    #[test]
+    fn responsive_layouts_keep_wrapping_when_the_viewport_falls_back_to_stack() {
+        let mut view = DiffView::new(
+            PathBuf::from("/repo"),
+            test_key(),
+            DiffLayoutPreference::Split,
+            3,
+            true,
+            false,
+        );
+
+        assert!(view.effective_wrap(120));
+        assert!(view.effective_wrap(80));
+        view.horizontal = 12;
+        view.ensure_horizontal_visible(80, DiffMarkerStyle::Symbols, false);
+        assert_eq!(view.horizontal, 0);
+
+        view.preference = DiffLayoutPreference::Auto;
+        assert!(view.effective_wrap(80));
+        view.preference = DiffLayoutPreference::Stack;
+        assert!(!view.effective_wrap(80));
+        view.wrap = true;
+        assert!(view.effective_wrap(80));
     }
 
     #[test]
