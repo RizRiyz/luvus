@@ -13,7 +13,7 @@ use bitflags::bitflags;
 use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
-use crate::event::{Event, EventListener};
+use crate::event::{Event, EventListener, KittyGraphics};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
@@ -2478,6 +2478,27 @@ impl<T: EventListener> Handler for Term<T> {
         self.event_proxy.send_event(title_event);
     }
 
+    /// Forward a kitty graphics command; discard every other APC.
+    ///
+    /// Applications use APC for private markers unrelated to graphics — some
+    /// agent prompts mark their cursor that way — and those arrive on the hot
+    /// output path. Matching the `G` introducer here keeps them exactly as
+    /// cheap as they were before this hook existed: no copy, no event.
+    #[inline]
+    fn apc(&mut self, payload: &[u8]) {
+        let Some(command) = payload.strip_prefix(b"G") else {
+            trace!("[unhandled apc] {} bytes", payload.len());
+            return;
+        };
+
+        let cursor = self.grid.cursor.point;
+        self.event_proxy.send_event(Event::KittyGraphics(KittyGraphics {
+            payload: command.to_vec(),
+            line: cursor.line.0,
+            column: cursor.column.0,
+        }));
+    }
+
     #[inline]
     fn push_title(&mut self) {
         trace!("Pushing '{:?}' onto title stack", self.title);
@@ -2508,6 +2529,13 @@ impl<T: EventListener> Handler for Term<T> {
             let height = window_size.num_lines * window_size.cell_height;
             let width = window_size.num_cols * window_size.cell_width;
             format!("\x1b[4;{height};{width}t")
+        })));
+    }
+
+    #[inline]
+    fn cell_size_pixels(&mut self) {
+        self.event_proxy.send_event(Event::CellSizeRequest(Arc::new(move |window_size| {
+            format!("\x1b[6;{};{}t", window_size.cell_height, window_size.cell_width)
         })));
     }
 

@@ -11,17 +11,42 @@ use serde::de::{DeserializeOwned, Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::sound::SoundSignal;
-use crate::terminal::theme_probe::TerminalColors;
+use crate::terminal::theme_probe::{CellSize, TerminalColors};
 
-pub const PROTOCOL_VERSION: u32 = 18;
+/// Bumped to 19 when the terminal probe reply grew the host's graphics
+/// capability alongside its colors.
+pub const PROTOCOL_VERSION: u32 = 19;
 /// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
 /// variant one. Its mismatch reply must use that released position.
 const V0141_PROTOCOL_VERSION: u32 = 17;
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
+/// What the terminal answered when the probe asked how big a cell is. Written
+/// once per process, before any window size is reported.
+static PROBED_CELL_PIXELS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Remember the probe's measurement as the fallback for [`local_cell_pixels`].
+pub fn set_probed_cell_pixels(cell_size: Option<CellSize>) {
+    PROBED_CELL_PIXELS.store(
+        cell_size.map_or(0, CellSize::pack),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Local display cell size in pixels, or `(0, 0)` when the host does not report it.
+///
+/// The kernel's window size is preferred because it stays current when the user
+/// changes font size, but a terminal is not obliged to fill it, and a multiplexer
+/// between Luvus and the display usually does not. What the terminal answered
+/// when asked directly stands in for those, so a pane still reports a pixel size
+/// to the program drawing in it.
 pub fn local_cell_pixels() -> (u16, u16) {
-    crate::platform::terminal_cell_pixels().unwrap_or((0, 0))
+    crate::platform::terminal_cell_pixels()
+        .or_else(|| {
+            CellSize::unpack(PROBED_CELL_PIXELS.load(std::sync::atomic::Ordering::Relaxed))
+                .map(|cell| (cell.width, cell.height))
+        })
+        .unwrap_or((0, 0))
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -69,8 +94,15 @@ pub enum ClientMessage {
     /// owner-local remote-machine form switches back to the local tab.
     OpenWorkspacePicker,
     Detach,
-    /// Response to [`ServerMessage::Ready`] when terminal colors were requested.
-    TerminalColors(Option<TerminalColors>),
+    /// Response to [`ServerMessage::Ready`] when a terminal probe was requested.
+    ///
+    /// Each field is independently optional: a terminal can report its palette
+    /// without answering the graphics query, or the reverse. An absent
+    /// `graphics` is not a refusal — see [`crate::terminal::theme_probe`].
+    TerminalProbe {
+        colors: Option<TerminalColors>,
+        graphics: Option<bool>,
+    },
     /// Display geometry reported after the version-checked handshake.
     CellPixels {
         cell_width_px: u16,
@@ -183,6 +215,14 @@ pub enum ServerMessage {
     /// Only the cells that changed since the last frame (docs/18 — the wire-level
     /// diff that keeps remote attach over SSH cheap; also cuts local serialization).
     FrameDiff(FrameDiff),
+    /// Kitty graphics commands from a pane's child, to be written to this
+    /// client's terminal verbatim.
+    ///
+    /// They teach that terminal an image without saying where it appears;
+    /// position comes from the placeholder cells in the frame. This travels on
+    /// the same ordered channel as frames and is always sent first, so a
+    /// terminal is never asked to draw an image it has not been given.
+    Graphics(Vec<Vec<u8>>),
     /// Ring the bell + raise a desktop notification on the client's terminal.
     Notify(String),
     /// Play the selected notification cue on the client.
@@ -209,7 +249,10 @@ pub enum ServerMessage {
     /// Completes negotiation after `Welcome`. Kept separate so a new client can
     /// still decode the version-mismatch reply from an older server.
     Ready {
-        probe_terminal: bool,
+        /// Whether to ask the terminal for its palette, which only the virtual
+        /// Terminal theme reads. The client probes either way — graphics
+        /// support describes the terminal, not the theme.
+        probe_colors: bool,
     },
     /// Exact client-owned Workspaces dock for the current viewport. `None`
     /// means the client must use its modal/mobile fallback.

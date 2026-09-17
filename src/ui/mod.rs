@@ -1531,6 +1531,7 @@ mod retained_render_tests {
             response_tx,
             4 * 1024 * 1024,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         app.panes.get_mut(&focus).expect("focused pane").engine = engine.clone();
 
@@ -1593,6 +1594,7 @@ mod retained_render_tests {
             response_tx,
             4 * 1024 * 1024,
             PaneAppearance::default(),
+            crate::terminal::graphics::HostGraphics::default(),
         );
         app.panes.get_mut(&focus).expect("focused pane").engine = engine.clone();
         let area = Rect::new(0, 0, 160, 40);

@@ -237,6 +237,9 @@ enum MachinePopup {
 }
 
 struct DockState {
+    /// Cached host capability. Remote machine endpoints remain text-only until
+    /// their image namespaces can be isolated from the local endpoint.
+    graphics: bool,
     local_session: String,
     scroll: usize,
     rect: Option<ShellDockRect>,
@@ -300,6 +303,7 @@ struct DockState {
 impl Default for DockState {
     fn default() -> Self {
         Self {
+            graphics: false,
             local_session: crate::session::display_name(),
             scroll: 0,
             rect: None,
@@ -483,7 +487,7 @@ fn negotiate_local(
     writer: &mut crate::ipc::transport::Conn,
     (cols, rows): (u16, u16),
     generation: u64,
-    probe_terminal_colors: impl FnOnce() -> crate::terminal::theme_probe::ProbeResult,
+    probe_terminal: impl FnOnce(bool) -> crate::terminal::theme_probe::ProbeResult,
 ) -> Result<LocalNegotiation> {
     protocol::write_message(
         writer,
@@ -495,25 +499,26 @@ fn negotiate_local(
     )?;
     let mut reader = BufReader::new(reader);
     validate_local_welcome(&mut reader)?;
-    let probe_terminal = match protocol::read_message::<_, ServerMessage>(&mut reader)? {
-        ServerMessage::Ready { probe_terminal } => probe_terminal,
+    let probe_colors = match protocol::read_message::<_, ServerMessage>(&mut reader)? {
+        ServerMessage::Ready { probe_colors } => probe_colors,
         _ => return Err(anyhow!("unexpected local server negotiation")),
     };
     // Windows named-pipe flushes block until the peer reads. The server writes
     // EndpointIdentity after Ready, so read it before sending negotiation data.
     let (events_tx, events_rx) = mpsc::sync_channel(8);
     start_local_reader(reader, events_tx.clone(), generation)?;
-    let probe = if probe_terminal {
-        probe_terminal_colors()
-    } else {
-        crate::terminal::theme_probe::ProbeResult {
-            colors: None,
-            pending: Vec::new(),
-        }
-    };
-    if probe_terminal {
-        protocol::write_message(writer, &ClientMessage::TerminalColors(probe.colors.clone()))?;
-    }
+    // The probe always runs: the palette is only read for the Terminal theme,
+    // but whether this terminal draws images describes the terminal itself, and
+    // the local endpoint's panes are shown through it.
+    let probe = probe_terminal(probe_colors);
+    protocol::set_probed_cell_pixels(probe.cell_size);
+    protocol::write_message(
+        writer,
+        &ClientMessage::TerminalProbe {
+            colors: probe.colors.clone(),
+            graphics: probe.graphics,
+        },
+    )?;
     protocol::write_message(writer, &super::client::cell_pixels_message())?;
     Ok(LocalNegotiation {
         events_tx,
@@ -581,6 +586,7 @@ fn run_inner(
     let mut initial_local_frame_painted = false;
     let labels = crate::i18n::by_code(&crate::config::load().language);
     let mut dock = DockState {
+        graphics: probe.graphics.unwrap_or(false),
         heading: labels.workspaces,
         close_label: labels.act_close,
         workspace_label: labels.open_workspace,
@@ -1511,7 +1517,7 @@ fn handle_surface_message(
                 }
             }
         }
-        ServerMessage::Ready { probe_terminal } => {
+        ServerMessage::Ready { probe_colors: _ } => {
             let is_candidate = candidate
                 .as_ref()
                 .is_some_and(|candidate| candidate.endpoint == endpoint);
@@ -1536,11 +1542,13 @@ fn handle_surface_message(
                         .control
                         .as_ref()
                         .ok_or_else(|| anyhow!("remote session connection closed"))?;
-                    if probe_terminal {
-                        // The input reader already owns the terminal. Reprobing
-                        // here would race keyboard input and block switching.
-                        control.send(&ClientMessage::TerminalColors(None))?;
-                    }
+                    // The input reader already owns the terminal. Reprobing here
+                    // would race keyboard input and block switching, so the
+                    // remote endpoint is told what this shell already knows.
+                    control.send(&ClientMessage::TerminalProbe {
+                        colors: None,
+                        graphics: Some(false),
+                    })?;
                     control.send(&super::client::cell_pixels_message())?;
                     control.send(&ClientMessage::ShellDockLayout(layout))?;
                     if let Some(state) = &dock.sidebars {
@@ -1772,7 +1780,13 @@ fn handle_surface_message(
                 super::client::sync_begin();
                 super::client::paint(
                     terminal,
-                    &super::client::frame_cells(&frame, truecolor),
+                    &super::client::frame_cells(
+                        &frame,
+                        super::client::HostTerminal {
+                            truecolor,
+                            graphics: dock.graphics && endpoint == Endpoint::Local,
+                        },
+                    ),
                     frame.cursor,
                     frame.cursor_visible,
                     true,
@@ -1834,7 +1848,13 @@ fn handle_surface_message(
             super::client::sync_begin();
             super::client::paint(
                 terminal,
-                &super::client::diff_cells(&diff, truecolor),
+                &super::client::diff_cells(
+                    &diff,
+                    super::client::HostTerminal {
+                        truecolor,
+                        graphics: dock.graphics && endpoint == Endpoint::Local,
+                    },
+                ),
                 diff.cursor,
                 diff.cursor_visible,
                 false,
@@ -1850,6 +1870,9 @@ fn handle_surface_message(
             if dock_changed {
                 dock.dirty = true;
             }
+        }
+        ServerMessage::Graphics(commands) if endpoint == Endpoint::Local && dock.graphics => {
+            crate::emit_graphics(&commands);
         }
         ServerMessage::Notify(message) if endpoint == *active => crate::emit_notification(&message),
         ServerMessage::Sound(signal) if endpoint == *active => crate::emit_sound(signal),
@@ -1951,7 +1974,16 @@ fn cache_dock_projection(
         .saturating_mul(usize::from(frame.width))
         .saturating_add(usize::from(x));
     if let Some(cell) = frame.cells.get(index) {
-        dock.base = super::client::make_cell(&cell.symbol, cell.fg, cell.bg, cell.mods, truecolor);
+        dock.base = super::client::make_cell(
+            &cell.symbol,
+            cell.fg,
+            cell.bg,
+            cell.mods,
+            super::client::HostTerminal {
+                truecolor,
+                graphics: false,
+            },
+        );
         if owner_local {
             dock.owner_base = Some(dock.base.clone());
         }
@@ -5600,11 +5632,8 @@ mod tests {
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut writer = client.clone();
-                let result = negotiate_local(client, &mut writer, (80, 24), 0, || {
-                    crate::terminal::theme_probe::ProbeResult {
-                        colors: None,
-                        pending: Vec::new(),
-                    }
+                let result = negotiate_local(client, &mut writer, (80, 24), 0, |_| {
+                    crate::terminal::theme_probe::ProbeResult::default()
                 });
                 let result = result.map(|_| ()).map_err(|error| error.to_string());
                 // Hand the writer back so the connection stays open while the test waits.

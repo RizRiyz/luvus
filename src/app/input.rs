@@ -1106,6 +1106,7 @@ impl App {
             | AppEvent::ClientShellWorkspaceMenu { .. }
             | AppEvent::ClientOpenWorkspacePicker { .. }
             | AppEvent::ClientCellPixels { .. }
+            | AppEvent::ClientGraphicsSent { .. }
             | AppEvent::ClientInput { .. }
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.

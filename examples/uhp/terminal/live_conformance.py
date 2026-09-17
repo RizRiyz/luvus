@@ -81,6 +81,8 @@ def main():
 
             capability = request(socket_path, {"id":"cap","method":"uhp.capabilities","params":{}})
             assert capability["result"]["protocol"] == {"name":"luvus-uhp","major":1,"minor":0}
+            assert capability["result"]["graphics"] is True
+            assert capability["result"]["graphics_details"]["available"] is False
             cli_capability = json.loads(subprocess.run(
                 [str(binary), "uhp", "capabilities"],
                 cwd=ROOT,
@@ -92,6 +94,8 @@ def main():
             assert cli_capability["result"]["protocol"] == {
                 "name": "luvus-uhp", "major": 1, "minor": 0
             }
+            assert cli_capability["result"]["graphics"] is True
+            assert cli_capability["result"]["graphics_details"]["protocol"] == "kitty"
             runtime_capability = request(socket_path, {
                 "id": "runtime-capability",
                 "method": "uhp.capabilities",

@@ -1914,6 +1914,7 @@ fn content_fence_app() -> (
         &[("LUVUS_CONTENT_FENCE_CHILD".into(), "1".into())],
         app.config.scrollback_bytes(),
         app.pane_appearance,
+        app.host_graphics.clone(),
     )
     .unwrap();
     app.panes.insert(pane, child);
