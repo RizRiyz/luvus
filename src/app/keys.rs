@@ -650,9 +650,10 @@ impl DirectKeySpec {
         Some(Self { modifiers, code })
     }
 
-    /// Whether the configured prefix consumes this direct chord first.
+    /// Whether prefix dispatch consumes any event accepted by this direct chord.
     pub fn is_reserved_by(&self, prefix: &PrefixSpec) -> bool {
         prefix.matches(&KeyEvent::new(self.code, self.modifiers))
+            || self.matches(&prefix.key_event())
     }
 
     /// Canonical, user-facing label for the parsed semantic chord.
@@ -1360,6 +1361,7 @@ mod tests {
 
         let ctrl_space = DirectKeySpec::parse("ctrl+space").unwrap();
         assert!(ctrl_space.is_reserved_by(&PrefixSpec::parse("ctrl+space").unwrap()));
+        assert!(ctrl_space.is_reserved_by(&PrefixSpec::parse("ctrl+@").unwrap()));
         assert!(DirectKeySpec::parse("ctrl+@")
             .unwrap()
             .is_reserved_by(&PrefixSpec::parse("ctrl+space").unwrap()));

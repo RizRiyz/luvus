@@ -197,7 +197,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(100, 32, tx).unwrap();
         app.help_open = true;
-        app.prefix = crate::app::PrefixSpec::parse("f12").unwrap();
+        app.prefix = crate::app::PrefixSpec::parse("ctrl+space").unwrap();
         app.config
             .keybindings
             .insert(Cmd::OpenDiff.id().into(), "u".into());
@@ -238,13 +238,11 @@ mod tests {
             }),
             "only the collision winner is rendered for a direct chord"
         );
-        assert_eq!(
-            initial_lines
+        assert!(
+            !initial_lines
                 .iter()
-                .map(|line| line.matches("Ctrl+Space").count())
-                .sum::<usize>(),
-            1,
-            "the title is the only visible prefix chord; a prefix-reserved direct binding is hidden"
+                .any(|line| { line.contains("Ctrl+Space") && line.contains("New worktree") }),
+            "a prefix-reserved direct binding is hidden"
         );
         assert!(
             initial_lines.iter().any(|line| {
@@ -268,7 +266,10 @@ mod tests {
             rendered.push_str(&screen(&term));
         }
 
-        assert!(rendered.contains("F12"), "configured prefix is shown");
+        assert!(
+            rendered.contains("Ctrl+Space"),
+            "configured prefix is shown"
+        );
         assert!(
             rendered.contains("u") && rendered.contains("Focus diff review"),
             "custom prefix command binding is listed"
