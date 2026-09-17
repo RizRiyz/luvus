@@ -16,6 +16,7 @@ use crate::module::ModuleRegistry;
 const GIT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProviderOutput {
     path: PathBuf,
 }
@@ -502,6 +503,15 @@ fn cleanup_failed_creation(
     {
         return;
     }
+    let actual_branch = bounded_git_for(
+        path,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        &cleanup,
+        GIT_PROBE_TIMEOUT,
+    );
+    if actual_branch.as_deref().map(str::trim) != Ok(branch) {
+        return;
+    }
     let run = |args: Vec<String>| {
         crate::module::runtime::run_bounded_argv_for(
             &repo.to_path_buf(),
@@ -697,7 +707,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cancelled_post_validation_cleans_created_worktree_and_branch() {
+    fn cancelled_post_validation_cleans_receipted_worktree_and_branch() {
         let base = std::env::temp_dir().join(format!(
             "luvus-worktree-cancel-cleanup-{}-{}",
             std::process::id(),
@@ -810,8 +820,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn parses_provider_json_path_and_rejects_other_output() {
+    fn failed_validation_keeps_a_new_checkout_on_another_branch() {
+        let base = std::env::temp_dir().join(format!(
+            "luvus-worktree-branch-safe-{}-{}",
+            std::process::id(),
+            crate::automation::unix_now()
+        ));
+        let repo = base.join("repo");
+        let path = base.join("concurrent");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str], cwd: &Path| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"], &repo);
+        git(
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+            &repo,
+        );
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "other",
+                path.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        cleanup_failed_creation(&repo, &path, "requested", true, &[]);
+        assert!(path.exists());
+        assert!(crate::git::local::branch_exists(&repo, "other"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn parses_strict_provider_json_and_rejects_other_output() {
         let path = if cfg!(windows) {
             r#"C:\\repo.wt"#
         } else {
@@ -824,5 +889,6 @@ mod tests {
         );
         assert!(parse_provider_output(b"human log\n{\"path\":\"/repo.wt\"}").is_err());
         assert!(parse_provider_output(br#"{"path":"relative"}"#).is_err());
+        assert!(parse_provider_output(br#"{"path":"/repo.wt","extra":1}"#).is_err());
     }
 }
