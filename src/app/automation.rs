@@ -243,6 +243,16 @@ impl App {
             return self.deliver_active_agent_run(&run, now);
         }
 
+        // Module-backed worktree creation has one ordered provider slot. A run
+        // already owns that slot until its deferred callback retries it; leave
+        // every other worktree occurrence Pending instead of turning ordinary
+        // provider contention into a durable automation failure.
+        if run.task.mode == crate::orch::TaskWorkerMode::Worktree
+            && (self.worktree_provider_inflight || self.pending_worktree_provider.is_some())
+        {
+            return false;
+        }
+
         if self.workspaces.is_empty() {
             let message = "no active session".to_string();
             let _ = self.automation.set_run_status(
@@ -299,7 +309,7 @@ impl App {
             .iter()
             .map(|workspace| (workspace.id.clone(), workspace.active_tab))
             .collect();
-        let started = self.task_start_automation(
+        let mut started = self.task_start_automation(
             &task_id,
             run.task.agent_id.clone(),
             run.task.mode,
@@ -322,6 +332,26 @@ impl App {
                 .position(|workspace| workspace.id == workspace_id)
             {
                 self.active_ws = index;
+            }
+        }
+
+        if started.as_ref().is_err_and(is_worktree_create_pending) {
+            let retry_run = run_id.to_string();
+            match self.schedule_pending_worktree(move |app, result| {
+                let now = crate::automation::unix_now();
+                match result {
+                    Ok(()) => {
+                        app.start_automation_run(&retry_run, now);
+                        app.discard_ready_worktree();
+                    }
+                    Err(message) => {
+                        app.fail_deferred_automation_start(&retry_run, message, now);
+                    }
+                }
+                true
+            }) {
+                Ok(()) => return true,
+                Err(message) => started = Err(("busy".into(), message)),
             }
         }
 
@@ -358,6 +388,34 @@ impl App {
             }
         }
         true
+    }
+
+    fn fail_deferred_automation_start(&mut self, run_id: &str, message: String, now: u64) {
+        let Some(run) = self.automation.run(run_id).cloned() else {
+            return;
+        };
+        if let Some(task_id) = run.task_id.as_deref() {
+            let _ = self.orch.set_status(task_id, TaskStatus::Failed);
+            let _ = self.orch.add_output(task_id, message.clone());
+            self.orch.save();
+            let task = self
+                .orch
+                .task(task_id)
+                .map(super::dispatch::task_json)
+                .unwrap_or(serde_json::Value::Null);
+            self.emit_event("task.updated", task);
+        }
+        let _ =
+            self.automation
+                .set_run_status(run_id, RunStatus::Failed, Some(message.clone()), now);
+        self.persist_automation();
+        self.emit_event(
+            "automation.run_failed",
+            json!({"automation_id": run.automation_id, "run_id": run_id,
+                "task_id": run.task_id, "code": "git_error", "message": message}),
+        );
+        self.pending_notify
+            .push(format!("Automation {} failed to start", run.automation_id));
     }
 
     pub(crate) fn validate_active_agent_target(
@@ -1863,6 +1921,86 @@ mod tests {
             app.automation.run(&run.id).unwrap().status,
             RunStatus::Running
         );
+    }
+
+    #[test]
+    fn deferred_worktree_failure_updates_linked_task_and_notifies() {
+        let _env = crate::persist::test_env("automation-deferred-worktree-failure");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut input = automation_input(
+            app.workspaces[0].id.clone(),
+            crate::automation::Trigger::Once {
+                at_utc: 4_000_000_000,
+            },
+        );
+        input.task.mode = crate::orch::TaskWorkerMode::Worktree;
+        let definition = app.automation.create(input, None, 10).unwrap();
+        let run = app
+            .automation
+            .request_run(&definition.id, None, 20)
+            .unwrap();
+        let task = app
+            .orch
+            .add_task("review".into(), Vec::new(), Vec::new(), None)
+            .unwrap();
+        app.orch
+            .attach_automation(
+                &task.id,
+                "review the changes".into(),
+                AutomationProvenance {
+                    automation_id: definition.id.clone(),
+                    run_id: run.id.clone(),
+                    scheduled_at: run.scheduled_at,
+                },
+            )
+            .unwrap();
+        app.automation
+            .bind_task(&run.id, task.id.clone(), 20)
+            .unwrap();
+
+        app.fail_deferred_automation_start(&run.id, "provider failed".into(), 21);
+
+        let task = app.orch.task(&task.id).unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(
+            task.outputs.last().map(String::as_str),
+            Some("provider failed")
+        );
+        let run = app.automation.run(&run.id).unwrap();
+        assert_eq!(run.status, RunStatus::Failed);
+        assert_eq!(run.error.as_deref(), Some("provider failed"));
+        assert!(app
+            .pending_notify
+            .iter()
+            .any(|message| message == &format!("Automation {} failed to start", definition.id)));
+    }
+
+    #[test]
+    fn worktree_provider_contention_keeps_automation_pending() {
+        let _env = crate::persist::test_env("automation-worktree-provider-contention");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let mut input = automation_input(
+            app.workspaces[0].id.clone(),
+            crate::automation::Trigger::Once {
+                at_utc: 4_000_000_000,
+            },
+        );
+        input.task.mode = crate::orch::TaskWorkerMode::Worktree;
+        let definition = app.automation.create(input, None, 10).unwrap();
+        let run = app
+            .automation
+            .request_run(&definition.id, None, 20)
+            .unwrap();
+        app.worktree_provider_inflight = true;
+
+        assert!(!app.start_automation_run(&run.id, 20));
+        let pending = app.automation.run(&run.id).unwrap();
+        assert_eq!(pending.status, RunStatus::Pending);
+        assert!(pending.task_id.is_none());
+        assert!(app.orch.tasks.is_empty());
+        assert!(app.pending_notify.is_empty());
     }
 
     #[test]

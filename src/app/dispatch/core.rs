@@ -245,6 +245,9 @@ impl App {
         })?;
         keys::validate_direct_keybindings(&next.direct_keybindings)
             .map_err(|message| ("invalid_request".to_string(), message))?;
+        let provider_changed = next.worktree != self.config.worktree;
+        crate::worktree::validate_config(&next.worktree, provider_changed.then_some(&self.modules))
+            .map_err(|message| ("invalid_request".to_string(), message))?;
         if self.theme_registry.get(&next.theme).is_none() && next.theme != "terminal" {
             return Err((
                 "invalid_request".to_string(),

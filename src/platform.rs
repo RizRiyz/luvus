@@ -162,6 +162,123 @@ pub fn no_window(cmd: &mut std::process::Command) -> &mut std::process::Command 
     cmd
 }
 
+/// Spawn a non-interactive Windows child suspended so it can enter a Job Object
+/// before any module code or descendant process runs.
+pub fn suspend_for_child_tree(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// Own a spawned process tree so dropping the guard terminates descendants.
+///
+/// Windows descendants can retain inherited output handles after their direct
+/// parent exits. A kill-on-close Job Object gives bounded command runners a
+/// stable tree handle instead of relying on an already-reaped parent PID.
+pub struct ChildTreeGuard {
+    #[cfg(windows)]
+    handle: Option<windows_sys::Win32::Foundation::HANDLE>,
+}
+
+impl ChildTreeGuard {
+    pub fn attach(child: &mut std::process::Child) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::JobObjects::*;
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut guard = Self {
+                handle: Some(handle),
+            };
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectExtendedLimitInformation,
+                    &limits as *const _ as *const _,
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            } == 0
+                || unsafe { AssignProcessToJobObject(handle, child.as_raw_handle()) } == 0
+            {
+                let error = std::io::Error::last_os_error();
+                guard.terminate();
+                return Err(error);
+            }
+            if let Err(error) = resume_suspended_process(child.id()) {
+                guard.terminate();
+                return Err(error);
+            }
+            Ok(guard)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            Ok(Self {})
+        }
+    }
+
+    pub fn terminate(&mut self) {
+        #[cfg(windows)]
+        if let Some(handle) = self.handle.take() {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+        }
+    }
+}
+
+impl Drop for ChildTreeGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut found = None;
+    let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    while more {
+        if entry.th32OwnerProcessID == pid {
+            found = Some(entry.th32ThreadID);
+            break;
+        }
+        more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    let thread_id = found.ok_or_else(std::io::Error::last_os_error)?;
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    if thread.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let resumed = unsafe { ResumeThread(thread) };
+    unsafe { CloseHandle(thread) };
+    if resumed == u32::MAX {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// The user's home directory, cross-platform (`$HOME`, else `%USERPROFILE%`).
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")

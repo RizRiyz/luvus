@@ -86,6 +86,44 @@ fn config_patch_rejects_unknown_fields_without_mutation() {
     assert!(app.agents_active_only);
     assert!(app.agents_this_workspace);
     assert_eq!(app.agents_scroll, 0);
+
+    let provider_dir = crate::persist::config_dir().join("config-provider");
+    std::fs::create_dir_all(&provider_dir).unwrap();
+    std::fs::write(
+        provider_dir.join("luvus-module.toml"),
+        r#"id = "example.worktree"
+name = "Config provider"
+version = "0.1.0"
+min_luvus_version = "0.14.0"
+[worktree_provider]
+command = ["provider"]
+"#,
+    )
+    .unwrap();
+    app.module_link_with(&provider_dir, true, None).unwrap();
+
+    let result = app
+        .dispatch(
+            "config.patch",
+            &json!({"patch":{"worktree":{"provider":"example.worktree"}}}),
+        )
+        .unwrap();
+    assert_eq!(result["config"]["worktree"]["provider"], "example.worktree");
+    assert_eq!(app.config.worktree.provider, "example.worktree");
+    app.modules.find_mut("example.worktree").unwrap().enabled = false;
+    app.dispatch(
+        "config.patch",
+        &json!({"patch":{"agents_active_only":false}}),
+    )
+    .unwrap();
+    assert!(!app.config.agents_active_only);
+    let before = app.config.worktree.clone();
+    let error = app.dispatch(
+        "config.patch",
+        &json!({"patch":{"worktree":{"provider":"  "}}}),
+    );
+    assert!(error.is_err());
+    assert_eq!(app.config.worktree, before);
 }
 
 #[test]

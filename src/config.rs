@@ -108,10 +108,34 @@ pub struct Config {
     /// or restart. This set keeps an off dock off; re-placing it clears the flag.
     #[serde(default)]
     pub docks_off: Vec<String>,
+    /// Worktree creation backend. The built-in Git provider remains the default;
+    /// third-party tools integrate through a selected module provider.
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
     /// Luvus Bar placement groups. Dynamic content is never persisted here;
     /// only presentation preferences survive a restart.
     #[serde(default)]
     pub bars: BarConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeConfig {
+    /// `git` (default) or the canonical id of an enabled module whose manifest
+    /// declares `[worktree_provider]`.
+    #[serde(default = "default_worktree_provider")]
+    pub provider: String,
+}
+
+fn default_worktree_provider() -> String {
+    "git".to_string()
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_worktree_provider(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -490,6 +514,7 @@ impl Default for Config {
             mission_pricing: std::collections::HashMap::new(),
             mission_budget: None,
             docks_off: Vec::new(),
+            worktree: WorktreeConfig::default(),
             bars: BarConfig::default(),
         }
     }
@@ -902,6 +927,15 @@ mod tests {
             "old configs gain the default runtime bar"
         );
         assert!(from_empty.bars.top_right.is_empty());
+        assert_eq!(from_empty.worktree, WorktreeConfig::default());
+        let module_provider: Config =
+            serde_json::from_str(r#"{"worktree":{"provider":"example.provider"}}"#).unwrap();
+        assert_eq!(module_provider.worktree.provider, "example.provider");
+        let forward: Config = serde_json::from_str(
+            r#"{"worktree":{"provider":"future-provider","future_option":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(forward.worktree.provider, "future-provider");
         // Round-trip preserves values.
         // Scrollback defaults to a per-pane 10 MiB budget. The legacy line
         // field remains only so old config can migrate safely.

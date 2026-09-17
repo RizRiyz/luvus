@@ -20,6 +20,7 @@ use crate::event::AppEvent;
 use crate::ipc::transport::{self, Conn};
 
 /// A request handed to the app loop, with a channel to send the reply back.
+#[derive(Clone)]
 pub struct ApiRequest {
     pub id: String,
     pub method: String,

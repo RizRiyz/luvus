@@ -35,6 +35,7 @@ enum TaskStartRollback {
         repo: std::path::PathBuf,
         path: std::path::PathBuf,
         branch: String,
+        worktree_created: bool,
         branch_created: bool,
     },
 }
@@ -591,12 +592,17 @@ impl App {
                 })?;
         }
         let branch = task_branch_name(task, branch);
+        let ready = self
+            .ready_created_worktree()
+            .is_some_and(|ready| ready.matches(&self.ws().cwd, &branch));
         let persisted = task
             .worktree
             .as_ref()
             .map(std::path::PathBuf::from)
             .filter(|path| path.exists());
-        let existing = if let Some(path) = persisted {
+        let existing = if ready {
+            None
+        } else if let Some(path) = persisted {
             if requested_workspace.is_some() {
                 let worktrees = crate::git::local::worktrees(&self.ws().cwd)
                     .map_err(|error| ("git_error".to_string(), error))?;
@@ -661,7 +667,15 @@ impl App {
                     "task start needs a git repo in worktree mode — use --mode workspace for the current checkout".to_string(),
                 ));
             }
-            let branch_created = !crate::git::local::branch_exists(&repo, &branch);
+            let branch_created = self
+                .ready_created_worktree()
+                .filter(|ready| ready.matches(&repo, &branch))
+                .map(|ready| ready.branch_created)
+                .unwrap_or_else(|| !crate::git::local::branch_exists(&repo, &branch));
+            let worktree_created = self
+                .ready_created_worktree()
+                .filter(|ready| ready.matches(&repo, &branch))
+                .is_none_or(|ready| ready.worktree_created);
             let path = self
                 .create_worktree(&repo, &branch)
                 .map_err(|error| ("git_error".to_string(), error))?;
@@ -687,6 +701,7 @@ impl App {
                     repo,
                     path,
                     branch: branch.clone(),
+                    worktree_created,
                     branch_created,
                 },
             )
@@ -929,6 +944,7 @@ impl App {
                 repo,
                 path,
                 branch,
+                worktree_created,
                 branch_created,
             } => {
                 if let Some(index) = self
@@ -938,14 +954,18 @@ impl App {
                 {
                     self.close_workspace_after_rehome(index);
                 }
-                match crate::git::local::worktree_remove_force(&repo, &path) {
-                    Ok(()) if branch_created => {
-                        if let Err(error) = crate::git::local::branch_delete_force(&repo, &branch) {
-                            cleanup_error = Some(error);
+                if worktree_created {
+                    match crate::git::local::worktree_remove_force(&repo, &path) {
+                        Ok(()) if branch_created => {
+                            if let Err(error) =
+                                crate::git::local::branch_delete_force(&repo, &branch)
+                            {
+                                cleanup_error = Some(error);
+                            }
                         }
+                        Ok(()) => {}
+                        Err(error) => cleanup_error = Some(error),
                     }
-                    Ok(()) => {}
-                    Err(error) => cleanup_error = Some(error),
                 }
             }
         }
@@ -1799,10 +1819,7 @@ impl App {
         self.orch_view = crate::app::OrchView::Tasks;
         self.orch_cursor = self.orch.tasks.len().saturating_sub(1);
         if let Some(descriptor) = descriptor {
-            match self.task_start(&id, None, Some(descriptor.id.to_string()), mode, None) {
-                Ok(_) => self.show_toast(format!("{id}: worker started")),
-                Err((_, message)) => self.show_toast(message),
-            }
+            self.start_task_from_ui(id, Some(descriptor.id.to_string()), mode, None, false);
         } else {
             self.show_toast(format!("added {id}"));
         }
@@ -2385,13 +2402,53 @@ impl App {
         }
     }
 
+    fn start_task_from_ui(
+        &mut self,
+        id: String,
+        agent: Option<String>,
+        mode: TaskWorkerMode,
+        workspace_id: Option<String>,
+        stay_on_board: bool,
+    ) {
+        let previous = stay_on_board.then(|| self.task_start_selection()).flatten();
+        match self.task_start(&id, None, agent.clone(), mode, workspace_id.clone()) {
+            Ok(_) => {
+                if stay_on_board {
+                    self.restore_task_start_selection(&previous);
+                }
+                let suffix = if stay_on_board {
+                    " — ⏎ to jump in"
+                } else {
+                    ""
+                };
+                self.show_toast(format!("{id}: worker started{suffix}"));
+            }
+            Err(error) if is_worktree_create_pending(&error) => {
+                self.show_toast(format!("{id}: creating worktree…"));
+                let scheduled = self.schedule_pending_worktree(move |app, result| {
+                    match result {
+                        Ok(()) => {
+                            app.start_task_from_ui(id, agent, mode, workspace_id, stay_on_board);
+                            app.discard_ready_worktree();
+                        }
+                        Err(message) => app.show_toast(message),
+                    }
+                    true
+                });
+                if let Err(message) = scheduled {
+                    self.show_toast(message);
+                }
+            }
+            Err((_, message)) => self.show_toast(message),
+        }
+    }
+
     /// Start a worker from the board and **stay on the board**: the worker
     /// spawns in the background, a toast confirms it, and `⏎` jumps into it
     /// when wanted — starting five workers is five keypresses, not five
     /// context switches.
     fn start_worker_from_board(&mut self, id: &str, agent: Option<String>, mode: TaskWorkerMode) {
         let prev_ws = self.active_ws;
-        let prev_tab = self.workspaces[prev_ws].active_tab;
         let legacy_projectless = self
             .orch
             .task(id)
@@ -2412,14 +2469,7 @@ impl App {
         } else {
             None
         };
-        match self.task_start(id, None, agent, mode, workspace_id) {
-            Ok(_) => {
-                self.active_ws = prev_ws;
-                self.workspaces[prev_ws].active_tab = prev_tab;
-                self.show_toast(format!("{id}: worker started — ⏎ to jump in"));
-            }
-            Err((_, msg)) => self.show_toast(msg),
-        }
+        self.start_task_from_ui(id.to_string(), agent, mode, workspace_id, true);
     }
 
     /// Board `o`: open the detail overlay for the selected task (branch,
