@@ -41,6 +41,10 @@ pub struct Config {
     pub layout: LayoutConfig,
     #[serde(default)]
     pub notifications: NotifyConfig,
+    /// Allow launching an interactive Luvus client from a Luvus pane.
+    /// Disabled by default because nested clients compete for terminal input.
+    #[serde(default)]
+    pub allow_nested: bool,
     /// Check `luvus.dev/latest.json` in the background for a newer release and
     /// show an indicator by the version number. A single periodic `curl`/`wget`
     /// GET; on by default, toggled in Settings → General. Notify-only — luvus
@@ -475,6 +479,7 @@ impl Default for Config {
             sidebars: None,
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
+            allow_nested: false,
             check_updates: true,
             resume_launch_flags: false,
             agents_active_only: false,
@@ -865,6 +870,7 @@ mod tests {
     #[test]
     fn defaults_and_roundtrip() {
         let c = Config::default();
+        assert!(!c.allow_nested);
         assert_eq!(c.theme, "quattro-rally");
         assert!(c.layout.show_titles);
         assert!(c.layout.workspace_paths);
@@ -874,6 +880,7 @@ mod tests {
         // Empty object → all defaults (forward/back compat).
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
+        assert!(!from_empty.allow_nested);
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         assert!(from_empty.layout.workspace_paths);
         assert!(from_empty.layout.agent_paths);
@@ -958,6 +965,15 @@ mod tests {
         assert!(back.notifications.sound_on_done);
         assert!(!back.notifications.sound_on_blocked);
         assert_eq!(back.notifications.sound_style, crate::sound::STYLE_RETRO);
+        // Nested clients are opt-in and survive serialization.
+        let mut nested = c2.clone();
+        nested.allow_nested = true;
+        let nested_json = serde_json::to_string(&nested).unwrap();
+        assert!(
+            serde_json::from_str::<Config>(&nested_json)
+                .unwrap()
+                .allow_nested
+        );
 
         // Configs written before sound styles existed retain the original cue.
         let old: Config = serde_json::from_str(
