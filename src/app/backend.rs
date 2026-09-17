@@ -1465,7 +1465,7 @@ fn required_display_string<'a>(
     Ok(value)
 }
 
-fn bounded_text(text: &str, max_bytes: usize) -> String {
+pub(super) fn bounded_text(text: &str, max_bytes: usize) -> String {
     let mut end = text.len().min(max_bytes);
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
