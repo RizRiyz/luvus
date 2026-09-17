@@ -18,7 +18,6 @@ mod storage;
 mod tests;
 
 pub use self::row::Row;
-pub use self::storage::RowRef;
 use self::storage::Storage;
 use self::storage::StorageMetrics;
 
@@ -31,14 +30,6 @@ pub trait GridCell: Sized + Clone {
 
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
-
-    /// Return an exact one-byte identity for the overwhelmingly common plain
-    /// ASCII cell shape. Cold-history packing uses this only as a lookup hint
-    /// and retains exact equality checks for every general cell shape.
-    #[inline]
-    fn plain_ascii_identity(&self) -> Option<u8> {
-        None
-    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -201,7 +192,6 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         };
     }
 
-    #[cfg(test)]
     fn increase_scroll_limit(&mut self, count: usize) {
         let count = min(count, self.max_scroll_limit - self.history_size());
         if count != 0 {
@@ -226,7 +216,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // When rotating the entire region, just reset everything.
         if region.end - region.start <= positions {
             for i in (region.start.0..region.end.0).map(Line::from) {
-                self.raw.row_mut(i).reset(&self.cursor.template);
+                self.raw[i].reset(&self.cursor.template);
             }
 
             return;
@@ -255,7 +245,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
             // Ensure all new lines are fully cleared.
             for i in (0..positions).map(Line::from) {
-                self.raw.row_mut(i).reset(&self.cursor.template);
+                self.raw[i].reset(&self.cursor.template);
             }
 
             // Swap the fixed lines at the top back into position.
@@ -271,7 +261,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
             let range = region.start.0..(region.start + positions).0;
             for line in range.rev().map(Line::from) {
-                self.raw.row_mut(line).reset(&self.cursor.template);
+                self.raw[line].reset(&self.cursor.template);
             }
         }
     }
@@ -287,7 +277,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // When rotating the entire region with fixed lines at the top, just reset everything.
         if region.end - region.start <= positions && region.start != 0 {
             for i in (region.start.0..region.end.0).map(Line::from) {
-                self.raw.row_mut(i).reset(&self.cursor.template);
+                self.raw[i].reset(&self.cursor.template);
             }
 
             return;
@@ -300,10 +290,8 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
-            // Create scrollback and rotate in fresh bottom rows without
-            // materializing page-owned cold history.
-            self.raw
-                .scroll_up_full(positions, self.max_scroll_limit + self.lines);
+            // Create scrollback for the new lines.
+            self.increase_scroll_limit(positions);
 
             // Swap the lines fixed at the top to their target positions after rotation.
             //
@@ -317,6 +305,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 self.raw.swap(i, i + positions);
             }
 
+            // Rotate the entire line buffer upward.
+            self.raw.rotate(-(positions as isize));
+
             // Swap the fixed lines at the bottom back into position.
             let screen_lines = self.screen_lines() as i32;
             for i in (region.end.0..screen_lines).rev().map(Line::from) {
@@ -328,7 +319,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             // ordinary dense representation used by Alacritty's parser.
             let added = min(positions, self.history_size());
             for line in -(added as i32)..0 {
-                self.raw.row_mut(Line(line)).compact_trailing();
+                self.raw[Line(line)].compact_trailing();
             }
         } else {
             // Rotate lines without moving anything into history.
@@ -365,7 +356,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Reset rotated lines.
         for line in (0..(self.lines - positions)).map(Line::from) {
-            self.raw.row_mut(line).reset(&self.cursor.template);
+            self.raw[line].reset(&self.cursor.template);
         }
     }
 
@@ -384,7 +375,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Reset all visible lines.
         let range = self.topmost_line().0..(self.screen_lines() as i32);
         for line in range.map(Line::from) {
-            self.raw.row_mut(line).reset(&self.cursor.template);
+            self.raw[line].reset(&self.cursor.template);
         }
     }
 }
@@ -412,7 +403,7 @@ impl<T> Grid<T> {
         debug_assert!(end <= self.screen_lines() as i32);
 
         for line in (start.0..end.0).map(Line::from) {
-            self.raw.row_mut(line).reset(&self.cursor.template);
+            self.raw[line].reset(&self.cursor.template);
         }
     }
 
@@ -443,11 +434,6 @@ impl<T> Grid<T> {
         self.raw.storage_metrics()
     }
 
-    #[inline]
-    pub fn row(&self, line: Line) -> RowRef<'_, T> {
-        self.raw.row(line)
-    }
-
     /// Estimated shallow allocation for the grid's row and cell vectors.
     #[inline]
     pub fn estimated_storage_bytes(&self) -> usize {
@@ -459,7 +445,7 @@ impl<T> Grid<T> {
     pub fn compacted_history_rows(&self) -> usize {
         (self.topmost_line().0..0)
             .map(Line)
-            .filter(|line| self.raw.row(*line).is_compacted())
+            .filter(|line| self.raw[*line].is_compacted())
             .count()
     }
 
@@ -475,7 +461,7 @@ impl<T> Grid<T> {
         T: Clone + PartialEq,
     {
         for line in self.topmost_line().0..0 {
-            self.raw.row_mut(Line(line)).compact_trailing();
+            self.raw[Line(line)].compact_trailing();
         }
     }
 
@@ -571,14 +557,14 @@ impl<T> Index<Line> for Grid<T> {
 
     #[inline]
     fn index(&self, index: Line) -> &Row<T> {
-        self.raw.active_row(index)
+        &self.raw[index]
     }
 }
 
 impl<T: Clone> IndexMut<Line> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, index: Line) -> &mut Row<T> {
-        self.raw.row_mut(index)
+        &mut self.raw[index]
     }
 }
 
@@ -587,14 +573,14 @@ impl<T> Index<Point> for Grid<T> {
 
     #[inline]
     fn index(&self, point: Point) -> &T {
-        self.raw.cell(point.line, point.column)
+        &self[point.line][point.column]
     }
 }
 
 impl<T: Clone> IndexMut<Point> for Grid<T> {
     #[inline]
     fn index_mut(&mut self, point: Point) -> &mut T {
-        &mut self.raw.row_mut(point.line)[point.column]
+        &mut self[point.line][point.column]
     }
 }
 

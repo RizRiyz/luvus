@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use ratatui::style::{Color, Modifier};
 
 use crate::terminal::appearance::PaneAppearance;
+use crate::terminal::keyboard::KeyboardProtocol;
 use crate::terminal::pty::InputSender;
 
 /// Internal continuation marker used by [`VtEngine::visible_rows_aligned`].
@@ -443,6 +444,11 @@ pub trait VtEngine: Send {
         0
     }
 
+    /// Text queued by the child via OSC 52 store since the last take.
+    fn take_pending_clipboard(&mut self) -> Option<String> {
+        None
+    }
+
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
     /// retained history. No-op while on the alternate screen.
@@ -518,15 +524,10 @@ pub trait VtEngine: Send {
     /// and mouse modes, this lets the input layer leave pager keys alone.
     fn application_cursor(&self) -> bool;
 
-    /// Whether the child requested unambiguous CSI-u encoding for control keys.
-    /// Input encoding must honor this for chords whose legacy byte loses the
-    /// original key identity, such as Ctrl+/ versus Ctrl+7.
-    fn disambiguate_escape_codes(&self) -> bool;
-
-    /// Whether the child requested Kitty's full key-event encoding mode. Unlike
-    /// disambiguation alone, this also encodes Enter, Tab, Backspace, and text
-    /// keys as escape sequences instead of their legacy bytes.
-    fn report_all_keys_as_escape_codes(&self) -> bool;
+    /// The negotiated Kitty keyboard protocol. Zero Kitty flags are projected
+    /// as [`KeyboardProtocol::Legacy`]; all five currently defined flags are
+    /// retained, including flags whose input event data Luvus does not yet model.
+    fn keyboard_protocol(&self) -> KeyboardProtocol;
 
     /// Whether the child also requested **drag/motion tracking** (1002/1003) —
     /// press-and-move events are forwarded only then, so a click-only (1000)

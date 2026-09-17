@@ -22,6 +22,7 @@ use crate::event::AppEvent;
 use crate::ids::PaneId;
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::TerminalRuntime;
+use crate::terminal::keyboard::KeyboardProtocol;
 use crate::terminal::vt::{create_engine, VtEngine, VtEngineKind};
 
 pub(crate) mod input;
@@ -72,14 +73,21 @@ fn write_input_action(writer: &mut dyn Write, action: InputAction) -> std::io::R
     writer.flush()
 }
 
-/// Pane keyboard modes that jointly determine PTY key encoding. Keep Kitty's
-/// disambiguation and report-all flags separate: the former deliberately leaves
-/// Tab and Backspace in their legacy forms.
-#[derive(Clone, Copy, Default)]
+/// Pane keyboard modes that jointly determine PTY key encoding. DECCKM is
+/// independent from the negotiated legacy/Kitty keyboard protocol.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct KeyEncodingModes {
     pub application_cursor: bool,
-    pub disambiguate_escape_codes: bool,
-    pub report_all_keys_as_escape_codes: bool,
+    pub protocol: KeyboardProtocol,
+}
+
+impl KeyEncodingModes {
+    pub(crate) fn from_engine(engine: &dyn VtEngine) -> Self {
+        Self {
+            application_cursor: engine.application_cursor(),
+            protocol: engine.keyboard_protocol(),
+        }
+    }
 }
 
 /// A pane app's mouse-tracking state (all four DECSET-derived flags in one
@@ -774,6 +782,10 @@ impl Pane {
             != generation
     }
 
+    pub(crate) fn take_pending_clipboard(&self) -> Option<String> {
+        self.engine.lock().ok()?.take_pending_clipboard()
+    }
+
     #[cfg(test)]
     pub(crate) fn mark_data_pending_for_test(&self) {
         self.data_pending.store(true, Ordering::Release);
@@ -1033,11 +1045,7 @@ impl Pane {
     pub fn key_encoding_modes(&self) -> KeyEncodingModes {
         self.engine
             .lock()
-            .map(|e| KeyEncodingModes {
-                application_cursor: e.application_cursor(),
-                disambiguate_escape_codes: e.disambiguate_escape_codes(),
-                report_all_keys_as_escape_codes: e.report_all_keys_as_escape_codes(),
-            })
+            .map(|e| KeyEncodingModes::from_engine(&*e))
             .unwrap_or_default()
     }
 

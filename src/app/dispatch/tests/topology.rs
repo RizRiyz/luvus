@@ -453,6 +453,34 @@ fn pane_rename_modal_sets_and_clears_the_name() {
 }
 
 #[test]
+fn pane_rename_caret_edits_keep_the_name_addressable() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+
+    app.open_pane_rename(pane);
+    for c in "w2".chars() {
+        app.handle_pane_rename_key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    app.handle_pane_rename_key(KeyEvent::from(KeyCode::Left));
+    app.handle_pane_rename_key(KeyEvent::from(KeyCode::Char('K')));
+    // A digit typed at the start, or a delete that would expose one, is refused.
+    app.handle_pane_rename_key(KeyEvent::from(KeyCode::Home));
+    app.handle_pane_rename_key(KeyEvent::from(KeyCode::Char('9')));
+    assert_eq!(app.pane_rename.as_ref().unwrap().buffer, "wk2");
+    app.handle_pane_rename_key(KeyEvent::from(KeyCode::Delete));
+    app.handle_pane_rename_key(KeyEvent::from(KeyCode::Delete));
+    assert_eq!(
+        app.pane_rename.as_ref().unwrap().buffer,
+        "k2",
+        "`2` never leads"
+    );
+    app.handle_pane_rename_key(KeyEvent::from(KeyCode::Enter));
+    assert_eq!(app.agent_name_for(pane), Some("k2"));
+}
+
+#[test]
 fn pane_rename_does_not_turn_backend_label_into_alias() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();

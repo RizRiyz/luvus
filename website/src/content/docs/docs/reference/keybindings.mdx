@@ -11,18 +11,18 @@ the live cheat-sheet. Remap anything, change the prefix, or apply a preset in
 |-----|---------|-----|---------|
 | `←↓↑→` / `hjkl` | focus pane | `c` | new tab |
 | `;` | next pane (cycle) | `n` / `p` / `⇥` | cycle tabs |
-| `.` | next blocked agent | `,` | rename tab |
-| `v` / `s` / `+` | split right / down / auto | `N` | new workspace (folder picker) |
-| `x` | close pane | `D` | close workspace |
-| `z` | zoom pane | `w` / `W` | next / previous workspace |
-| `r` | resize mode (then arrows) | `G` | new worktree |
-| `f` | fork agent session | `g` | git tab |
-| `b` / `B` | toggle both / right sidebar | `o` | orchestration board |
-| `a` / `A` | agents All/Active / All workspaces/Here | `m` | Mission Control |
-| `e` | focus FILES tree | `i` | focus DIFF review |
-| `M` | jump palette (tabs / workspaces / agents) | `/` | global fuzzy finder |
-| `t` | named sessions | `=` | Settings |
-| `q` / `d` | detach | | |
+| `[` / `]` | focus history back / forward | `.` / `>` | next blocked / done agent |
+| `,` | rename tab | `v` / `s` / `+` | split right / down / auto |
+| `x` | close pane | `N` | new workspace (folder picker) |
+| `z` | zoom pane | `D` | close workspace |
+| `r` | resize mode (then arrows) | `w` / `W` | next / previous workspace |
+| `f` | fork agent session | `G` | new worktree |
+| `b` / `B` | toggle both / right sidebar | `g` | git tab |
+| `a` / `A` | agents All/Active / All workspaces/Here | `o` | orchestration board |
+| `e` | focus FILES tree | `m` | Mission Control |
+| `M` | jump palette (tabs / workspaces / agents) | `i` | focus DIFF review |
+| `t` | named sessions | `/` | global fuzzy finder |
+| `q` / `d` | detach | `=` | Settings |
 | `1`–`9` | jump to tab | `Shift+1`–`Shift+9` | jump to workspace |
 
 ## The prefix and presets
@@ -59,6 +59,14 @@ individual keys afterward. Choose **luvus (default)** to revert.
 Note: `,` renames the tab on both the luvus defaults and the tmux preset (the
 same as tmux's rename-window), and Settings lives on `=`. The **Menu** button
 (top-right) always opens Settings too.
+
+The pane focus history behaves like a browser or Vim jump list and crosses tabs
+and workspaces. `Ctrl+Space [` walks backward through previously focused panes;
+`Ctrl+Space ]` walks forward again. A new ordinary focus change after going back
+starts a new branch and clears the forward history. Closed panes are skipped.
+
+Agent navigation is separate: `Ctrl+Space .` cycles through Blocked agents and
+`Ctrl+Space >` cycles through Done agents.
 
 ## The jump palette
 
@@ -130,6 +138,11 @@ AGENTS also accepts `f` for All / Active and `s` for all workspaces / this
 workspace. FILES additionally uses `h` / `l` to collapse or expand folders.
 After `Enter` opens a file view, `x` closes that view. An opened DIFF review
 closes with `q` or `Esc`.
+
+**Rename dialogs** (a tab, a workspace, or a pane): `←` / `→` move the text
+cursor, `Home` / `End` jump to the start or end of the name, `Backspace` and
+`Delete` remove the character before or after the cursor, `Enter` saves, and
+`Esc` cancels.
 
 **Right-click menus** (no key needed): a **tab** to rename it, a **workspace** row
 for its menu (rename / close / path visibility / worktrees / git / board), a

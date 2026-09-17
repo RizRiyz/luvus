@@ -40,6 +40,7 @@ mod git;
 mod input;
 pub(crate) mod io_jobs;
 mod keys;
+pub(crate) mod line_edit;
 mod mission;
 mod modules;
 mod persistence;
@@ -596,6 +597,8 @@ pub struct CmdInspect {
 pub struct TabRename {
     pub target: TabMenuTarget,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
 }
 
 /// One row of the open-worktree modal (docs/18 WT): a checkout of the repo, as
@@ -1191,12 +1194,15 @@ pub struct WsRename {
     /// open if another workspace closes through the API.
     pub workspace_id: String,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
 }
 
 /// Cap a custom workspace name (same reasoning as [`TAB_NAME_MAX`]). Shared
 /// with the CLI so local validation and the socket mutation agree.
 pub(crate) const WS_NAME_MAX: usize = 40;
 const MAX_CLOSED_WORKSPACE_PATHS: usize = 128;
+const FOCUS_HISTORY_LIMIT: usize = 64;
 
 /// Why workspace metadata could not be changed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1212,6 +1218,8 @@ pub enum WorkspaceUpdateError {
 pub struct PaneRename {
     pub pane: PaneId,
     pub buffer: String,
+    /// Caret as a char index into `buffer` (see [`line_edit`]).
+    pub cursor: usize,
 }
 
 /// Cap a live pane name at the addressable-name length (`[a-z][a-z0-9_-]{0,31}`).
@@ -1825,10 +1833,6 @@ pub struct PaneStatus {
     pub state: State,
     pub agent: String,
     pub last_activity: Instant,
-    /// One exact follow-up after recent output leaves `ACTIVITY_WINDOW`.
-    /// PTY events move this deadline forward; detection clears it after the
-    /// boundary is inspected, avoiding a 100 ms poll throughout the window.
-    quiet_check_at: Option<Instant>,
     /// When the user last sent input (keystrokes/paste) to this pane. Lets
     /// detection tell a user typing (whose echo is also output) apart from the
     /// agent generating (docs/07). Defaults old so unfocused/new panes aren't
@@ -1895,7 +1899,6 @@ impl PaneStatus {
             state: State::Idle,
             agent,
             last_activity: Instant::now(),
-            quiet_check_at: None,
             // Old by default so a freshly spawned pane's first output isn't gated
             // as "the user is typing".
             last_input: Instant::now()
@@ -2320,6 +2323,11 @@ pub struct App {
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
     /// authoritative unless the user opts a chord into Luvus handling.
     pub direct_keymap: keys::DirectKeymap,
+    /// Process-local pane jump history. Ordinary focus changes append to the
+    /// back stack and clear the forward stack, matching browser/Vim jump-list
+    /// branch semantics. Entries are bounded and are not persisted.
+    focus_history_back: Vec<PaneId>,
+    focus_history_forward: Vec<PaneId>,
     /// The parsed prefix chord (docs/64), from `config.prefix`. Default Ctrl+Space.
     pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
@@ -3107,6 +3115,8 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            focus_history_back: Vec::new(),
+            focus_history_forward: Vec::new(),
             prefix,
             agent_names: HashMap::new(),
             settings: None,
@@ -3791,6 +3801,8 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            focus_history_back: Vec::new(),
+            focus_history_forward: Vec::new(),
             prefix,
             agent_names,
             settings: None,
@@ -4482,7 +4494,9 @@ impl App {
             }
             KeyCode::Enter => {
                 if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
-                    self.active_ws = workspace;
+                    let tab = self.workspaces[workspace].active_tab;
+                    let pane = self.workspaces[workspace].tabs[tab].layout.focus;
+                    self.focus_location(workspace, tab, pane);
                     self.sidebar_focus = None;
                 }
             }
@@ -5177,6 +5191,7 @@ impl App {
         spawn: impl FnOnce(&mut Self) -> Option<PaneId>,
     ) -> Option<PaneId> {
         let previous_zoom = self.zoomed;
+        let caller_focus = self.layout().focus;
         let previous_target_focus = self.workspaces[workspace].tabs[tab].layout.focus;
         let new_id = spawn(self)?;
         {
@@ -5188,6 +5203,10 @@ impl App {
             }
         }
         if focus {
+            if caller_focus != new_id {
+                Self::push_focus_history(&mut self.focus_history_back, caller_focus);
+                self.focus_history_forward.clear();
+            }
             self.active_ws = workspace;
             self.workspaces[workspace].active_tab = tab;
             self.scroll_pane = None;
@@ -5609,7 +5628,12 @@ impl App {
             if tab.is_renameable() {
                 let buffer = tab.name.clone().unwrap_or_default();
                 if let Some(target) = self.tab_menu_target(workspace, index) {
-                    self.tab_rename = Some(TabRename { target, buffer });
+                    let cursor = buffer.chars().count();
+                    self.tab_rename = Some(TabRename {
+                        target,
+                        buffer,
+                        cursor,
+                    });
                 }
             }
         }
@@ -5630,19 +5654,11 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.tab_rename.as_mut() {
-                    r.buffer.pop();
+                    line_edit::edit_line(&mut r.buffer, &mut r.cursor, key, TAB_NAME_MAX, |_| true);
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.tab_rename.as_mut() {
-                    if r.buffer.chars().count() < TAB_NAME_MAX {
-                        r.buffer.push(c);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -6135,6 +6151,7 @@ impl App {
             self.ws_rename = Some(WsRename {
                 workspace_id: w.id.clone(),
                 buffer: w.name.clone(),
+                cursor: w.name.chars().count(),
             });
         }
     }
@@ -6163,7 +6180,12 @@ impl App {
             .find_map(|(name, target)| (*target == pane).then_some(name.as_str()))
             .unwrap_or("")
             .to_string();
-        self.pane_rename = Some(PaneRename { pane, buffer });
+        let cursor = buffer.chars().count();
+        self.pane_rename = Some(PaneRename {
+            pane,
+            buffer,
+            cursor,
+        });
     }
 
     /// Key handling while the pane-rename modal is open. `Enter` applies the name
@@ -6178,24 +6200,33 @@ impl App {
                     self.set_agent_name(r.pane, (!name.is_empty()).then_some(name));
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.pane_rename.as_mut() {
-                    r.buffer.pop();
+                    let key = match key.code {
+                        KeyCode::Char(c) => {
+                            KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), key.modifiers)
+                        }
+                        _ => key,
+                    };
+                    // Every edit must keep the name addressable: a letter first,
+                    // then letters, digits, `_`, or `-`. Deleting a leading letter
+                    // that would expose a digit is refused like a bad keystroke.
+                    let addressable = |name: &str| {
+                        let mut chars = name.chars();
+                        chars.next().is_none_or(|c| c.is_ascii_lowercase())
+                            && chars.all(|c| {
+                                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
+                            })
+                    };
+                    line_edit::edit_line(
+                        &mut r.buffer,
+                        &mut r.cursor,
+                        key,
+                        PANE_NAME_MAX,
+                        addressable,
+                    );
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.pane_rename.as_mut() {
-                    let c = c.to_ascii_lowercase();
-                    let char_ok =
-                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
-                    // A name must start with a letter.
-                    let first_ok = !r.buffer.is_empty() || c.is_ascii_lowercase();
-                    if char_ok && first_ok && r.buffer.chars().count() < PANE_NAME_MAX {
-                        r.buffer.push(c);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -6216,19 +6247,11 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
+            _ => {
                 if let Some(r) = self.ws_rename.as_mut() {
-                    r.buffer.pop();
+                    line_edit::edit_line(&mut r.buffer, &mut r.cursor, key, WS_NAME_MAX, |_| true);
                 }
             }
-            KeyCode::Char(c) => {
-                if let Some(r) = self.ws_rename.as_mut() {
-                    if r.buffer.chars().count() < WS_NAME_MAX {
-                        r.buffer.push(c);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -7252,8 +7275,8 @@ impl App {
         {
             return Err(TabFocusError::PositionOutOfRange);
         }
-        self.active_ws = workspace;
-        self.workspaces[workspace].active_tab = index;
+        let pane = self.workspaces[workspace].tabs[index].layout.focus;
+        self.focus_location(workspace, index, pane);
         Ok(())
     }
 
@@ -7262,10 +7285,13 @@ impl App {
     }
 
     fn cycle_tab(&mut self, delta: isize) {
-        let ws = &mut self.workspaces[self.active_ws];
+        let workspace = self.active_ws;
+        let ws = &self.workspaces[workspace];
         let n = ws.tabs.len() as isize;
         if n > 0 {
-            ws.active_tab = (((ws.active_tab as isize + delta) % n + n) % n) as usize;
+            let tab = (((ws.active_tab as isize + delta) % n + n) % n) as usize;
+            let pane = ws.tabs[tab].layout.focus;
+            self.focus_location(workspace, tab, pane);
         }
     }
 
@@ -7562,8 +7588,39 @@ impl App {
         })
     }
 
+    fn push_focus_history(history: &mut Vec<PaneId>, id: PaneId) {
+        if history.last() == Some(&id) {
+            return;
+        }
+        if history.len() == FOCUS_HISTORY_LIMIT {
+            history.remove(0);
+        }
+        history.push(id);
+    }
+
+    fn set_focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+        self.active_ws = workspace;
+        self.workspaces[workspace].active_tab = tab;
+        self.workspaces[workspace].tabs[tab].layout.focus = id;
+        self.scroll_pane = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+        let current = self.layout().focus;
+        let location_changed = self.active_ws != workspace
+            || self.workspaces[workspace].active_tab != tab
+            || current != id;
+        if location_changed {
+            Self::push_focus_history(&mut self.focus_history_back, current);
+            self.focus_history_forward.clear();
+            self.set_focus_location(workspace, tab, id);
+        } else {
+            self.mode = Mode::Normal;
+        }
+    }
+
     fn focus_pane_global(&mut self, id: PaneId) {
-        let changed = self.layout().focus != id;
         let mut found = None;
         for (wi, ws) in self.workspaces.iter().enumerate() {
             for (ti, tab) in ws.tabs.iter().enumerate() {
@@ -7573,26 +7630,59 @@ impl App {
             }
         }
         if let Some((wi, ti)) = found {
-            self.active_ws = wi;
-            self.workspaces[wi].active_tab = ti;
-            self.workspaces[wi].tabs[ti].layout.focus = id;
-            if changed {
-                self.scroll_pane = None;
+            self.focus_location(wi, ti, id);
+        }
+    }
+
+    /// Move backward through pane focus history. Dead panes are discarded
+    /// lazily, so closing a tab or workspace cannot strand navigation.
+    fn focus_history_back(&mut self) {
+        let current = self.layout().focus;
+        while let Some(target) = self.focus_history_back.pop() {
+            if target == current {
+                continue;
             }
-            self.mode = Mode::Normal;
+            if let Some((workspace, tab)) = self.pane_location(target) {
+                Self::push_focus_history(&mut self.focus_history_forward, current);
+                self.set_focus_location(workspace, tab, target);
+                return;
+            }
+        }
+    }
+
+    /// Move forward after one or more history-back jumps. Any ordinary focus
+    /// change clears this stack and begins a new history branch.
+    fn focus_history_forward(&mut self) {
+        let current = self.layout().focus;
+        while let Some(target) = self.focus_history_forward.pop() {
+            if target == current {
+                continue;
+            }
+            if let Some((workspace, tab)) = self.pane_location(target) {
+                Self::push_focus_history(&mut self.focus_history_back, current);
+                self.set_focus_location(workspace, tab, target);
+                return;
+            }
         }
     }
 
     fn cycle_workspace(&mut self, delta: isize) {
         let n = self.workspaces.len() as isize;
         if n > 0 {
-            self.active_ws = (((self.active_ws as isize + delta) % n + n) % n) as usize;
+            let workspace = (((self.active_ws as isize + delta) % n + n) % n) as usize;
+            let tab = self.workspaces[workspace].active_tab;
+            let pane = self.workspaces[workspace].tabs[tab].layout.focus;
+            self.focus_pane_global(pane);
         }
     }
 
     fn focus_dir(&mut self, dir: Dir) {
         let area = self.last_pane_area;
+        let current = self.layout().focus;
         self.layout_mut().focus_dir(area, dir);
+        let next = self.layout().focus;
+        self.layout_mut().focus = current;
+        self.focus_pane_global(next);
     }
 
     /// Cycle focus within the current tab's leaf order, wrapping at both ends.
@@ -7606,9 +7696,7 @@ impl App {
         let idx = leaves.iter().position(|&id| id == focus).unwrap_or(0);
         let len = leaves.len() as isize;
         let next = leaves[((idx as isize + delta) % len + len) as usize % leaves.len()];
-        self.layout_mut().focus = next;
-        self.scroll_pane = None;
-        self.mode = Mode::Normal;
+        self.focus_pane_global(next);
     }
 
     fn focus_next_pane(&mut self) {
@@ -8012,6 +8100,8 @@ impl App {
     }
 
     fn close_pane(&mut self, id: PaneId) {
+        self.focus_history_back.retain(|pane| *pane != id);
+        self.focus_history_forward.retain(|pane| *pane != id);
         crate::orch::worker::discard(id);
         let owner = self.pane_location(id);
         let durable = self
@@ -8690,6 +8780,19 @@ mod tests {
             app.handle_event(key(' ', KeyModifiers::CONTROL)),
             "entering prefix mode must repaint"
         );
+    }
+
+    #[test]
+    fn pane_osc52_store_queues_pending_clipboard() {
+        let _env = crate::persist::test_env("pane-osc52-clipboard");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let id = app.layout().focus;
+        if let Ok(mut engine) = app.panes.get(&id).unwrap().engine.lock() {
+            engine.advance(b"\x1b]52;c;aGVsbG8tb3NjNTI=\x07");
+        }
+        assert!(app.handle_event(AppEvent::PtyData(id)));
+        assert_eq!(app.pending_clipboard.as_deref(), Some("hello-osc52"));
     }
 
     #[test]
@@ -10744,6 +10847,37 @@ mod tests {
     }
 
     #[test]
+    fn workspace_rename_arrows_move_the_caret_instead_of_typing_at_the_end() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].name = "Recall issue".into();
+        app.open_ws_rename(0);
+        let press =
+            |app: &mut App, code| app.handle_ws_rename_key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        for _ in 0.."issue".len() {
+            press(&mut app, KeyCode::Left);
+        }
+        for c in "bot ".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Delete);
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Char('s'));
+        let rename = app.ws_rename.as_ref().expect("rename modal stays open");
+        assert_eq!(rename.buffer, "recall bot issues");
+        assert!(
+            app.ws_menu.is_none() && app.sidebar_focus.is_none(),
+            "no navigation"
+        );
+
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.workspaces[0].name, "recall bot issues");
+    }
+
+    #[test]
     fn deferred_workspace_actions_abort_after_target_closes() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -11465,7 +11599,6 @@ mod tests {
 
         app.detect_tick(first);
         let extracted = app.detection_extractions;
-        let considered = app.detection_panes_considered;
         assert!(extracted > 0, "the first tick inspects every pane");
 
         app.detect_tick(first + Duration::from_millis(200));
@@ -11473,15 +11606,12 @@ mod tests {
             app.detection_extractions, extracted,
             "an unchanged pane does not rebuild title or bottom text"
         );
-        assert_eq!(
-            app.detection_panes_considered, considered,
-            "event-driven detection does not revisit a quiet pane between audits"
-        );
+        assert!(app.detection_skips > 0);
 
         if let Some(pane) = app.panes.get(&pane) {
             pane.engine.lock().unwrap().advance(b"new output\r\n");
         }
-        app.detect_tick(first + Duration::from_secs(3));
+        app.detect_tick(first + Duration::from_millis(400));
         assert_eq!(app.detection_extractions, extracted + 1);
     }
 

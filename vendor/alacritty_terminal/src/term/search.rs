@@ -592,9 +592,7 @@ impl<T> Term<T> {
     /// Find the beginning of the current line across linewraps.
     pub fn line_search_left(&self, mut point: Point) -> Point {
         while point.line > self.topmost_line()
-            && self.grid[Point::new(point.line - 1i32, self.last_column())]
-                .flags
-                .contains(Flags::WRAPLINE)
+            && self.grid[point.line - 1i32][self.last_column()].flags.contains(Flags::WRAPLINE)
         {
             point.line -= 1;
         }
@@ -607,9 +605,7 @@ impl<T> Term<T> {
     /// Find the end of the current line across linewraps.
     pub fn line_search_right(&self, mut point: Point) -> Point {
         while point.line + 1 < self.screen_lines()
-            && self.grid[Point::new(point.line, self.last_column())]
-                .flags
-                .contains(Flags::WRAPLINE)
+            && self.grid[point.line][self.last_column()].flags.contains(Flags::WRAPLINE)
         {
             point.line += 1;
         }

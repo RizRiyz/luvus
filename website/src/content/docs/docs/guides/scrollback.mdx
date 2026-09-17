@@ -87,8 +87,11 @@ No clipboard text or helper stderr is logged.
 For Wayland troubleshooting, run `wl-copy` and `wl-paste` from the same outer
 terminal that launches the Luvus client. Check `WAYLAND_DISPLAY` and
 `XDG_RUNTIME_DIR` there, not just in the detached server. A socket symlink is not
-required. This behavior concerns Luvus selection copy, not OSC 52 emitted by
-applications running inside a pane.
+required. Applications inside a pane can also copy with OSC 52 (for example
+Claude Code drag-select or `printf` with a `\e]52;c;…` sequence). Luvus forwards
+those writes through the same client clipboard path as its own selection copy.
+OSC 52 read (paste from the host clipboard into a pane) is not enabled. Rapid
+pane and selection copies retain only the latest pending text.
 
 For keyboard selection, press **`Ctrl+Space`**, then **`y`** by default. Change
 the second key in **Settings → Keys → Copy terminal text**. Shift-based `V`

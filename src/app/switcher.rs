@@ -318,16 +318,20 @@ impl App {
         match target {
             SwitcherTarget::Pane(id) => self.focus_pane_global(id),
             SwitcherTarget::Tab { ws, tab } => {
-                if let Some(w) = self.workspaces.get_mut(ws) {
-                    if tab < w.tabs.len() {
-                        w.active_tab = tab;
-                        self.active_ws = ws;
-                    }
+                if self
+                    .workspaces
+                    .get(ws)
+                    .is_some_and(|workspace| tab < workspace.tabs.len())
+                {
+                    let pane = self.workspaces[ws].tabs[tab].layout.focus;
+                    self.focus_location(ws, tab, pane);
                 }
             }
             SwitcherTarget::Workspace(i) => {
                 if i < self.workspaces.len() {
-                    self.active_ws = i;
+                    let tab = self.workspaces[i].active_tab;
+                    let pane = self.workspaces[i].tabs[tab].layout.focus;
+                    self.focus_location(i, tab, pane);
                 }
             }
             SwitcherTarget::NewWorkspace => self.open_folder_picker(),
@@ -528,6 +532,45 @@ mod tests {
         app.switcher_activate(SwitcherTarget::Tab { ws: 0, tab: 0 });
         assert_eq!(app.ws().active_tab, 0, "switcher jumped to the tab");
         assert!(!app.switcher, "activating closes the overlay");
+    }
+
+    #[test]
+    fn switcher_navigation_starts_a_new_focus_history_branch() {
+        let _env = crate::persist::test_env("switcher-focus-history-branch");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let second = crate::ids::PaneId::alloc();
+        let third = crate::ids::PaneId::alloc();
+        let fourth = crate::ids::PaneId::alloc();
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                second,
+            )));
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                third,
+            )));
+        app.workspaces[0]
+            .tabs
+            .push(super::super::Tab::panes(crate::layout::TileLayout::new(
+                fourth,
+            )));
+
+        app.focus_tab(1).unwrap();
+        app.focus_tab(2).unwrap();
+        app.focus_history_back();
+        assert_eq!(app.layout().focus, second);
+
+        app.switcher_activate(SwitcherTarget::Tab { ws: 0, tab: 3 });
+        assert_eq!(app.layout().focus, fourth);
+        app.focus_history_forward();
+        assert_eq!(
+            app.layout().focus,
+            fourth,
+            "switcher navigation clears the abandoned forward branch"
+        );
     }
 
     #[test]

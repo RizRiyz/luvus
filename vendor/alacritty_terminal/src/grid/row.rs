@@ -40,7 +40,7 @@ enum PackedCells<T> {
 
 impl<T> PackedBlock<T> {
     #[inline]
-    pub(crate) fn cell(&self, index: usize) -> &T {
+    fn cell(&self, index: usize) -> &T {
         match &self.cells {
             PackedCells::Direct(cells) => &cells[index],
             PackedCells::Indexed8 { values, indices } => &values[indices[index] as usize],
@@ -330,22 +330,6 @@ impl<T> Row<T> {
         self.columns as usize
     }
 
-    #[inline]
-    pub(crate) fn occupancy(&self) -> u32 {
-        self.occ
-    }
-
-    #[inline]
-    pub(crate) fn from_packed(
-        block: Arc<PackedBlock<T>>,
-        start: u32,
-        len: u32,
-        columns: u32,
-        occ: u32,
-    ) -> Self {
-        Self { inner: RowStorage::Packed { block, start, len }, occ, columns }
-    }
-
     /// Whether this row uses a single retained cell for its repeated suffix.
     #[inline]
     pub(crate) fn is_compacted(&self) -> bool {
@@ -429,25 +413,25 @@ impl<T> Row<T> {
         }
     }
 
-    /// Move this row's physical cells into the cold-history page builder.
-    ///
-    /// The row retains its logical dimensions and occupancy so the page can
-    /// install its final shared block after construction. Dense allocations
-    /// are returned intact, allowing the caller to either move their cells
-    /// into the block or keep a bounded empty allocation for row reuse.
-    pub(crate) fn take_cells_for_packing(&mut self) -> Vec<T>
-    where
-        T: Clone,
-    {
-        match std::mem::take(&mut self.inner) {
-            RowStorage::Dense(dense) => dense,
-            RowStorage::Uniform(fill) => match Arc::try_unwrap(fill) {
-                Ok(fill) => vec![fill],
-                Err(fill) => vec![fill.as_ref().clone()],
+    #[inline]
+    pub(crate) fn install_packed(
+        &mut self,
+        block: Arc<PackedBlock<T>>,
+        start: usize,
+        len: usize,
+    ) -> Option<Vec<T>> {
+        debug_assert!(!self.is_packed());
+        let previous = std::mem::replace(&mut self.inner, RowStorage::Packed {
+            block,
+            start: u32::try_from(start).expect("packed block offset exceeds u32"),
+            len: u32::try_from(len).expect("packed row length exceeds u32"),
+        });
+        match previous {
+            RowStorage::Dense(mut dense) if dense.capacity() <= COMPACT_ROW_REUSE_CELLS => {
+                dense.clear();
+                Some(dense)
             },
-            RowStorage::Packed { .. } => {
-                unreachable!("packed rows cannot enter the cold-page builder")
-            },
+            RowStorage::Dense(_) | RowStorage::Uniform(_) | RowStorage::Packed { .. } => None,
         }
     }
 
@@ -910,13 +894,7 @@ mod tests {
                 .map(|index| row.physical_cell(index).clone())
                 .collect(),
         );
-        row = Row::from_packed(
-            block,
-            0,
-            row.physical_len() as u32,
-            row.len() as u32,
-            row.occ,
-        );
+        let _ = row.install_packed(block, 0, row.physical_len());
 
         row.reset(&Cell::default());
         assert_eq!(row.physical_len(), 2);
@@ -965,7 +943,7 @@ mod tests {
         row[Column(0)] = 'a';
         row.compact_trailing();
         let block = Row::new_indexed8_block(vec!['a', '\0'], vec![0, 1]);
-        row = Row::from_packed(block, 0, 2, row.len() as u32, row.occ);
+        let _ = row.install_packed(block, 0, 2);
 
         let serialized = serde_json::to_string(&row).expect("serialize packed row");
         let restored: Row<char> = serde_json::from_str(&serialized).expect("restore packed row");

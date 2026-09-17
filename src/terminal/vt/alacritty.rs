@@ -21,6 +21,7 @@ use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
 use crate::terminal::graphics;
 use crate::terminal::graphics::placeholder;
+use crate::terminal::keyboard::{KeyboardProtocol, KittyKeyboardFlags};
 use crate::terminal::pty::{InputAction, InputSender};
 
 #[derive(Default)]
@@ -34,6 +35,9 @@ struct TitleState {
 
 type TitleSlot = Arc<Mutex<TitleState>>;
 
+/// Latest OSC 52 store request from the child, drained by the app loop.
+type ClipboardSlot = Arc<Mutex<Option<String>>>;
+
 /// Receives terminal-generated responses (cursor reports, device attributes,
 /// etc.) and forwards them back to the child via the shared write channel.
 /// Also captures the window title (OSC 0/2) for agent detection.
@@ -41,6 +45,7 @@ type TitleSlot = Arc<Mutex<TitleState>>;
 pub struct EventProxy {
     tx: InputSender,
     title: TitleSlot,
+    clipboard: ClipboardSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
     host_graphics: graphics::HostGraphics,
     graphics_queue: GraphicsSlot,
@@ -139,6 +144,13 @@ impl EventListener for EventProxy {
                     }
                 }
             }
+            Event::ClipboardStore(_, text) => {
+                if let Ok(mut pending) = self.clipboard.lock() {
+                    *pending = Some(text);
+                }
+            }
+            // OSC 52 read would expose the host clipboard to untrusted pane apps.
+            Event::ClipboardLoad(_, _) => {}
             _ => {}
         }
     }
@@ -224,6 +236,7 @@ pub struct AlacrittyEngine {
     title: TitleSlot,
     graphics_queue: GraphicsSlot,
     grid: GridSlot,
+    clipboard: ClipboardSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
@@ -284,6 +297,7 @@ impl AlacrittyEngine {
         };
         let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
         let graphics_queue: GraphicsSlot = Arc::new(Mutex::new(graphics::GraphicsQueue::default()));
+        let clipboard: ClipboardSlot = Arc::new(Mutex::new(None));
         let appearance = Arc::new(Mutex::new(initial_appearance));
         let grid: GridSlot = Arc::new(AtomicU32::new(pack_grid(
             dims.cols as u16,
@@ -292,6 +306,7 @@ impl AlacrittyEngine {
         let proxy = EventProxy {
             tx: resp_tx.clone(),
             title: title.clone(),
+            clipboard: clipboard.clone(),
             appearance: appearance.clone(),
             host_graphics: host_graphics.clone(),
             graphics_queue: graphics_queue.clone(),
@@ -314,6 +329,7 @@ impl AlacrittyEngine {
             title,
             graphics_queue,
             grid,
+            clipboard,
             response_tx: resp_tx,
             appearance,
             history_budget_bytes,
@@ -526,7 +542,7 @@ impl AlacrittyEngine {
         }
 
         output.clear();
-        let row = grid.row(Line(line));
+        let row = &grid[Line(line)];
         for column in 0..grid.columns() {
             let cell = &row[Column(column)];
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -554,7 +570,7 @@ impl AlacrittyEngine {
         if line > grid.bottommost_line().0 || grid.columns() == 0 {
             return false;
         }
-        grid[Point::new(Line(line), Column(grid.columns() - 1))]
+        grid[Line(line)][Column(grid.columns() - 1)]
             .flags
             .contains(Flags::WRAPLINE)
     }
@@ -568,7 +584,7 @@ impl AlacrittyEngine {
 
     fn append_plain_grid_row(&self, line: Line, output: &mut String, max_bytes: usize) -> bool {
         let grid = self.term.grid();
-        let row = grid.row(line);
+        let row = &grid[line];
         let last = (0..grid.columns())
             .rfind(|column| {
                 let cell = &row[Column(*column)];
@@ -601,7 +617,7 @@ impl AlacrittyEngine {
 
     fn append_ansi_grid_row(&self, line: Line, output: &mut String, max_bytes: usize) -> bool {
         let grid = self.term.grid();
-        let row = grid.row(line);
+        let row = &grid[line];
         let last = (0..grid.columns())
             .rfind(|column| {
                 let cell = &row[Column(*column)];
@@ -959,9 +975,8 @@ impl VtEngine for AlacrittyEngine {
             damaged_row.row = row;
             let line = Line(row as i32 - display_offset);
             let mut used = 0;
-            let grid_row = grid.row(line);
             for column in 0..columns {
-                let cell = &grid_row[Column(column)];
+                let cell = &grid[line][Column(column)];
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
@@ -1326,6 +1341,13 @@ impl VtEngine for AlacrittyEngine {
         self.title.lock().map_or(0, |title| title.generation)
     }
 
+    fn take_pending_clipboard(&mut self) -> Option<String> {
+        self.clipboard
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+    }
+
     fn set_history_budget(&mut self, bytes: usize) {
         // `set_options` funnels into `Grid::update_history`, which *shrinks* the
         // retained history when the limit drops — so lowering the setting frees
@@ -1452,7 +1474,7 @@ impl VtEngine for AlacrittyEngine {
     fn retained_row_layout(&self, index: usize) -> Option<RetainedRowLayout> {
         let line = self.retained_line(index)?;
         let grid = self.term.grid();
-        let row = grid.row(line);
+        let row = &grid[line];
         let mut whitespace = Vec::with_capacity(grid.columns());
         let mut previous_whitespace = true;
         let mut last_content = None;
@@ -1514,12 +1536,25 @@ impl VtEngine for AlacrittyEngine {
         self.term.mode().contains(TermMode::APP_CURSOR)
     }
 
-    fn disambiguate_escape_codes(&self) -> bool {
-        self.term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES)
-    }
-
-    fn report_all_keys_as_escape_codes(&self) -> bool {
-        self.term.mode().contains(TermMode::REPORT_ALL_KEYS_AS_ESC)
+    fn keyboard_protocol(&self) -> KeyboardProtocol {
+        let mode = self.term.mode();
+        let mut flags = KittyKeyboardFlags::empty();
+        if mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+            flags.insert(KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES);
+        }
+        if mode.contains(TermMode::REPORT_EVENT_TYPES) {
+            flags.insert(KittyKeyboardFlags::REPORT_EVENT_TYPES);
+        }
+        if mode.contains(TermMode::REPORT_ALTERNATE_KEYS) {
+            flags.insert(KittyKeyboardFlags::REPORT_ALTERNATE_KEYS);
+        }
+        if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+            flags.insert(KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES);
+        }
+        if mode.contains(TermMode::REPORT_ASSOCIATED_TEXT) {
+            flags.insert(KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT);
+        }
+        KeyboardProtocol::from_kitty_flags(flags)
     }
 
     fn mouse_drag(&self) -> bool {
@@ -1698,6 +1733,8 @@ mod tests {
     use std::sync::mpsc::channel;
 
     use crate::terminal::appearance::ColorScheme;
+    use crate::terminal::keyboard::{KeyboardProtocol, KittyKeyboardFlags};
+    use crate::terminal::pty::KeyEncodingModes;
 
     fn feed_lines(e: &mut AlacrittyEngine, n: usize) {
         for i in 0..n {
@@ -1823,41 +1860,6 @@ mod tests {
         }
     }
 
-    /// Measure terminal parsing/scrolling and cold-history maintenance
-    /// separately from PTY syscalls.
-    #[test]
-    #[ignore]
-    fn bulk_history_ingestion_benchmark() {
-        use std::{hint::black_box, io::Write, time::Instant};
-
-        let mut corpus = Vec::new();
-        for line in 1..=7_600 {
-            write!(&mut corpus, "{line}\r\n").unwrap();
-        }
-        for chunk_bytes in [8 * 1024, 32 * 1024, 64 * 1024] {
-            for trial in 1..=3 {
-                let (tx, _rx) = channel();
-                let mut engine = AlacrittyEngine::new(27, 24, tx, 32 * 1024 * 1024);
-                let start = Instant::now();
-                for chunk in corpus.chunks(chunk_bytes) {
-                    engine.advance(chunk);
-                }
-                let ingestion = start.elapsed();
-                let maintenance_start = Instant::now();
-                engine.finish_output_batch();
-                let maintenance = maintenance_start.elapsed();
-                black_box(engine.history_len());
-                eprintln!(
-                    "bulk_history_ingestion chunk_bytes={chunk_bytes} trial={trial} rows={} ingestion_ms={:.3} maintenance_ms={:.3} total_ms={:.3}",
-                    engine.history_len(),
-                    ingestion.as_secs_f64() * 1000.0,
-                    maintenance.as_secs_f64() * 1000.0,
-                    (ingestion + maintenance).as_secs_f64() * 1000.0,
-                );
-            }
-        }
-    }
-
     #[test]
     fn incremental_history_maintenance_is_lossless_and_restarts_after_mutation() {
         fn rows(engine: &AlacrittyEngine) -> Vec<String> {
@@ -1876,7 +1878,7 @@ mod tests {
             "large backlog takes multiple turns"
         );
         let packed = engine.history_metrics().packed_rows.unwrap();
-        assert!(packed > 0 && packed <= 1_024);
+        assert!(packed > 0 && packed <= 512);
         assert_eq!(before, rows(&engine));
         engine.advance(b"new output\r\n");
         engine.resize(90, 24);
@@ -1892,7 +1894,7 @@ mod tests {
         let metrics = engine.history_metrics();
         assert_eq!(
             metrics.packed_rows.unwrap(),
-            metrics.retained_rows.saturating_sub(32)
+            metrics.retained_rows.saturating_sub(128)
         );
         assert!(
             !engine.finish_output_batch_step(),
@@ -3568,26 +3570,49 @@ mod tests {
     fn nested_keyboard_modes_are_tracked_across_config_updates() {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 2_000));
-        assert!(!e.disambiguate_escape_codes());
-        assert!(!e.report_all_keys_as_escape_codes());
+        assert_eq!(e.keyboard_protocol(), KeyboardProtocol::Legacy);
+
+        e.advance(b"\x1b[=31u");
+        let all_flags = KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES
+            | KittyKeyboardFlags::REPORT_EVENT_TYPES
+            | KittyKeyboardFlags::REPORT_ALTERNATE_KEYS
+            | KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            | KittyKeyboardFlags::REPORT_ASSOCIATED_TEXT;
+        let expected_protocol = KeyboardProtocol::Kitty { flags: all_flags };
+        assert_eq!(e.keyboard_protocol(), expected_protocol);
+        assert_eq!(
+            KeyEncodingModes::from_engine(&e).protocol,
+            expected_protocol,
+            "pane key mode projection must retain every Kitty flag"
+        );
 
         e.advance(b"\x1b[>1u");
-        assert!(e.disambiguate_escape_codes());
-        assert!(!e.report_all_keys_as_escape_codes());
+        assert_eq!(
+            e.keyboard_protocol(),
+            KeyboardProtocol::Kitty {
+                flags: KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES,
+            }
+        );
 
         e.advance(b"\x1b[=8u");
-        assert!(!e.disambiguate_escape_codes());
-        assert!(e.report_all_keys_as_escape_codes());
+        assert_eq!(
+            e.keyboard_protocol(),
+            KeyboardProtocol::Kitty {
+                flags: KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            }
+        );
 
         e.set_history_budget(budget_for_rows(20, 1_000));
-        assert!(
-            e.report_all_keys_as_escape_codes(),
+        assert_eq!(
+            e.keyboard_protocol(),
+            KeyboardProtocol::Kitty {
+                flags: KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            },
             "changing scrollback settings must not disable the child keyboard protocol"
         );
 
         e.advance(b"\x1b[<u");
-        assert!(!e.disambiguate_escape_codes());
-        assert!(!e.report_all_keys_as_escape_codes());
+        assert_eq!(e.keyboard_protocol(), KeyboardProtocol::Legacy);
     }
 
     #[test]
@@ -3831,5 +3856,17 @@ mod tests {
 
         engine.advance(b"\x1b[?2040$p");
         assert_eq!(recv_bytes(&rx), b"\x1b[?2040;0$y");
+    }
+
+    #[test]
+    fn osc52_store_forwards_clipboard_text() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        engine.advance(b"\x1b]52;c;aGVsbG8tb3NjNTI=\x07");
+        assert_eq!(
+            engine.take_pending_clipboard().as_deref(),
+            Some("hello-osc52")
+        );
+        assert!(engine.take_pending_clipboard().is_none());
     }
 }

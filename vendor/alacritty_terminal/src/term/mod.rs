@@ -524,8 +524,6 @@ impl<T> Term<T> {
         self.trim_history_cache_if_dirty();
         self.grid.pack_cold_history();
         self.inactive_grid.pack_cold_history();
-        self.grid.trim_history_cache();
-        self.inactive_grid.trim_history_cache();
     }
 
     /// Opt into consumer-scheduled maintenance after reflow instead of packing
@@ -538,15 +536,8 @@ impl<T> Term<T> {
     pub fn finish_output_batch_step(&mut self, cursors: &mut [usize; 2], full_scan: bool) -> bool {
         self.trim_history_cache_if_dirty();
         let active = self.grid.pack_cold_history_step(&mut cursors[0], full_scan);
-        let inactive = self
-            .inactive_grid
-            .pack_cold_history_step(&mut cursors[1], full_scan);
-        let pending = active || inactive;
-        if !pending {
-            self.grid.trim_history_cache();
-            self.inactive_grid.trim_history_cache();
-        }
-        pending
+        let inactive = self.inactive_grid.pack_cold_history_step(&mut cursors[1], full_scan);
+        active || inactive
     }
 
     fn trim_history_cache_if_dirty(&mut self) {
@@ -647,7 +638,7 @@ impl<T> Term<T> {
     ) -> String {
         let mut text = String::new();
 
-        let grid_line = self.grid.row(line);
+        let grid_line = &self.grid[line];
         let line_length = cmp::min(grid_line.line_length(), cols.end + 1);
 
         // Include wide char when trailing spacer is selected.
@@ -685,9 +676,7 @@ impl<T> Term<T> {
 
         if cols.end >= self.columns() - 1
             && (line_length.0 == 0
-                || !self.grid[Point::new(line, line_length - 1)]
-                    .flags
-                    .contains(Flags::WRAPLINE))
+                || !self.grid[line][line_length - 1].flags.contains(Flags::WRAPLINE))
         {
             text.push('\n');
         }
@@ -698,7 +687,7 @@ impl<T> Term<T> {
             && grid_line[line_length - 1].flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
             && include_wrapped_wide
         {
-            text.push(self.grid[Point::new(line - 1i32, Column(0))].c);
+            text.push(self.grid[line - 1i32][Column(0)].c);
         }
 
         text
@@ -1062,7 +1051,7 @@ impl<T> Term<T> {
 
     /// Jump to the end of a wide cell.
     pub fn expand_wide(&self, mut point: Point, direction: Direction) -> Point {
-        let flags = self.grid[point].flags;
+        let flags = self.grid[point.line][point.column].flags;
 
         match direction {
             Direction::Right if flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) => {

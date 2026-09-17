@@ -471,11 +471,12 @@ pub(super) fn draw_tab_rename(
     f: &mut RenderTarget,
     area: Rect,
     buf: &str,
+    cursor: usize,
     hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
 ) -> (Option<Rect>, Option<Rect>) {
-    draw_rename(f, area, cat.rename_tab, buf, hover, cat, t)
+    draw_rename(f, area, cat.rename_tab, buf, cursor, hover, cat, t)
 }
 
 /// The workspace-rename modal: titled for a node. The on-disk folder is never
@@ -484,11 +485,12 @@ pub(super) fn draw_ws_rename(
     f: &mut RenderTarget,
     area: Rect,
     buf: &str,
+    cursor: usize,
     hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
 ) -> (Option<Rect>, Option<Rect>) {
-    draw_rename(f, area, cat.menu_rename, buf, hover, cat, t)
+    draw_rename(f, area, cat.menu_rename, buf, cursor, hover, cat, t)
 }
 
 /// The pane-rename modal (same look as the workspace/tab rename).
@@ -496,20 +498,23 @@ pub(super) fn draw_pane_rename(
     f: &mut RenderTarget,
     area: Rect,
     buf: &str,
+    cursor: usize,
     hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
 ) -> (Option<Rect>, Option<Rect>) {
-    draw_rename(f, area, cat.menu_rename, buf, hover, cat, t)
+    draw_rename(f, area, cat.menu_rename, buf, cursor, hover, cat, t)
 }
 
 /// Shared single-field rename modal (tab / workspace): a title, an editable
 /// buffer, and the clickable ⏎/esc footer hints. Returns each hint's rect.
+#[allow(clippy::too_many_arguments)]
 fn draw_rename(
     f: &mut RenderTarget,
     area: Rect,
     title: &str,
     buf: &str,
+    cursor: usize,
     hover: Option<(u16, u16)>,
     cat: &Catalog,
     t: &Theme,
@@ -531,11 +536,13 @@ fn draw_rename(
         )),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
+    let (before, after) = crate::app::line_edit::split_at_caret(buf, cursor);
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(" "),
-            Span::styled(buf.to_string(), Style::new().fg(t.accent).bold()),
+            Span::styled(before.to_string(), Style::new().fg(t.accent).bold()),
             Span::styled("▏", Style::new().fg(t.accent)),
+            Span::styled(after.to_string(), Style::new().fg(t.accent).bold()),
         ])),
         Rect::new(inner.x, inner.y + 2, inner.width, 1),
     );
