@@ -146,10 +146,15 @@ fn main() -> Result<()> {
         Some("integration") => {
             std::process::exit(integration::run(&args, i18n::cli::Context::configured())?)
         }
-        Some("machine") => std::process::exit(machine::run_cli(
-            &args[2.min(args.len())..],
-            i18n::cli::Context::configured(),
-        )?),
+        Some("machine") => {
+            if args.get(2).map(String::as_str) == Some("open") {
+                ensure_interactive_launch_allowed()?;
+            }
+            std::process::exit(machine::run_cli(
+                &args[2.min(args.len())..],
+                i18n::cli::Context::configured(),
+            )?);
+        }
         Some("--local") => {
             ensure_interactive_launch_allowed()?;
             return run_local();
@@ -1739,7 +1744,6 @@ mod tests {
     #[test]
     fn nested_interactive_launch_requires_opt_in() {
         let _env = crate::persist::test_env("nested-launch");
-        let previous = std::env::var_os("LUVUS_ENV");
         std::env::set_var("LUVUS_ENV", "1");
 
         let error = ensure_interactive_launch_allowed().unwrap_err();
@@ -1750,11 +1754,6 @@ mod tests {
             ..Default::default()
         });
         assert!(ensure_interactive_launch_allowed().is_ok());
-
-        match previous {
-            Some(value) => std::env::set_var("LUVUS_ENV", value),
-            None => std::env::remove_var("LUVUS_ENV"),
-        }
     }
 
     #[test]

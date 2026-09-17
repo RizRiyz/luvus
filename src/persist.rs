@@ -164,6 +164,7 @@ pub(crate) struct TestEnv {
     prev: Option<std::ffi::OsString>,
     prev_session: Option<std::ffi::OsString>,
     prev_socket: Option<std::ffi::OsString>,
+    prev_luvus_env: Option<std::ffi::OsString>,
     dir: PathBuf,
 }
 
@@ -182,6 +183,10 @@ impl Drop for TestEnv {
             Some(value) => std::env::set_var("LUVUS_SOCKET_PATH", value),
             None => std::env::remove_var("LUVUS_SOCKET_PATH"),
         }
+        match &self.prev_luvus_env {
+            Some(value) => std::env::set_var("LUVUS_ENV", value),
+            None => std::env::remove_var("LUVUS_ENV"),
+        }
         crate::session::clear_explicit_for_test();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -193,6 +198,7 @@ pub(crate) fn test_env(tag: &str) -> TestEnv {
     let prev = std::env::var_os("LUVUS_HOME");
     let prev_session = std::env::var_os(crate::session::SESSION_ENV_VAR);
     let prev_socket = std::env::var_os("LUVUS_SOCKET_PATH");
+    let prev_luvus_env = std::env::var_os("LUVUS_ENV");
     let dir = std::env::temp_dir().join(format!("luvus-test-{}-{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::env::set_var("LUVUS_HOME", &dir);
@@ -204,6 +210,7 @@ pub(crate) fn test_env(tag: &str) -> TestEnv {
         prev,
         prev_session,
         prev_socket,
+        prev_luvus_env,
         dir,
     }
 }
