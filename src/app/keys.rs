@@ -650,6 +650,11 @@ impl DirectKeySpec {
         Some(Self { modifiers, code })
     }
 
+    /// Whether the configured prefix consumes this direct chord first.
+    pub fn is_reserved_by(&self, prefix: &PrefixSpec) -> bool {
+        prefix.matches(&KeyEvent::new(self.code, self.modifiers))
+    }
+
     /// Canonical, user-facing label for the parsed semantic chord.
     pub fn label(&self) -> String {
         let mut parts = Vec::new();
@@ -1337,6 +1342,7 @@ mod tests {
         let alt = KeyModifiers::ALT;
         let right = DirectKeySpec::parse("alt+right").unwrap();
         assert_eq!(right.label(), "Alt+Right");
+        assert!(!right.is_reserved_by(&PrefixSpec::parse("ctrl+space").unwrap()));
         assert!(right.matches(&KeyEvent::new(KeyCode::Right, alt)));
         assert!(!right.matches(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
         assert!(!right.matches(&KeyEvent::new(KeyCode::Left, alt)));
@@ -1353,6 +1359,10 @@ mod tests {
         assert_eq!(DirectKeySpec::parse("\x1b[1;3C"), None);
 
         let ctrl_space = DirectKeySpec::parse("ctrl+space").unwrap();
+        assert!(ctrl_space.is_reserved_by(&PrefixSpec::parse("ctrl+space").unwrap()));
+        assert!(DirectKeySpec::parse("ctrl+@")
+            .unwrap()
+            .is_reserved_by(&PrefixSpec::parse("ctrl+space").unwrap()));
         assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)));
         assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Null, KeyModifiers::CONTROL)));
         assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL)));

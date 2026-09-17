@@ -33,7 +33,9 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &mut App, t: &The
 
     let mut references = vec![HelpRow::Heading(cat.settings.keys_direct_shortcuts)];
     for (spec, cmd) in &app.direct_keymap {
-        references.push(HelpRow::Entry(spec.label(), cmd.label(cat)));
+        if !spec.is_reserved_by(&app.prefix) {
+            references.push(HelpRow::Entry(spec.label(), cmd.label(cat)));
+        }
     }
     for (section, keys) in crate::i18n::settings::KEY_REFERENCE_KEYS.iter().enumerate() {
         references.push(HelpRow::Heading(
@@ -208,6 +210,9 @@ mod tests {
         app.config
             .direct_keybindings
             .insert(Cmd::OpenDiff.id().into(), "shift+ctrl+pagedown".into());
+        app.config
+            .direct_keybindings
+            .insert(Cmd::NewWorktree.id().into(), "ctrl+space".into());
         app.direct_keymap = crate::app::build_direct_keymap(&app.config.direct_keybindings);
         let mut term = Terminal::new(TestBackend::new(100, 32)).unwrap();
 
@@ -232,6 +237,14 @@ mod tests {
                     && !line.contains("Next tab")
             }),
             "only the collision winner is rendered for a direct chord"
+        );
+        assert_eq!(
+            initial_lines
+                .iter()
+                .map(|line| line.matches("Ctrl+Space").count())
+                .sum::<usize>(),
+            1,
+            "the title is the only visible prefix chord; a prefix-reserved direct binding is hidden"
         );
         assert!(
             initial_lines.iter().any(|line| {
