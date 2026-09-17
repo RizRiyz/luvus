@@ -78,11 +78,57 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
     // Workspace and branch are already present in Luvus chrome. Start content
     // immediately below the selector instead of spending a dock row repeating
     // that identity and DIFF progress.
-    let list_top = area.y + 1;
-    let cap = area.height.saturating_sub(1) as usize;
+    let mut list_top = area.y + 1;
+    let mut cap = area.height.saturating_sub(1) as usize;
     if app.files_mode == crate::diff::FilesMode::Diff {
         draw_diff_list(f, area, list_top, cap, app, t, &line_at);
         return;
+    }
+    if let Some(filter) = &app.file_tree.filter {
+        let status = if filter.loading {
+            " …"
+        } else if filter.partial {
+            " (partial)"
+        } else {
+            ""
+        };
+        line_at(
+            f,
+            list_top,
+            Line::from(Span::styled(
+                format!("f: {}{}", filter.query, status),
+                Style::new().fg(t.accent),
+            )),
+        );
+        line_at(
+            f,
+            list_top.saturating_add(1),
+            Line::from(Span::styled(
+                "Enter: actions · Esc: cancel",
+                Style::new().fg(t.overlay1),
+            )),
+        );
+        list_top = list_top.saturating_add(2);
+        cap = cap.saturating_sub(2);
+        if !filter.loading && filter.rows.is_empty() {
+            line_at(
+                f,
+                list_top,
+                Line::from(Span::styled(
+                    "No matching files",
+                    Style::new().fg(t.overlay1),
+                )),
+            );
+        }
+    } else if app.files_focused {
+        let hint = " f: find";
+        let x = diff_rect.right();
+        f.buffer_mut().set_line(
+            x,
+            area.y,
+            &Line::from(Span::styled(hint, Style::new().fg(t.overlay1))),
+            area.right().saturating_sub(x),
+        );
     }
     // Clamp scroll first (mutates `file_tree`), *then* borrow the memoized rows —
     // `visible_rows` returns a slice borrowing `file_tree`, so it must come after

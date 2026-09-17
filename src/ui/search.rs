@@ -207,7 +207,7 @@ pub(super) fn draw_search(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
     let loading = if search.loading { " · searching" } else { "" };
     let capped = if search.capped { " · partial" } else { "" };
     let footer = format!(
-        " {} result{}{}{}   ↑↓ select · tab scope · ⏎ open · esc close",
+        " {} result{}{}{}   ↑↓ select · tab scope · F2 actions · ⏎ open · esc close",
         search.total,
         if search.total == 1 { "" } else { "s" },
         loading,
@@ -310,6 +310,91 @@ mod tests {
             "the kind is aligned to the right: {row:?}"
         );
         assert!(!row.contains('·'), "result kinds do not use glyph icons");
+    }
+
+    #[test]
+    fn file_actions_render_over_the_finder_and_own_input() {
+        use crate::event::AppEvent;
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        let _env = crate::persist::test_env("finder-actions-layer");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let cwd = app.workspaces[0].cwd.clone();
+        let path = cwd.join("Cargo.toml");
+        app.open_search();
+        let search = app.search.as_mut().unwrap();
+        search.query = "Cargo".into();
+        search.results = vec![SearchMatch {
+            entry: SearchEntry::new(
+                "file:0:Cargo.toml".into(),
+                SearchKind::File,
+                "Cargo.toml".into(),
+                "workspace › Cargo.toml".into(),
+                [],
+                SearchTarget::File {
+                    ws: 0,
+                    path: path.clone(),
+                    workspace_cwd: cwd,
+                },
+                false,
+            ),
+            score: 1,
+            label_positions: Vec::new(),
+        }];
+        let area = Rect::new(0, 0, 120, 40);
+        let render = |app: &mut App| {
+            let mut buffer = Buffer::empty(area);
+            crate::ui::render_into(&mut RenderTarget::new(&mut buffer, area), app);
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        render(&mut app);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::F(2),
+            KeyModifiers::NONE,
+        )));
+        let screen = render(&mut app);
+        assert!(screen.contains("Cargo"), "finder query stays visible");
+        assert!(
+            screen.contains("Open in Tab"),
+            "menu renders above the finder"
+        );
+        app.handle_event(AppEvent::Paste("must-not-change-query".into()));
+        assert_eq!(app.search.as_ref().unwrap().query, "Cargo");
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.file_menu.is_none());
+        assert_eq!(app.search.as_ref().unwrap().query, "Cargo");
+        app.search_file_actions();
+        render(&mut app);
+        let rect = app
+            .file_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(item, _)| *item == crate::app::FileMenuItem::CopyPath)
+            .unwrap()
+            .1;
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(app.search.is_none());
+        assert!(app.file_menu.is_none());
+        assert_eq!(app.pending_clipboard.as_deref(), path.to_str());
     }
 
     #[test]

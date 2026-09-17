@@ -111,6 +111,12 @@ workspaces, tabs, panes, agents, file paths, and retained pane output. Use
 opens the selected target. A non-empty query needs one `Esc` to clear and a
 second `Esc` to close.
 
+For a file in the current session, `Alt+A`, `F2`, or right-click opens the
+same action menu as FILES: choose a native read-only tab or an available editor.
+Actions target the result's workspace. Plain `a` remains query text.
+The finder stays visible behind the menu; `Esc` dismisses only the menu and
+returns to the same query. Choosing an action closes the finder.
+
 Navigation results appear first. File, output, and other running-session
 results arrive in the same list without resetting the selected row. See the
 [Global Fuzzy Finder](/docs/guides/search/) guide for limits and CLI use.
@@ -136,6 +142,14 @@ Use arrows or `j` / `k` to move, `Enter` to open the selected row, `a` to
 open its right-click actions, and `Esc` or `q` to return input to the pane.
 AGENTS also accepts `f` for All / Active and `s` for all workspaces / this
 workspace. FILES additionally uses `h` / `l` to collapse or expand folders.
+Press `f` in FILES to fuzzy-filter workspace file paths, including files inside
+collapsed folders. Type a query, select with arrows, and press `Enter` to open
+the selected file's actions. Choosing an action clears the search and restores
+the original tree. `Esc` cancels the search from either the query or its action
+menu and restores your tree position. Another `Esc` leaves FILES.
+The filter uses the global finder's bounded index (Git tracked and unignored
+files, with a filesystem fallback), displays relative paths, and marks partial
+results when a limit is reached.
 After `Enter` opens a file view, `x` closes that view. An opened DIFF review
 closes with `q` or `Esc`.
 
