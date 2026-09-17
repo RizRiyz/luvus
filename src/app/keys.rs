@@ -650,6 +650,46 @@ impl DirectKeySpec {
         Some(Self { modifiers, code })
     }
 
+    /// Whether prefix dispatch consumes any event accepted by this direct chord.
+    pub fn is_reserved_by(&self, prefix: &PrefixSpec) -> bool {
+        prefix.matches(&KeyEvent::new(self.code, self.modifiers))
+            || self.matches(&prefix.key_event())
+    }
+
+    /// Canonical, user-facing label for the parsed semantic chord.
+    pub fn label(&self) -> String {
+        let mut parts = Vec::new();
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("Ctrl".to_string());
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            parts.push("Alt".to_string());
+        }
+        if self.modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("Shift".to_string());
+        }
+        parts.push(match self.code {
+            KeyCode::Left => "Left".to_string(),
+            KeyCode::Right => "Right".to_string(),
+            KeyCode::Up => "Up".to_string(),
+            KeyCode::Down => "Down".to_string(),
+            KeyCode::Home => "Home".to_string(),
+            KeyCode::End => "End".to_string(),
+            KeyCode::PageUp => "PageUp".to_string(),
+            KeyCode::PageDown => "PageDown".to_string(),
+            KeyCode::Tab => "Tab".to_string(),
+            KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Esc => "Esc".to_string(),
+            KeyCode::Delete => "Delete".to_string(),
+            KeyCode::Insert => "Insert".to_string(),
+            KeyCode::Char(' ') => "Space".to_string(),
+            KeyCode::Char(character) => character.to_ascii_uppercase().to_string(),
+            KeyCode::F(number) => format!("F{number}"),
+            _ => unreachable!("DirectKeySpec only stores supported keys"),
+        });
+        parts.join("+")
+    }
+
     fn matches(&self, key: &KeyEvent) -> bool {
         if key
             .modifiers
@@ -1302,10 +1342,16 @@ mod tests {
     fn direct_bindings_parse_semantic_modified_keys_only() {
         let alt = KeyModifiers::ALT;
         let right = DirectKeySpec::parse("alt+right").unwrap();
+        assert_eq!(right.label(), "Alt+Right");
+        assert!(!right.is_reserved_by(&PrefixSpec::parse("ctrl+space").unwrap()));
         assert!(right.matches(&KeyEvent::new(KeyCode::Right, alt)));
         assert!(!right.matches(&KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
         assert!(!right.matches(&KeyEvent::new(KeyCode::Left, alt)));
 
+        assert_eq!(
+            DirectKeySpec::parse("shift+ctrl+pagedown").unwrap().label(),
+            "Ctrl+Shift+PageDown"
+        );
         assert!(DirectKeySpec::parse("ctrl+alt+left").is_some());
         assert!(DirectKeySpec::parse("shift+f12").is_some());
         assert!(DirectKeySpec::parse("alt+space").is_some());
@@ -1314,6 +1360,11 @@ mod tests {
         assert_eq!(DirectKeySpec::parse("\x1b[1;3C"), None);
 
         let ctrl_space = DirectKeySpec::parse("ctrl+space").unwrap();
+        assert!(ctrl_space.is_reserved_by(&PrefixSpec::parse("ctrl+space").unwrap()));
+        assert!(ctrl_space.is_reserved_by(&PrefixSpec::parse("ctrl+@").unwrap()));
+        assert!(DirectKeySpec::parse("ctrl+@")
+            .unwrap()
+            .is_reserved_by(&PrefixSpec::parse("ctrl+space").unwrap()));
         assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)));
         assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Null, KeyModifiers::CONTROL)));
         assert!(ctrl_space.matches(&KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL)));
