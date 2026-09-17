@@ -9448,10 +9448,12 @@ safe=$(printf '%s' "$branch" | tr '/ ' '--')
 target="$(dirname "$repo")/wt-$safe"
 git -C "$repo" worktree add -q $create "$branch" "$target"
 if [ "$branch" = post-create-error ]; then
+  printf '%s\n' 'uncommitted provider work' > "$target/uncommitted.txt"
   printf '%s\n' 'provider failed after creating the worktree' >&2
   exit 2
 fi
 if [ "$branch" = invalid-json ]; then
+  printf '%s\n' 'uncommitted provider work' > "$target/uncommitted.txt"
   printf '%s\n' 'provider log on stdout'
   exit 0
 fi
@@ -9777,9 +9779,20 @@ fi
                 "worktree.create",
                 serde_json::json!({"branch":branch}),
             );
-            assert!(failed["error"]["message"].is_string(), "{failed}");
-            assert!(!base.join(format!("wt-{branch}")).exists());
-            assert!(!crate::git::local::branch_exists(&repo, branch));
+            let message = failed["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains("ownership could not be proven"),
+                "{failed}"
+            );
+            let orphan = base.join(format!("wt-{branch}"));
+            assert!(orphan.exists());
+            assert_eq!(
+                std::fs::read_to_string(orphan.join("uncommitted.txt")).unwrap(),
+                "uncommitted provider work\n"
+            );
+            assert!(crate::git::local::branch_exists(&repo, branch));
+            crate::git::local::worktree_remove_force(&repo, &orphan).unwrap();
+            crate::git::local::branch_delete_force(&repo, branch).unwrap();
         }
 
         let expected_revision = crate::ipc::api::current_sequence(&app.events);

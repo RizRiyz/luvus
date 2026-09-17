@@ -112,25 +112,23 @@ fn run_create(
     ) {
         Ok(stdout) => stdout,
         Err(error) => {
-            reconcile_failed_creation(
+            return Err(describe_unowned_creation(
+                error,
                 &request.repo,
                 &request.branch,
-                !branch_exists,
                 &existing_worktrees,
-            );
-            return Err(error);
+            ));
         }
     };
     let path = match parse_provider_output(stdout.as_bytes()) {
         Ok(path) => path,
         Err(error) => {
-            reconcile_failed_creation(
+            return Err(describe_unowned_creation(
+                error,
                 &request.repo,
                 &request.branch,
-                !branch_exists,
                 &existing_worktrees,
-            );
-            return Err(error);
+            ));
         }
     };
     if let Err(error) = validate_bounded(&request.repo, &path, &request.branch, cancelled) {
@@ -420,17 +418,17 @@ fn bounded_branch_exists(
     }
 }
 
-fn reconcile_failed_creation(
+fn describe_unowned_creation(
+    error: String,
     repo: &Path,
     branch: &str,
-    branch_created: bool,
     existing_worktrees: &[PathBuf],
-) {
+) -> String {
     use std::sync::atomic::AtomicBool;
 
-    let cleanup = AtomicBool::new(false);
-    let Ok(current) = bounded_worktree_paths_for(repo, &cleanup, GIT_PROBE_TIMEOUT) else {
-        return;
+    let probe = AtomicBool::new(false);
+    let Ok(current) = bounded_worktree_paths_for(repo, &probe, GIT_PROBE_TIMEOUT) else {
+        return error;
     };
     let candidates = current
         .into_iter()
@@ -439,16 +437,20 @@ fn reconcile_failed_creation(
             bounded_git_for(
                 path,
                 &["symbolic-ref", "--quiet", "--short", "HEAD"],
-                &cleanup,
+                &probe,
                 GIT_PROBE_TIMEOUT,
             )
             .is_ok_and(|actual| actual.trim() == branch)
         })
+        .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
-    let [path] = candidates.as_slice() else {
-        return;
-    };
-    cleanup_failed_creation(repo, path, branch, branch_created, existing_worktrees);
+    if candidates.is_empty() {
+        return error;
+    }
+    format!(
+        "{error}; worktree creation may have completed at {} — left untouched because ownership could not be proven",
+        candidates.join(", ")
+    )
 }
 
 fn bounded_git_for(
