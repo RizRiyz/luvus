@@ -533,7 +533,10 @@ rejection queues neither text nor Enter. Read the visible agent output and use
 For explicit key interactions, `agent.read` adds `content_revision` (the pane's
 PTY output counter) and `terminal_id` (32 lowercase hexadecimal characters for
 that PTY lifetime) alongside `text`. Text and coordinates are captured under the
-same engine lock for both `source:"visible"` and recent output. A deferred pane
+same engine lock for both `source:"visible"` and recent output. `source:"visible"`
+returns the **live** screen: it reports what the agent is painting now and never
+follows the pane's scrollback position, so a read taken while someone is scrolled
+back into an earlier turn still describes the frame the fenced keys will land on. A deferred pane
 without a runtime has `terminal_id:null`; an unavailable engine snapshot returns
 empty text and null coordinates. These fields are additive: legacy results stay
 valid. The response's generic `revision` is a global event sequence and is not
