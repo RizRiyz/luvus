@@ -26,6 +26,60 @@ pub struct SearchFlash {
     pub row: u16,
     pub scroll: usize,
     pub until: std::time::Instant,
+    /// Display-cell span of the current match on `row`, when known.
+    pub span: Option<(u16, u16)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PaneSearchMatch {
+    pub row: usize,
+    pub offset: usize,
+    pub above: usize,
+    pub col: usize,
+    pub width: usize,
+}
+
+/// First case-insensitive match of `query` in `line`, as display-cell column
+/// and width so terminal rendering can highlight the same cells.
+pub(super) fn match_display_span(line: &str, query: &str) -> Option<(usize, usize)> {
+    use unicode_width::UnicodeWidthChar;
+    let needle: Vec<char> = query.chars().collect();
+    if needle.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() < needle.len() {
+        return None;
+    }
+    let width_of = |slice: &[char]| {
+        slice
+            .iter()
+            .map(|ch| ch.width().unwrap_or(0))
+            .sum::<usize>()
+    };
+    for start in 0..=chars.len() - needle.len() {
+        if chars[start..start + needle.len()]
+            .iter()
+            .zip(needle.iter())
+            .all(|(hay, query_ch)| hay.to_lowercase().eq(query_ch.to_lowercase()))
+        {
+            return Some((
+                width_of(&chars[..start]),
+                width_of(&chars[start..start + needle.len()]).max(1),
+            ));
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug)]
+pub struct PaneSearch {
+    pub pane: PaneId,
+    pub query: String,
+    pub editing: bool,
+    pub matches: Vec<PaneSearchMatch>,
+    pub current: usize,
+    pub saved_scroll: usize,
 }
 
 pub struct LegacySearchHit {
@@ -997,7 +1051,7 @@ impl App {
         }
     }
 
-    fn activate_output(
+    pub(super) fn activate_output(
         &mut self,
         pane_id: PaneId,
         old_row: usize,
@@ -1029,6 +1083,16 @@ impl App {
             }
             None => return,
         };
+        self.reveal_output_position(pane_id, offset, above, None);
+    }
+
+    pub(super) fn reveal_output_position(
+        &mut self,
+        pane_id: PaneId,
+        offset: usize,
+        above: usize,
+        span: Option<(u16, u16)>,
+    ) {
         if let Some(pane) = self.panes.get(&pane_id) {
             pane.scroll_to(offset);
         }
@@ -1045,6 +1109,7 @@ impl App {
                     row: row as u16,
                     scroll: offset,
                     until: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                    span,
                 });
             }
         }
@@ -2107,5 +2172,15 @@ mod tests {
         app.open_file_search_result(path);
         assert_eq!(app.workspaces[0].tabs.len(), tabs_after);
         assert_eq!(app.layout().focus, file_tab_view, "the whole tab is reused");
+    }
+
+    #[test]
+    fn match_display_span_is_case_insensitive_and_uses_display_cells() {
+        assert_eq!(
+            match_display_span("hello Needle world", "needle"),
+            Some((6, 6))
+        );
+        assert_eq!(match_display_span("nope", "needle"), None);
+        assert_eq!(match_display_span("前Needle后", "needle"), Some((2, 6)));
     }
 }
