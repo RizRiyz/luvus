@@ -295,6 +295,13 @@ impl App {
             let lines = p.get("lines").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
             // `visible` = the current screen; anything else = recent output
             // (soft wraps joined), the default and best for transcripts.
+            //
+            // `screen_rows`, never `visible_rows`: the caller is inspecting what
+            // the agent is showing now, and fences `agent.keys` on the revision
+            // returned beside it. A viewport-relative read hands back an old
+            // composer or dialog whenever the pane is scrolled back, while the
+            // revision keeps advancing on live output — so every fenced key
+            // would be admitted against a frame that is not on the screen (#395).
             let source = p.get("source").and_then(|v| v.as_str()).unwrap_or("recent");
             let (text, content_revision, terminal_id) = self
                 .panes
@@ -302,7 +309,7 @@ impl App {
                 .and_then(|pane| {
                     pane.engine.lock().ok().map(|e| {
                         let text = if source == "visible" {
-                            e.visible_rows().join("\n")
+                            e.screen_rows().join("\n")
                         } else {
                             e.detection_text(lines)
                         };

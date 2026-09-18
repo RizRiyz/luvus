@@ -327,7 +327,9 @@ invalid entry sends nothing, and a closed target returns `send_failed`.
 
 For UHP interactions that must match the inspected screen, use `agent.read`
 with `source:"visible"` and pass its `content_revision` as `if_content_revision`
-together with its `terminal_id` in `agent.keys` params. The revision is a
+together with its `terminal_id` in `agent.keys` params. A `visible` read is the
+live screen, not the pane's scrollback viewport, so it stays valid while someone
+is scrolled back through an earlier turn. The revision is a
 non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
 Both fields are optional as a pair; a one-sided or malformed pair is
 `invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.

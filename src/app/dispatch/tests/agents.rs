@@ -2196,3 +2196,51 @@ fn content_fence_unavailable_engine_queues_nothing() {
     // Clear poison so unrelated teardown does not inherit the fixture failure.
     engine.clear_poison();
 }
+
+/// docs/07 / #395: `agent.read --source visible` describes the live screen.
+/// Scrollback keeps old composers and dialogs, and the `content_revision`
+/// returned with the text advances on live output, so a viewport-relative read
+/// would fence `agent.keys` against a frame that is no longer on the terminal.
+#[test]
+fn agent_read_visible_reports_the_live_screen_not_the_scrollback_viewport() {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let id = app.layout().focus;
+    let pane = app.panes.get(&id).expect("focus pane");
+    {
+        let mut engine = pane.engine.lock().unwrap();
+        engine.advance(b"> STALE_COMPOSER\r\n");
+        for i in 0..60 {
+            engine.advance(format!("output line {i}\r\n").as_bytes());
+        }
+        engine.advance(b"> LIVE_COMPOSER");
+    }
+    // Scroll the old composer back into view, as a user inspecting an earlier
+    // turn leaves it.
+    pane.scroll(60);
+    assert!(
+        pane.engine
+            .lock()
+            .unwrap()
+            .visible_rows()
+            .join("\n")
+            .contains("STALE_COMPOSER"),
+        "precondition: the viewport is parked on the old frame"
+    );
+
+    let out = app
+        .dispatch(
+            "agent.read",
+            &json!({"target": id.0.to_string(), "source": "visible"}),
+        )
+        .expect("agent.read ok");
+    let text = out["text"].as_str().unwrap();
+    assert!(
+        text.contains("LIVE_COMPOSER"),
+        "visible read returns the live screen, got:\n{text}"
+    );
+    assert!(
+        !text.contains("STALE_COMPOSER"),
+        "visible read never returns the scrolled-back frame, got:\n{text}"
+    );
+}

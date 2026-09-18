@@ -7025,7 +7025,7 @@ mod link_click_tests {
             let pane = app.panes.get(&pane).expect("pane");
             let engine = pane.engine.lock().expect("engine");
             engine
-                .visible_rows()
+                .screen_rows()
                 .iter()
                 .position(|row| row.trim_end() == "你好，hello.")
                 .expect("visible fixture row")
