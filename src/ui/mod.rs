@@ -562,6 +562,7 @@ pub(crate) fn retained_pty_eligible(app: &App) -> bool {
         && app.copy_mode.is_none()
         && app.hover_link.is_none()
         && app.search_flash.is_none()
+        && app.pane_search.is_none()
         && app.settings.is_none()
         && app.picker.is_none()
         && !app.help_open

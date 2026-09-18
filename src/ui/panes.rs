@@ -496,7 +496,12 @@ fn draw_one_pane(
         .search_flash
         .as_ref()
         .filter(|fl| fl.pane == id)
-        .map(|fl| (fl.row, fl.scroll));
+        .map(|fl| (fl.row, fl.scroll, fl.span));
+    let pane_query = app
+        .pane_search
+        .as_ref()
+        .filter(|search| search.pane == id && !search.editing && !search.query.is_empty())
+        .map(|search| search.query.clone());
     let mut scrolled = 0usize;
     let agent = app.status.get(&id).map(|s| s.agent.as_str()).unwrap_or("");
     let is_codex = agent == "codex";
@@ -604,11 +609,27 @@ fn draw_one_pane(
         );
     }
 
-    // The search-jump flash band (docs/63): recolor the landed row's background
-    // full width, keeping the text, so it reads as a highlighted line. Only while
-    // the pane is still at the offset we jumped to, so a scroll or new output
-    // (which changes `scrolled`) hides it instead of banding the wrong line.
-    if let Some((fr, fscroll)) = flash {
+    // Pane-local search highlights the matched word from the painted cells so
+    // columns stay aligned with wide glyphs. The current hit uses accent; other
+    // visible hits use amber. Global finder jumps without a query keep the row band.
+    if let Some(query) = pane_query.as_deref() {
+        let current_y = flash
+            .filter(|(fr, fscroll, _)| *fr < content.height && scrolled == *fscroll)
+            .map(|(fr, _, _)| content.y + fr);
+        let buf = f.buffer_mut();
+        for vis in 0..content.height {
+            let y = content.y + vis;
+            highlight_query_on_row(
+                buf,
+                y,
+                content.x,
+                content.right(),
+                query,
+                current_y == Some(y),
+                t,
+            );
+        }
+    } else if let Some((fr, fscroll, _)) = flash {
         if fr < content.height && scrolled == fscroll {
             let y = content.y + fr;
             let buf = f.buffer_mut();
@@ -653,6 +674,52 @@ fn pane_ime_cursor(content: Rect, cur: crate::terminal::vt::Cursor) -> Option<(u
         return None;
     }
     Some((content.x + cur.x, content.y + cur.y, cur.visible))
+}
+
+fn highlight_query_on_row(
+    buf: &mut ratatui::buffer::Buffer,
+    y: u16,
+    x0: u16,
+    x1: u16,
+    query: &str,
+    current: bool,
+    t: &Theme,
+) {
+    let needle: Vec<char> = query.chars().collect();
+    if needle.is_empty() {
+        return;
+    }
+    let mut cells: Vec<(u16, char)> = Vec::new();
+    for x in x0..x1 {
+        let Some(cell) = buf.cell((x, y)) else {
+            continue;
+        };
+        let symbol = cell.symbol();
+        if symbol.is_empty() {
+            continue;
+        }
+        for ch in symbol.chars() {
+            cells.push((x, ch));
+        }
+    }
+    if cells.len() < needle.len() {
+        return;
+    }
+    let background = if current { t.accent } else { t.amber };
+    for start in 0..=cells.len() - needle.len() {
+        if cells[start..start + needle.len()]
+            .iter()
+            .zip(needle.iter())
+            .all(|((_, hay), query_ch)| hay.to_lowercase().eq(query_ch.to_lowercase()))
+        {
+            for (x, _) in &cells[start..start + needle.len()] {
+                if let Some(cell) = buf.cell_mut((*x, y)) {
+                    cell.set_bg(background);
+                    cell.set_fg(t.base);
+                }
+            }
+        }
+    }
 }
 
 fn terminal_cell_style(
@@ -884,5 +951,21 @@ mod tests {
             links.iter().find(|link| link.pane == other).unwrap().end,
             18
         );
+    }
+
+    #[test]
+    fn pane_search_highlights_the_matched_word_not_the_whole_row() {
+        let t = Theme::noir();
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        for (column, ch) in "hello Needle world".chars().enumerate() {
+            buf[(column as u16, 0)].set_symbol(&ch.to_string());
+        }
+        highlight_query_on_row(&mut buf, 0, 0, 20, "needle", true, &t);
+        assert_eq!(buf[(5, 0)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(6, 0)].bg, t.accent);
+        assert_eq!(buf[(11, 0)].bg, t.accent);
+        assert_eq!(buf[(12, 0)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(6, 0)].fg, t.base);
     }
 }

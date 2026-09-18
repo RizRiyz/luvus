@@ -46,7 +46,23 @@ plain keys navigate without reaching the program in the pane:
 | `j` / `k` (or `↓`/`↑`) | line down / up |
 | `f` / `b` (or Space/PageDn/PageUp) | page down / up |
 | `g` / `G` | top of history / live bottom |
+| `/` | search retained output in this exact PTY pane |
 | `q`, `Esc`, `0`, or just typing | back to live |
+
+The inline `/` search is owned by Luvus, so query and navigation keys never
+reach the child process. Type a query and press **Enter** to jump to the first
+case-insensitive match at or after the current viewport (wrapping to the oldest
+match when needed). Matches are highlighted in place like FILE search: the
+current word uses the accent color, and other visible hits use amber. Press
+**`n`** / **`N`** for the next / previous match; both wrap within that pane's
+retained rows. **Esc** while editing or after committing
+cancels the search and restores the viewport from before `/`, leaving keyboard
+scroll mode active; press **Esc** again to return to live output. A no-match
+query remains active as `0/0` until canceled.
+
+This pane-local search is separate from the prefix **global fuzzy finder**. The
+configured prefix followed by `/` still searches sessions, workspaces, tabs,
+panes, agents, files, and retained output across the selected Luvus home.
 
 While scrolled, a **`↑N` badge** at the pane's top-right shows how many lines
 up you are, and anything you type snaps back to live first, so you always see

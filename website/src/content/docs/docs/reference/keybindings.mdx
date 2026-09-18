@@ -106,7 +106,12 @@ direct workspace jumps are therefore unbound under that preset until reassigned.
 
 ## The global fuzzy finder
 
-`/` opens one finder across the selected Luvus home. It ranks named sessions,
+The configured prefix followed by `/` opens one finder across the selected
+Luvus home. A plain `/` while [keyboard scroll mode](/docs/guides/scrollback/)
+is active instead searches retained output only in that exact PTY pane. This
+pane-local binding does not replace or remap the global finder.
+
+The global finder ranks named sessions,
 workspaces, tabs, panes, agents, file paths, and retained pane output. Use
 `Tab` or `Shift+Tab` to move through **All**, **Navigate**, **Files**, and
 **Output**. `Ctrl+i` toggles case-sensitive retained-output matching. `Enter`
@@ -136,7 +141,10 @@ click.
 
 ## Focused modes and menus
 
-`Shift+↑` enters [scroll mode](/docs/guides/scrollback/). The built-in sidebar
+`Shift+↑` enters [scroll mode](/docs/guides/scrollback/). While it is active,
+plain `/` opens a case-insensitive retained-output search for the bound PTY;
+`Enter` commits, `n` / `N` wrap through matches, and `Esc` cancels back to the
+pre-search viewport. The built-in sidebar
 lists have matching focus commands: `Ctrl+Space w` for WORKSPACES,
 `Ctrl+Space a` for AGENTS, `Ctrl+Space e` for FILES, and `Ctrl+Space i` for
 DIFF. The Sessions selector at `Ctrl+Space t` follows the same keyboard model.

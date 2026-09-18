@@ -51,6 +51,9 @@ pub(crate) mod session_menu;
 mod settings;
 mod switcher;
 
+pub(crate) use search::PaneSearch;
+#[cfg(test)]
+pub(crate) use search::PaneSearchMatch;
 pub use search::{GlobalSearch, SearchFlash};
 
 #[cfg(test)]
@@ -2847,6 +2850,8 @@ pub struct App {
     pub switcher_close_rect: Option<Rect>,
     /// The global scrollback-search overlay (docs/63). `Some` => it owns input.
     pub search: Option<GlobalSearch>,
+    /// Inline retained-output search bound to the exact PTY in scroll mode.
+    pub(crate) pane_search: Option<PaneSearch>,
     /// A brief highlight of the line a search jump landed on (docs/63).
     pub search_flash: Option<SearchFlash>,
     /// Native **view panes** (docs/38 FILE-3): a leaf id maps to a non-PTY
@@ -2898,8 +2903,9 @@ pub struct App {
     pub(crate) rendered_hyperlinks: Vec<RenderedHyperlink>,
     /// When `Some`, keyboard **scroll mode** is active on this pane: plain keys
     /// scroll its scrollback (see `handle_scroll_mode_key`) instead of reaching
-    /// the agent. Entered by wheel-up or `Shift+↑`; left by `q`/typing. A
-    /// Mac-friendly path that needs no `Ctrl+Space` prefix.
+    /// the agent. Entered by wheel-up or `Shift+↑`; `/` starts an inline search
+    /// bound to this PTY; left by `q`/typing. A Mac-friendly path that needs no
+    /// `Ctrl+Space` prefix.
     pub scroll_pane: Option<PaneId>,
     /// Active pane-divider resize drag (docs/27, RESIZE-2); `None` when idle.
     pub resize_drag: Option<ResizeDrag>,
@@ -3366,6 +3372,7 @@ impl App {
             compact: false,
             switcher: false,
             search: None,
+            pane_search: None,
             search_flash: None,
             switcher_cursor: 0,
             switcher_scroll: 0,
@@ -4059,6 +4066,7 @@ impl App {
             compact: false,
             switcher: false,
             search: None,
+            pane_search: None,
             search_flash: None,
             switcher_cursor: 0,
             switcher_scroll: 0,
@@ -7882,6 +7890,7 @@ impl App {
         self.active_ws = workspace;
         self.workspaces[workspace].active_tab = tab;
         self.workspaces[workspace].tabs[tab].layout.focus = id;
+        self.cancel_pane_search();
         self.scroll_pane = None;
         self.mode = Mode::Normal;
     }
@@ -8346,6 +8355,13 @@ impl App {
         self.preview_views.remove(&id); // forget a closed reusable preview pane
         if self.scroll_pane == Some(id) {
             self.scroll_pane = None; // don't leave scroll mode pointing at a dead pane
+        }
+        if self
+            .pane_search
+            .as_ref()
+            .is_some_and(|search| search.pane == id)
+        {
+            self.pane_search = None;
         }
         if self.copy_mode.is_some_and(|copy| copy.pane == id) {
             self.copy_mode = None; // the pane is gone; there is no viewport to restore

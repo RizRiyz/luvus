@@ -732,6 +732,14 @@ impl App {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
+                // Inline pane search owns pasted query text just like typed text;
+                // it must never reach the PTY underneath.
+                if let Some(search) = self.pane_search.as_mut() {
+                    if search.editing {
+                        search.query.extend(s.chars().filter(|ch| !ch.is_control()));
+                    }
+                    return true;
+                }
                 // Copy mode owns input just like scroll mode: never leak a
                 // pasted command into the pane while the user is selecting.
                 if self.copy_mode.is_some() {
@@ -1327,6 +1335,13 @@ impl App {
         use ratatui::crossterm::event::MouseEventKind;
 
         let kind = m.kind;
+        // Pane search is keyboard-owned too. A deliberate mouse action cancels
+        // it back to its saved viewport and is swallowed, so neither focus nor
+        // terminal mouse reporting can escape the pane-bound search.
+        if self.pane_search.is_some() && !matches!(kind, MouseEventKind::Moved) {
+            self.cancel_pane_search();
+            return true;
+        }
         // Copy mode is keyboard-owned. Any deliberate mouse action cancels it
         // and restores its saved viewport rather than forwarding a click/wheel
         // into the child while a selection is active.
@@ -3003,8 +3018,8 @@ impl App {
     /// Handle one key while in keyboard scroll mode; always consumes it. Plain
     /// keys navigate the focused pane's scrollback and never reach the agent:
     /// `j`/`k`/arrows = lines, `f`/`b`/Space/PageUp/Down = pages, `g`/`G` =
-    /// top/live, `1`–`9` = jump (1 oldest … 9 newest), `0`/`G`/`q`/`Esc`/typing =
-    /// back to live. See [`App::scroll_pane`].
+    /// top/live, `1`–`9` = jump (1 oldest … 9 newest), `/` = pane-local search,
+    /// and `0`/`G`/`q`/`Esc`/typing = back to live. See [`App::scroll_pane`].
     /// Keyboard resize mode (docs/27, RESIZE-3): arrows / `hjkl` resize the
     /// focused pane, `=`/`0` equalize, anything else (`Esc`/`Enter`/`q`/…) exits.
     fn handle_resize_mode_key(&mut self, key: KeyEvent) -> bool {
@@ -3034,11 +3049,152 @@ impl App {
         true
     }
 
+    fn begin_pane_search(&mut self, pane: PaneId) {
+        let saved_scroll = self
+            .panes
+            .get(&pane)
+            .map(|pane| pane.scroll_state().0)
+            .unwrap_or(0);
+        self.search_flash = None;
+        self.pane_search = Some(super::search::PaneSearch {
+            pane,
+            query: String::new(),
+            editing: true,
+            matches: Vec::new(),
+            current: 0,
+            saved_scroll,
+        });
+    }
+
+    fn commit_pane_search(&mut self) {
+        let Some((pane_id, query, saved_scroll)) = self
+            .pane_search
+            .as_ref()
+            .map(|search| (search.pane, search.query.clone(), search.saved_scroll))
+        else {
+            return;
+        };
+        if query.is_empty() {
+            self.pane_search = None;
+            return;
+        }
+        let mut matches = Vec::new();
+        if let Some(pane) = self.panes.get(&pane_id) {
+            pane.for_each_retained_row(&mut |row, history, row_count, line| {
+                let Some((col, width)) = super::search::match_display_span(line, &query) else {
+                    return;
+                };
+                matches.push(super::search::PaneSearchMatch {
+                    row,
+                    offset: history.saturating_sub(row),
+                    above: row_count.saturating_sub(1).saturating_sub(row),
+                    col,
+                    width,
+                });
+            });
+        }
+        let viewport_top = self
+            .panes
+            .get(&pane_id)
+            .map(|pane| pane.scroll_state().1.saturating_sub(saved_scroll))
+            .unwrap_or(0);
+        let current = matches
+            .iter()
+            .position(|search_match| search_match.row >= viewport_top)
+            .unwrap_or(0);
+        self.pane_search = Some(super::search::PaneSearch {
+            pane: pane_id,
+            query,
+            editing: false,
+            matches,
+            current,
+            saved_scroll,
+        });
+        self.reveal_current_pane_search_match();
+    }
+
+    fn reveal_current_pane_search_match(&mut self) {
+        let target = self.pane_search.as_ref().and_then(|search| {
+            search.matches.get(search.current).map(|search_match| {
+                (
+                    search.pane,
+                    search_match.offset,
+                    search_match.above,
+                    (
+                        search_match.col.min(u16::MAX as usize) as u16,
+                        search_match.width.min(u16::MAX as usize) as u16,
+                    ),
+                )
+            })
+        });
+        if let Some((pane, offset, above, span)) = target {
+            self.reveal_output_position(pane, offset, above, Some(span));
+        }
+    }
+
+    fn step_pane_search(&mut self, forward: bool) {
+        let Some(search) = self
+            .pane_search
+            .as_mut()
+            .filter(|search| !search.editing && !search.matches.is_empty())
+        else {
+            return;
+        };
+        let count = search.matches.len();
+        search.current = if forward {
+            (search.current + 1) % count
+        } else {
+            (search.current + count - 1) % count
+        };
+        self.reveal_current_pane_search_match();
+    }
+
+    pub(super) fn cancel_pane_search(&mut self) {
+        if let Some(search) = self.pane_search.take() {
+            if let Some(pane) = self.panes.get(&search.pane) {
+                pane.scroll_to(search.saved_scroll);
+            }
+        }
+        self.search_flash = None;
+    }
+
+    fn handle_pane_search_key(&mut self, key: KeyEvent) -> bool {
+        let editing = self
+            .pane_search
+            .as_ref()
+            .is_some_and(|search| search.editing);
+        match key.code {
+            KeyCode::Esc => self.cancel_pane_search(),
+            KeyCode::Enter if editing => self.commit_pane_search(),
+            KeyCode::Backspace if editing => {
+                if let Some(search) = self.pane_search.as_mut() {
+                    search.query.pop();
+                }
+            }
+            KeyCode::Char('n') if !editing => self.step_pane_search(true),
+            KeyCode::Char('N') if !editing => self.step_pane_search(false),
+            KeyCode::Char(ch) if editing && !super::keys::is_ctrl_chord(key.modifiers) => {
+                if let Some(search) = self.pane_search.as_mut() {
+                    search.query.push(ch);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
     fn handle_scroll_mode_key(&mut self, key: KeyEvent) -> bool {
         let Some(id) = self.scroll_pane else {
             return false;
         };
+        if self.pane_search.is_some() {
+            return self.handle_pane_search_key(key);
+        }
         let page = self.focused_page();
+        if key.code == KeyCode::Char('/') {
+            self.begin_pane_search(id);
+            return true;
+        }
         let newline = self.config.shift_enter_bytes();
         let mut exit = false;
         if let Some(pane) = self.panes.get(&id) {
@@ -3090,6 +3246,7 @@ impl App {
             exit = true; // the pane vanished
         }
         if exit {
+            self.cancel_pane_search();
             self.scroll_pane = None;
         }
         true
@@ -3104,6 +3261,7 @@ impl App {
         };
         let (offset, history) = pane.scroll_state();
         self.clear_selection();
+        self.cancel_pane_search();
         self.scroll_pane = None;
         self.copy_mode = Some(CopyMode {
             pane: id,
@@ -3863,7 +4021,12 @@ impl App {
             .scroll_pane
             .is_some_and(|scrolling| scrolling != self.layout().focus)
         {
+            let search_owned_input = self.pane_search.is_some();
+            self.cancel_pane_search();
             self.scroll_pane = None;
+            if search_owned_input {
+                return true;
+            }
         }
         // Copy mode belongs to its pane just like scroll mode. A focus change
         // cancels it rather than risking keys or a clipboard operation targeting
@@ -4679,6 +4842,181 @@ fn csi_tilde_key(code: u8, modifiers: KeyModifiers) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::terminal::keyboard::KittyKeyboardFlags;
+
+    fn plain(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)
+    }
+
+    fn add_scrollback(app: &App, pane: PaneId, lines: &[&str]) {
+        let pane = app.panes.get(&pane).expect("pane");
+        let mut engine = pane.engine.lock().expect("engine");
+        for line in lines {
+            engine.advance(format!("{line}\r\n").as_bytes());
+        }
+        for index in 0..40 {
+            engine.advance(format!("filler {index}\r\n").as_bytes());
+        }
+    }
+
+    fn enter_search(app: &mut App) {
+        assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::SHIFT,
+        ))));
+        assert!(app.handle_event(AppEvent::Key(plain('/'))));
+    }
+
+    #[test]
+    fn pane_search_is_scoped_and_cancelled_when_focus_changes() {
+        let _env = crate::persist::test_env("pane-search-scope");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        add_scrollback(&app, first, &["first needle"]);
+        app.run_cmd(crate::app::Cmd::SplitRight);
+        let second = app.layout().focus;
+        add_scrollback(&app, second, &["second needle"]);
+        app.layout_mut().focus = first;
+
+        enter_search(&mut app);
+        for character in "needle".chars() {
+            app.handle_event(AppEvent::Key(plain(character)));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let search = app.pane_search.as_ref().unwrap();
+        assert_eq!(search.pane, first);
+        assert_eq!(search.matches.len(), 1, "other pane output is excluded");
+        assert_eq!(
+            (search.matches[0].col, search.matches[0].width),
+            (6, 6),
+            "the hit is the first pane's needle, not the sibling"
+        );
+
+        app.layout_mut().focus = second;
+        app.handle_event(AppEvent::Key(plain('x')));
+        assert!(app.pane_search.is_none());
+        assert!(app.scroll_pane.is_none());
+    }
+
+    #[test]
+    fn pane_search_navigation_wraps_in_both_directions() {
+        let _env = crate::persist::test_env("pane-search-wrap");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        add_scrollback(&app, pane, &["hit alpha", "skip", "hit beta"]);
+        enter_search(&mut app);
+        for character in "HIT".chars() {
+            app.handle_event(AppEvent::Key(plain(character)));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.pane_search.as_ref().unwrap().matches.len(), 2);
+        let first = app.pane_search.as_ref().unwrap().current;
+        app.handle_event(AppEvent::Key(plain('N')));
+        assert_eq!(app.pane_search.as_ref().unwrap().current, (first + 1) % 2);
+        app.handle_event(AppEvent::Key(plain('n')));
+        assert_eq!(app.pane_search.as_ref().unwrap().current, first);
+        app.handle_event(AppEvent::Key(plain('n')));
+        assert_eq!(app.pane_search.as_ref().unwrap().current, (first + 1) % 2);
+    }
+
+    #[test]
+    fn pane_search_no_match_and_escape_restore_scroll_mode_viewport() {
+        let _env = crate::persist::test_env("pane-search-cancel");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        add_scrollback(&app, pane, &["haystack"]);
+        app.panes.get(&pane).unwrap().scroll(6);
+        let saved = app.panes.get(&pane).unwrap().scroll_state().0;
+        app.scroll_pane = Some(pane);
+        app.handle_event(AppEvent::Key(plain('/')));
+        for character in "missing".chars() {
+            app.handle_event(AppEvent::Key(plain(character)));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.pane_search.as_ref().unwrap().matches.is_empty());
+        assert_eq!(app.panes.get(&pane).unwrap().scroll_state().0, saved);
+
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.pane_search.is_none());
+        assert_eq!(app.scroll_pane, Some(pane));
+        assert_eq!(app.panes.get(&pane).unwrap().scroll_state().0, saved);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.scroll_pane.is_none());
+        assert_eq!(app.panes.get(&pane).unwrap().scroll_state().0, 0);
+    }
+
+    #[test]
+    fn pane_search_owns_keys_and_paste_without_pty_leaks() {
+        let _env = crate::persist::test_env("pane-search-input-owner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        add_scrollback(&app, pane, &["needle one", "needle two"]);
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        enter_search(&mut app);
+        app.handle_event(AppEvent::Paste("needle".into()));
+        assert_eq!(app.pane_search.as_ref().unwrap().query, "needle");
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(AppEvent::Key(plain('n')));
+        app.handle_event(AppEvent::Key(plain('N')));
+        app.handle_event(AppEvent::Paste("must not leak".into()));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(input_rx.try_recv().is_err(), "search input reached the PTY");
+    }
+
+    #[test]
+    fn pane_search_flash_spans_the_matched_word() {
+        let _env = crate::persist::test_env("pane-search-word-span");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        add_scrollback(&app, pane, &["hello Needle world"]);
+        app.pane_content_rects = vec![(pane, ratatui::layout::Rect::new(0, 0, 80, 24))];
+        app.scroll_pane = Some(pane);
+        app.handle_event(AppEvent::Key(plain('/')));
+        for character in "needle".chars() {
+            app.handle_event(AppEvent::Key(plain(character)));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let hit = &app.pane_search.as_ref().unwrap().matches[0];
+        assert_eq!((hit.col, hit.width), (6, 6));
+        assert_eq!(
+            app.search_flash.as_ref().and_then(|flash| flash.span),
+            Some((6, 6)),
+            "the landed-row flash must mark the selected word"
+        );
+    }
 
     #[test]
     fn task_prompt_paste_preserves_normalized_newlines() {

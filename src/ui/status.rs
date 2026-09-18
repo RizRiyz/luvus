@@ -92,12 +92,38 @@ pub(super) fn draw_status(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
 fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
     let cat = app.catalog;
     let mut left = vec![Span::raw(" ")];
+    if let Some(search) = app.pane_search.as_ref() {
+        left.push(mode_label(&cat.act_search.to_uppercase(), t));
+        left.push(Span::raw("  "));
+        let query = if search.editing {
+            format!("/{}▏", search.query)
+        } else if search.matches.is_empty() {
+            format!("/{} 0/0", search.query)
+        } else {
+            format!(
+                "/{} {}/{}",
+                search.query,
+                search.current + 1,
+                search.matches.len()
+            )
+        };
+        left.push(Span::styled(query, Style::new().fg(t.text).bold()));
+        left.push(Span::raw("  "));
+        if search.editing {
+            left.extend(hint("Enter", cat.act_select, t));
+        } else if !search.matches.is_empty() {
+            left.extend(hint("n/N", cat.act_move, t));
+        }
+        left.extend(hint("Esc", cat.act_cancel, t));
+        return (Line::from(left), false);
+    }
     if app.scroll_pane.is_some() {
         left.push(mode_label(cat.mode_scroll, t));
         left.push(Span::raw("  "));
         left.extend(hint("1-9", cat.scroll_jump, t));
         left.extend(hint("j/k f/b ↑↓", cat.act_scroll, t));
         left.extend(hint("g/G", cat.scroll_ends, t));
+        left.extend(hint("/", cat.act_search, t));
         left.extend(hint("q", cat.scroll_live, t));
         return (Line::from(left), false);
     }
@@ -540,6 +566,88 @@ mod tests {
                 "{mode:?} must own the leading mode label"
             );
         }
+    }
+
+    #[test]
+    fn scroll_and_pane_search_guidance_shows_key_hints() {
+        let _env = crate::persist::test_env("bar-status-pane-search");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let theme = app.theme.clone();
+        let text = |app: &App| {
+            fixed_guidance(app, &theme, 120)
+                .0
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        app.scroll_pane = Some(pane);
+        let scroll = text(&app);
+        assert!(scroll.contains(app.catalog.mode_scroll));
+        assert!(
+            scroll.contains("/ search"),
+            "scroll mode must hint /: {scroll}"
+        );
+        assert!(
+            scroll.contains("q live"),
+            "scroll mode must keep live: {scroll}"
+        );
+
+        app.pane_search = Some(crate::app::PaneSearch {
+            pane,
+            query: "needle".into(),
+            editing: true,
+            matches: Vec::new(),
+            current: 0,
+            saved_scroll: 0,
+        });
+        let editing = text(&app);
+        assert!(editing.contains("SEARCH"), "search mode label: {editing}");
+        assert!(editing.contains("/needle▏"), "query caret: {editing}");
+        assert!(
+            editing.contains("Enter select"),
+            "editing search must hint Enter: {editing}"
+        );
+        assert!(
+            editing.contains("Esc cancel"),
+            "editing search must hint Esc: {editing}"
+        );
+        assert!(
+            !editing.contains("n/N"),
+            "editing search must not advertise n/N: {editing}"
+        );
+
+        app.pane_search.as_mut().unwrap().editing = false;
+        app.pane_search.as_mut().unwrap().matches = vec![
+            crate::app::PaneSearchMatch {
+                row: 0,
+                offset: 1,
+                above: 1,
+                col: 0,
+                width: 6,
+            },
+            crate::app::PaneSearchMatch {
+                row: 2,
+                offset: 3,
+                above: 0,
+                col: 0,
+                width: 6,
+            },
+        ];
+        let committed = text(&app);
+        assert!(
+            committed.contains("/needle 1/2"),
+            "match count: {committed}"
+        );
+        assert!(
+            committed.contains("n/N move"),
+            "committed search must hint n/N: {committed}"
+        );
+        assert!(committed.contains("Esc cancel"));
+        assert!(!committed.contains("Enter select"));
     }
 
     #[test]
