@@ -42,7 +42,7 @@ fn scan_with_untracked_cap(
         ],
         STATUS_BYTE_CAP,
     )?;
-    let (mut untracked_raw, untracked_truncated) = run_git_bytes_truncating(
+    let (mut untracked_raw, untracked_truncated) = run_git_nul_records_truncating(
         &repo_root,
         &[
             OsString::from("ls-files"),
@@ -678,6 +678,21 @@ fn run_git_bytes(cwd: &Path, args: &[OsString], cap: usize) -> Result<Vec<u8>, S
     Ok(out)
 }
 
+fn run_git_nul_records_truncating(
+    cwd: &Path,
+    args: &[OsString],
+    cap: usize,
+) -> Result<(Vec<u8>, bool), String> {
+    // A NUL terminator proves that the pathname occupying the final budgeted
+    // byte is complete. Permit that one structural byte beyond the content
+    // cap; the underlying reader still consumes one further byte to determine
+    // whether another record exists.
+    let cap_with_delimiter = cap
+        .checked_add(1)
+        .ok_or_else(|| "Git output limit is too large".to_string())?;
+    run_git_bytes_truncating(cwd, args, cap_with_delimiter)
+}
+
 fn run_git_bytes_truncating(
     cwd: &Path,
     args: &[OsString],
@@ -1083,6 +1098,22 @@ mod tests {
         let diff = load_diff(&snapshot.repo_root, untracked[0], 3).unwrap();
         assert_eq!(diff.additions, 2);
         assert!(!diff.binary);
+    }
+
+    #[test]
+    fn final_untracked_nul_just_past_cap_keeps_the_complete_path() {
+        let repo = TestRepo::new("untracked-boundary-nul");
+        let name = "edge.txt";
+        std::fs::write(repo.0.join(name), "new\n").unwrap();
+
+        // `git ls-files -z` emits the pathname followed by one NUL. The byte
+        // cap covers the complete pathname but not that record delimiter.
+        let snapshot = scan_with_untracked_cap(&repo.0, 1, name.len()).unwrap();
+
+        assert!(snapshot.files.iter().any(|file| {
+            file.key.layer == DiffLayer::Untracked && file.key.display_path() == name
+        }));
+        assert_eq!(snapshot.omitted_files, 0);
     }
 
     #[test]
