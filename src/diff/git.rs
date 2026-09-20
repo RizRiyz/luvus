@@ -29,6 +29,7 @@ pub fn scan(root: &Path, generation: u64) -> Result<DiffSnapshot, String> {
         &[
             OsString::from("status"),
             OsString::from("--porcelain=v2"),
+            OsString::from("--untracked-files=all"),
             OsString::from("-z"),
         ],
         STATUS_BYTE_CAP,
@@ -998,6 +999,26 @@ mod tests {
         let diff = load_diff(&snapshot.repo_root, file, 3).unwrap();
         assert_eq!(diff.additions, 2);
         assert_eq!(diff.deletions, 0);
+        assert!(!diff.binary);
+    }
+
+    #[test]
+    fn real_repo_expands_untracked_directories_into_previewable_files() {
+        let repo = TestRepo::new("untracked-directory");
+        std::fs::create_dir_all(repo.0.join("new/nested")).unwrap();
+        std::fs::write(repo.0.join("new/nested/file.txt"), "one\ntwo\n").unwrap();
+
+        let snapshot = scan(&repo.0, 1).unwrap();
+        let untracked: Vec<_> = snapshot
+            .files
+            .iter()
+            .filter(|file| file.key.layer == DiffLayer::Untracked)
+            .collect();
+
+        assert_eq!(untracked.len(), 1);
+        assert_eq!(untracked[0].key.display_path(), "new/nested/file.txt");
+        let diff = load_diff(&snapshot.repo_root, untracked[0], 3).unwrap();
+        assert_eq!(diff.additions, 2);
         assert!(!diff.binary);
     }
 
