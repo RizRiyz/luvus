@@ -15,6 +15,14 @@ use super::{DIFF_FILE_CAP, PATCH_BYTE_CAP, PATCH_LINE_BYTE_CAP, PATCH_LINE_CAP};
 const STATUS_BYTE_CAP: usize = 16 * 1024 * 1024;
 
 pub fn scan(root: &Path, generation: u64) -> Result<DiffSnapshot, String> {
+    scan_with_untracked_cap(root, generation, STATUS_BYTE_CAP)
+}
+
+fn scan_with_untracked_cap(
+    root: &Path,
+    generation: u64,
+    untracked_cap: usize,
+) -> Result<DiffSnapshot, String> {
     let visible_root = root.to_path_buf();
     let repo_root =
         PathBuf::from(run_text(root, &["rev-parse", "--show-toplevel"], 64 * 1024)?.trim());
@@ -24,21 +32,50 @@ pub fn scan(root: &Path, generation: u64) -> Result<DiffSnapshot, String> {
         .unwrap_or_default()
         .trim()
         .to_string();
-    let raw = run_git_bytes(
+    let tracked_raw = run_git_bytes(
         &repo_root,
         &[
             OsString::from("status"),
             OsString::from("--porcelain=v2"),
-            OsString::from("--untracked-files=all"),
+            OsString::from("--untracked-files=no"),
             OsString::from("-z"),
         ],
         STATUS_BYTE_CAP,
     )?;
+    let (mut untracked_raw, untracked_truncated) = run_git_bytes_truncating(
+        &repo_root,
+        &[
+            OsString::from("ls-files"),
+            OsString::from("--others"),
+            OsString::from("--exclude-standard"),
+            OsString::from("-z"),
+        ],
+        untracked_cap,
+    )?;
+    if untracked_truncated {
+        // The bounded read may end halfway through a pathname. Publish only
+        // complete NUL-delimited records so every listed entry remains safe to
+        // open; `omitted_files` below advertises that the list is incomplete.
+        let complete = untracked_raw
+            .iter()
+            .rposition(|byte| *byte == 0)
+            .map_or(0, |end| end + 1);
+        untracked_raw.truncate(complete);
+    }
     let repo_id = digest_path(&common);
     let worktree_id = digest_path(&repo_root);
-    let mut files = parse_status(&raw, &repo_id, &worktree_id, &repo_root)?;
+    let mut files = parse_status(&tracked_raw, &repo_id, &worktree_id, &repo_root)?;
+    append_untracked(
+        &untracked_raw,
+        &repo_id,
+        &worktree_id,
+        &repo_root,
+        &mut files,
+    )?;
     let mut fingerprint = Sha256::new();
-    fingerprint.update(&raw);
+    fingerprint.update(&tracked_raw);
+    fingerprint.update(&untracked_raw);
+    fingerprint.update([u8::from(untracked_truncated)]);
     for layer in [DiffLayer::Staged, DiffLayer::Worktree] {
         if !files.iter().any(|file| file.key.layer == layer) {
             continue;
@@ -50,7 +87,10 @@ pub fn scan(root: &Path, generation: u64) -> Result<DiffSnapshot, String> {
             let _ = apply_numstat(&numstat, &layer, &mut files);
         }
     }
-    let omitted_files = files.len().saturating_sub(DIFF_FILE_CAP);
+    let omitted_files = files
+        .len()
+        .saturating_sub(DIFF_FILE_CAP)
+        .saturating_add(usize::from(untracked_truncated));
     files.truncate(DIFF_FILE_CAP);
     let fingerprint = format!("{:x}", fingerprint.finalize());
     Ok(DiffSnapshot {
@@ -282,6 +322,29 @@ fn parse_status(
         }
     }
     Ok(files)
+}
+
+fn append_untracked(
+    raw: &[u8],
+    repo_id: &str,
+    worktree_id: &str,
+    repo_root: &Path,
+    files: &mut Vec<DiffFile>,
+) -> Result<(), String> {
+    for path in raw.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+        push_change(
+            files,
+            repo_id,
+            worktree_id,
+            repo_root,
+            DiffLayer::Untracked,
+            DiffFileStatus::Untracked,
+            None,
+            path,
+            path,
+        )?;
+    }
+    Ok(())
 }
 
 /// Split the first `spaces` fields and leave the remainder as one raw path.
@@ -1020,6 +1083,38 @@ mod tests {
         let diff = load_diff(&snapshot.repo_root, untracked[0], 3).unwrap();
         assert_eq!(diff.additions, 2);
         assert!(!diff.binary);
+    }
+
+    #[test]
+    fn oversized_untracked_listing_preserves_tracked_changes() {
+        let repo = TestRepo::new("bounded-untracked");
+        std::fs::write(repo.0.join("tracked.txt"), "base\n").unwrap();
+        repo.git(&["add", "tracked.txt"]);
+        repo.git(&["commit", "-qm", "base"]);
+        std::fs::write(repo.0.join("tracked.txt"), "changed\n").unwrap();
+        std::fs::create_dir_all(repo.0.join("generated")).unwrap();
+        for index in 0..8 {
+            std::fs::write(
+                repo.0
+                    .join(format!("generated/long-untracked-file-{index:02}.txt")),
+                "new\n",
+            )
+            .unwrap();
+        }
+
+        let snapshot = scan_with_untracked_cap(&repo.0, 1, 96).unwrap();
+
+        assert!(snapshot.files.iter().any(|file| {
+            file.key.layer == DiffLayer::Worktree && file.key.display_path() == "tracked.txt"
+        }));
+        assert!(snapshot.omitted_files > 0);
+        for file in snapshot
+            .files
+            .iter()
+            .filter(|file| file.key.layer == DiffLayer::Untracked)
+        {
+            assert!(repo.0.join(file.key.git_path().unwrap()).is_file());
+        }
     }
 
     #[test]
