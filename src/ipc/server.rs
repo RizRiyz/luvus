@@ -1514,10 +1514,7 @@ fn shell_workspace_projection(app: &App) -> Vec<protocol::ShellWorkspace> {
                 id: workspace.id.clone(),
                 index: u16::try_from(*index).ok()?,
                 name: workspace.name.clone(),
-                cwd: ui::short_path(
-                    app.workspace_terminal_cwd(*index).unwrap_or(&workspace.cwd),
-                    u16::MAX,
-                ),
+                cwd: ui::short_path(&workspace.cwd, u16::MAX),
                 branch: workspace.branch.clone(),
                 active: *index == app.active_ws,
                 selected: app.sidebar_focus == Some(crate::app::SidebarListFocus::Workspaces)
@@ -2443,8 +2440,8 @@ mod tests {
     use super::{
         apply, broadcast, broadcast_effect, broadcast_machine_catalog_changed, ends_client_writer,
         frame_cadence_ready, frame_wait, handle_client, record_event_render_request,
-        render_clients, ClientSender, ClientState, EventRenderSource, FrameSendError, RenderCause,
-        RenderRequest, RenderScratch, FRAME_INTERVAL,
+        render_clients, shell_workspace_projection, ClientSender, ClientState, EventRenderSource,
+        FrameSendError, RenderCause, RenderRequest, RenderScratch, FRAME_INTERVAL,
     };
     use crate::app::App;
     use crate::event::{AppEvent, ClientInput};
@@ -3034,6 +3031,23 @@ mod tests {
             ServerMessage::Frame(_)
         ));
         assert_eq!(app.panes[&pane].size(), pty_size);
+    }
+
+    #[test]
+    fn machine_workspace_projection_keeps_the_stored_root() {
+        let _env = crate::persist::test_env("machine-static-workspace-root");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let pane = app.layout().focus;
+        let root = std::path::PathBuf::from("stable-workspace-root");
+        let live = std::path::PathBuf::from("live-pane-cwd");
+        app.workspaces[0].cwd = root.clone();
+        app.panes.get_mut(&pane).unwrap().cwd = live.clone();
+
+        let projection = shell_workspace_projection(&app);
+        assert_eq!(projection.len(), 1);
+        assert_eq!(projection[0].cwd, crate::ui::short_path(&root, u16::MAX));
+        assert_eq!(app.workspace_terminal_cwd(0), Some(live.as_path()));
     }
 
     #[test]

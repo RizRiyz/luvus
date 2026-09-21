@@ -520,14 +520,13 @@ fn draw_workspaces_dock(
         ws_rects.push((i, Rect::new(area.x, y, area.width, row_stride)));
         let st = rollup(app, i);
         let ws = &app.workspaces[i];
-        let terminal_cwd = app.workspace_terminal_cwd(i).unwrap_or(&ws.cwd);
         super::workspace_row::draw(
             f.buffer_mut(),
             Rect::new(area.x, y, area.width, row_stride),
             super::workspace_row::WorkspaceRow {
                 name: &ws.name,
                 branch: ws.branch.as_deref(),
-                path: &short_path(terminal_cwd, u16::MAX),
+                path: &short_path(&ws.cwd, u16::MAX),
                 dot: st.dot(),
                 dot_color: st.color(t),
                 nested: machine_children || is_member,
@@ -1318,6 +1317,43 @@ mod tests {
             .unwrap();
         assert_eq!(app.ws_rects[0].1.height, 1);
         assert_eq!(app.session_rects[0].1.height, 1);
+    }
+
+    #[test]
+    fn workspace_sidebar_keeps_the_stored_root_when_the_pane_moves() {
+        let _env = crate::persist::test_env("sidebar-static-workspace-root");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        let root = std::path::PathBuf::from("static-root");
+        let live = std::path::PathBuf::from("live-cwd");
+        app.workspaces[0].cwd = root.clone();
+        app.panes.get_mut(&pane).unwrap().cwd = live.clone();
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let workspace = app.ws_rects[0].1;
+        let path_row: String = (workspace.x..workspace.right())
+            .map(|column| {
+                term.backend()
+                    .buffer()
+                    .cell((column, workspace.y + 1))
+                    .map(|cell| cell.symbol())
+                    .unwrap_or(" ")
+            })
+            .collect();
+        assert!(path_row.contains(&root.display().to_string()), "{path_row}");
+        assert!(
+            !path_row.contains(&live.display().to_string()),
+            "{path_row}"
+        );
+        assert_eq!(
+            app.workspace_terminal_cwd(0),
+            Some(live.as_path()),
+            "the API projection still exposes the focused pane cwd"
+        );
     }
 
     /// The column each agent row's state label starts at, for every row drawn.
