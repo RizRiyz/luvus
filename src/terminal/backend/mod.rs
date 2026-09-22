@@ -58,6 +58,25 @@ pub const CAPABILITIES: &[&str] = &[
     "process_inspection",
 ];
 
+/// Control-stream actions without a matching one-request terminal method.
+/// These remain individually discoverable without pretending they extend the
+/// root method registry.
+pub const STREAM_ACTION_CAPABILITIES: &[&str] = &[
+    "paste_image",
+    "upload_start",
+    "upload_chunk",
+    "upload_finish",
+    "upload_cancel",
+];
+
+pub fn advertised_capabilities() -> Vec<&'static str> {
+    CAPABILITIES
+        .iter()
+        .chain(STREAM_ACTION_CAPABILITIES)
+        .copied()
+        .collect()
+}
+
 pub const FEATURES: &[&str] = &["stream_cursor"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -487,6 +506,10 @@ mod tests {
         let fixture: Value = serde_json::from_str(&capabilities_fixture).unwrap();
         assert_eq!(fixture["result"]["protocol"]["major"], PROTOCOL_MAJOR);
         assert_eq!(fixture["result"]["protocol"]["minor"], PROTOCOL_MINOR);
+        assert_eq!(
+            fixture["result"]["terminal"]["capabilities"],
+            json!(advertised_capabilities())
+        );
         assert_eq!(MAX_FRAME_BYTES, 1_048_576);
         assert_eq!(MAX_CAPTURE_BYTES, 524_288);
         assert_eq!(MAX_OBSERVE_BYTES, 65_536);

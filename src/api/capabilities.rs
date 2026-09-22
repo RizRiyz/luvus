@@ -423,7 +423,7 @@ pub fn capabilities(event_sequence: u64) -> Value {
         "agent_authorities":["integration_report","process_tree","launch_command","osc_title","screen_text","prior_identity","command_fallback"],
         "agent_states":["idle","working","blocked","done"],
         "terminal":{
-            "capabilities":crate::terminal::backend::CAPABILITIES,
+            "capabilities":crate::terminal::backend::advertised_capabilities(),
             "features":crate::terminal::backend::FEATURES,
             "limits":crate::terminal::backend::limits_json(),
         },
@@ -488,6 +488,21 @@ mod tests {
             capabilities["terminal"]["features"],
             json!(["stream_cursor"])
         );
+        let terminal_capabilities = capabilities["terminal"]["capabilities"]
+            .as_array()
+            .expect("terminal capabilities");
+        for action in [
+            "paste_image",
+            "upload_start",
+            "upload_chunk",
+            "upload_finish",
+            "upload_cancel",
+        ] {
+            assert!(
+                terminal_capabilities.iter().any(|value| value == action),
+                "missing terminal action capability {action}"
+            );
+        }
         assert!(is_idempotent("pane.list"));
         assert!(!is_read_only("mission.open"));
         assert_eq!(required_scope("mission.open"), "workspace");

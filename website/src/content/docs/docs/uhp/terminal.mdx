@@ -39,6 +39,12 @@ running row, validate its `endpoint`, then discover the global contract:
 The response returns the protocol version, a random `server_generation`, and
 the exact methods and active limits. Never call an unannounced method.
 
+For a control stream, also check each exact action name in
+`terminal.capabilities`. Do not infer action support from `control_stream`, the
+protocol version, or a Luvus release number. For example, file attachment
+requires `upload_start`, `upload_chunk`, `upload_finish`, and `upload_cancel`;
+image paste requires `paste_image`.
+
 ## Identity and lifecycle
 
 Every terminal has a random `terminal_id` for one successful PTY lifetime and a
