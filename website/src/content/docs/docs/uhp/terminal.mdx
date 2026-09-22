@@ -100,9 +100,12 @@ captured text, and the sender advances its cursor to that revision only after
 writing the frame successfully. Output arriving during the initial or a later
 write remains eligible for delivery, even when the child then becomes quiet.
 The acknowledgment revision does not mean that output has already been emitted.
-Each frame also carries `cursor`, either `null` or a Unicode-scalar `offset` in
-the normalized rendered text. ANSI control bytes do not count toward the
-offset, so semantic clients can place a caret after applying terminal styles.
+When `terminal.features` advertises `stream_cursor`, a client can add
+`cursor:true` to the observe or control request. Those frames also carry
+`cursor`, either `null` or a Unicode-scalar `offset` in the normalized rendered
+text. ANSI control bytes do not count toward the offset, so semantic clients
+can place a caret after applying terminal styles. Omitting the opt-in preserves
+the original strict UHP 1.0 frame shape.
 
 `terminal.backend.control` has the same output stream and accepts correlated
 action frames after its acknowledgment:

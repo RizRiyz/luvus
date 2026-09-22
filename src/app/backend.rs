@@ -1055,6 +1055,7 @@ impl App {
                 "mode",
                 "lines",
                 "ansi",
+                "cursor",
             ],
         )?;
         let pane_id = self.resolve_backend_runtime(params, false)?;
@@ -1098,6 +1099,16 @@ impl App {
                 ))
             }
         };
+        let cursor = match params.get("cursor") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => {
+                return Err(BackendError::read(
+                    "invalid_params",
+                    "cursor must be a boolean",
+                ))
+            }
+        };
         let pane = self
             .panes
             .get(&pane_id)
@@ -1114,6 +1125,7 @@ impl App {
             mode,
             lines: lines as usize,
             ansi,
+            cursor,
         })
     }
 
@@ -1887,7 +1899,20 @@ mod tests {
         assert_eq!(target.pane_id, pane.0.to_string());
         assert_eq!(target.lines, 80);
         assert!(target.ansi);
+        assert!(!target.cursor);
         assert_eq!(app.layout().focus, pane);
+
+        let mut with_cursor = locator.clone();
+        with_cursor["cursor"] = json!(true);
+        assert!(app.prepare_backend_observe(&with_cursor).unwrap().cursor);
+        with_cursor["cursor"] = json!("yes");
+        assert_eq!(
+            app.prepare_backend_observe(&with_cursor)
+                .err()
+                .unwrap()
+                .code,
+            "invalid_params"
+        );
 
         let mut oversized = locator.clone();
         oversized["lines"] = json!(backend::MAX_OBSERVE_LINES + 1);

@@ -58,6 +58,8 @@ pub const CAPABILITIES: &[&str] = &[
     "process_inspection",
 ];
 
+pub const FEATURES: &[&str] = &["stream_cursor"];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureMode {
     Visible,
@@ -113,6 +115,9 @@ pub struct ObserveTarget {
     pub mode: CaptureMode,
     pub lines: usize,
     pub ansi: bool,
+    /// Include semantic cursor metadata in replacement frames. This is opt-in
+    /// so strict UHP 1.0 consumers keep receiving the original frame shape.
+    pub cursor: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -424,6 +424,7 @@ pub fn capabilities(event_sequence: u64) -> Value {
         "agent_states":["idle","working","blocked","done"],
         "terminal":{
             "capabilities":crate::terminal::backend::CAPABILITIES,
+            "features":crate::terminal::backend::FEATURES,
             "limits":crate::terminal::backend::limits_json(),
         },
         "authorization":{"default":"local_owner","delegation":"scoped_ephemeral_token",
@@ -483,6 +484,10 @@ mod tests {
         assert_eq!(capabilities["limits"]["agent_row_titles"], 256);
         assert_eq!(capabilities["limits"]["agent_row_title_bytes"], 256);
         assert_eq!(capabilities["limits"]["agent_row_title_agent_bytes"], 64);
+        assert_eq!(
+            capabilities["terminal"]["features"],
+            json!(["stream_cursor"])
+        );
         assert!(is_idempotent("pane.list"));
         assert!(!is_read_only("mission.open"));
         assert_eq!(required_scope("mission.open"), "workspace");

@@ -27,7 +27,7 @@
             "truncated":{"type":"boolean"},
             "cursor":{"type":["object","null"],"properties":{"offset":{"type":"integer","minimum":0,"maximum":65536}},"required":["offset"],"additionalProperties":false}
           },
-          "required":["server_generation","terminal_id","pane_id","content_revision","mode","ansi","text","lines","bytes","truncated","cursor"],
+          "required":["server_generation","terminal_id","pane_id","content_revision","mode","ansi","text","lines","bytes","truncated"],
           "additionalProperties":false
         }
       }

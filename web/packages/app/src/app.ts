@@ -107,7 +107,8 @@ export class WebApp {
     const control = allowed.has("terminal.backend.control");
     if (!control && !allowed.has("terminal.backend.observe")) return;
     this.#terminal?.destroy();
-    const terminal = new TerminalView(this.#bridge, snapshot.server_generation, pane, control, () => {
+    const streamCursor = this.#session.capabilities?.terminal?.features?.includes("stream_cursor") ?? false;
+    const terminal = new TerminalView(this.#bridge, snapshot.server_generation, pane, control, streamCursor, () => {
       terminal.destroy();
       this.#terminal = undefined;
       this.#render();

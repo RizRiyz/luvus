@@ -8,7 +8,7 @@
     {"path":"invalid/requests.jsonl","kind":"request","expect":"invalid","count":10},
     {"path":"invalid/responses.jsonl","kind":"response","expect":"invalid","count":1},
     {"path":"invalid/events.jsonl","kind":"event","expect":"invalid","count":2},
-    {"path":"invalid/control-frames.jsonl","kind":"control","expect":"invalid","count":4}
+    {"path":"invalid/control-frames.jsonl","kind":"control","expect":"invalid","count":6}
   ],
   "framing":[
     {"name":"missing_lf","expect":"invalid_request","dispatch":"not_started"},

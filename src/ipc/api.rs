@@ -1250,22 +1250,27 @@ fn terminal_stream_frame(
     );
     let content_revision = target.content_revision.load(Ordering::Acquire);
     let bytes = capture.text.len();
+    let mut data = json!({
+        "server_generation":target.server_generation,
+        "terminal_id":target.terminal_id,
+        "pane_id":target.pane_id,
+        "content_revision":content_revision,
+        "mode":target.mode.as_str(),
+        "ansi":target.ansi,
+        "text":capture.text,
+        "lines":capture.lines,
+        "bytes":bytes,
+        "truncated":capture.truncated,
+    });
+    if target.cursor {
+        data["cursor"] = capture
+            .cursor_offset
+            .map_or(Value::Null, |offset| json!({"offset":offset}));
+    }
     let frame = json!({
         "event":"terminal.frame",
         "sequence":sequence,
-        "data":{
-            "server_generation":target.server_generation,
-            "terminal_id":target.terminal_id,
-            "pane_id":target.pane_id,
-            "content_revision":content_revision,
-            "mode":target.mode.as_str(),
-            "ansi":target.ansi,
-            "text":capture.text,
-            "lines":capture.lines,
-            "bytes":bytes,
-            "truncated":capture.truncated,
-            "cursor":capture.cursor_offset.map(|offset| json!({"offset":offset})),
-        }
+        "data":data,
     })
     .to_string();
     (frame.len().saturating_add(1) <= crate::terminal::backend::MAX_FRAME_BYTES)
@@ -3024,6 +3029,7 @@ mod tests {
             mode: crate::terminal::backend::CaptureMode::Visible,
             lines: 4,
             ansi: true,
+            cursor: false,
         }
     }
 
@@ -3039,10 +3045,20 @@ mod tests {
         assert_eq!(frame["data"]["terminal_id"], "terminal");
         assert_eq!(frame["data"]["content_revision"], 3);
         assert!(frame["data"]["text"].as_str().unwrap().contains("hello"));
+        assert!(frame["data"].get("cursor").is_none());
         assert!(
             frame["data"]["bytes"].as_u64().unwrap()
                 <= crate::terminal::backend::MAX_OBSERVE_BYTES as u64
         );
+    }
+
+    #[test]
+    fn terminal_stream_cursor_is_explicitly_negotiated() {
+        let mut target = observe_target();
+        target.cursor = true;
+        let frame = terminal_stream_frame(&target, 12).unwrap();
+        let frame: Value = serde_json::from_str(&frame.serialized).unwrap();
+        assert!(frame["data"].get("cursor").is_some());
     }
 
     #[test]

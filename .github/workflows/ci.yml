@@ -26,12 +26,23 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
       # Path dependencies retain their upstream formatting; check Luvus itself.
       - run: cargo fmt --package luvus --check
       # `-D warnings` is scoped to clippy on our own crate — NOT a global
       # RUSTFLAGS, which would also fail on harmless dependency warnings.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Validate web client and bridge
+        run: |
+          npm --prefix web run check
+          npm --prefix web test
+          npm --prefix web run test:integration
       - name: Validate terminal backend contract
         run: |
           python3 examples/uhp/terminal/consumer.py --fixtures

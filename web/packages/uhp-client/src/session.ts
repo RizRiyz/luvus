@@ -62,7 +62,16 @@ export class LiveSession extends EventTarget {
     try {
       await this.bridge.connect();
       this.#setState("authenticating");
-      this.#capabilities = asCapabilities(await this.bridge.request("uhp.capabilities"));
+      const capabilities = asCapabilities(await this.bridge.request("uhp.capabilities"));
+      const priorGeneration = this.#capabilities?.server_generation ?? this.#snapshot?.server_generation;
+      if (
+        (priorGeneration !== undefined && capabilities.server_generation !== priorGeneration)
+        || this.#lastSequence > capabilities.event_sequence
+      ) {
+        this.#lastSequence = 0;
+        this.#snapshot = undefined;
+      }
+      this.#capabilities = capabilities;
       this.#setState("synchronizing");
       this.#buffer = [];
       this.#events?.close();

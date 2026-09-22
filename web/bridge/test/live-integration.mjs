@@ -52,6 +52,7 @@ try {
   assert.equal(capabilities.type, "uhp_capabilities");
   assert.ok(capabilities.access.allowed_methods.includes("terminal.backend.control"));
   assert.ok(capabilities.access.allowed_methods.includes("search.query"));
+  assert.ok(capabilities.terminal.features.includes("stream_cursor"));
   const completions = await request(socket, "complete", "search.query", {
     query: "Cargo",
     scope: "files",
@@ -85,6 +86,7 @@ try {
       mode: "recent_unwrapped",
       lines: 80,
       ansi: true,
+      cursor: true,
     },
   }));
   assert.equal((await controlAck).result.type, "terminal_backend_stream");

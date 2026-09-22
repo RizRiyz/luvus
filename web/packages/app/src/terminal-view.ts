@@ -24,6 +24,7 @@ export class TerminalView {
     private readonly generation: string,
     private readonly pane: PaneSnapshot,
     private readonly control: boolean,
+    private readonly streamCursor: boolean,
     onBack: () => void,
   ) {
     const title = pane.agent_name || pane.agent || `Pane ${pane.pane_id}`;
@@ -140,6 +141,7 @@ export class TerminalView {
       mode: "recent_unwrapped",
       lines: 120,
       ansi: true,
+      ...(this.streamCursor ? { cursor: true } : {}),
     }, (frame) => this.#frame(frame), (reason) => {
       this.#appendStatus(`Terminal disconnected: ${reason}`);
     });

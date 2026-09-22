@@ -82,9 +82,12 @@ belongs to the text captured under the terminal-engine lock. Both initial and
 subsequent sends advance the stream cursor only to that emitted revision,
 after a successful write; output arriving during a write remains eligible for
 the next frame. The acknowledgment's revision is an earlier observation, not
-proof that a frame has been emitted. `cursor.offset` is a Unicode-scalar offset
-in the normalized rendered text with ANSI control bytes excluded; `null` means
-the live child cursor is hidden or outside the bounded capture.
+proof that a frame has been emitted. Clients that see `stream_cursor` in
+`terminal.features` may request `cursor:true`. Those frames add
+`cursor.offset`, a Unicode-scalar offset in the normalized rendered text with
+ANSI control bytes excluded; `null` means the live child cursor is hidden or
+outside the bounded capture. Without that opt-in, the original strict UHP 1.0
+frame shape is preserved.
 
 An installed binary exposes the same contract with `luvus uhp schema`,
 live negotiation with `luvus uhp capabilities`, the fenced inventory
