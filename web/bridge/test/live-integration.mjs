@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,9 @@ const repoRoot = path.resolve(bridgeRoot, "../..");
 const binary = path.resolve(process.env.LUVUS_BIN || path.join(repoRoot, "target/debug/luvus"));
 const homePrefix = path.join(os.homedir(), ".luvus-web-integration-");
 const home = await mkdtemp(homePrefix);
+const workspace = path.join(home, "workspace");
+await mkdir(workspace);
+await writeFile(path.join(workspace, "Cargo.fixture"), "isolated web integration\n");
 const session = `web-integration-${process.pid}`;
 const alternateSession = `web-alternate-${process.pid}`;
 const commonEnv = { ...process.env, LUVUS_HOME: home };
@@ -254,8 +257,10 @@ try {
 }
 
 function command(executable, args, env, allowFailure = false) {
-  const result = spawnSync(executable, args, { cwd: repoRoot, env, encoding: "utf8", timeout: 20_000 });
-  if (!allowFailure && result.status !== 0) throw new Error(result.stderr || result.stdout || `command failed: ${args.join(" ")}`);
+  const result = spawnSync(executable, args, { cwd: workspace, env, encoding: "utf8", timeout: 30_000 });
+  if (!allowFailure && (result.error || result.status !== 0)) {
+    throw result.error || new Error(result.stderr || result.stdout || `command failed: ${args.join(" ")}`);
+  }
 }
 
 function childLine(child, timeoutMs) {

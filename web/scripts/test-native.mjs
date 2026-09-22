@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -12,6 +12,8 @@ const repoRoot = path.resolve(webRoot, "..");
 const executable = path.resolve(process.env.LUVUS_BIN
   || path.join(repoRoot, "target", "debug", process.platform === "win32" ? "luvus.exe" : "luvus"));
 const home = await mkdtemp(path.join(os.tmpdir(), "luvus-native-web-"));
+const workspace = path.join(home, "workspace");
+await mkdir(workspace);
 const session = "native-web-" + process.pid;
 const env = { ...process.env, LUVUS_HOME: home };
 delete env.LUVUS_SOCKET_PATH;
@@ -23,7 +25,7 @@ try {
   child = spawn(executable, [
     "--session", session, "web", "--control", "--port", "0", "--no-open",
   ], {
-    cwd: repoRoot,
+    cwd: workspace,
     env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -103,7 +105,7 @@ try {
 
 function run(args, runEnv, allowFailure = false) {
   const result = spawnSync(executable, args, {
-    cwd: repoRoot,
+    cwd: workspace,
     env: runEnv,
     encoding: "utf8",
     timeout: 20_000,
