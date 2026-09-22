@@ -8,5 +8,5 @@
     "lib": ["ES2022", "DOM"],
     "declaration": false
   },
-  "include": ["src/native-keymap.ts", "src/pairing-qr.ts"]
+  "include": ["src/native-keymap.ts", "src/pairing-qr.ts", "src/terminal-capabilities.ts"]
 }

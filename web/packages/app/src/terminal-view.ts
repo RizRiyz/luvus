@@ -48,6 +48,7 @@ export class TerminalView {
     private readonly generation: string,
     private readonly pane: PaneSnapshot,
     private readonly control: boolean,
+    private readonly canUploadFiles: boolean,
     private readonly streamCursor: boolean,
     private readonly paneOptions: () => TerminalPaneOption[],
     private readonly onSelectPane: (pane: PaneSnapshot) => void,
@@ -58,7 +59,9 @@ export class TerminalView {
       this.#input = new NativeTerminalInput(
         (action, params) => this.#action(action, params),
         (message) => this.#appendStatus(`Input failed: ${message}`),
-        (files) => this.#queueFiles(files),
+        (files) => {
+          if (this.canUploadFiles) this.#queueFiles(files);
+        },
       );
       this.#input.element.addEventListener("focus", () => {
         this.#inputHint.textContent = "Typing in terminal";
@@ -82,10 +85,12 @@ export class TerminalView {
       className: "terminal-file-input",
       attrs: { type: "file", multiple: "", "aria-label": "Attach files" },
     }) as HTMLInputElement;
-    fileInput.disabled = !control;
-    const attach = button("+", "terminal-tool attach-file", () => fileInput.click());
+    fileInput.disabled = !canUploadFiles;
+    const attach = button("+", "terminal-tool attach-file", () => {
+      if (this.canUploadFiles) fileInput.click();
+    });
     this.#attach = attach;
-    attach.disabled = !control;
+    attach.disabled = !canUploadFiles;
     attach.setAttribute("aria-label", "Attach files");
     attach.title = "Attach files";
     fileInput.addEventListener("change", () => {
@@ -94,7 +99,7 @@ export class TerminalView {
       if (files.length) this.#queueFiles(files);
     });
 
-    if (control) {
+    if (canUploadFiles) {
       this.root.addEventListener("dragenter", (event) => this.#drag(event));
       this.root.addEventListener("dragover", (event) => this.#drag(event));
       this.root.addEventListener("dragleave", (event) => {
@@ -306,6 +311,7 @@ export class TerminalView {
   }
 
   #queueFiles(files: File[]): void {
+    if (!this.canUploadFiles) return;
     this.#uploadTail = this.#uploadTail.then(async () => {
       if (!files.length) return;
       if (this.#attach) this.#attach.disabled = true;
@@ -322,7 +328,7 @@ export class TerminalView {
         this.#appendStatus(`Upload failed: ${message}`);
         this.#inputHint.textContent = "Tap terminal to type";
       } finally {
-        if (this.#attach) this.#attach.disabled = !this.control;
+        if (this.#attach) this.#attach.disabled = !this.canUploadFiles;
       }
     });
   }

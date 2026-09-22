@@ -1,6 +1,7 @@
 import { BridgeClient, BridgeError, LiveSession, type PaneSnapshot, type SessionSnapshot } from "@luvus/uhp-client";
 import { button, element } from "./dom.js";
 import { pairingQrDataUrl } from "./pairing-qr.js";
+import { supportsFileUpload } from "./terminal-capabilities.js";
 import { TerminalView, type TerminalPaneOption } from "./terminal-view.js";
 
 const TICKET_KEY = "luvus.web.ticket";
@@ -468,11 +469,15 @@ export class WebApp {
     if (!control && !allowed.has("terminal.backend.observe")) return;
     this.#terminal?.destroy();
     const streamCursor = this.#session.capabilities?.terminal?.features?.includes("stream_cursor") ?? false;
+    const canUploadFiles = control && supportsFileUpload(
+      this.#session.capabilities?.terminal?.capabilities,
+    );
     const terminal = new TerminalView(
       this.#bridge,
       snapshot.server_generation,
       pane,
       control,
+      canUploadFiles,
       streamCursor,
       () => this.#terminalPaneOptions(),
       (selectedPane) => {
