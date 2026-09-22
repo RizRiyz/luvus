@@ -63,7 +63,11 @@ export class WebApp {
       this.#render();
       if (this.#session.state === "ready" && !this.#devices) void this.#refreshDevices();
     });
-    this.#session.addEventListener("snapshot", () => this.#render());
+    this.#session.addEventListener("snapshot", () => {
+      const snapshot = this.#session.snapshot;
+      if (snapshot) this.#terminal?.updateSnapshot(snapshot);
+      this.#render();
+    });
   }
 
   async start(): Promise<void> {
@@ -528,7 +532,7 @@ export class WebApp {
     );
     const terminal = new TerminalView(
       this.#bridge,
-      snapshot.server_generation,
+      snapshot,
       pane,
       control,
       canUploadFiles,

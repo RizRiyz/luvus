@@ -375,10 +375,7 @@ export class BridgeServer {
     const params = objectField(frame, "params");
     const stream = state.streams.get(streamId);
     if (!stream) return send(socket, { type: "response", id, error: { code: "stale_stream", message: "Terminal stream is closed" } });
-    if (!new Set([
-      "type_literal", "paste_text", "paste_image", "submit_text", "send_key",
-      "upload_start", "upload_chunk", "upload_finish", "upload_cancel",
-    ]).has(action)) {
+    if (!terminalAction(action)) {
       return send(socket, { type: "response", id, error: { code: "invalid_params", message: "Unknown terminal action" } });
     }
     if (!stream.write({ id, action, params })) {

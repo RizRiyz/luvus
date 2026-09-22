@@ -154,7 +154,11 @@ export class BridgeClient extends EventTarget {
       close: () => {
         this.#streams.delete(id);
         this.#rejectStream(id, new BridgeError("Terminal stream is closed", "stale_stream"));
-        this.#send({ type: "stream.close", stream_id: id });
+        try {
+          this.#send({ type: "stream.close", stream_id: id });
+        } catch {
+          // Local cleanup is complete even when the socket is already closing.
+        }
       },
     };
   }

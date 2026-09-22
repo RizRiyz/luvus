@@ -1,8 +1,9 @@
-import { BridgeError, type BridgeClient, type PaneSnapshot, type StreamHandle, type TerminalFrame } from "@luvus/uhp-client";
+import { BridgeError, type BridgeClient, type PaneSnapshot, type SessionSnapshot, type StreamHandle, type TerminalFrame } from "@luvus/uhp-client";
 import { parseAnsi } from "./ansi.js";
 import { button, element } from "./dom.js";
 import { uploadTerminalFile } from "./file-upload.js";
 import { NativeTerminalInput, type TerminalAction } from "./native-input.js";
+import { TerminalTargetTracker, type TerminalTarget } from "./terminal-target.js";
 
 export interface TerminalPaneOption {
   pane: PaneSnapshot;
@@ -14,6 +15,8 @@ export interface TerminalPaneOption {
 export class TerminalView {
   readonly root = element("section", { className: "terminal-screen" });
   #stream: StreamHandle | undefined;
+  #target: TerminalTarget | undefined;
+  #targetTracker: TerminalTargetTracker;
   #streamAttempt = 0;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   #reconnectRetry = 0;
@@ -56,8 +59,8 @@ export class TerminalView {
 
   constructor(
     private readonly bridge: BridgeClient,
-    private readonly generation: string,
-    private readonly pane: PaneSnapshot,
+    snapshot: SessionSnapshot,
+    pane: PaneSnapshot,
     private readonly control: boolean,
     private readonly canUploadFiles: boolean,
     private readonly streamCursor: boolean,
@@ -65,6 +68,8 @@ export class TerminalView {
     private readonly onSelectPane: (pane: PaneSnapshot) => void,
     onBack: () => void,
   ) {
+    this.#targetTracker = new TerminalTargetTracker(snapshot, pane);
+    this.#target = this.#targetTracker.resolve(snapshot);
     const title = pane.agent_name || pane.agent || `Pane ${pane.pane_id}`;
     if (control) {
       this.#input = new NativeTerminalInput(
@@ -202,13 +207,18 @@ export class TerminalView {
   }
 
   async start(): Promise<void> {
-    if (!this.pane.terminal_id) throw new Error("Pane has no live terminal identity");
+    if (!this.#target) throw new Error("Pane has no live terminal identity");
     await this.#connectStream(true);
     if (this.control && matchMedia("(pointer: fine)").matches) this.#input?.focus();
   }
 
   async #connectStream(initial = false): Promise<void> {
-    if (this.#destroyed || !this.pane.terminal_id) return;
+    if (this.#destroyed) return;
+    const target = this.#target;
+    if (!target?.pane.terminal_id) {
+      if (initial) throw new Error("Pane has no live terminal identity");
+      return;
+    }
     if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
     this.#reconnectTimer = undefined;
     const attempt = ++this.#streamAttempt;
@@ -216,9 +226,9 @@ export class TerminalView {
     try {
       await this.bridge.connect();
       const stream = await this.bridge.openStream(method, {
-        server_generation: this.generation,
-        terminal_id: this.pane.terminal_id,
-        pane_id: this.pane.pane_id,
+        server_generation: target.serverGeneration,
+        terminal_id: target.pane.terminal_id,
+        pane_id: target.pane.pane_id,
         mode: "recent_unwrapped",
         lines: 120,
         ansi: true,
@@ -265,6 +275,47 @@ export class TerminalView {
     document.removeEventListener("keydown", this.#paneMenuKeydown);
   }
 
+  updateSnapshot(snapshot: SessionSnapshot): void {
+    if (this.#destroyed) return;
+    if (snapshot.session !== this.#targetTracker.session) {
+      this.#target = undefined;
+      if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+      const stream = this.#stream;
+      this.#streamAttempt += 1;
+      this.#stream = undefined;
+      stream?.close();
+      this.#failQueuedActions(new BridgeError("Terminal belongs to another session", "stale_stream"));
+      this.#showStatus("Session changed — return to Mission Control to choose a terminal");
+      return;
+    }
+    const previous = this.#target;
+    const target = this.#targetTracker.resolve(snapshot);
+    this.#target = target;
+    if (!target) {
+      if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+      const stream = this.#stream;
+      this.#streamAttempt += 1;
+      this.#stream = undefined;
+      stream?.close();
+      this.#showStatus("Waiting for terminal to restore…");
+      return;
+    }
+    const changed = !previous
+      || previous.serverGeneration !== target.serverGeneration
+      || previous.pane.pane_id !== target.pane.pane_id
+      || previous.pane.terminal_id !== target.pane.terminal_id;
+    if (!changed) return;
+    this.#reconnectRetry = 0;
+    if (this.#stream) this.#disconnectStream(this.#streamAttempt, "Terminal identity changed");
+    else {
+      if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+      this.#scheduleReconnect(true);
+    }
+  }
+
   #togglePaneMenu(): void {
     if (this.#paneMenu.hidden) this.#openPaneMenu();
     else this.#closePaneMenu(true);
@@ -273,8 +324,8 @@ export class TerminalView {
   #openPaneMenu(): void {
     const options = this.paneOptions();
     this.#paneMenu.replaceChildren(...options.map((option) => {
-      const active = option.pane.pane_id === this.pane.pane_id
-        && option.pane.terminal_id === this.pane.terminal_id;
+      const active = option.pane.pane_id === this.#target?.pane.pane_id
+        && option.pane.terminal_id === this.#target?.pane.terminal_id;
       return element("button", {
         className: `terminal-pane-option${active ? " active" : ""}`,
         attrs: { type: "button", role: "menuitem", ...(active ? { "aria-current": "true" } : {}) },
@@ -458,9 +509,9 @@ export class TerminalView {
     this.#scheduleReconnect();
   }
 
-  #scheduleReconnect(): void {
+  #scheduleReconnect(immediate = false): void {
     if (this.#destroyed || this.#stream || this.#reconnectTimer) return;
-    const delay = Math.min(5_000, 150 * 2 ** Math.min(this.#reconnectRetry++, 5));
+    const delay = immediate ? 0 : Math.min(5_000, 150 * 2 ** Math.min(this.#reconnectRetry++, 5));
     this.#reconnectTimer = setTimeout(() => {
       this.#reconnectTimer = undefined;
       void this.#connectStream();
@@ -495,7 +546,7 @@ export class TerminalView {
 
 function recoverableConnectionError(error: unknown): boolean {
   if (!(error instanceof BridgeError)) return true;
-  return new Set(["bridge_error", "closed", "disconnected", "stale_stream", "timeout", "unavailable"]).has(error.code);
+  return new Set(["bridge_error", "closed", "disconnected", "stale_server", "stale_stream", "timeout", "unavailable"]).has(error.code);
 }
 
 function headerBackButton(onBack: () => void): HTMLButtonElement {

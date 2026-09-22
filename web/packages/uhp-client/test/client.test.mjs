@@ -69,6 +69,12 @@ test("closing a stream rejects pending and future actions immediately", async ()
       stream.action("send_key", { key: "enter" }),
       (error) => error.code === "stale_stream",
     );
+
+    const closingStream = await bridge.openStream("terminal.backend.control", {}, () => {}, () => {});
+    const closingAction = closingStream.action("send_key", { key: "enter" });
+    FakeWebSocket.instances[0].readyState = FakeWebSocket.CLOSING;
+    assert.doesNotThrow(() => closingStream.close());
+    await assert.rejects(closingAction, (error) => error.code === "stale_stream");
     bridge.close();
   } finally {
     globalThis.WebSocket = previous;
