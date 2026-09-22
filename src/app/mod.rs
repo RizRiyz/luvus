@@ -3428,8 +3428,13 @@ impl App {
         App::new(cols, rows, app_tx)
     }
 
-    fn from_snapshot(snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
+    fn from_snapshot(mut snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
+        // Opting out must also reject content written by an older run. Mark the
+        // restored app for an immediate save so the on-disk snapshot is scrubbed
+        // while layout and native agent resume metadata remain intact.
+        let discarded_pane_screens =
+            !config.session.persist_pane_screen && snap.discard_pane_screens();
         let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
@@ -3860,7 +3865,7 @@ impl App {
             zoomed: false,
             should_quit: false,
             server_mode: false,
-            session_dirty: false,
+            session_dirty: discarded_pane_screens,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
             automation: crate::automation::AutomationState::load(),
@@ -3910,7 +3915,7 @@ impl App {
             named_session_close_rect: None,
             named_session_row_rects: Vec::new(),
             named_session_generation: 0,
-            persist_session_now: false,
+            persist_session_now: discarded_pane_screens,
             force_redraw: false,
             pending_notify: Vec::new(),
             pending_sound: None,
@@ -9061,6 +9066,56 @@ mod tests {
         assert_eq!(restored.layout().len(), 2);
         assert_eq!(restored.workspaces[0].name, "Luvus website");
         assert!(restored.workspaces[0].pinned);
+    }
+
+    #[test]
+    fn pane_screen_opt_out_ignores_and_schedules_scrubbing_of_existing_content() {
+        let _env = crate::persist::test_env("pane-screen-restore-opt-out");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .unwrap()
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[2J\x1b[HLUVUS-RESTORE-PRIVATE-MARKER");
+        let snapshot = persist::snapshot(&app);
+        assert!(snapshot.workspaces.iter().any(|workspace| workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .any(|(_, pane)| pane
+                .screen
+                .as_deref()
+                .is_some_and(|screen| screen.contains("LUVUS-RESTORE-PRIVATE-MARKER")))));
+        drop(app);
+
+        let mut config = crate::config::Config::default();
+        config.session.persist_pane_screen = false;
+        crate::config::save(&config);
+
+        let (restored_tx, _restored_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restored_tx).expect("layout restores");
+        let pane = restored.layout().focus;
+        assert!(
+            !restored
+                .panes
+                .get(&pane)
+                .unwrap()
+                .engine
+                .lock()
+                .unwrap()
+                .detection_text(24)
+                .contains("LUVUS-RESTORE-PRIVATE-MARKER"),
+            "saved terminal content must not be replayed after opt-out"
+        );
+        assert!(restored.session_dirty);
+        assert!(
+            restored.persist_session_now,
+            "the old on-disk snapshot is scheduled for immediate scrubbing"
+        );
     }
 
     #[test]

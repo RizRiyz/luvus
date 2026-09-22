@@ -41,6 +41,11 @@ pub struct Config {
     pub layout: LayoutConfig,
     #[serde(default)]
     pub notifications: NotifyConfig,
+    /// Session persistence policy. Pane screens remain enabled by default for
+    /// backward-compatible instant restore; users can retain layout and agent
+    /// resume metadata without writing terminal content to disk.
+    #[serde(default)]
+    pub session: SessionConfig,
     /// Allow launching an interactive Luvus client from a Luvus pane.
     /// Disabled by default because nested clients compete for terminal input.
     #[serde(default)]
@@ -116,6 +121,22 @@ pub struct Config {
     /// only presentation preferences survive a restart.
     #[serde(default)]
     pub bars: BarConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionConfig {
+    /// Persist each pane's visible terminal screen in `session.json` so it can
+    /// be replayed immediately while the restored PTY starts.
+    #[serde(default = "yes")]
+    pub persist_pane_screen: bool,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            persist_pane_screen: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -503,6 +524,7 @@ impl Default for Config {
             sidebars: None,
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
+            session: SessionConfig::default(),
             allow_nested: false,
             check_updates: true,
             resume_launch_flags: false,
@@ -900,6 +922,7 @@ mod tests {
         assert!(c.layout.show_titles);
         assert!(c.layout.workspace_paths);
         assert!(c.layout.agent_paths);
+        assert!(c.session.persist_pane_screen);
         assert_eq!(c.layout.col_gap, 1);
         assert_eq!(c.layout.mobile_width, crate::app::MOBILE_WIDTH);
         // Empty object → all defaults (forward/back compat).
@@ -909,6 +932,10 @@ mod tests {
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         assert!(from_empty.layout.workspace_paths);
         assert!(from_empty.layout.agent_paths);
+        assert!(
+            from_empty.session.persist_pane_screen,
+            "existing configs retain instant pane-screen restore"
+        );
         assert!(
             from_empty.direct_keybindings.is_empty(),
             "existing configs do not gain input-stealing direct shortcuts"
@@ -936,6 +963,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(forward.worktree.provider, "future-provider");
+        let private: Config =
+            serde_json::from_str(r#"{"session":{"persist_pane_screen":false}}"#).unwrap();
+        assert!(!private.session.persist_pane_screen);
+        let private_json = serde_json::to_string(&private).unwrap();
+        assert!(
+            !serde_json::from_str::<Config>(&private_json)
+                .unwrap()
+                .session
+                .persist_pane_screen
+        );
         // Round-trip preserves values.
         // Scrollback defaults to a per-pane 10 MiB budget. The legacy line
         // field remains only so old config can migrate safely.
