@@ -211,11 +211,3 @@ pub struct WorktreeMembership {
     /// syscall-free.
     pub linked: bool,
 }
-
-/// Git metadata for one repository root, resolved off the app loop.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GitRootInfo {
-    pub root: std::path::PathBuf,
-    pub branch: Option<String>,
-    pub worktree: Option<WorktreeMembership>,
-}

@@ -944,7 +944,7 @@ pub fn process_tree(_root: u32) -> Vec<ProcInfo> {
 ///
 /// The PTY child owns the pane cwd. A descendant git cwd is a candidate
 /// override (Pi and similar `chdir` in a child) and must be held stable by
-/// the app before it can rehome the pane.
+/// the app before it can replace the pane's reported live cwd.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneCwdEvidence {
     pub pid: u32,
