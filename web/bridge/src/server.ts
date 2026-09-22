@@ -35,6 +35,7 @@ export class BridgeServer {
   #http: http.Server | undefined;
   #wss: WebSocketServer | undefined;
   #clients = new Map<WebSocket, ClientState>();
+  #sessionSwitching = false;
 
   constructor(private readonly config: BridgeConfig, private readonly uhp: UhpAccess) {
     this.authority = new BrowserAuthority(config.browserTicketSeconds, config.browserMaxDevices);
@@ -171,6 +172,9 @@ export class BridgeServer {
     if (method.startsWith("web.devices.")) {
       return this.#deviceRequest(socket, id, method, params);
     }
+    if (method.startsWith("web.sessions.")) {
+      return this.#sessionRequest(socket, id, method, params);
+    }
     if (!this.uhp.methodAllowed(method) || isStreaming(method)) {
       return send(socket, { type: "response", id, error: { code: "forbidden", message: "Method is not available through this bridge path" } });
     }
@@ -226,6 +230,38 @@ export class BridgeServer {
       return;
     }
     send(socket, { type: "response", id, error: { code: "method_not_found", message: "Unknown web device method" } });
+  }
+
+  async #sessionRequest(socket: WebSocket, id: string, method: string, params: Record<string, unknown>): Promise<void> {
+    if (method === "web.sessions.list") {
+      if (Object.keys(params).length) {
+        return send(socket, { type: "response", id, error: { code: "invalid_params", message: "Session listing takes no parameters" } });
+      }
+      try {
+        const sessions = await this.uhp.sessions();
+        return send(socket, { type: "response", id, result: { type: "browser_session_list", sessions } });
+      } catch (error) {
+        return send(socket, { type: "response", id, error: publicError(error) });
+      }
+    }
+    if (method === "web.sessions.switch") {
+      if (Object.keys(params).some((key) => key !== "name") || typeof params.name !== "string") {
+        return send(socket, { type: "response", id, error: { code: "invalid_params", message: "A valid session name is required" } });
+      }
+      if (this.#sessionSwitching) {
+        return send(socket, { type: "response", id, error: { code: "busy", message: "Another session switch is in progress" } });
+      }
+      this.#sessionSwitching = true;
+      try {
+        const session = await this.uhp.switchSession(params.name, this.config.control);
+        return send(socket, { type: "response", id, result: { type: "browser_session_switch", session } });
+      } catch (error) {
+        return send(socket, { type: "response", id, error: publicError(error) });
+      } finally {
+        this.#sessionSwitching = false;
+      }
+    }
+    send(socket, { type: "response", id, error: { code: "method_not_found", message: "Unknown web session method" } });
   }
 
   #broadcastDevices(except?: WebSocket): void {

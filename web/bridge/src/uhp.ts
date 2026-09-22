@@ -15,6 +15,12 @@ type Descriptor = {
 
 type Paired = { type: "paired"; token: string; scopes: string[]; expires_at?: number; expires_on_close?: true };
 
+export type BrowserSession = {
+  name: string;
+  default: boolean;
+  running: boolean;
+};
+
 export interface UpstreamStream {
   write(frame: object): boolean;
   close(): void;
@@ -28,6 +34,7 @@ export class UhpAccess extends EventTarget {
   #allowed = new Set<string>();
   #config: BridgeConfig | undefined;
   #restartPromise: Promise<void> | undefined;
+  #switchPromise: Promise<BrowserSession> | undefined;
 
   get authority(): Descriptor["authority"] {
     if (!this.#descriptor) throw new Error("UHP access has not started");
@@ -95,6 +102,7 @@ export class UhpAccess extends EventTarget {
   }
 
   restart(): Promise<void> {
+    if (this.#switchPromise) return this.#switchPromise.then(() => {});
     if (this.#restartPromise) return this.#restartPromise;
     const config = this.#config;
     if (!config) return Promise.reject(new Error("UHP access configuration unavailable"));
@@ -104,6 +112,66 @@ export class UhpAccess extends EventTarget {
       await this.start(config);
     })().finally(() => { this.#restartPromise = undefined; });
     return this.#restartPromise;
+  }
+
+  async sessions(): Promise<BrowserSession[]> {
+    const result = await this.#hostRequest("session.list", {});
+    if (!result || typeof result !== "object" || (result as { type?: unknown }).type !== "session_list") {
+      throw new Error("Luvus returned an invalid session list");
+    }
+    const sessions = (result as { sessions?: unknown }).sessions;
+    if (!Array.isArray(sessions) || sessions.length > 256) throw new Error("Luvus returned an invalid session list");
+    return sessions.map((entry) => {
+      if (!entry || typeof entry !== "object") throw new Error("Luvus returned an invalid session entry");
+      const session = entry as { name?: unknown; default?: unknown; running?: unknown };
+      if (
+        typeof session.name !== "string" || !validSessionName(session.name)
+        || typeof session.default !== "boolean" || typeof session.running !== "boolean"
+      ) throw new Error("Luvus returned an invalid session entry");
+      return { name: session.name, default: session.default, running: session.running };
+    });
+  }
+
+  switchSession(name: string, allowStart: boolean): Promise<BrowserSession> {
+    if (this.#switchPromise) return this.#switchPromise;
+    this.#switchPromise = (async () => {
+      if (this.#restartPromise) await this.#restartPromise;
+      if (!validSessionName(name)) throw codedError("Invalid session name", "invalid_params");
+      const sessions = await this.sessions();
+      let target = sessions.find((session) => session.name === name);
+      if (!target) throw codedError("Unknown Luvus session", "not_found");
+      if (!target.running) {
+        if (!allowStart) throw codedError("Starting a stopped session requires web control", "forbidden");
+        const started = await this.#hostRequest("session.start", { name });
+        const session = started && typeof started === "object"
+          ? (started as { session?: { name?: unknown; default?: unknown; running?: unknown } }).session
+          : undefined;
+        if (
+          !session || session.name !== name || typeof session.default !== "boolean"
+          || session.running !== true
+        ) throw new Error("Luvus returned an invalid started session");
+        target = { name, default: session.default, running: true };
+      }
+      const previous = this.#config;
+      if (!previous) throw new Error("UHP access configuration unavailable");
+      const selected = previous.session ?? "default";
+      if (selected === name) return target;
+      const next: BridgeConfig = {
+        ...previous,
+        ...(name === "default" ? {} : { session: name }),
+      };
+      if (name === "default") delete next.session;
+      this.#terminateChild();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      try {
+        await this.start(next);
+      } catch (error) {
+        try { await this.start(previous); } catch { /* A later request retries the prior target. */ }
+        throw error;
+      }
+      return target;
+    })().finally(() => { this.#switchPromise = undefined; });
+    return this.#switchPromise;
   }
 
   async request(method: string, params: object, id = requestId()): Promise<unknown> {
@@ -170,6 +238,40 @@ export class UhpAccess extends EventTarget {
     this.#token = "";
     child?.kill("SIGTERM");
   }
+
+  async #hostRequest(method: "session.list" | "session.start", params: object): Promise<unknown> {
+    const config = this.#config;
+    if (!config) throw new Error("UHP access configuration unavailable");
+    const env = { ...process.env };
+    delete env.LUVUS_SOCKET_PATH;
+    delete env.LUVUS_SESSION;
+    if (config.luvusHome) env.LUVUS_HOME = config.luvusHome;
+    const child = spawn(config.luvusBin, ["uhp", "proxy"], {
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stderr.setEncoding("utf8");
+    let stderr = "";
+    child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-4096); });
+    const id = requestId();
+    child.stdin.end(`${JSON.stringify({ id, method, params })}\n`);
+    try {
+      const line = await Promise.race([
+        readChildLine(child, 12_000),
+        once(child, "error").then(([error]) => { throw error; }),
+        once(child, "exit").then(([code]) => {
+          throw new Error(stderr.trim() || `luvus uhp proxy exited with status ${String(code)}`);
+        }),
+      ]);
+      const frame = parseObject(line);
+      if (frame.id !== id) throw new Error("UHP host response id mismatch");
+      if (frame.error && typeof frame.error === "object") throw upstreamError(frame.error as Record<string, unknown>);
+      return frame.result;
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    }
+  }
 }
 
 async function pair(descriptor: Descriptor): Promise<Paired> {
@@ -195,7 +297,7 @@ function parseDescriptor(line: string): Descriptor {
   return value as Descriptor;
 }
 
-function readChildLine(child: ChildProcessByStdio<null, Readable, Readable>, timeoutMs: number): Promise<string> {
+function readChildLine(child: { stdout: Readable }, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     let buffer = "";
     const timer = setTimeout(() => done(new Error("timed out waiting for UHP access descriptor")), timeoutMs);
@@ -237,4 +339,13 @@ function upstreamError(error: Record<string, unknown>): Error & { code?: string 
 
 function requestId(): string {
   return `bridge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function validSessionName(name: string): boolean {
+  return name.length > 0 && name.length <= 64 && name !== "." && name !== ".."
+    && /^[A-Za-z0-9._-]+$/.test(name);
+}
+
+function codedError(message: string, code: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
 }

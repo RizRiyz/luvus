@@ -12,6 +12,7 @@ const binary = path.resolve(process.env.LUVUS_BIN || path.join(repoRoot, "target
 const homePrefix = path.join(os.homedir(), ".luvus-web-integration-");
 const home = await mkdtemp(homePrefix);
 const session = `web-integration-${process.pid}`;
+const alternateSession = `web-alternate-${process.pid}`;
 const commonEnv = { ...process.env, LUVUS_HOME: home };
 delete commonEnv.LUVUS_SOCKET_PATH;
 delete commonEnv.LUVUS_SESSION;
@@ -19,6 +20,8 @@ delete commonEnv.LUVUS_SESSION;
 let bridge;
 try {
   command(binary, ["--session", session, "server", "restart"], commonEnv);
+  command(binary, ["--session", alternateSession, "server", "start"], commonEnv);
+  command(binary, ["--session", alternateSession, "server", "stop"], commonEnv);
   bridge = spawn(process.execPath, [path.join(bridgeRoot, "dist/index.js")], {
     cwd: bridgeRoot,
     env: {
@@ -217,6 +220,26 @@ try {
   }));
   assert.equal((await cancelReply).result.type, "terminal_backend_action");
 
+  socket.send(JSON.stringify({ type: "stream.close", stream_id: "control" }));
+  socket.send(JSON.stringify({ type: "stream.close", stream_id: "events" }));
+  const sessions = await request(socket, "sessions", "web.sessions.list", {});
+  assert.equal(sessions.type, "browser_session_list");
+  assert.deepEqual(
+    sessions.sessions.find((candidate) => candidate.name === alternateSession),
+    { name: alternateSession, default: false, running: false },
+  );
+  const switched = await request(socket, "switch-alternate", "web.sessions.switch", { name: alternateSession });
+  assert.equal(switched.type, "browser_session_switch");
+  assert.equal(switched.session.name, alternateSession);
+  assert.equal(switched.session.running, true);
+  const alternateSnapshot = await retryRequest(socket, "alternate", "session.snapshot", {}, 12_000);
+  assert.equal(alternateSnapshot.session, alternateSession);
+
+  const switchedBack = await request(socket, "switch-original", "web.sessions.switch", { name: session });
+  assert.equal(switchedBack.session.name, session);
+  const originalSnapshot = await retryRequest(socket, "original", "session.snapshot", {}, 12_000);
+  assert.equal(originalSnapshot.session, session);
+
   command(binary, ["--session", session, "server", "restart"], commonEnv);
   const restored = await retryRequest(socket, "restored", "session.snapshot", {}, 12_000);
   assert.equal(restored.type, "session_snapshot");
@@ -226,6 +249,7 @@ try {
 } finally {
   bridge?.kill("SIGTERM");
   command(binary, ["--session", session, "server", "stop"], commonEnv, true);
+  command(binary, ["--session", alternateSession, "server", "stop"], commonEnv, true);
   if (home.startsWith(homePrefix)) await rm(home, { recursive: true, force: true });
 }
 

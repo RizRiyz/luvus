@@ -4,16 +4,18 @@ import test from "node:test";
 class FakeBridge extends EventTarget {
   generation = "a".repeat(32);
   sequence = 42;
+  sessionName = "test";
   streamParams = [];
+  switches = [];
 
   async connect() {}
 
-  async request(method) {
+  async request(method, params = {}) {
     if (method === "uhp.capabilities") {
       return {
         type: "uhp_capabilities",
         server_generation: this.generation,
-        session: "test",
+        session: this.sessionName,
         event_sequence: this.sequence,
         methods: ["events.subscribe", "session.snapshot"],
       };
@@ -21,10 +23,20 @@ class FakeBridge extends EventTarget {
     if (method === "session.snapshot") {
       return {
         type: "session_snapshot",
-        session: "test",
+        session: this.sessionName,
         server_generation: this.generation,
         event_sequence: this.sequence,
         workspaces: [],
+      };
+    }
+    if (method === "web.sessions.switch") {
+      this.switches.push(params.name);
+      this.sessionName = params.name;
+      this.generation = "c".repeat(32);
+      this.sequence = 0;
+      return {
+        type: "browser_session_switch",
+        session: { name: params.name, default: false, running: true },
       };
     }
     throw new Error(`unexpected method: ${method}`);
@@ -64,5 +76,20 @@ test("same-generation reconnect resumes after the latest snapshot sequence", asy
   await session.start();
 
   assert.deepEqual(bridge.streamParams, [{}, { after_sequence: 42 }]);
+  session.stop();
+});
+
+test("session switching replaces the upstream generation and takes a fresh snapshot", async () => {
+  const { LiveSession } = await import("../dist/index.js");
+  const bridge = new FakeBridge();
+  const session = new LiveSession(bridge);
+
+  await session.start();
+  await session.switchSession("review");
+
+  assert.equal(session.state, "ready");
+  assert.equal(session.snapshot.session, "review");
+  assert.deepEqual(bridge.switches, ["review"]);
+  assert.deepEqual(bridge.streamParams, [{}, {}]);
   session.stop();
 });

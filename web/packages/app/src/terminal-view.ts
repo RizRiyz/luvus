@@ -4,6 +4,13 @@ import { button, element } from "./dom.js";
 import { uploadTerminalFile } from "./file-upload.js";
 import { NativeTerminalInput, type TerminalAction } from "./native-input.js";
 
+export interface TerminalPaneOption {
+  pane: PaneSnapshot;
+  title: string;
+  context: string;
+  path: string;
+}
+
 export class TerminalView {
   readonly root = element("section", { className: "terminal-screen" });
   #stream: StreamHandle | undefined;
@@ -22,6 +29,21 @@ export class TerminalView {
   #viewportChanged = () => this.#syncViewport();
   #manualScroll = false;
   #manualScrollTimer: ReturnType<typeof setTimeout> | undefined;
+  #paneMenu = element("div", {
+    className: "terminal-pane-menu",
+    attrs: { role: "menu", "aria-label": "Switch terminal pane", hidden: "" },
+  });
+  #paneSelector: HTMLButtonElement | undefined;
+  #paneSwitcher: HTMLElement | undefined;
+  #outsidePaneMenu = (event: PointerEvent) => {
+    if (this.#paneMenu.hidden || this.#paneSwitcher?.contains(event.target as Node)) return;
+    this.#closePaneMenu();
+  };
+  #paneMenuKeydown = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || this.#paneMenu.hidden) return;
+    event.preventDefault();
+    this.#closePaneMenu(true);
+  };
 
   constructor(
     private readonly bridge: BridgeClient,
@@ -29,6 +51,8 @@ export class TerminalView {
     private readonly pane: PaneSnapshot,
     private readonly control: boolean,
     private readonly streamCursor: boolean,
+    private readonly paneOptions: () => TerminalPaneOption[],
+    private readonly onSelectPane: (pane: PaneSnapshot) => void,
     onBack: () => void,
   ) {
     const title = pane.agent_name || pane.agent || `Pane ${pane.pane_id}`;
@@ -113,18 +137,39 @@ export class TerminalView {
       controlButton.addEventListener("pointerdown", (event) => event.preventDefault());
       return controlButton;
     });
+    const tools = element("div", { className: "terminal-tools" }, attach, keyboard, ...keys);
+    const controlsToggle = button("", "terminal-controls-toggle", () => {
+      const expanded = this.root.classList.toggle("controls-expanded");
+      controlsToggle.setAttribute("aria-expanded", String(expanded));
+      controlsToggle.setAttribute("aria-label", expanded ? "Hide terminal controls" : "Show terminal controls");
+      controlsToggle.title = expanded ? "Hide terminal controls" : "Show terminal controls";
+    });
+    controlsToggle.setAttribute("aria-expanded", "false");
+    controlsToggle.setAttribute("aria-label", "Show terminal controls");
+    controlsToggle.title = "Show terminal controls";
+    controlsToggle.addEventListener("pointerdown", (event) => event.preventDefault());
+
+    this.#paneSelector = element("button", {
+      className: "terminal-pane-selector",
+      attrs: { type: "button", "aria-haspopup": "menu", "aria-expanded": "false" },
+      on: { click: () => this.#togglePaneMenu() },
+    },
+    element("span", { className: "terminal-pane-copy" },
+      element("strong", { text: title }),
+      element("small", { text: pane.cwd || "Terminal" }),
+    ),
+    element("span", { className: "terminal-pane-chevron", attrs: { "aria-hidden": "true" } }),
+    );
+    this.#paneSwitcher = element("div", { className: "terminal-pane-switcher" }, this.#paneSelector, this.#paneMenu);
 
     this.root.append(
-      element("header", { className: "terminal-header" },
-        headerBackButton(onBack),
-        element("div", {}, element("h1", { text: title }), element("p", { text: pane.cwd || "Terminal" })),
-        element("span", { className: `mode ${control ? "control" : "read"}`, text: control ? "Control" : "Observe" }),
-      ),
+      element("header", { className: "terminal-header" }, headerBackButton(onBack), this.#paneSwitcher),
       this.#output,
       element("div", { className: "terminal-controls-wrap" },
         element("div", { className: "terminal-controls" },
           this.#inputHint,
-          element("div", { className: "terminal-tools" }, attach, keyboard, ...keys),
+          tools,
+          controlsToggle,
         ),
       ),
       fileInput,
@@ -146,6 +191,8 @@ export class TerminalView {
     window.visualViewport?.addEventListener("resize", this.#viewportChanged);
     window.visualViewport?.addEventListener("scroll", this.#viewportChanged);
     window.addEventListener("resize", this.#viewportChanged);
+    document.addEventListener("pointerdown", this.#outsidePaneMenu);
+    document.addEventListener("keydown", this.#paneMenuKeydown);
     this.#syncViewport();
   }
 
@@ -175,6 +222,49 @@ export class TerminalView {
     window.visualViewport?.removeEventListener("resize", this.#viewportChanged);
     window.visualViewport?.removeEventListener("scroll", this.#viewportChanged);
     window.removeEventListener("resize", this.#viewportChanged);
+    document.removeEventListener("pointerdown", this.#outsidePaneMenu);
+    document.removeEventListener("keydown", this.#paneMenuKeydown);
+  }
+
+  #togglePaneMenu(): void {
+    if (this.#paneMenu.hidden) this.#openPaneMenu();
+    else this.#closePaneMenu(true);
+  }
+
+  #openPaneMenu(): void {
+    const options = this.paneOptions();
+    this.#paneMenu.replaceChildren(...options.map((option) => {
+      const active = option.pane.pane_id === this.pane.pane_id
+        && option.pane.terminal_id === this.pane.terminal_id;
+      return element("button", {
+        className: `terminal-pane-option${active ? " active" : ""}`,
+        attrs: { type: "button", role: "menuitem", ...(active ? { "aria-current": "true" } : {}) },
+        on: { click: () => {
+          if (active) {
+            this.#closePaneMenu(true);
+            return;
+          }
+          this.#closePaneMenu();
+          this.onSelectPane(option.pane);
+        } },
+      },
+      element("span", { className: "terminal-pane-option-dot", attrs: { "aria-hidden": "true" } }),
+      element("span", { className: "terminal-pane-option-copy" },
+        element("strong", { text: option.title }),
+        element("small", { text: option.context }),
+        element("small", { className: "terminal-pane-option-path", text: option.path }),
+      ),
+      );
+    }));
+    if (options.length === 0) this.#paneMenu.append(element("p", { className: "terminal-pane-menu-empty", text: "No terminal panes available" }));
+    this.#paneMenu.hidden = false;
+    this.#paneSelector?.setAttribute("aria-expanded", "true");
+  }
+
+  #closePaneMenu(restoreFocus = false): void {
+    this.#paneMenu.hidden = true;
+    this.#paneSelector?.setAttribute("aria-expanded", "false");
+    if (restoreFocus) this.#paneSelector?.focus();
   }
 
   #frame(raw: Record<string, unknown>): void {

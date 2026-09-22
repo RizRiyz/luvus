@@ -55,6 +55,38 @@ export class LiveSession extends EventTarget {
     await this.#takeSnapshot();
   }
 
+  async switchSession(name: string): Promise<void> {
+    if (this.#syncing || this.#reconnecting || this.#state !== "ready") {
+      throw new BridgeError("The live session is busy", "busy");
+    }
+    this.#stopped = true;
+    if (this.#refreshTimer) clearTimeout(this.#refreshTimer);
+    this.#refreshTimer = undefined;
+    this.#events?.close();
+    this.#events = undefined;
+    this.#snapshot = undefined;
+    this.#capabilities = undefined;
+    this.#lastSequence = 0;
+    this.#buffer = [];
+    this.#setState("synchronizing");
+    let switchError: unknown;
+    try {
+      asSessionSwitch(await this.bridge.request("web.sessions.switch", { name }, 30_000), name);
+    } catch (error) {
+      switchError = error;
+    }
+    this.bridge.close("session switched");
+    this.#stopped = false;
+    this.#retry = 0;
+    try {
+      await this.#synchronize("connecting");
+    } catch (error) {
+      void this.#reconnect();
+      if (!switchError) throw error;
+    }
+    if (switchError) throw switchError;
+  }
+
   async #synchronize(initial: ConnectionState): Promise<void> {
     if (this.#syncing || this.#stopped) return;
     this.#syncing = true;
@@ -188,6 +220,13 @@ function asSnapshot(value: unknown): SessionSnapshot {
     throw new BridgeError("Invalid snapshot response", "invalid_response");
   }
   return value as SessionSnapshot;
+}
+
+function asSessionSwitch(value: unknown, expected: string): void {
+  const response = value as { type?: unknown; session?: { name?: unknown } } | undefined;
+  if (response?.type !== "browser_session_switch" || response.session?.name !== expected) {
+    throw new BridgeError("Invalid session switch response", "invalid_response");
+  }
 }
 
 function asEvent(value: JsonObject): UhpEvent | undefined {

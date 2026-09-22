@@ -102,6 +102,14 @@ on the selected server and pastes only the resulting remote path, so the same
 flow works through a remote bridge and never exposes a meaningless local
 browser path to the PTY.
 
+On Mission Control, select the **SESSION** name below Live stats to list known
+Luvus sessions and move the web bridge to another namespace. Running sessions
+are attached without disturbing their TUI clients or PTYs. In control mode, a
+known stopped session may be started on selection; read-only bridges can switch
+only to sessions that are already running. Because one bridge owns one selected
+upstream, a switch moves every browser device connected to that bridge while
+other TUI and CLI clients remain attached to their own sessions.
+
 The bridge binds `127.0.0.1` by default and starts read-only access. Set
 `LUVUS_WEB_CONTROL=1` to enable terminal control. To place the bridge behind a
 TLS tunnel, keep the bridge loopback-bound and set `LUVUS_WEB_ORIGINS` to the
