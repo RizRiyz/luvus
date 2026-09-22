@@ -94,6 +94,7 @@ export default defineConfig({
             { label: 'Remote Sessions', slug: 'docs/guides/remote' },
             { label: 'Multiple Machines', slug: 'docs/guides/machines' },
             { label: 'Mobile Sessions', slug: 'docs/guides/mobile' },
+            { label: 'Luvus Web', slug: 'docs/guides/web' },
             { label: 'Scrollback & Copy', slug: 'docs/guides/scrollback' },
             { label: 'Settings & Theming', slug: 'docs/guides/settings' },
             { label: 'Community Themes', slug: 'docs/guides/themes' },

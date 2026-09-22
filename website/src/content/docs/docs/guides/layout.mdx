@@ -82,8 +82,8 @@ Closing the final workspace leaves the client attached with the normal Luvus
 chrome instead of closing the app or showing a separate landing screen. Luvus
 immediately replaces it with a neutral workspace and real terminal rooted at
 your home directory. You can type, change directory, create tabs or splits, and
-open the folder picker normally. The sidebar path follows the focused pane, so
-split terminals with different working directories remain unambiguous.
+open the folder picker normally. The sidebar path remains the workspace root;
+pane titles show each terminal's live working directory.
 
 - **Open one:** the `+` button above the list, or `Ctrl+Space N`, opens a
   **folder picker**. Browse with the arrows / wheel, use the **Home** row to jump
@@ -101,14 +101,14 @@ split terminals with different working directories remain unambiguous.
 - **Jump to its git tab:** right-click the workspace and choose **Open Git
   Tab**, or focus it and press `Ctrl+Space g`.
 
-### Following a pane into another repository
+### Changing directory inside a pane
 
-When a terminal or agent changes its working directory into another Git
-repository or linked worktree, luvus confirms the new root across two scans and
-then moves the complete normal tab to that workspace. If the workspace is not
-open yet, luvus creates it without starting another shell. Split tabs move only
-when every pane agrees on the same destination; mixed-workspace splits and
-dashboard tabs stay where they are.
+Running `cd` changes that pane's live working directory without reorganizing
+the workspace. The tab stays where you placed it, the workspace keeps its
+project root, and an empty source workspace is never created by a directory
+change. Open another repository or linked worktree explicitly when you want it
+to become a workspace. You can still move panes and tabs with their existing
+UI, CLI, and UHP controls.
 
 ### Right-click a workspace
 
@@ -232,20 +232,28 @@ Unicode character counts; wide glyphs such as CJK and many emoji consume two.
 Drag across any pane to select, and releasing **auto-copies** to your clipboard. Full
 details, plus scrollback, are in [Scrollback & Copy](/docs/guides/scrollback/).
 
-## Pasting images on Windows
+## Pasting clipboard images
 
-Copy a screenshot or image, focus an agent pane, then press `Ctrl+V` or
-`Ctrl+Shift+V` if that is the paste chord your terminal sends. Luvus reads the
-clipboard only for that explicit gesture. A supported PNG or bitmap is staged
-as a private PNG and its path is pasted into the focused pane without submitting
-the prompt. Agents that accept image paths can then attach or inspect it.
+Copy a screenshot or image, focus an agent pane, then use the paste chord your
+terminal sends: `Ctrl+V` or `Ctrl+Shift+V`, plus `Command+V` or
+`Command+Shift+V` on macOS. Luvus reads the clipboard only for that explicit
+gesture. A supported image is staged as a private PNG and its path is pasted
+into the focused pane without submitting the prompt. Agents that accept image
+paths can then attach or inspect it.
+
+Windows reads registered PNG and bitmap clipboard formats directly. macOS reads
+PNG or TIFF from the system pasteboard and normalizes it to PNG. Wayland clients
+use `wl-paste`; X11 clients on Linux or FreeBSD use `xclip`. These Unix helpers
+run in the display client and inherit its `WAYLAND_DISPLAY`, `DISPLAY`, and
+`XDG_RUNTIME_DIR`; install `wl-clipboard` or `xclip` when your desktop does not
+already provide the applicable command.
 
 If the clipboard has text, is unavailable, or contains an unsupported image,
 Luvus forwards the original key unchanged. Image paste is ignored while a Luvus
 modal, native file view, dashboard, copy mode, or navigation mode owns input, so
-the private path cannot leak into a pane behind it. This dedicated reader is
-currently available in Windows display clients. Text paste and the existing
-terminal-native behavior on macOS and Linux are unchanged.
+the private path cannot leak into a pane behind it. The host terminal must pass
+the chord through to Luvus; a terminal-reserved paste binding can still consume
+it before Luvus sees it.
 
 ## Opening links and files
 

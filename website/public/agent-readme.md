@@ -293,9 +293,9 @@ luvus agent keys reviewer esc
 luvus wait agent-status <pane-id> --status done,blocked --timeout 600
 ```
 
-The neutral home workspace supports ordinary tabs and panes, and its displayed
-path follows the focused pane's live cwd. Use `workspace open <path>` when the
-user named a specific project.
+The neutral home workspace supports ordinary tabs and panes. Its sidebar path
+remains the stored home root while `terminal_cwd` follows the focused pane. Use
+`workspace open <path>` when the user named a specific project.
 
 `agent prompt` submits one complete prompt and can wait semantically. Prefer it
 to separate text and Enter operations. A timeout does not prove that an agent

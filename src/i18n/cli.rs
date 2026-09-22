@@ -177,6 +177,39 @@ macro_rules! tr {
 /// suffix, so canonical syntax at the start of a row is never rewritten.
 static HELP: &[Translation] = &[
     tr!(
+        "Serve the optional browser client",
+        "Servir el cliente web opcional",
+        "Servir o cliente web opcional",
+        "Servir le client web facultatif",
+        "Den optionalen Webclient bereitstellen",
+        "Sajikan klien web opsional",
+        "提供可选的 Web 客户端",
+        "オプションの Web クライアントを提供",
+        "선택적 웹 클라이언트 제공"
+    ),
+    tr!(
+        "web access:",
+        "acceso web:",
+        "acesso web:",
+        "accès web :",
+        "Webzugriff:",
+        "akses web:",
+        "Web 访问：",
+        "Web アクセス:",
+        "웹 접근:"
+    ),
+    tr!(
+        "serve the optional loopback browser client (read-only by default)",
+        "servir el cliente web opcional en loopback (solo lectura por defecto)",
+        "servir o cliente web opcional em loopback (somente leitura por padrão)",
+        "servir le client web facultatif en boucle locale (lecture seule par défaut)",
+        "den optionalen Loopback-Webclient bereitstellen (standardmäßig schreibgeschützt)",
+        "sajikan klien web loopback opsional (bawaan hanya-baca)",
+        "提供可选的回环 Web 客户端（默认只读）",
+        "オプションのループバック Web クライアントを提供（既定は読み取り専用）",
+        "선택적 루프백 웹 클라이언트 제공(기본값은 읽기 전용)"
+    ),
+    tr!(
         "expose scoped UHP through a private provider endpoint",
         "exponer UHP con alcance mediante un endpoint privado para proveedores",
         "expor UHP com escopo por um endpoint privado para provedores",

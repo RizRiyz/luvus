@@ -834,14 +834,11 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         let old = std::env::var_os("XDG_CONFIG_HOME");
         let old_tui = std::env::var_os("OPENCODE_TUI_CONFIG");
-        let old_path = std::env::var_os("PATH");
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
         std::env::remove_var("OPENCODE_TUI_CONFIG");
         // Make the no-binary fallback deterministic even on a maintainer host
         // that still has OpenCode V1 installed.
-        std::env::set_var("PATH", &tmp);
-
-        install("opencode").unwrap();
+        crate::agent::opencode::without_binary_probe(|| install("opencode")).unwrap();
         let plugin = tmp.join("opencode/luvus-v2/tui.js");
         let js = fs::read_to_string(&plugin).unwrap();
         assert!(js.contains("session.updated"), "hooks the session event");
@@ -865,10 +862,6 @@ mod tests {
         match old_tui {
             Some(value) => std::env::set_var("OPENCODE_TUI_CONFIG", value),
             None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
-        }
-        match old_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
         }
         let _ = fs::remove_dir_all(&tmp);
     }

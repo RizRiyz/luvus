@@ -1,0 +1,19 @@
+{
+  "name": "@luvus/web-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "build:native": "vite build --mode native",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "tsc -p tsconfig.test.json && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@luvus/uhp-client": "*",
+    "uqr": "^0.1.3"
+  },
+  "devDependencies": {
+    "vite": "^7.1.7"
+  }
+}

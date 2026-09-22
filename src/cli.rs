@@ -27,6 +27,7 @@ pub fn is_cli(args: &[String]) -> bool {
                 | "api"
                 | "logs"
                 | "uhp"
+                | "web"
                 | "socket"
                 | "module"
                 | "theme"
@@ -85,6 +86,7 @@ Commands:
   search       Search across pane scrollback
   events       Stream live status changes
   uhp          Discover and use Universal Harness Protocol 1.0
+  web          Serve the optional browser client
   attach       Open the TUI focused on one pane
   doctor       Check optional external tools
   update       Check for and install a newer Luvus release
@@ -100,7 +102,6 @@ Options:
   --remote <host> [ssh args]             Attach through SSH
   --version, -V                          Print the version
   --help, -h                             Show this help
-
 Help:
   luvus help all                         Complete CLI reference
   luvus help <topic> [command]           Focus on one area or command
@@ -330,6 +331,10 @@ universal harness protocol:
   uhp access [--machines] [--control] [--ttl <seconds> | --no-expiry]
                              expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
+
+web access:
+  web [--control|--read-only] [--port <port>] [--max-devices <1-8>] [--public-url <origin>] [--origin <origin>] [--no-open]
+                             serve the optional loopback browser client (read-only by default)
 
 sessions:
   session list [--json]      list default and named server sessions
@@ -641,7 +646,7 @@ fn normalize_help_topic(topic: &str) -> Option<&str> {
         "workspace" | "tab" | "pane" | "agent" | "files" | "git" | "mission" | "worktree"
         | "task" | "lease" | "automation" | "module" | "theme" | "bar" | "ui" | "session"
         | "server" | "integration" | "diff" | "skill" | "wait" | "search" | "events" | "uhp"
-        | "machine" | "ping" | "doctor" | "update" | "attach" => Some(topic),
+        | "machine" | "web" | "ping" | "doctor" | "update" | "attach" => Some(topic),
         "node" => Some("pane"),
         "remote" | "--remote" => Some("remote"),
         _ => None,
@@ -828,7 +833,11 @@ fn write_topic_help_english(
         ),
         "uhp" => (
             "luvus uhp <capabilities|schema|snapshot|events|access|proxy>",
-            detailed_section("universal harness protocol:\n", "\nsessions:\n"),
+            detailed_section("universal harness protocol:\n", "\nweb access:\n"),
+        ),
+        "web" => (
+            "luvus [--session <name>] web [options]",
+            detailed_section("web access:\n", "\nsessions:\n"),
         ),
         "machine" => (
             "luvus machine <command> [args]",
@@ -4366,6 +4375,7 @@ mod tests {
                             | "integration"
                             | "machine"
                             | "uhp"
+                            | "web"
                     )
                 ) && !trimmed.contains("  ");
                 if trimmed.is_empty()

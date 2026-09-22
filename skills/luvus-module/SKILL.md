@@ -35,6 +35,21 @@ Then any of these tables, each declaring an argv `command` (a list, run as-is, c
 - **`[[actions]]`** `id`, `title`, `command`, optional `contexts` — a runnable action. With `contexts = ["pane"|"workspace"|"node"|"agent"|"tab"]` it also appears in that right-click menu, acting on **what was clicked**. Without `contexts` it is CLI-only (`luvus module run <id> <action>`). Dock rows also invoke an action on click.
 - **`[[panes]]`** `id`, `title`, `command`, `placement` (`split` | `overlay` | `tab`) — a real pane running your command (`luvus module pane open <id> <entrypoint>`).
 - **`[[settings]]`** `key`, `title`, `type` (`bool` | `string` | `number` | `enum`), plus `default`, `options` (enum), `min`/`max`/`step` (number), `secret` (mask + hide the value). Rendered in Settings → Modules; values reach every command as env (below).
+- **`[worktree_provider]`** one optional fixed creation `command`, optional fixed `remove_command`, and optional `platforms`. The user selects the module id in `config.json` at `worktree.provider`; config cannot replace either command.
+
+A worktree provider reads one versioned JSON request from stdin. Creation gets
+`version`, `operation`, `repository`, `branch`, and `branch_exists`, and must
+print only `{"path":"/absolute/worktree/path"}` on stdout. Removal gets
+`version`, `operation`, `repository`, `path`, `branch`, and `force`; it must
+print nothing, exit successfully, and unregister and remove the target. If a
+provider violates its exit or stdout contract after deletion already completed,
+Luvus reconciles the proven Git/filesystem state instead of retaining a stale
+workspace; stdout remains unsupported. Human logs go to stderr. This command is
+synchronous and must not call back into the Luvus CLI/API while the server
+waits. Luvus verifies the returned path is a
+registered worktree of the source repository on the exact requested branch
+before opening a workspace; explicit removal is verified before and after the
+command. Internal rollback and task merge remain Git-backed.
 
 ## What your command receives (no JSON parsing needed)
 
@@ -46,6 +61,7 @@ luvus puts context in the environment, flat, so a bash module never parses JSON:
 - `LUVUS_WORKSPACE_ID`, `LUVUS_WORKSPACE_CWD`, `LUVUS_TAB_INDEX`
 - `LUVUS_PANE_ID`, `LUVUS_PANE_CWD`, `LUVUS_PANE_AGENT`, `LUVUS_PANE_STATUS` (the clicked/target pane)
 - `LUVUS_SETTING_<KEY>` for each declared setting (uppercased key), plus the whole set as JSON
+- `[worktree_provider]` commands read their versioned operation request as JSON from stdin
 - Dock-row clicks add `LUVUS_MODULE_DOCK_ID`, `LUVUS_MODULE_ROW_ACTION`, `LUVUS_MODULE_ROW_VALUE`, `LUVUS_MODULE_ROW_TEXT`, `LUVUS_MODULE_ROW_INDEX`
 - Bar-segment clicks add `LUVUS_MODULE_BAR_ID`, `LUVUS_MODULE_BAR_SEGMENT`, and optional `LUVUS_MODULE_BAR_VALUE`
 - `LUVUS_MODULE_CONTEXT_JSON` — the full snapshot, if you want structured data

@@ -4,7 +4,7 @@
   "type":"object",
   "properties":{
     "id":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._:-]+$"},
-    "action":{"enum":["type_literal","submit_text","send_key"]},
+    "action":{"enum":["type_literal","paste_text","paste_image","submit_text","send_key","upload_start","upload_chunk","upload_finish","upload_cancel"]},
     "params":{"type":"object"}
   },
   "required":["id","action","params"],
@@ -18,6 +18,36 @@
     },
     {
       "properties":{
+        "action":{"const":"paste_text"},
+        "params":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":262144}},"required":["text"],"additionalProperties":false}
+      }
+    },
+    {
+      "properties":{
+        "action":{"const":"paste_image"},
+        "params":{"type":"object","properties":{"png_base64":{"type":"string","minLength":4,"maxLength":218456,"pattern":"^[A-Za-z0-9+/]+={0,2}$"}},"required":["png_base64"],"additionalProperties":false}
+      }
+    },
+    {
+      "properties":{
+        "action":{"const":"upload_start"},
+        "params":{"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":255},"size":{"type":"integer","minimum":1,"maximum":33554432}},"required":["name","size"],"additionalProperties":false}
+      }
+    },
+    {
+      "properties":{
+        "action":{"const":"upload_chunk"},
+        "params":{"type":"object","properties":{"upload_id":{"type":"string","pattern":"^[0-9a-f]{32}$"},"offset":{"type":"integer","minimum":0,"maximum":33554432},"data_base64":{"type":"string","minLength":4,"maxLength":218456,"pattern":"^[A-Za-z0-9+/]+={0,2}$"}},"required":["upload_id","offset","data_base64"],"additionalProperties":false}
+      }
+    },
+    {
+      "properties":{
+        "action":{"enum":["upload_finish","upload_cancel"]},
+        "params":{"type":"object","properties":{"upload_id":{"type":"string","pattern":"^[0-9a-f]{32}$"}},"required":["upload_id"],"additionalProperties":false}
+      }
+    },
+    {
+      "properties":{
         "action":{"const":"submit_text"},
         "params":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":262144}},"required":["text"],"additionalProperties":false}
       }
@@ -25,7 +55,7 @@
     {
       "properties":{
         "action":{"const":"send_key"},
-        "params":{"type":"object","properties":{"key":{"enum":["enter","escape","tab","backtab","up","down","left","right","home","end","backspace","delete","pageup","pagedown","ctrl-c","ctrl-d","ctrl-u","ctrl-w","space","digit-0","digit-1","digit-2","digit-3","digit-4","digit-5","digit-6","digit-7","digit-8","digit-9"]}},"required":["key"],"additionalProperties":false}
+        "params":{"type":"object","properties":{"key":{"enum":["enter","escape","tab","backtab","up","down","left","right","home","end","backspace","delete","pageup","pagedown","ctrl-c","ctrl-d","ctrl-k","ctrl-u","ctrl-w","alt-d","space","digit-0","digit-1","digit-2","digit-3","digit-4","digit-5","digit-6","digit-7","digit-8","digit-9"]}},"required":["key"],"additionalProperties":false}
       }
     }
   ]

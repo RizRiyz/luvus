@@ -41,6 +41,15 @@ pub struct Config {
     pub layout: LayoutConfig,
     #[serde(default)]
     pub notifications: NotifyConfig,
+    /// Session persistence policy. Pane screens remain enabled by default for
+    /// backward-compatible instant restore; users can retain layout and agent
+    /// resume metadata without writing terminal content to disk.
+    #[serde(default)]
+    pub session: SessionConfig,
+    /// Allow launching an interactive Luvus client from a Luvus pane.
+    /// Disabled by default because nested clients compete for terminal input.
+    #[serde(default)]
+    pub allow_nested: bool,
     /// Check `luvus.dev/latest.json` in the background for a newer release and
     /// show an indicator by the version number. A single periodic `curl`/`wget`
     /// GET; on by default, toggled in Settings → General. Notify-only — luvus
@@ -104,10 +113,50 @@ pub struct Config {
     /// or restart. This set keeps an off dock off; re-placing it clears the flag.
     #[serde(default)]
     pub docks_off: Vec<String>,
+    /// Worktree creation backend. The built-in Git provider remains the default;
+    /// third-party tools integrate through a selected module provider.
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
     /// Luvus Bar placement groups. Dynamic content is never persisted here;
     /// only presentation preferences survive a restart.
     #[serde(default)]
     pub bars: BarConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SessionConfig {
+    /// Persist each pane's visible terminal screen in `session.json` so it can
+    /// be replayed immediately while the restored PTY starts.
+    #[serde(default = "yes")]
+    pub persist_pane_screen: bool,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            persist_pane_screen: true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct WorktreeConfig {
+    /// `git` (default) or the canonical id of an enabled module whose manifest
+    /// declares `[worktree_provider]`.
+    #[serde(default = "default_worktree_provider")]
+    pub provider: String,
+}
+
+fn default_worktree_provider() -> String {
+    "git".to_string()
+}
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            provider: default_worktree_provider(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -475,6 +524,8 @@ impl Default for Config {
             sidebars: None,
             layout: LayoutConfig::default(),
             notifications: NotifyConfig::default(),
+            session: SessionConfig::default(),
+            allow_nested: false,
             check_updates: true,
             resume_launch_flags: false,
             agents_active_only: false,
@@ -485,6 +536,7 @@ impl Default for Config {
             mission_pricing: std::collections::HashMap::new(),
             mission_budget: None,
             docks_off: Vec::new(),
+            worktree: WorktreeConfig::default(),
             bars: BarConfig::default(),
         }
     }
@@ -865,18 +917,25 @@ mod tests {
     #[test]
     fn defaults_and_roundtrip() {
         let c = Config::default();
+        assert!(!c.allow_nested);
         assert_eq!(c.theme, "quattro-rally");
         assert!(c.layout.show_titles);
         assert!(c.layout.workspace_paths);
         assert!(c.layout.agent_paths);
+        assert!(c.session.persist_pane_screen);
         assert_eq!(c.layout.col_gap, 1);
         assert_eq!(c.layout.mobile_width, crate::app::MOBILE_WIDTH);
         // Empty object → all defaults (forward/back compat).
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
+        assert!(!from_empty.allow_nested);
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         assert!(from_empty.layout.workspace_paths);
         assert!(from_empty.layout.agent_paths);
+        assert!(
+            from_empty.session.persist_pane_screen,
+            "existing configs retain instant pane-screen restore"
+        );
         assert!(
             from_empty.direct_keybindings.is_empty(),
             "existing configs do not gain input-stealing direct shortcuts"
@@ -895,6 +954,25 @@ mod tests {
             "old configs gain the default runtime bar"
         );
         assert!(from_empty.bars.top_right.is_empty());
+        assert_eq!(from_empty.worktree, WorktreeConfig::default());
+        let module_provider: Config =
+            serde_json::from_str(r#"{"worktree":{"provider":"example.provider"}}"#).unwrap();
+        assert_eq!(module_provider.worktree.provider, "example.provider");
+        let forward: Config = serde_json::from_str(
+            r#"{"worktree":{"provider":"future-provider","future_option":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(forward.worktree.provider, "future-provider");
+        let private: Config =
+            serde_json::from_str(r#"{"session":{"persist_pane_screen":false}}"#).unwrap();
+        assert!(!private.session.persist_pane_screen);
+        let private_json = serde_json::to_string(&private).unwrap();
+        assert!(
+            !serde_json::from_str::<Config>(&private_json)
+                .unwrap()
+                .session
+                .persist_pane_screen
+        );
         // Round-trip preserves values.
         // Scrollback defaults to a per-pane 10 MiB budget. The legacy line
         // field remains only so old config can migrate safely.
@@ -958,6 +1036,15 @@ mod tests {
         assert!(back.notifications.sound_on_done);
         assert!(!back.notifications.sound_on_blocked);
         assert_eq!(back.notifications.sound_style, crate::sound::STYLE_RETRO);
+        // Nested clients are opt-in and survive serialization.
+        let mut nested = c2.clone();
+        nested.allow_nested = true;
+        let nested_json = serde_json::to_string(&nested).unwrap();
+        assert!(
+            serde_json::from_str::<Config>(&nested_json)
+                .unwrap()
+                .allow_nested
+        );
 
         // Configs written before sound styles existed retain the original cue.
         let old: Config = serde_json::from_str(

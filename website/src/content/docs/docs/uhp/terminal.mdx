@@ -39,6 +39,12 @@ running row, validate its `endpoint`, then discover the global contract:
 The response returns the protocol version, a random `server_generation`, and
 the exact methods and active limits. Never call an unannounced method.
 
+For a control stream, also check each exact action name in
+`terminal.capabilities`. Do not infer action support from `control_stream`, the
+protocol version, or a Luvus release number. For example, file attachment
+requires `upload_start`, `upload_chunk`, `upload_finish`, and `upload_cancel`;
+image paste requires `paste_image`.
+
 ## Identity and lifecycle
 
 Every terminal has a random `terminal_id` for one successful PTY lifetime and a
@@ -59,8 +65,9 @@ never follows a moved terminal implicitly for a write.
 | `process_inspection` | `terminal.backend.processes` | Cached executable identities under a validated root; never full argv |
 | `capture` | `terminal.backend.capture` | Bounded `visible`, `recent_unwrapped`, or detection text; optional safe SGR for the first two; recent capture includes passively retained alternate-screen rows |
 | `observe` | `terminal.backend.observe` | Initial safe ANSI frame followed by revision-deduplicated frames when this terminal emits output |
-| `control_stream` | `terminal.backend.control` | The observe stream plus correlated `type_literal`, `submit_text`, and `send_key` action frames |
+| `control_stream` | `terminal.backend.control` | The observe stream plus correlated input, key, image, and bounded `upload_*` action frames |
 | `type_literal` | `terminal.backend.type_literal` | Literal UTF-8 with no implicit Enter |
+| `paste_text` | `terminal.backend.paste_text` | Text with terminal bracketed-paste semantics and no implicit Enter |
 | `submit_text` | `terminal.backend.submit_text` | One atomic paste-and-Enter queue action |
 | `send_key` | `terminal.backend.send_key` | One documented logical key with terminal-mode-aware navigation |
 | `set_title` | `terminal.backend.set_title` | Bounded Luvus label; does not inject OSC into the child |
@@ -99,18 +106,44 @@ captured text, and the sender advances its cursor to that revision only after
 writing the frame successfully. Output arriving during the initial or a later
 write remains eligible for delivery, even when the child then becomes quiet.
 The acknowledgment revision does not mean that output has already been emitted.
+When `terminal.features` advertises `stream_cursor`, a client can add
+`cursor:true` to the observe or control request. Those frames also carry
+`cursor`, either `null` or a Unicode-scalar `offset` in the normalized rendered
+text plus `padding_cells`, the blank terminal cells trimmed immediately before
+the live cursor. ANSI control bytes do not count toward the offset. Renderers
+insert the padding only before their visual caret, after applying terminal
+styles. Omitting the opt-in preserves the original strict UHP 1.0 frame shape.
 
 `terminal.backend.control` has the same output stream and accepts correlated
 action frames after its acknowledgment:
 
 ```json
 {"id":"input-1","action":"type_literal","params":{"text":"cargo test"}}
+{"id":"paste-1","action":"paste_text","params":{"text":"first line\nsecond line"}}
 {"id":"input-2","action":"send_key","params":{"key":"enter"}}
 ```
 
 Actions reuse ordinary strict UHP validation and replies. Only one
 API control stream can lease a terminal at a time. Observe streams remain
 read-only, and local owner/TUI authority is unchanged.
+
+For native command-line editing, `send_key` includes `ctrl-w` and `alt-d` for
+backward and forward word deletion, and `ctrl-u` and `ctrl-k` for deletion
+toward the start and end of the current line.
+
+`paste_image` takes `{png_base64}` for one validated PNG up to 160 KiB. Luvus
+stages the image beneath private selected-session storage and delivers its
+owned path through the same bracketed-paste route as native clipboard images.
+Invalid encodings, non-PNG data, and oversized images are rejected before a
+path is published.
+
+Browser and remote clients can attach other files without giving Luvus a local
+browser path. Send `upload_start` with the leaf name and total size, ordered
+`upload_chunk` actions with an exact byte offset and base64 data, then
+`upload_finish`. Each chunk is at most 160 KiB and the completed file is at most
+32 MiB. Luvus writes into private selected-session storage, atomically publishes
+the completed remote file, and bracket-pastes only its owned path. A disconnect
+or `upload_cancel` removes an incomplete upload.
 
 Each pane admits at most 4,096 pending input actions and 8 MiB of owned input
 buffer capacity across the channel and writer queues together. Capabilities

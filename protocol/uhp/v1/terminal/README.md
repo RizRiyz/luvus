@@ -37,12 +37,24 @@ reconcile through a fresh inventory.
 Protocol v1 capabilities are:
 
 - `inventory`, `validate`, `capture`, `observe`, and `control_stream`
-- `type_literal`, `submit_text`, and `send_key`
+- `type_literal`, `paste_text`, `paste_image`, `submit_text`, `send_key`, and
+  bounded `upload_*` control-stream actions
 - `set_title` and `notify_terminal`
 - `create_workspace`, `create_sibling`, and `close`
 - `snapshot`, `events`, `wait_change`, and `wait_output`
 - privacy-preserving cached `process_inspection`, returning executable names
   rather than full argument vectors that may contain secrets
+
+Every control-stream action is advertised by its exact action name in
+`terminal.capabilities`. Consumers must check those names individually and
+must not infer image or file-upload support from `control_stream`, the protocol
+version, or the Luvus release version. In particular, an older server without
+`paste_image`, `upload_start`, `upload_chunk`, `upload_finish`, or
+`upload_cancel` does not support that action.
+
+The bounded `send_key` vocabulary includes `ctrl-w` and `alt-d` for backward
+and forward word deletion plus `ctrl-u` and `ctrl-k` for deletion toward the
+start and end of the current line.
 
 Protocol 1.0 capture includes a monotonic `content_revision` and provides a
 sequence-fenced snapshot, bounded terminal-only event streams, and event-driven
@@ -65,18 +77,30 @@ tests this reconciliation policy.
 immediately, then only after that terminal's existing coalesced
 `terminal.output_ready` event advances its content revision. A stream has a
 two-frame queue, captures at most 200 rows and 64 KiB, and never polls a PTY.
-`terminal.backend.control` adds newline-delimited `type_literal`, `submit_text`,
-and `send_key` action frames on that same connection. Only one API control
-stream may lease a terminal at a time. There are at most eight combined
-observe/control streams per server. Overflow requires a fresh capture and
-reconnect.
+`terminal.backend.control` adds newline-delimited input and upload actions on
+that same connection. `paste_text` preserves terminal bracketed-paste semantics
+without adding Enter. `paste_image` accepts one strictly validated base64 PNG
+up to 160 KiB. General files use `upload_start`, ordered `upload_chunk` frames,
+and `upload_finish` or `upload_cancel`; one control stream owns at most one
+incomplete upload, each chunk is at most 160 KiB, and a file is at most 32 MiB.
+Luvus stages bytes in private selected-session storage and pastes only the
+completed server-owned path. Only one API control stream may lease a terminal
+at a time. There are at most eight combined observe/control streams per server.
+Overflow requires a fresh capture and reconnect.
 
 Each `terminal.frame` replaces the previous capture. Its `content_revision`
 belongs to the text captured under the terminal-engine lock. Both initial and
 subsequent sends advance the stream cursor only to that emitted revision,
 after a successful write; output arriving during a write remains eligible for
 the next frame. The acknowledgment's revision is an earlier observation, not
-proof that a frame has been emitted. The wire shape and event catalog are unchanged.
+proof that a frame has been emitted. Clients that see `stream_cursor` in
+`terminal.features` may request `cursor:true`. Those frames add
+`cursor.offset`, a Unicode-scalar offset in the normalized rendered text with
+ANSI control bytes excluded, plus `cursor.padding_cells`, the number of blank
+terminal cells trimmed immediately before the live cursor. A renderer inserts
+those cells only before its visual caret; they are not captured output. `null`
+means the live child cursor is hidden or outside the bounded capture. Without
+that opt-in, the original strict UHP 1.0 frame shape is preserved.
 
 An installed binary exposes the same contract with `luvus uhp schema`,
 live negotiation with `luvus uhp capabilities`, the fenced inventory

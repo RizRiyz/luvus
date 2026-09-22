@@ -16,7 +16,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 PACKAGE = ROOT / "protocol" / "uhp" / "v1" / "terminal"
 OPAQUE = re.compile(r"^[0-9a-f]{32}$")
 REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-KEYS = {"enter", "escape", "tab", "backtab", "up", "down", "left", "right", "home", "end", "backspace", "delete", "pageup", "pagedown", "ctrl-c", "ctrl-d", "ctrl-u", "ctrl-w", "space", *(f"digit-{n}" for n in range(10))}
+BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+KEYS = {"enter", "escape", "tab", "backtab", "up", "down", "left", "right", "home", "end", "backspace", "delete", "pageup", "pagedown", "ctrl-c", "ctrl-d", "ctrl-k", "ctrl-u", "ctrl-w", "alt-d", "space", *(f"digit-{n}" for n in range(10))}
 METHOD_FIELDS = {
     "uhp.capabilities": set(),
     "terminal.backend.inventory": set(),
@@ -24,9 +25,10 @@ METHOD_FIELDS = {
     "terminal.backend.validate": {"server_generation", "terminal_id", "pane_id", "expected_root"},
     "terminal.backend.processes": {"server_generation", "terminal_id", "pane_id", "expected_root"},
     "terminal.backend.capture": {"server_generation", "terminal_id", "pane_id", "expected_root", "mode", "lines", "ansi"},
-    "terminal.backend.observe": {"server_generation", "terminal_id", "pane_id", "expected_root", "mode", "lines", "ansi"},
-    "terminal.backend.control": {"server_generation", "terminal_id", "pane_id", "expected_root", "mode", "lines", "ansi"},
+    "terminal.backend.observe": {"server_generation", "terminal_id", "pane_id", "expected_root", "mode", "lines", "ansi", "cursor"},
+    "terminal.backend.control": {"server_generation", "terminal_id", "pane_id", "expected_root", "mode", "lines", "ansi", "cursor"},
     "terminal.backend.type_literal": {"server_generation", "terminal_id", "pane_id", "expected_root", "text"},
+    "terminal.backend.paste_text": {"server_generation", "terminal_id", "pane_id", "expected_root", "text"},
     "terminal.backend.submit_text": {"server_generation", "terminal_id", "pane_id", "expected_root", "text"},
     "terminal.backend.send_key": {"server_generation", "terminal_id", "pane_id", "expected_root", "key"},
     "terminal.backend.set_title": {"server_generation", "terminal_id", "pane_id", "expected_root", "title"},
@@ -105,10 +107,11 @@ def valid_request(value):
         mode = params.get("mode", "visible")
         lines = params.get("lines", 80)
         ansi = params.get("ansi", True)
-        return mode in {"visible", "recent_unwrapped"} and isinstance(lines, int) and not isinstance(lines, bool) and 1 <= lines <= 200 and isinstance(ansi, bool)
+        cursor = params.get("cursor", False)
+        return mode in {"visible", "recent_unwrapped"} and isinstance(lines, int) and not isinstance(lines, bool) and 1 <= lines <= 200 and isinstance(ansi, bool) and isinstance(cursor, bool)
     if method == "terminal.backend.send_key":
         return params.get("key") in KEYS
-    if method in {"terminal.backend.type_literal", "terminal.backend.submit_text"}:
+    if method in {"terminal.backend.type_literal", "terminal.backend.paste_text", "terminal.backend.submit_text"}:
         text = params.get("text")
         return isinstance(text, str) and 1 <= len(text.encode()) <= 262144
     return True
@@ -126,9 +129,48 @@ def valid_control_frame(value):
     action, params = value["action"], value["params"]
     if not isinstance(params, dict):
         return False
-    if action in {"type_literal", "submit_text"}:
+    if action in {"type_literal", "paste_text", "submit_text"}:
         text = params.get("text")
         return set(params) == {"text"} and isinstance(text, str) and 1 <= len(text.encode()) <= 262144
+    if action == "paste_image":
+        encoded = params.get("png_base64")
+        return (
+            set(params) == {"png_base64"}
+            and isinstance(encoded, str)
+            and 4 <= len(encoded) <= 218456
+            and len(encoded) % 4 == 0
+            and BASE64.fullmatch(encoded) is not None
+        )
+    if action == "upload_start":
+        name, size = params.get("name"), params.get("size")
+        return (
+            set(params) == {"name", "size"}
+            and isinstance(name, str)
+            and 1 <= len(name.encode()) <= 255
+            and not any(ord(character) < 32 or ord(character) == 127 for character in name)
+            and isinstance(size, int)
+            and not isinstance(size, bool)
+            and 1 <= size <= 33554432
+        )
+    if action == "upload_chunk":
+        upload_id = params.get("upload_id")
+        offset = params.get("offset")
+        encoded = params.get("data_base64")
+        return (
+            set(params) == {"upload_id", "offset", "data_base64"}
+            and isinstance(upload_id, str)
+            and OPAQUE.fullmatch(upload_id) is not None
+            and isinstance(offset, int)
+            and not isinstance(offset, bool)
+            and 0 <= offset <= 33554432
+            and isinstance(encoded, str)
+            and 4 <= len(encoded) <= 218456
+            and len(encoded) % 4 == 0
+            and BASE64.fullmatch(encoded) is not None
+        )
+    if action in {"upload_finish", "upload_cancel"}:
+        upload_id = params.get("upload_id")
+        return set(params) == {"upload_id"} and isinstance(upload_id, str) and OPAQUE.fullmatch(upload_id) is not None
     return action == "send_key" and set(params) == {"key"} and params.get("key") in KEYS
 
 
@@ -141,7 +183,20 @@ def valid_event(value):
         return value["data"] == {"reason": "subscriber_overflow"}
     if value["event"] == "terminal.frame":
         data = value["data"]
-        if not (value["sequence"] >= 0 and set(data) == {"server_generation", "terminal_id", "pane_id", "content_revision", "mode", "ansi", "text", "lines", "bytes", "truncated"} and locator_ok(data) and isinstance(data["content_revision"], int) and data["content_revision"] >= 0 and data["mode"] in {"visible", "recent_unwrapped"} and isinstance(data["ansi"], bool) and isinstance(data["text"], str) and isinstance(data["lines"], int) and not isinstance(data["lines"], bool) and 1 <= data["lines"] <= 200 and isinstance(data["bytes"], int) and not isinstance(data["bytes"], bool) and 0 <= data["bytes"] <= 65536 and isinstance(data["truncated"], bool)):
+        required = {"server_generation", "terminal_id", "pane_id", "content_revision", "mode", "ansi", "text", "lines", "bytes", "truncated"}
+        if not (required <= set(data) <= required | {"cursor"} and value["sequence"] >= 0 and locator_ok(data) and isinstance(data["content_revision"], int) and data["content_revision"] >= 0 and data["mode"] in {"visible", "recent_unwrapped"} and isinstance(data["ansi"], bool) and isinstance(data["text"], str) and isinstance(data["lines"], int) and not isinstance(data["lines"], bool) and 1 <= data["lines"] <= 200 and isinstance(data["bytes"], int) and not isinstance(data["bytes"], bool) and 0 <= data["bytes"] <= 65536 and isinstance(data["truncated"], bool)):
+            return False
+        cursor = data.get("cursor")
+        if cursor is not None and not (
+            isinstance(cursor, dict)
+            and set(cursor) == {"offset", "padding_cells"}
+            and isinstance(cursor["offset"], int)
+            and not isinstance(cursor["offset"], bool)
+            and 0 <= cursor["offset"] <= 65536
+            and isinstance(cursor["padding_cells"], int)
+            and not isinstance(cursor["padding_cells"], bool)
+            and 0 <= cursor["padding_cells"] <= 65536
+        ):
             return False
         encoded = data["text"].encode()
         return data["bytes"] == len(encoded) and len(encoded) <= 65536 and data["lines"] == data["text"].count("\n") + 1
@@ -283,6 +338,7 @@ def check_generated_event_limits():
             "lines": 1,
             "bytes": 65537,
             "truncated": False,
+            "cursor": {"offset": 0, "padding_cells": 0},
         },
     }
     assert not valid_event(frame), "terminal frames must stay within 64 KiB"

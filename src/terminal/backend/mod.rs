@@ -43,6 +43,7 @@ pub const CAPABILITIES: &[&str] = &[
     "observe",
     "control_stream",
     "type_literal",
+    "paste_text",
     "submit_text",
     "send_key",
     "set_title",
@@ -56,6 +57,27 @@ pub const CAPABILITIES: &[&str] = &[
     "wait_output",
     "process_inspection",
 ];
+
+/// Control-stream actions without a matching one-request terminal method.
+/// These remain individually discoverable without pretending they extend the
+/// root method registry.
+pub const STREAM_ACTION_CAPABILITIES: &[&str] = &[
+    "paste_image",
+    "upload_start",
+    "upload_chunk",
+    "upload_finish",
+    "upload_cancel",
+];
+
+pub fn advertised_capabilities() -> Vec<&'static str> {
+    CAPABILITIES
+        .iter()
+        .chain(STREAM_ACTION_CAPABILITIES)
+        .copied()
+        .collect()
+}
+
+pub const FEATURES: &[&str] = &["stream_cursor"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureMode {
@@ -88,6 +110,12 @@ pub struct CaptureResult {
     pub text: String,
     pub lines: usize,
     pub truncated: bool,
+    /// Unicode-scalar offset in the normalized rendered text. ANSI control
+    /// bytes are excluded so semantic clients can place a caret after styling.
+    pub cursor_offset: Option<usize>,
+    /// Blank terminal cells trimmed from the rendered row immediately before
+    /// the live cursor. Stream clients restore these only for caret placement.
+    pub cursor_padding_cells: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -109,6 +137,9 @@ pub struct ObserveTarget {
     pub mode: CaptureMode,
     pub lines: usize,
     pub ansi: bool,
+    /// Include semantic cursor metadata in replacement frames. This is opt-in
+    /// so strict UHP 1.0 consumers keep receiving the original frame shape.
+    pub cursor: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +329,7 @@ pub fn schema_bundle() -> Value {
         "observe":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/observe.schema.json")),
         "control":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/control.schema.json")),
         "type_literal":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/type-literal.schema.json")),
+        "paste_text":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/paste-text.schema.json")),
         "submit_text":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/submit-text.schema.json")),
         "send_key":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/send-key.schema.json")),
         "set_title":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/set-title.schema.json")),
@@ -327,6 +359,7 @@ pub fn schema_bundle() -> Value {
         ("observe", "observe"),
         ("control", "control"),
         ("type_literal", "type-literal"),
+        ("paste_text", "paste-text"),
         ("submit_text", "submit-text"),
         ("send_key", "send-key"),
         ("set_title", "set-title"),
@@ -473,6 +506,10 @@ mod tests {
         let fixture: Value = serde_json::from_str(&capabilities_fixture).unwrap();
         assert_eq!(fixture["result"]["protocol"]["major"], PROTOCOL_MAJOR);
         assert_eq!(fixture["result"]["protocol"]["minor"], PROTOCOL_MINOR);
+        assert_eq!(
+            fixture["result"]["terminal"]["capabilities"],
+            json!(advertised_capabilities())
+        );
         assert_eq!(MAX_FRAME_BYTES, 1_048_576);
         assert_eq!(MAX_CAPTURE_BYTES, 524_288);
         assert_eq!(MAX_OBSERVE_BYTES, 65_536);
