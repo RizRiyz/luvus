@@ -85,6 +85,17 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         draw_diff_list(f, area, list_top, cap, app, t, &line_at);
         return;
     }
+    // A folder never visited yet has no listing until the worker read lands.
+    // Say so instead of leaving a blank dock that reads as an empty folder;
+    // a revisited folder renders its cached listing immediately instead.
+    if !app.file_tree.root_loaded() {
+        line_at(
+            f,
+            list_top,
+            Line::from(Span::styled("loading…", Style::new().fg(t.overlay1))),
+        );
+        return;
+    }
     // Clamp scroll first (mutates `file_tree`), *then* borrow the memoized rows —
     // `visible_rows` returns a slice borrowing `file_tree`, so it must come after
     // the scroll write.

@@ -94,6 +94,23 @@ impl App {
         self.refresh_git_status();
     }
 
+    /// Re-root FILES as soon as the active workspace changes. The periodic
+    /// [`ensure_file_tree`](Self::ensure_file_tree) rides the PTY-driven CWD
+    /// scan, which never runs while every pane is quiet, so a workspace switch
+    /// could leave the dock showing the previous folder for an unbounded time.
+    /// This costs two cheap checks per loop turn; the reads and the git status
+    /// scan it schedules stay on worker threads. Returns whether it re-rooted,
+    /// so the caller repaints the dock's loading state right away.
+    pub(crate) fn follow_active_file_root(&mut self) -> bool {
+        let dock_visible =
+            self.client_files_visible || self.sidebars.side_of(&DockKind::Files).is_some();
+        if !dock_visible || self.file_tree.root() == self.ws().cwd.as_path() {
+            return false;
+        }
+        self.ensure_file_tree();
+        true
+    }
+
     /// Park a first `files.tree` call until its root listing has returned from
     /// the filesystem worker. Cached trees answer inline; no directory I/O is
     /// ever moved onto the app loop just to make the CLI deterministic.
@@ -3927,6 +3944,87 @@ mod tests {
             "FILES re-roots to the focused workspace immediately"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Switching workspaces must not wait for PTY activity. The periodic
+    /// re-root rides the CWD scan, which only runs after a pane prints, so a
+    /// switch between quiet workspaces used to leave FILES on the old folder.
+    #[test]
+    fn workspace_switch_reroots_files_without_pane_activity() {
+        let _env = crate::persist::test_env("files-follow-active-root");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let dir = std::env::temp_dir().join(format!("luvus-follow-root-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        assert!(app.create_workspace_at(dir.clone()), "seed workspace");
+        let target = app.active_ws;
+        app.active_ws = 0;
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        assert!(!crate::platform::same_path(app.file_tree.root(), &dir));
+
+        // A bare index switch, like most switch paths perform, with every pane
+        // quiet and no client attached: no CWD scan can run on this tick.
+        app.active_ws = target;
+        app.runtime_cwd_dirty = false;
+        app.runtime_cwd_dirty_panes.clear();
+        assert!(
+            app.detect_tick_with(std::time::Instant::now(), false),
+            "the re-root asks for a repaint"
+        );
+        assert_eq!(
+            app.file_tree.root(),
+            app.workspaces[target].cwd.as_path(),
+            "FILES follows the switch on the next loop turn"
+        );
+        assert!(
+            !app.follow_active_file_root(),
+            "an already-followed root costs no further work"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder that has never been read shows a loading line instead of a
+    /// blank dock that is indistinguishable from an empty folder.
+    #[test]
+    fn files_dock_says_loading_until_the_root_listing_arrives() {
+        let _env = crate::persist::test_env("files-dock-loading");
+        let root = std::env::temp_dir().join(format!("luvus-ft-loading-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), b"# hi").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        assert!(
+            !app.file_tree.root_loaded(),
+            "the root read is still in flight"
+        );
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("loading…"),
+            "an unread root says it is loading"
+        );
+        assert!(!text.contains("README.md"));
+        assert!(app.file_tree_rects.is_empty(), "no clickable rows yet");
+
+        app.file_tree
+            .apply_dir(root.clone(), crate::files::read_dir_entries(&root));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let text = buffer_text(&term);
+        assert!(
+            !text.contains("loading…"),
+            "the listing replaces the loading line"
+        );
+        assert!(text.contains("README.md"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// FILES can reach a folder through a symlink spelling while the open

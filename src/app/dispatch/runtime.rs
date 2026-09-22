@@ -408,6 +408,7 @@ impl App {
         if self.workspaces.is_empty() || self.workspaces[self.active_ws].tabs.is_empty() {
             return repaired_location;
         }
+        let repaired_location = self.follow_active_file_root() || repaired_location;
         self.schedule_runtime_scans(now, clients_attached);
         // Mission Control usage is demand-driven. Opening/focusing the dashboard,
         // changing scope, or pressing/clicking refresh queues one worker scan;
