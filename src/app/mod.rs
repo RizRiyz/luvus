@@ -2275,6 +2275,10 @@ pub struct App {
     /// Harness-assigned display labels are separate from addressable agent
     /// aliases and from child-controlled OSC titles.
     pub(crate) backend_labels: HashMap<PaneId, String>,
+    /// Last terminal content revision announced to backend observers. PTY
+    /// readers coalesce wakeups, so the re-arm boundary may need to publish a
+    /// newer trailing revision without duplicating the first wake's event.
+    pub(crate) backend_published_revisions: HashMap<PaneId, u64>,
     /// Bounded, event-driven protocol waits keyed by pane. These observe the
     /// PTY's monotonic content revision and never poll from a socket worker.
     pub(crate) backend_revision_waits:
@@ -3084,6 +3088,7 @@ impl App {
             backend_server_generation,
             backend_terminal_index,
             backend_labels: HashMap::new(),
+            backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
             last_backend_wait_scan: Instant::now(),
             status,
@@ -3783,6 +3788,7 @@ impl App {
             backend_server_generation,
             backend_terminal_index,
             backend_labels: HashMap::new(),
+            backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
             last_backend_wait_scan: Instant::now(),
             status,
@@ -4741,7 +4747,7 @@ impl App {
     /// active tab from output owned by another tab or workspace. The server
     /// uses this to keep focused rendering responsive without repeatedly
     /// diffing an unchanged UI for background-only bursts.
-    pub fn rearm_pty_notify_by_visibility(&self) -> (bool, bool, bool) {
+    pub fn rearm_pty_notify_by_visibility(&mut self) -> (bool, bool, bool) {
         let layout = self.workspaces.get(self.active_ws).and_then(|workspace| {
             workspace
                 .tabs
@@ -4751,16 +4757,24 @@ impl App {
         let mut visible = false;
         let mut background = false;
         let mut title_changed = false;
+        let mut changed = Vec::new();
         for (id, pane) in &self.panes {
             if !pane.take_data_pending() {
                 continue;
             }
+            changed.push(*id);
             if layout.is_some_and(|layout| layout.contains(*id)) {
                 visible = true;
             } else {
                 background = true;
                 title_changed |= self.hidden_title_changed(*id);
             }
+        }
+        // A reader can append more bytes while its wake flag is already set.
+        // Publish at the re-arm boundary so backend observers receive that
+        // final revision even when no later command produces another wake.
+        for id in changed {
+            self.backend_output_changed(id);
         }
         (visible, background, title_changed)
     }
@@ -8232,6 +8246,7 @@ impl App {
         self.emit_backend_terminal_event(id, "terminal.closed", serde_json::json!({}));
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
+        self.backend_published_revisions.remove(&id);
         self.agent_title_panes.remove(&id);
         self.cancel_backend_revision_waits(id);
         let reported = self

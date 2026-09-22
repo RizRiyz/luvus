@@ -43,6 +43,7 @@ pub const CAPABILITIES: &[&str] = &[
     "observe",
     "control_stream",
     "type_literal",
+    "paste_text",
     "submit_text",
     "send_key",
     "set_title",
@@ -88,6 +89,9 @@ pub struct CaptureResult {
     pub text: String,
     pub lines: usize,
     pub truncated: bool,
+    /// Unicode-scalar offset in the normalized rendered text. ANSI control
+    /// bytes are excluded so semantic clients can place a caret after styling.
+    pub cursor_offset: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -298,6 +302,7 @@ pub fn schema_bundle() -> Value {
         "observe":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/observe.schema.json")),
         "control":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/control.schema.json")),
         "type_literal":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/type-literal.schema.json")),
+        "paste_text":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/paste-text.schema.json")),
         "submit_text":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/submit-text.schema.json")),
         "send_key":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/send-key.schema.json")),
         "set_title":schema(include_str!("../../../protocol/uhp/v1/terminal/schema/methods/set-title.schema.json")),
@@ -327,6 +332,7 @@ pub fn schema_bundle() -> Value {
         ("observe", "observe"),
         ("control", "control"),
         ("type_literal", "type-literal"),
+        ("paste_text", "paste-text"),
         ("submit_text", "submit-text"),
         ("send_key", "send-key"),
         ("set_title", "set-title"),

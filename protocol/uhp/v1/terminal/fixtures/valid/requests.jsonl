@@ -4,6 +4,7 @@
 {"id":"proc-1","method":"terminal.backend.processes","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7"}}
 {"id":"captr-1","method":"terminal.backend.capture","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","mode":"recent_unwrapped","lines":200,"ansi":false}}
 {"id":"type-1","method":"terminal.backend.type_literal","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","text":"literal\ntext"}}
+{"id":"paste-1","method":"terminal.backend.paste_text","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","text":"first\nsecond"}}
 {"id":"submit-1","method":"terminal.backend.submit_text","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","text":"run tests"}}
 {"id":"key-1","method":"terminal.backend.send_key","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","key":"ctrl-c"}}
 {"id":"title-1","method":"terminal.backend.set_title","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","title":"review"}}

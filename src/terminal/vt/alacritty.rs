@@ -354,6 +354,44 @@ impl AlacrittyEngine {
         }
         true
     }
+
+    /// Count rendered Unicode scalars before `column`, using the same control
+    /// and wide-cell rules as backend capture. The capture protocol reports a
+    /// text offset rather than a terminal-cell coordinate so browser clients
+    /// do not need to duplicate wcwidth or ANSI parsing rules.
+    fn backend_row_chars_before(&self, line: Line, column: usize, ansi: bool) -> usize {
+        let grid = self.term.grid();
+        let row = &grid[line];
+        let last = (0..grid.columns())
+            .rfind(|column| {
+                let cell = &row[Column(*column)];
+                !cell.flags.contains(Flags::WIDE_CHAR_SPACER) && cell.c != '\0' && cell.c != ' '
+            })
+            .map_or(0, |column| column + 1);
+        let end = column.min(last);
+        let mut count = 0;
+        for column in 0..end {
+            let cell = &row[Column(column)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let character = if cell.c == '\0' { ' ' } else { cell.c };
+            if character.is_control() && character != '\t' {
+                if ansi {
+                    continue;
+                }
+            } else {
+                count += 1;
+            }
+            if let Some(zerowidth) = cell.zerowidth() {
+                count += zerowidth
+                    .iter()
+                    .filter(|character| !character.is_control())
+                    .count();
+            }
+        }
+        count
+    }
 }
 
 fn append_utf8_bounded(output: &mut String, text: &str, max_bytes: usize) -> bool {
@@ -828,13 +866,20 @@ impl VtEngine for AlacrittyEngine {
                 text,
                 lines: count,
                 truncated: !complete,
+                cursor_offset: None,
             };
         }
 
         let grid = self.term.grid();
+        let cursor = self.cursor();
+        let cursor_line = cursor
+            .visible
+            .then_some(grid.history_size() + cursor.y as usize);
         let mut output = String::new();
         let mut returned = 0;
         let mut truncated = false;
+        let mut cursor_offset = None;
+        let mut rendered_chars = 0usize;
         match mode {
             CaptureMode::Visible => {
                 let rows = grid.screen_lines();
@@ -844,6 +889,17 @@ impl VtEngine for AlacrittyEngine {
                         truncated = true;
                         break;
                     }
+                    if returned > 0 {
+                        rendered_chars += 1;
+                    }
+                    let candidate = (cursor.visible && row == cursor.y as usize).then(|| {
+                        rendered_chars
+                            + self.backend_row_chars_before(
+                                Line(row as i32),
+                                cursor.x as usize,
+                                ansi,
+                            )
+                    });
                     let complete = if ansi {
                         self.append_ansi_grid_row(Line(row as i32), &mut output, max_bytes)
                     } else {
@@ -854,6 +910,11 @@ impl VtEngine for AlacrittyEngine {
                         truncated = true;
                         break;
                     }
+                    if candidate.is_some() {
+                        cursor_offset = candidate;
+                    }
+                    rendered_chars +=
+                        self.backend_row_chars_before(Line(row as i32), usize::MAX, ansi);
                 }
             }
             CaptureMode::RecentUnwrapped => {
@@ -866,6 +927,7 @@ impl VtEngine for AlacrittyEngine {
                     .saturating_div(std::mem::size_of::<usize>().max(1))
                     .max(1);
                 let mut inspected_rows = 0usize;
+                let mut trailing_empty = true;
                 for index in (0..count).rev() {
                     let Some(line) = self.retained_line(index) else {
                         continue;
@@ -882,6 +944,14 @@ impl VtEngine for AlacrittyEngine {
                         break;
                     }
                     inspected_rows += 1;
+                    if trailing_empty
+                        && cursor_line.is_some()
+                        && row.is_empty()
+                        && cursor_line != Some(index)
+                    {
+                        continue;
+                    }
+                    trailing_empty = false;
                     inspected_bytes = inspected_bytes.saturating_add(row.len());
                     current.push(index);
                     if index == 0 || !self.retained_row_wraps(index - 1) {
@@ -897,12 +967,24 @@ impl VtEngine for AlacrittyEngine {
                         truncated = true;
                         break;
                     }
+                    if returned > 0 {
+                        rendered_chars += 1;
+                    }
                     physical_rows.reverse();
                     let mut complete = true;
+                    let mut logical_chars = 0usize;
+                    let mut candidate = None;
                     for index in physical_rows {
                         let Some(line) = self.retained_line(index) else {
                             continue;
                         };
+                        if cursor_line == Some(index) {
+                            candidate = Some(
+                                rendered_chars
+                                    + logical_chars
+                                    + self.backend_row_chars_before(line, cursor.x as usize, ansi),
+                            );
+                        }
                         complete = if ansi {
                             self.append_ansi_grid_row(line, &mut output, max_bytes)
                         } else {
@@ -911,12 +993,17 @@ impl VtEngine for AlacrittyEngine {
                         if !complete {
                             break;
                         }
+                        logical_chars += self.backend_row_chars_before(line, usize::MAX, ansi);
                     }
                     returned += 1;
                     if !complete {
                         truncated = true;
                         break;
                     }
+                    if candidate.is_some() {
+                        cursor_offset = candidate;
+                    }
+                    rendered_chars += logical_chars;
                 }
             }
             CaptureMode::Detection => unreachable!(),
@@ -925,6 +1012,7 @@ impl VtEngine for AlacrittyEngine {
             text: output,
             lines: returned,
             truncated,
+            cursor_offset,
         }
     }
 
@@ -2472,6 +2560,45 @@ mod tests {
         assert!(capture.text.contains("abcdefghij"), "{:?}", capture.text);
         assert!(capture.text.contains("next"), "{:?}", capture.text);
         assert!(capture.lines <= 3);
+    }
+
+    #[test]
+    fn backend_capture_cursor_tracks_normalized_visible_and_unwrapped_text() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(5, 3, tx, budget_for_rows(5, 200));
+        engine.advance(b"abcdefghij\r\nxy");
+
+        let visible = engine.backend_capture(CaptureMode::Visible, 3, false, 512);
+        let visible_offset = visible.cursor_offset.expect("visible cursor");
+        let mut marked: Vec<char> = visible.text.chars().collect();
+        marked.insert(visible_offset, '|');
+        assert!(marked.into_iter().collect::<String>().contains("xy|"));
+
+        let recent = engine.backend_capture(CaptureMode::RecentUnwrapped, 3, false, 512);
+        let recent_offset = recent.cursor_offset.expect("unwrapped cursor");
+        let mut marked: Vec<char> = recent.text.chars().collect();
+        marked.insert(recent_offset, '|');
+        assert!(
+            marked
+                .into_iter()
+                .collect::<String>()
+                .contains("abcdefghij\nxy|"),
+            "{}",
+            recent.text
+        );
+    }
+
+    #[test]
+    fn recent_capture_drops_cleared_rows_below_the_live_cursor() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(20, 8, tx, budget_for_rows(20, 200));
+        engine.advance(b"old output\r\nmore output");
+        engine.advance(b"\x1b[2J\x1b[H$ ");
+
+        let capture = engine.backend_capture(CaptureMode::RecentUnwrapped, 80, false, 4096);
+        assert!(capture.text.ends_with("\n$"), "{}", capture.text);
+        assert!(!capture.text.ends_with('\n'));
+        assert_eq!(capture.cursor_offset, Some(capture.text.chars().count()));
     }
 
     /// Pi alt-screen `doRender`: 2026 + row writes + CUP to fake caret + hide.

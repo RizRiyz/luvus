@@ -190,6 +190,7 @@ pub const METHODS: &[&str] = &[
     "terminal.backend.observe",
     "terminal.backend.control",
     "terminal.backend.type_literal",
+    "terminal.backend.paste_text",
     "terminal.backend.submit_text",
     "terminal.backend.send_key",
     "terminal.backend.set_title",

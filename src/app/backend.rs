@@ -37,6 +37,7 @@ impl App {
         if self.backend_terminal_index.get(&runtime.terminal_id) == Some(&pane_id) {
             return;
         }
+        self.backend_published_revisions.remove(&pane_id);
         self.backend_terminal_index
             .insert(runtime.terminal_id, pane_id);
         self.emit_backend_terminal_event(pane_id, "terminal.created", json!({}));
@@ -89,9 +90,13 @@ impl App {
 
     pub(super) fn backend_output_changed(&mut self, pane_id: PaneId) {
         self.check_backend_revision_waits(pane_id);
-        // `PtyData` is already coalesced by Pane at the render cadence, so each
-        // wake can safely publish the latest revision without per-read spam or
-        // a trailing-edge debounce that might hide the final revision.
+        let Some(revision) = self.panes.get(&pane_id).map(Pane::content_revision) else {
+            return;
+        };
+        if self.backend_published_revisions.get(&pane_id) == Some(&revision) {
+            return;
+        }
+        self.backend_published_revisions.insert(pane_id, revision);
         self.emit_backend_terminal_event(pane_id, "terminal.output_ready", json!({}));
     }
 
@@ -119,6 +124,7 @@ impl App {
                 "capture must be dispatched through its bounded worker",
             )),
             "terminal.backend.type_literal" => self.backend_type_literal(params),
+            "terminal.backend.paste_text" => self.backend_paste_text(params),
             "terminal.backend.submit_text" => self.backend_submit_text(params),
             "terminal.backend.send_key" => self.backend_send_key(params),
             "terminal.backend.set_title" => self.backend_set_title(params),
@@ -307,6 +313,25 @@ impl App {
         let text = required_bounded_string(params, "text", backend::MAX_INPUT_BYTES, true)?;
         self.panes[&pane_id]
             .try_send(text.as_bytes())
+            .map_err(|message| mutation_error("send_failed", message))?;
+        Ok(queued_action_json())
+    }
+
+    fn backend_paste_text(&self, params: &Value) -> BackendResult {
+        reject_mutation_fields(
+            params,
+            &[
+                "server_generation",
+                "terminal_id",
+                "pane_id",
+                "expected_root",
+                "text",
+            ],
+        )?;
+        let pane_id = self.resolve_backend_runtime(params, true)?;
+        let text = required_bounded_string(params, "text", backend::MAX_INPUT_BYTES, true)?;
+        self.panes[&pane_id]
+            .try_send_paste(text)
             .map_err(|message| mutation_error("send_failed", message))?;
         Ok(queued_action_json())
     }
@@ -1536,6 +1561,36 @@ mod tests {
             .into_iter()
             .filter(|event| event["event"] == name)
             .collect()
+    }
+
+    #[test]
+    fn rearm_publishes_only_a_new_trailing_terminal_revision() {
+        let _env = crate::persist::test_env("backend-output-tail");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let revision = app.panes[&pane].content_revision_handle();
+
+        revision.fetch_add(1, std::sync::atomic::Ordering::Release);
+        app.panes[&pane].mark_data_pending_for_test();
+        let floor = crate::ipc::api::current_sequence(&app.events);
+        app.backend_output_changed(pane);
+        assert_eq!(
+            backend_events_after(&app, floor, "terminal.output_ready").len(),
+            1
+        );
+
+        let floor = crate::ipc::api::current_sequence(&app.events);
+        app.rearm_pty_notify_by_visibility();
+        assert!(backend_events_after(&app, floor, "terminal.output_ready").is_empty());
+
+        revision.fetch_add(1, std::sync::atomic::Ordering::Release);
+        app.panes[&pane].mark_data_pending_for_test();
+        let floor = crate::ipc::api::current_sequence(&app.events);
+        app.rearm_pty_notify_by_visibility();
+        let events = backend_events_after(&app, floor, "terminal.output_ready");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["data"]["content_revision"], 2);
     }
 
     fn assert_capture_succeeds(app: &mut App, mut params: Value) {

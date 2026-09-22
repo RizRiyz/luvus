@@ -742,7 +742,7 @@ fn valid_terminal_control_frame(frame: &str) -> bool {
     };
     valid_id
         && match value.get("action").and_then(Value::as_str) {
-            Some("type_literal" | "submit_text") => {
+            Some("type_literal" | "paste_text" | "submit_text") => {
                 params.len() == 1
                     && params
                         .get("text")
@@ -751,6 +751,62 @@ fn valid_terminal_control_frame(frame: &str) -> bool {
                             !text.is_empty()
                                 && text.len() <= crate::terminal::backend::MAX_INPUT_BYTES
                         })
+            }
+            Some("paste_image") => {
+                params.len() == 1
+                    && params
+                        .get("png_base64")
+                        .and_then(Value::as_str)
+                        .is_some_and(|encoded| {
+                            !encoded.is_empty()
+                                && encoded.len() <= crate::clipboard_image::MAX_WEB_PNG_BASE64_BYTES
+                                && encoded.len().is_multiple_of(4)
+                        })
+            }
+            Some("upload_start") => {
+                params.len() == 2
+                    && params
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| {
+                            !name.is_empty()
+                                && name.len() <= 255
+                                && !name.chars().any(char::is_control)
+                        })
+                    && params
+                        .get("size")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|size| {
+                            size > 0 && size <= crate::terminal::upload::MAX_UPLOAD_BYTES as u64
+                        })
+            }
+            Some("upload_chunk") => {
+                params.len() == 3
+                    && params
+                        .get("upload_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(crate::terminal::backend::valid_id)
+                    && params
+                        .get("offset")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|offset| {
+                            offset <= crate::terminal::upload::MAX_UPLOAD_BYTES as u64
+                        })
+                    && params
+                        .get("data_base64")
+                        .and_then(Value::as_str)
+                        .is_some_and(|encoded| {
+                            !encoded.is_empty()
+                                && encoded.len() <= crate::terminal::upload::MAX_CHUNK_BASE64_BYTES
+                                && encoded.len().is_multiple_of(4)
+                        })
+            }
+            Some("upload_finish" | "upload_cancel") => {
+                params.len() == 1
+                    && params
+                        .get("upload_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(crate::terminal::backend::valid_id)
             }
             Some("send_key") => {
                 params.len() == 1
@@ -1142,6 +1198,21 @@ mod tests {
     fn terminal_control_frames_are_strict_and_bounded() {
         assert!(valid_terminal_control_frame(
             r#"{"id":"input-1","action":"submit_text","params":{"text":"echo ok"}}"#
+        ));
+        assert!(valid_terminal_control_frame(
+            r#"{"id":"paste-1","action":"paste_text","params":{"text":"first\nsecond"}}"#
+        ));
+        assert!(valid_terminal_control_frame(
+            r#"{"id":"image-1","action":"paste_image","params":{"png_base64":"aGVsbA=="}}"#
+        ));
+        assert!(valid_terminal_control_frame(
+            r#"{"id":"upload-1","action":"upload_start","params":{"name":"notes.txt","size":5}}"#
+        ));
+        assert!(valid_terminal_control_frame(
+            r#"{"id":"upload-2","action":"upload_chunk","params":{"upload_id":"11111111111111111111111111111111","offset":0,"data_base64":"aGVsbG8="}}"#
+        ));
+        assert!(valid_terminal_control_frame(
+            r#"{"id":"upload-3","action":"upload_finish","params":{"upload_id":"11111111111111111111111111111111"}}"#
         ));
         assert!(valid_terminal_control_frame(
             r#"{"id":"key-1","action":"send_key","params":{"key":"ctrl-c"}}"#
@@ -1691,6 +1762,7 @@ mod tests {
                     "pane.run",
                     "pane.close",
                     "terminal.backend.type_literal",
+                    "terminal.backend.paste_text",
                     "terminal.backend.submit_text",
                     "terminal.backend.send_key",
                     "uhp.token.list",

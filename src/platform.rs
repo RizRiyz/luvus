@@ -22,6 +22,9 @@ mod windows;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(unix)]
+mod unix_clipboard;
+
 /// Whether the physical Option modifier is currently held by the local user.
 ///
 /// Some macOS terminal emulators consume Option while translating Backspace,
@@ -40,15 +43,19 @@ pub fn option_modifier_pressed() -> bool {
     false
 }
 
-/// Read and normalize a local Windows clipboard image after an explicit paste
-/// gesture. Other platforms preserve their existing terminal and agent-native
-/// clipboard behavior and never probe the clipboard here.
+/// Read and normalize a local clipboard image after an explicit paste gesture.
+/// Clipboard ownership stays with the display client, including remote attach.
 #[cfg(windows)]
 pub fn clipboard_image() -> Option<Vec<u8>> {
     windows::clipboard_image()
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub fn clipboard_image() -> Option<Vec<u8>> {
+    unix_clipboard::clipboard_image()
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn clipboard_image() -> Option<Vec<u8>> {
     None
 }

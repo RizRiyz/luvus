@@ -108,6 +108,7 @@ jobs:
             cargo test --locked machine::catalog::
             cargo test --locked machine::api::
             cargo test --locked layout::
+            cargo test --locked platform::unix_clipboard::tests
             cargo build --release --locked
             ./target/release/luvus --version
             python3 examples/uhp/terminal/consumer.py --fixtures
@@ -202,6 +203,8 @@ jobs:
         shell: pwsh
         run: |
           cargo test --locked platform::windows::tests
+          cargo test --locked clipboard_image
+          cargo test --locked image_paste
           cargo test --locked app::cwd::tests
           cargo test --locked platform::tests::no_window_keeps_the_command_working
           cargo test --locked ipc::transport::windows_
