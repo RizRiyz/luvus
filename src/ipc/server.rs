@@ -3034,7 +3034,7 @@ mod tests {
             ServerMessage::ShellDock(Some(slot)) => slot,
             _ => panic!("machine-aware clients receive dock geometry before their frame"),
         };
-        assert_eq!(slot.height, 13);
+        assert_eq!(slot.height, 14);
         assert!(slot.show_paths);
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),

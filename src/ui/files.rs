@@ -75,13 +75,25 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         diff_rect.width,
     );
 
-    // Workspace and branch are already present in Luvus chrome. Start content
-    // immediately below the selector instead of spending a dock row repeating
-    // that identity and DIFF progress.
-    let list_top = area.y + 1;
-    let cap = area.height.saturating_sub(1) as usize;
+    // Workspace and branch are already present in Luvus chrome, so the dock
+    // spends no row repeating that identity and DIFF progress. Content starts
+    // one blank row under the selector, the gap every dock keeps between its
+    // title and its rows (`DOCK_HEADER_ROWS`).
+    let list_top = area.y + crate::ui::DOCK_HEADER_ROWS;
+    let cap = area.height.saturating_sub(crate::ui::DOCK_HEADER_ROWS) as usize;
     if app.files_mode == crate::diff::FilesMode::Diff {
         draw_diff_list(f, area, list_top, cap, app, t, &line_at);
+        return;
+    }
+    // A folder never visited yet has no listing until the worker read lands.
+    // Say so instead of leaving a blank dock that reads as an empty folder;
+    // a revisited folder renders its cached listing immediately instead.
+    if !app.file_tree.root_loaded() {
+        line_at(
+            f,
+            list_top,
+            Line::from(Span::styled("loading…", Style::new().fg(t.overlay1))),
+        );
         return;
     }
     // Clamp scroll first (mutates `file_tree`), *then* borrow the memoized rows —
