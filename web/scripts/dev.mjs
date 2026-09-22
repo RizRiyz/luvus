@@ -14,7 +14,7 @@ import {
 
 const args = new Set(process.argv.slice(2));
 if (args.has("--help")) {
-  writeOutput(`Usage: npm run dev -- [--read-only] [--no-open] [--skip-build]\n\nEnvironment:\n  LUVUS_WEB_SESSION  isolated session name (default: web-dev)\n  LUVUS_WEB_HOME     debug state directory (default: ~/.luvus-dev)\n  LUVUS_WEB_PORT     loopback port (default: 4174)\n  LUVUS_BIN          exact existing binary; skips the Rust build\n`);
+  writeOutput(`Usage: npm run dev -- [--read-only] [--no-open] [--skip-build]\n\nEnvironment:\n  LUVUS_WEB_SESSION      isolated session name (default: web-dev)\n  LUVUS_WEB_HOME         debug state directory (default: ~/.luvus-dev)\n  LUVUS_WEB_PORT         loopback port (default: 4174)\n  LUVUS_WEB_MAX_DEVICES  authorized browser limit, 1-8 (default: 2)\n  LUVUS_WEB_PUBLIC_URL   public HTTPS origin used in pairing links\n  LUVUS_BIN              exact existing binary; skips the Rust build\n`);
   process.exit(0);
 }
 for (const arg of args) {

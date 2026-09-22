@@ -69,7 +69,7 @@ export interface TerminalFrame extends UhpEvent {
     ansi: boolean;
     text: string;
     truncated: boolean;
-    cursor?: { offset: number } | null;
+    cursor?: { offset: number; padding_cells: number } | null;
   };
 }
 

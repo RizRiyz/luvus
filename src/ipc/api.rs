@@ -1263,9 +1263,12 @@ fn terminal_stream_frame(
         "truncated":capture.truncated,
     });
     if target.cursor {
-        data["cursor"] = capture
-            .cursor_offset
-            .map_or(Value::Null, |offset| json!({"offset":offset}));
+        data["cursor"] = capture.cursor_offset.map_or(Value::Null, |offset| {
+            json!({
+                "offset":offset,
+                "padding_cells":capture.cursor_padding_cells,
+            })
+        });
     }
     let frame = json!({
         "event":"terminal.frame",
@@ -3059,6 +3062,7 @@ mod tests {
         let frame = terminal_stream_frame(&target, 12).unwrap();
         let frame: Value = serde_json::from_str(&frame.serialized).unwrap();
         assert!(frame["data"].get("cursor").is_some());
+        assert_eq!(frame["data"]["cursor"]["padding_cells"], 0);
     }
 
     #[test]

@@ -103,9 +103,10 @@ The acknowledgment revision does not mean that output has already been emitted.
 When `terminal.features` advertises `stream_cursor`, a client can add
 `cursor:true` to the observe or control request. Those frames also carry
 `cursor`, either `null` or a Unicode-scalar `offset` in the normalized rendered
-text. ANSI control bytes do not count toward the offset, so semantic clients
-can place a caret after applying terminal styles. Omitting the opt-in preserves
-the original strict UHP 1.0 frame shape.
+text plus `padding_cells`, the blank terminal cells trimmed immediately before
+the live cursor. ANSI control bytes do not count toward the offset. Renderers
+insert the padding only before their visual caret, after applying terminal
+styles. Omitting the opt-in preserves the original strict UHP 1.0 frame shape.
 
 `terminal.backend.control` has the same output stream and accepts correlated
 action frames after its acknowledgment:
@@ -119,6 +120,10 @@ action frames after its acknowledgment:
 Actions reuse ordinary strict UHP validation and replies. Only one
 API control stream can lease a terminal at a time. Observe streams remain
 read-only, and local owner/TUI authority is unchanged.
+
+For native command-line editing, `send_key` includes `ctrl-w` and `alt-d` for
+backward and forward word deletion, and `ctrl-u` and `ctrl-k` for deletion
+toward the start and end of the current line.
 
 `paste_image` takes `{png_base64}` for one validated PNG up to 160 KiB. Luvus
 stages the image beneath private selected-session storage and delivers its

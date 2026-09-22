@@ -1537,8 +1537,10 @@ fn backend_key_bytes(key: &str, application_cursor: bool) -> Option<Vec<u8>> {
         "pagedown" => b"\x1b[6~",
         "ctrl-c" => b"\x03",
         "ctrl-d" => b"\x04",
+        "ctrl-k" => b"\x0b",
         "ctrl-u" => b"\x15",
         "ctrl-w" => b"\x17",
+        "alt-d" => b"\x1bd",
         "space" => b" ",
         "digit-0" => b"0",
         "digit-1" => b"1",
@@ -1941,6 +1943,8 @@ mod tests {
     fn logical_keys_are_strict_and_mode_aware() {
         assert_eq!(backend_key_bytes("left", false).unwrap(), b"\x1b[D");
         assert_eq!(backend_key_bytes("left", true).unwrap(), b"\x1bOD");
+        assert_eq!(backend_key_bytes("ctrl-k", false).unwrap(), b"\x0b");
+        assert_eq!(backend_key_bytes("alt-d", false).unwrap(), b"\x1bd");
         assert!(backend_key_bytes("raw-escape", false).is_none());
     }
 

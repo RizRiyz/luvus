@@ -45,6 +45,10 @@ Protocol v1 capabilities are:
 - privacy-preserving cached `process_inspection`, returning executable names
   rather than full argument vectors that may contain secrets
 
+The bounded `send_key` vocabulary includes `ctrl-w` and `alt-d` for backward
+and forward word deletion plus `ctrl-u` and `ctrl-k` for deletion toward the
+start and end of the current line.
+
 Protocol 1.0 capture includes a monotonic `content_revision` and provides a
 sequence-fenced snapshot, bounded terminal-only event streams, and event-driven
 waits. For a race-free initial view, subscribe first, fetch a snapshot on a
@@ -85,9 +89,11 @@ the next frame. The acknowledgment's revision is an earlier observation, not
 proof that a frame has been emitted. Clients that see `stream_cursor` in
 `terminal.features` may request `cursor:true`. Those frames add
 `cursor.offset`, a Unicode-scalar offset in the normalized rendered text with
-ANSI control bytes excluded; `null` means the live child cursor is hidden or
-outside the bounded capture. Without that opt-in, the original strict UHP 1.0
-frame shape is preserved.
+ANSI control bytes excluded, plus `cursor.padding_cells`, the number of blank
+terminal cells trimmed immediately before the live cursor. A renderer inserts
+those cells only before its visual caret; they are not captured output. `null`
+means the live child cursor is hidden or outside the bounded capture. Without
+that opt-in, the original strict UHP 1.0 frame shape is preserved.
 
 An installed binary exposes the same contract with `luvus uhp schema`,
 live negotiation with `luvus uhp capabilities`, the fenced inventory

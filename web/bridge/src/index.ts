@@ -15,11 +15,12 @@ try {
 }
 
 const localUrl = `http://${config.host}:${bridge.port}`;
-const pairedUrl = `${localUrl}/#pair=${encodeURIComponent(bridge.authority.pairingCode)}`;
+const pairing = bridge.authority.initialPairing;
+const pairedUrl = `${config.publicUrl ?? localUrl}/#pair=${encodeURIComponent(pairing.code)}`;
 process.stdout.write(`${JSON.stringify({
   type: "luvus_web_bridge",
   url: pairedUrl,
-  pairing_expires_at: bridge.authority.pairingExpiresAt,
+  pairing_expires_at: pairing.expiresAt,
   authority: uhp.authority,
 })}\n`);
 

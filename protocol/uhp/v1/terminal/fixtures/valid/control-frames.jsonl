@@ -7,3 +7,5 @@
 {"id":"upload-4","action":"upload_cancel","params":{"upload_id":"11111111111111111111111111111111"}}
 {"id":"input-2","action":"submit_text","params":{"text":"summarize this change"}}
 {"id":"input-3","action":"send_key","params":{"key":"escape"}}
+{"id":"input-4","action":"send_key","params":{"key":"ctrl-k"}}
+{"id":"input-5","action":"send_key","params":{"key":"alt-d"}}

@@ -1,4 +1,5 @@
 import { element } from "./dom.js";
+import { deletionInputKey, logicalKey } from "./native-keymap.js";
 
 export type TerminalAction =
   | "type_literal"
@@ -88,14 +89,10 @@ export class NativeTerminalInput {
       this.sendKey("enter");
       return;
     }
-    if (event.inputType === "deleteContentBackward") {
+    const deletionKey = deletionInputKey(event.inputType);
+    if (deletionKey) {
       event.preventDefault();
-      this.sendKey("backspace");
-      return;
-    }
-    if (event.inputType === "deleteContentForward") {
-      event.preventDefault();
-      this.sendKey("delete");
+      this.sendKey(deletionKey);
       return;
     }
     if (event.data && event.inputType.startsWith("insert")) {
@@ -188,30 +185,4 @@ export class NativeTerminalInput {
         this.onError(message);
       });
   }
-}
-
-function logicalKey(event: KeyboardEvent): string | undefined {
-  if (event.metaKey || event.altKey) return undefined;
-  if (event.ctrlKey && !event.shiftKey) {
-    const control = event.key.toLowerCase();
-    if (["c", "d", "u", "w"].includes(control)) return `ctrl-${control}`;
-    return undefined;
-  }
-  if (event.ctrlKey) return undefined;
-  if (event.key === "Tab") return event.shiftKey ? "backtab" : "tab";
-  if (event.shiftKey) return undefined;
-  return ({
-    Enter: "enter",
-    Escape: "escape",
-    Backspace: "backspace",
-    Delete: "delete",
-    ArrowUp: "up",
-    ArrowDown: "down",
-    ArrowLeft: "left",
-    ArrowRight: "right",
-    Home: "home",
-    End: "end",
-    PageUp: "pageup",
-    PageDown: "pagedown",
-  } as Record<string, string>)[event.key];
 }

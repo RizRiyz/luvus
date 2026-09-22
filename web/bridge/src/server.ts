@@ -34,9 +34,10 @@ export class BridgeServer {
   readonly authority: BrowserAuthority;
   #http: http.Server | undefined;
   #wss: WebSocketServer | undefined;
+  #clients = new Map<WebSocket, ClientState>();
 
   constructor(private readonly config: BridgeConfig, private readonly uhp: UhpAccess) {
-    this.authority = new BrowserAuthority(config.browserTicketSeconds);
+    this.authority = new BrowserAuthority(config.browserTicketSeconds, config.browserMaxDevices);
   }
 
   get port(): number {
@@ -91,12 +92,14 @@ export class BridgeServer {
       windowStarted: Date.now(),
       streams: new Map(),
     };
+    this.#clients.set(socket, state);
     const authTimer = setTimeout(() => socket.close(1008, "authentication timeout"), 5_000);
     socket.on("message", (raw, binary) => {
       if (binary) return socket.close(1003, "binary messages are not supported");
       void this.#message(socket, state, raw).catch(() => socket.close(1011, "bridge failure"));
     });
     socket.on("close", () => {
+      this.#clients.delete(socket);
       clearTimeout(authTimer);
       if (state.expiryTimer) clearTimeout(state.expiryTimer);
       for (const stream of state.streams.values()) stream.close();
@@ -119,13 +122,17 @@ export class BridgeServer {
       }
       state.authenticated = true;
       const expiresInMs = Math.max(1, result.expiresAt * 1000 - Date.now());
-      state.expiryTimer = setTimeout(() => socket.close(1008, "browser ticket expired"), expiresInMs);
+      state.expiryTimer = setTimeout(() => {
+        socket.close(1008, "browser ticket expired");
+        this.#broadcastDevices(socket);
+      }, expiresInMs);
       send(socket, {
         type: "ready",
         ...(result.ticket ? { ticket: result.ticket } : {}),
         expires_at: result.expiresAt,
         authority: this.uhp.authority,
       });
+      this.#broadcastDevices(socket);
       return;
     }
     const uploadChunk = frame.type === "stream.action" && frame.action === "upload_chunk";
@@ -161,6 +168,9 @@ export class BridgeServer {
     const id = requiredString(frame, "id", ID_PATTERN);
     const method = requiredString(frame, "method", METHOD_PATTERN);
     const params = objectField(frame, "params");
+    if (method.startsWith("web.devices.")) {
+      return this.#deviceRequest(socket, id, method, params);
+    }
     if (!this.uhp.methodAllowed(method) || isStreaming(method)) {
       return send(socket, { type: "response", id, error: { code: "forbidden", message: "Method is not available through this bridge path" } });
     }
@@ -176,6 +186,52 @@ export class BridgeServer {
       send(socket, { type: "response", id, error: publicError(error) });
     } finally {
       state.pending -= 1;
+    }
+  }
+
+  #deviceRequest(socket: WebSocket, id: string, method: string, params: Record<string, unknown>): void {
+    if (method === "web.devices.status") {
+      return send(socket, { type: "response", id, result: deviceStatus(this.authority.status()) });
+    }
+    if (method === "web.devices.create_pairing") {
+      const pairing = this.authority.createPairing();
+      if (!pairing) {
+        return send(socket, { type: "response", id, error: { code: "device_limit", message: "Device limit reached or another pairing link is still pending" } });
+      }
+      const base = this.config.publicUrl;
+      send(socket, {
+        type: "response",
+        id,
+        result: {
+          type: "browser_device_pairing",
+          code: pairing.code,
+          expires_at: pairing.expiresAt,
+          ...(base ? { url: `${base}/#pair=${encodeURIComponent(pairing.code)}` } : {}),
+          devices: deviceStatus(this.authority.status()),
+        },
+      });
+      this.#broadcastDevices();
+      return;
+    }
+    if (method === "web.devices.set_limit") {
+      const limit = params.limit;
+      if (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > MAX_CLIENTS) {
+        return send(socket, { type: "response", id, error: { code: "invalid_params", message: `Device limit must be from 1 through ${MAX_CLIENTS}` } });
+      }
+      if (!this.authority.setMaxDevices(limit as number)) {
+        return send(socket, { type: "response", id, error: { code: "device_limit", message: "Device limit cannot be lower than paired devices and pending links" } });
+      }
+      send(socket, { type: "response", id, result: deviceStatus(this.authority.status()) });
+      this.#broadcastDevices();
+      return;
+    }
+    send(socket, { type: "response", id, error: { code: "method_not_found", message: "Unknown web device method" } });
+  }
+
+  #broadcastDevices(except?: WebSocket): void {
+    const devices = deviceStatus(this.authority.status());
+    for (const [client, state] of this.#clients) {
+      if (client !== except && state.authenticated) send(client, { type: "devices", devices });
     }
   }
 
@@ -367,6 +423,15 @@ function recoverable(error: unknown): boolean {
   if (!error || typeof error !== "object") return true;
   const code = (error as { code?: unknown }).code;
   return code === undefined || code === "forbidden" || code === "unavailable" || code === "stale_server";
+}
+
+function deviceStatus(status: { pairedDevices: number; pendingPairings: number; maxDevices: number }): object {
+  return {
+    type: "browser_device_status",
+    paired_devices: status.pairedDevices,
+    pending_pairings: status.pendingPairings,
+    max_devices: status.maxDevices,
+  };
 }
 
 function setSecurityHeaders(response: ServerResponse): void {

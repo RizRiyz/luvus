@@ -94,6 +94,9 @@ pub struct CaptureResult {
     /// Unicode-scalar offset in the normalized rendered text. ANSI control
     /// bytes are excluded so semantic clients can place a caret after styling.
     pub cursor_offset: Option<usize>,
+    /// Blank terminal cells trimmed from the rendered row immediately before
+    /// the live cursor. Stream clients restore these only for caret placement.
+    pub cursor_padding_cells: usize,
 }
 
 #[derive(Clone, Debug)]

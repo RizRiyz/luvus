@@ -12,6 +12,7 @@ type ServerFrame =
   | { type: "response"; id: string; result?: unknown; error?: JsonObject }
   | { type: "stream.frame"; stream_id: string; frame: JsonObject }
   | { type: "stream.closed"; stream_id: string; reason: string }
+  | { type: "devices"; devices: JsonObject }
   | { type: "error"; code: string; message: string }
   | { type: "pong" };
 
@@ -213,6 +214,10 @@ export class BridgeClient extends EventTarget {
       const stream = this.#streams.get(frame.stream_id);
       this.#streams.delete(frame.stream_id);
       stream?.onClose(frame.reason);
+      return;
+    }
+    if (frame.type === "devices") {
+      this.dispatchEvent(new CustomEvent("devices", { detail: frame.devices }));
       return;
     }
     if (frame.type === "error") {

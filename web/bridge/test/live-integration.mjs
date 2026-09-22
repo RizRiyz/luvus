@@ -48,6 +48,21 @@ try {
   const socket = await connect(socketUrl, origin);
   const paired = await exchange(socket, { type: "authenticate", ticket: ready.ticket }, "ready");
   assert.equal(paired.ticket, undefined);
+  const deviceStatus = await request(socket, "device-status", "web.devices.status", {});
+  assert.equal(deviceStatus.paired_devices, 1);
+  assert.equal(deviceStatus.max_devices, 2);
+  const phonePairing = await request(socket, "phone-pairing", "web.devices.create_pairing", {});
+  assert.equal(phonePairing.type, "browser_device_pairing");
+  const pairedDeviceEvent = waitFor(socket, (frame) => frame.type === "devices" && frame.devices?.paired_devices === 2);
+  const phone = await connect(socketUrl, origin);
+  const phoneReady = await exchange(phone, { type: "authenticate", code: phonePairing.code }, "ready");
+  assert.ok(phoneReady.ticket);
+  const phoneCapabilities = await request(phone, "phone-caps", "uhp.capabilities", {});
+  assert.equal(phoneCapabilities.type, "uhp_capabilities");
+  assert.equal((await pairedDeviceEvent).devices.max_devices, 2);
+  const bothDevices = await request(socket, "both-devices", "web.devices.status", {});
+  assert.equal(bothDevices.paired_devices, 2);
+  phone.close();
   const capabilities = await request(socket, "caps", "uhp.capabilities", {});
   assert.equal(capabilities.type, "uhp_capabilities");
   assert.ok(capabilities.access.allowed_methods.includes("terminal.backend.control"));
@@ -110,7 +125,8 @@ try {
   const outputFrame = await output;
   assert.ok(Object.hasOwn(outputFrame.frame.data, "cursor"));
   assert.ok(outputFrame.frame.data.cursor === null
-    || Number.isSafeInteger(outputFrame.frame.data.cursor.offset));
+    || (Number.isSafeInteger(outputFrame.frame.data.cursor.offset)
+      && Number.isSafeInteger(outputFrame.frame.data.cursor.padding_cells)));
 
   const pasteReply = waitFor(socket, (frame) => frame.type === "response" && frame.id === "paste");
   socket.send(JSON.stringify({

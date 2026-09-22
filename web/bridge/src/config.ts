@@ -11,6 +11,8 @@ export interface BridgeConfig {
   origins: ReadonlySet<string>;
   appDir: string;
   browserTicketSeconds: number;
+  browserMaxDevices: number;
+  publicUrl?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
@@ -22,6 +24,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     24 * 60 * 60,
     "LUVUS_WEB_TICKET_TTL",
   );
+  const browserMaxDevices = boundedInteger(env.LUVUS_WEB_MAX_DEVICES, 2, 1, 8, "LUVUS_WEB_MAX_DEVICES");
   const origins = new Set(
     (env.LUVUS_WEB_ORIGINS ?? "")
       .split(",")
@@ -40,6 +43,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     origins,
     appDir: env.LUVUS_WEB_APP_DIR || path.resolve(here, "../../packages/app/dist"),
     browserTicketSeconds,
+    browserMaxDevices,
+    ...(env.LUVUS_WEB_PUBLIC_URL ? { publicUrl: normalizePublicUrl(env.LUVUS_WEB_PUBLIC_URL) } : {}),
   };
 }
 
@@ -62,6 +67,15 @@ function normalizeOrigin(value: string): string {
     throw new Error(`LUVUS_WEB_ORIGINS contains unsupported origin: ${value}`);
   }
   return parsed.origin.toLowerCase();
+}
+
+function normalizePublicUrl(value: string): string {
+  const parsed = new URL(value);
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("LUVUS_WEB_PUBLIC_URL must be an HTTP(S) URL without credentials, query, or fragment");
+  }
+  parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+  return parsed.toString().replace(/\/$/, "");
 }
 
 function boundedInteger(raw: string | undefined, fallback: number, minimum: number, maximum: number, name: string): number {

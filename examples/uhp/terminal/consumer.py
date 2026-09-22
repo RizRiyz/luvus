@@ -17,7 +17,7 @@ PACKAGE = ROOT / "protocol" / "uhp" / "v1" / "terminal"
 OPAQUE = re.compile(r"^[0-9a-f]{32}$")
 REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
-KEYS = {"enter", "escape", "tab", "backtab", "up", "down", "left", "right", "home", "end", "backspace", "delete", "pageup", "pagedown", "ctrl-c", "ctrl-d", "ctrl-u", "ctrl-w", "space", *(f"digit-{n}" for n in range(10))}
+KEYS = {"enter", "escape", "tab", "backtab", "up", "down", "left", "right", "home", "end", "backspace", "delete", "pageup", "pagedown", "ctrl-c", "ctrl-d", "ctrl-k", "ctrl-u", "ctrl-w", "alt-d", "space", *(f"digit-{n}" for n in range(10))}
 METHOD_FIELDS = {
     "uhp.capabilities": set(),
     "terminal.backend.inventory": set(),
@@ -189,10 +189,13 @@ def valid_event(value):
         cursor = data.get("cursor")
         if cursor is not None and not (
             isinstance(cursor, dict)
-            and set(cursor) == {"offset"}
+            and set(cursor) == {"offset", "padding_cells"}
             and isinstance(cursor["offset"], int)
             and not isinstance(cursor["offset"], bool)
             and 0 <= cursor["offset"] <= 65536
+            and isinstance(cursor["padding_cells"], int)
+            and not isinstance(cursor["padding_cells"], bool)
+            and 0 <= cursor["padding_cells"] <= 65536
         ):
             return False
         encoded = data["text"].encode()
@@ -335,7 +338,7 @@ def check_generated_event_limits():
             "lines": 1,
             "bytes": 65537,
             "truncated": False,
-            "cursor": {"offset": 0},
+            "cursor": {"offset": 0, "padding_cells": 0},
         },
     }
     assert not valid_event(frame), "terminal frames must stay within 64 KiB"

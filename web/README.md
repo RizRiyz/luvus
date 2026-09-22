@@ -36,6 +36,30 @@ another isolated profile or port is needed. Set `LUVUS_WEB_NO_OPEN=1` or pass
 `LUVUS_SESSION` and `LUVUS_HOME` selectors remain supported outside a managed
 Luvus pane.
 
+## Pair local and mobile devices
+
+The bridge authorizes two browser devices by default. After the first browser
+connects, open **Devices**, choose a limit from 1 through 8, and create a new
+one-use pairing for each phone, tablet, or computer. Scan the locally generated
+QR code with the phone camera, or use Copy/Share as a fallback. Existing devices
+stay live; each new device receives an independent in-memory ticket that can
+reconnect until its ticket expires or the bridge stops. QR generation happens
+inside the browser and never sends the pairing secret to an external service.
+
+For a bridge behind a private TLS tunnel, configure the public address so links
+created from a localhost browser are immediately usable on a phone:
+
+```sh
+LUVUS_WEB_PUBLIC_URL=https://luvus.example.test \
+LUVUS_WEB_ORIGINS=https://luvus.example.test \
+LUVUS_WEB_MAX_DEVICES=3 \
+npm --prefix web run dev
+```
+
+`LUVUS_WEB_MAX_DEVICES` sets the initial limit and accepts 1 through 8. The
+Devices panel may change that limit for the current bridge lifetime, but cannot
+set it below the number of authorized devices plus unspent pairing links.
+
 ## Manual development
 
 Build Luvus first, then run an isolated server and the bridge:
@@ -55,15 +79,23 @@ LUVUS_SESSION=web-dev \
 npm start
 ```
 
-Open the fragment-bearing URL printed by the bridge. The browser pairing code
-is one-use and is exchanged for an in-memory bridge ticket. Browser tickets
-expire and are never persisted beyond `sessionStorage`.
+Open the fragment-bearing URL printed by the bridge. Every browser pairing code
+is one-use and is exchanged for an independent in-memory bridge ticket. Browser
+tickets expire and are never persisted beyond that device tab's
+`sessionStorage`.
 
 In a controlled terminal, click the terminal or the keyboard button to focus
 native input. Physical and mobile keyboards write directly to the PTY; shell
 or agent history, cursor movement, and Tab completion therefore remain owned by
-the child application. The bottom dock only supplies keys that are awkward on
-touch keyboards. Clipboard paste uses terminal bracketed-paste semantics and
+the child application. `Alt`/`Option`+Backspace and `Ctrl`+Backspace delete the
+previous word; `Alt`/`Option`+forward Delete and `Ctrl`+Delete delete the next
+word. `Command`+Backspace/Delete clear toward the start/end of the line, as do
+`Ctrl+U`/`Ctrl+K`. The bottom dock only supplies keys that are awkward on
+touch keyboards; Enter and Backspace remain on the native keyboard. On mobile,
+the terminal follows the visual viewport and keeps the live cursor above the
+software keyboard. Submitting input resumes follow-tail so streaming output
+stays visible; an intentional touch or wheel scroll still pauses it for history
+reading. Clipboard paste uses terminal bracketed-paste semantics and
 does not add Enter. The `+` button, clipboard file paste, and drag/drop all
 stream files up to 32 MiB in bounded chunks. Luvus stores the bytes privately
 on the selected server and pastes only the resulting remote path, so the same

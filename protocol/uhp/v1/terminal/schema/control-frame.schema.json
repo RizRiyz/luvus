@@ -55,7 +55,7 @@
     {
       "properties":{
         "action":{"const":"send_key"},
-        "params":{"type":"object","properties":{"key":{"enum":["enter","escape","tab","backtab","up","down","left","right","home","end","backspace","delete","pageup","pagedown","ctrl-c","ctrl-d","ctrl-u","ctrl-w","space","digit-0","digit-1","digit-2","digit-3","digit-4","digit-5","digit-6","digit-7","digit-8","digit-9"]}},"required":["key"],"additionalProperties":false}
+        "params":{"type":"object","properties":{"key":{"enum":["enter","escape","tab","backtab","up","down","left","right","home","end","backspace","delete","pageup","pagedown","ctrl-c","ctrl-d","ctrl-k","ctrl-u","ctrl-w","alt-d","space","digit-0","digit-1","digit-2","digit-3","digit-4","digit-5","digit-6","digit-7","digit-8","digit-9"]}},"required":["key"],"additionalProperties":false}
       }
     }
   ]

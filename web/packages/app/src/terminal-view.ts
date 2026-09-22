@@ -12,12 +12,16 @@ export class TerminalView {
     attrs: { role: "log", tabindex: "0", "aria-label": "Terminal output" },
   });
   #paintFrame: number | undefined;
-  #pendingPaint: { text: string; cursorOffset: number | undefined } | undefined;
+  #pendingPaint: { text: string; cursorOffset: number | undefined; cursorPadding: number } | undefined;
   #input: NativeTerminalInput | undefined;
   #inputHint = element("span", { className: "terminal-input-hint", text: "Tap terminal to type" });
   #attach: HTMLButtonElement | undefined;
   #uploadTail: Promise<void> = Promise.resolve();
   #followTail = true;
+  #viewportFrame: number | undefined;
+  #viewportChanged = () => this.#syncViewport();
+  #manualScroll = false;
+  #manualScrollTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     private readonly bridge: BridgeClient,
@@ -37,10 +41,13 @@ export class TerminalView {
       this.#input.element.addEventListener("focus", () => {
         this.#inputHint.textContent = "Typing in terminal";
         this.root.classList.add("keyboard-active");
+        this.#followTail = true;
+        this.#syncViewport(true);
       });
       this.#input.element.addEventListener("blur", () => {
         this.#inputHint.textContent = "Tap terminal to type";
         this.root.classList.remove("keyboard-active");
+        this.#syncViewport();
       });
       this.#output.addEventListener("click", () => {
         if (!window.getSelection()?.toString()) this.#input?.focus();
@@ -93,12 +100,10 @@ export class TerminalView {
     const keySpecs = [
       ["escape", "Esc"],
       ["tab", "Tab"],
-      ["enter", "↵"],
       ["up", "↑"],
       ["down", "↓"],
       ["left", "←"],
       ["right", "→"],
-      ["backspace", "⌫"],
       ["ctrl-c", "⌃C"],
     ] as const;
     const keys = keySpecs.map(([key, label]) => {
@@ -125,10 +130,23 @@ export class TerminalView {
       fileInput,
       ...(this.#input ? [this.#input.element] : []),
     );
+    const markManualScroll = () => {
+      this.#manualScroll = true;
+      if (this.#manualScrollTimer) clearTimeout(this.#manualScrollTimer);
+      this.#manualScrollTimer = setTimeout(() => { this.#manualScroll = false; }, 250);
+    };
+    this.#output.addEventListener("wheel", markManualScroll, { passive: true });
+    this.#output.addEventListener("touchmove", markManualScroll, { passive: true });
     this.#output.addEventListener("scroll", () => {
+      if (!this.#manualScroll) return;
       const distance = this.#output.scrollHeight - this.#output.scrollTop - this.#output.clientHeight;
       this.#followTail = distance < 80;
+      markManualScroll();
     }, { passive: true });
+    window.visualViewport?.addEventListener("resize", this.#viewportChanged);
+    window.visualViewport?.addEventListener("scroll", this.#viewportChanged);
+    window.addEventListener("resize", this.#viewportChanged);
+    this.#syncViewport();
   }
 
   async start(): Promise<void> {
@@ -152,6 +170,11 @@ export class TerminalView {
     this.#input?.destroy();
     this.#stream?.close();
     if (this.#paintFrame !== undefined) cancelAnimationFrame(this.#paintFrame);
+    if (this.#viewportFrame !== undefined) cancelAnimationFrame(this.#viewportFrame);
+    if (this.#manualScrollTimer) clearTimeout(this.#manualScrollTimer);
+    window.visualViewport?.removeEventListener("resize", this.#viewportChanged);
+    window.visualViewport?.removeEventListener("scroll", this.#viewportChanged);
+    window.removeEventListener("resize", this.#viewportChanged);
   }
 
   #frame(raw: Record<string, unknown>): void {
@@ -163,12 +186,17 @@ export class TerminalView {
     const frame = raw as unknown as TerminalFrame;
     if (typeof frame.data.text === "string") {
       const cursorOffset = frame.data.cursor?.offset;
-      this.#paint(frame.data.text, Number.isSafeInteger(cursorOffset) ? cursorOffset : undefined);
+      const cursorPadding = frame.data.cursor?.padding_cells;
+      this.#paint(
+        frame.data.text,
+        Number.isSafeInteger(cursorOffset) ? cursorOffset : undefined,
+        Number.isSafeInteger(cursorPadding) ? cursorPadding : 0,
+      );
     }
   }
 
-  #paint(text: string, cursorOffset?: number): void {
-    this.#pendingPaint = { text, cursorOffset };
+  #paint(text: string, cursorOffset?: number, cursorPadding = 0): void {
+    this.#pendingPaint = { text, cursorOffset, cursorPadding };
     if (this.#paintFrame !== undefined) return;
     this.#paintFrame = requestAnimationFrame(() => {
       this.#paintFrame = undefined;
@@ -176,9 +204,9 @@ export class TerminalView {
       this.#pendingPaint = undefined;
       if (pending === undefined) return;
       const followTail = this.#followTail;
-      const fragment = renderTerminalFrame(pending.text, pending.cursorOffset);
+      const fragment = renderTerminalFrame(pending.text, pending.cursorOffset, pending.cursorPadding);
       this.#output.replaceChildren(fragment);
-      if (followTail) this.#output.scrollTop = this.#output.scrollHeight;
+      if (followTail) this.#scrollToLatest();
     });
   }
 
@@ -190,6 +218,8 @@ export class TerminalView {
 
   async #action(action: TerminalAction, params: Record<string, unknown>): Promise<unknown> {
     if (!this.#stream) throw new Error("Terminal is not connected");
+    this.#followTail = true;
+    this.#scrollToLatest();
     return this.#stream.action(action, params);
   }
 
@@ -222,6 +252,25 @@ export class TerminalView {
     this.root.classList.add("file-drag-active");
   }
 
+  #syncViewport(revealInput = false): void {
+    const viewport = window.visualViewport;
+    const height = Math.max(1, Math.round(viewport?.height ?? window.innerHeight));
+    const top = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
+    this.root.style.setProperty("--terminal-viewport-height", `${height}px`);
+    this.root.style.setProperty("--terminal-viewport-top", `${top}px`);
+    if ((!revealInput && !this.root.classList.contains("keyboard-active")) || !this.#followTail) return;
+    this.#scrollToLatest();
+  }
+
+  #scrollToLatest(): void {
+    this.#output.scrollTop = this.#output.scrollHeight;
+    if (this.#viewportFrame !== undefined) cancelAnimationFrame(this.#viewportFrame);
+    this.#viewportFrame = requestAnimationFrame(() => {
+      this.#viewportFrame = undefined;
+      if (this.#followTail) this.#output.scrollTop = this.#output.scrollHeight;
+    });
+  }
+
 }
 
 function headerBackButton(onBack: () => void): HTMLButtonElement {
@@ -231,7 +280,7 @@ function headerBackButton(onBack: () => void): HTMLButtonElement {
   return back;
 }
 
-function renderTerminalFrame(text: string, cursorOffset: number | undefined): DocumentFragment {
+function renderTerminalFrame(text: string, cursorOffset: number | undefined, cursorPadding: number): DocumentFragment {
   const fragment = document.createDocumentFragment();
   let remaining = cursorOffset;
   let placed = false;
@@ -239,6 +288,7 @@ function renderTerminalFrame(text: string, cursorOffset: number | undefined): Do
     const characters = Array.from(run.text);
     if (!placed && remaining !== undefined && remaining <= characters.length) {
       appendStyledText(fragment, characters.slice(0, remaining).join(""), run.style);
+      if (cursorPadding > 0) fragment.append(document.createTextNode(" ".repeat(cursorPadding)));
       fragment.append(element("span", { className: "terminal-caret", attrs: { "aria-hidden": "true" } }));
       appendStyledText(fragment, characters.slice(remaining).join(""), run.style);
       placed = true;
@@ -248,6 +298,7 @@ function renderTerminalFrame(text: string, cursorOffset: number | undefined): Do
     if (!placed && remaining !== undefined) remaining -= characters.length;
   }
   if (!placed && remaining === 0) {
+    if (cursorPadding > 0) fragment.append(document.createTextNode(" ".repeat(cursorPadding)));
     fragment.append(element("span", { className: "terminal-caret", attrs: { "aria-hidden": "true" } }));
   }
   return fragment;

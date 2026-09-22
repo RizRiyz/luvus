@@ -392,6 +392,22 @@ impl AlacrittyEngine {
         }
         count
     }
+
+    /// Count blank terminal cells omitted from the normalized row immediately
+    /// before the cursor. Captures intentionally trim those cells from their
+    /// text, but stream clients need the distance to place a visual caret in
+    /// the same input cell as the child terminal.
+    fn backend_cursor_padding_cells(&self, line: Line, column: usize) -> usize {
+        let grid = self.term.grid();
+        let row = &grid[line];
+        let last = (0..grid.columns())
+            .rfind(|column| {
+                let cell = &row[Column(*column)];
+                cell.flags.contains(Flags::WIDE_CHAR_SPACER) || (cell.c != '\0' && cell.c != ' ')
+            })
+            .map_or(0, |column| column + 1);
+        column.min(grid.columns()).saturating_sub(last)
+    }
 }
 
 fn append_utf8_bounded(output: &mut String, text: &str, max_bytes: usize) -> bool {
@@ -867,6 +883,7 @@ impl VtEngine for AlacrittyEngine {
                 lines: count,
                 truncated: !complete,
                 cursor_offset: None,
+                cursor_padding_cells: 0,
             };
         }
 
@@ -879,6 +896,7 @@ impl VtEngine for AlacrittyEngine {
         let mut returned = 0;
         let mut truncated = false;
         let mut cursor_offset = None;
+        let mut cursor_padding_cells = 0;
         let mut rendered_chars = 0usize;
         match mode {
             CaptureMode::Visible => {
@@ -893,12 +911,12 @@ impl VtEngine for AlacrittyEngine {
                         rendered_chars += 1;
                     }
                     let candidate = (cursor.visible && row == cursor.y as usize).then(|| {
-                        rendered_chars
-                            + self.backend_row_chars_before(
-                                Line(row as i32),
-                                cursor.x as usize,
-                                ansi,
-                            )
+                        let line = Line(row as i32);
+                        (
+                            rendered_chars
+                                + self.backend_row_chars_before(line, cursor.x as usize, ansi),
+                            self.backend_cursor_padding_cells(line, cursor.x as usize),
+                        )
                     });
                     let complete = if ansi {
                         self.append_ansi_grid_row(Line(row as i32), &mut output, max_bytes)
@@ -910,8 +928,9 @@ impl VtEngine for AlacrittyEngine {
                         truncated = true;
                         break;
                     }
-                    if candidate.is_some() {
-                        cursor_offset = candidate;
+                    if let Some((offset, padding_cells)) = candidate {
+                        cursor_offset = Some(offset);
+                        cursor_padding_cells = padding_cells;
                     }
                     rendered_chars +=
                         self.backend_row_chars_before(Line(row as i32), usize::MAX, ansi);
@@ -979,11 +998,12 @@ impl VtEngine for AlacrittyEngine {
                             continue;
                         };
                         if cursor_line == Some(index) {
-                            candidate = Some(
+                            candidate = Some((
                                 rendered_chars
                                     + logical_chars
                                     + self.backend_row_chars_before(line, cursor.x as usize, ansi),
-                            );
+                                self.backend_cursor_padding_cells(line, cursor.x as usize),
+                            ));
                         }
                         complete = if ansi {
                             self.append_ansi_grid_row(line, &mut output, max_bytes)
@@ -1000,8 +1020,9 @@ impl VtEngine for AlacrittyEngine {
                         truncated = true;
                         break;
                     }
-                    if candidate.is_some() {
-                        cursor_offset = candidate;
+                    if let Some((offset, padding_cells)) = candidate {
+                        cursor_offset = Some(offset);
+                        cursor_padding_cells = padding_cells;
                     }
                     rendered_chars += logical_chars;
                 }
@@ -1013,6 +1034,7 @@ impl VtEngine for AlacrittyEngine {
             lines: returned,
             truncated,
             cursor_offset,
+            cursor_padding_cells,
         }
     }
 
@@ -2569,12 +2591,14 @@ mod tests {
         engine.advance(b"abcdefghij\r\nxy");
 
         let visible = engine.backend_capture(CaptureMode::Visible, 3, false, 512);
+        assert_eq!(visible.cursor_padding_cells, 0);
         let visible_offset = visible.cursor_offset.expect("visible cursor");
         let mut marked: Vec<char> = visible.text.chars().collect();
         marked.insert(visible_offset, '|');
         assert!(marked.into_iter().collect::<String>().contains("xy|"));
 
         let recent = engine.backend_capture(CaptureMode::RecentUnwrapped, 3, false, 512);
+        assert_eq!(recent.cursor_padding_cells, 0);
         let recent_offset = recent.cursor_offset.expect("unwrapped cursor");
         let mut marked: Vec<char> = recent.text.chars().collect();
         marked.insert(recent_offset, '|');
@@ -2586,6 +2610,13 @@ mod tests {
             "{}",
             recent.text
         );
+
+        let (tx, _rx) = channel();
+        let mut wide = AlacrittyEngine::new(5, 3, tx, budget_for_rows(5, 200));
+        wide.advance("界".as_bytes());
+        let capture = wide.backend_capture(CaptureMode::Visible, 3, false, 512);
+        assert_eq!(capture.cursor_padding_cells, 0);
+        assert_eq!(capture.cursor_offset, Some(1));
     }
 
     #[test]
@@ -2599,6 +2630,7 @@ mod tests {
         assert!(capture.text.ends_with("\n$"), "{}", capture.text);
         assert!(!capture.text.ends_with('\n'));
         assert_eq!(capture.cursor_offset, Some(capture.text.chars().count()));
+        assert_eq!(capture.cursor_padding_cells, 1);
     }
 
     /// Pi alt-screen `doRender`: 2026 + row writes + CUP to fake caret + hide.
