@@ -22,6 +22,7 @@ pub(super) struct BrowserDeviceStatus {
 pub(super) struct Authentication {
     pub ticket: Option<String>,
     pub expires_at: u64,
+    pairing: Option<([u8; 32], u64)>,
 }
 
 pub(super) struct BrowserAuthority {
@@ -57,13 +58,15 @@ impl BrowserAuthority {
                     return Some(Authentication {
                         ticket: None,
                         expires_at,
+                        pairing: None,
                     });
                 }
             }
         }
         let code = code?;
-        let expires_at = self.pairings.remove(&digest(code))?;
-        if expires_at <= unix_now() || self.tickets.len() >= self.max_devices {
+        let pairing = digest(code);
+        let pairing_expires_at = self.pairings.remove(&pairing)?;
+        if pairing_expires_at <= unix_now() || self.tickets.len() >= self.max_devices {
             return None;
         }
         let ticket = random_token(32).ok()?;
@@ -72,7 +75,20 @@ impl BrowserAuthority {
         Some(Authentication {
             ticket: Some(ticket),
             expires_at,
+            pairing: Some((pairing, pairing_expires_at)),
         })
+    }
+
+    pub fn rollback(&mut self, authentication: Authentication) {
+        let Some((pairing, expires_at)) = authentication.pairing else {
+            return;
+        };
+        if let Some(ticket) = authentication.ticket {
+            self.tickets.remove(&digest(&ticket));
+        }
+        if expires_at > unix_now() {
+            self.pairings.insert(pairing, expires_at);
+        }
     }
 
     pub fn create_pairing(&mut self) -> Option<BrowserPairing> {
@@ -183,5 +199,15 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')));
         }
+    }
+
+    #[test]
+    fn rolled_back_pairing_can_authenticate_again() {
+        let (mut authority, initial) = BrowserAuthority::new(600, 1).unwrap();
+        let authentication = authority.authenticate(Some(&initial.code), None).unwrap();
+        authority.rollback(authentication);
+
+        assert_eq!(authority.status().pending_pairings, 1);
+        assert!(authority.authenticate(Some(&initial.code), None).is_some());
     }
 }

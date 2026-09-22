@@ -342,6 +342,10 @@ authority by default. Add `--control` for bounded terminal and workspace input.
 Stopping the command revokes only its temporary web authority; the Luvus
 server, PTYs, and other clients remain attached.
 
+See the [Luvus Web guide](/docs/guides/web/) for first-time pairing, phone
+access through a private TLS provider, multiple devices, terminal input, file
+uploads, session switching, and troubleshooting.
+
 `luvus uhp snapshot` includes nullable `agent_name` operator aliases on terminal rows alongside `pane_id`. Native view rows omit the field. Refresh snapshots after naming: `agent.name` emits no event and does not advance `event_sequence`, while `pane.rename` updates the same map, emits `pane.renamed`, and advances the sequence, including when clearing a name. The event sequence is not an alias ETag because `agent.name` is silent.
 
 ## Prompt wait observation

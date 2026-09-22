@@ -45,6 +45,19 @@ pub(super) struct BridgeState {
 
 struct ConnectionGuard(Arc<std::sync::atomic::AtomicUsize>);
 
+impl ConnectionGuard {
+    fn acquire(counter: &Arc<std::sync::atomic::AtomicUsize>, limit: usize) -> Option<Self> {
+        counter
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |current| (current < limit).then_some(current + 1),
+            )
+            .ok()?;
+        Some(Self(Arc::clone(counter)))
+    }
+}
+
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
@@ -135,23 +148,10 @@ async fn websocket(
     if !origin_allowed(&headers, &state.origins) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if state
-        .connected
-        .fetch_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-            |current| (current < MAX_CLIENTS).then_some(current + 1),
-        )
-        .is_err()
-    {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-    let connection = ConnectionGuard(Arc::clone(&state.connected));
     upgrade
         .max_message_size(MAX_PAYLOAD)
         .max_frame_size(MAX_PAYLOAD)
         .on_upgrade(move |socket| async move {
-            let _connection = connection;
             client(socket, state).await;
         })
 }
@@ -185,6 +185,24 @@ async fn client(socket: WebSocket, state: BridgeState) {
                 "type": "error",
                 "code": "forbidden",
                 "message": "Pairing or ticket was rejected",
+            })))
+            .await;
+        let _ = sink.send(Message::Close(None)).await;
+        return;
+    };
+    // Idle or rejected upgrades must never occupy the authenticated client
+    // budget. Their only lifetime is the bounded authentication timeout above.
+    let Some(_connection) = ConnectionGuard::acquire(&state.connected, MAX_CLIENTS) else {
+        state
+            .authority
+            .lock()
+            .expect("browser authority poisoned")
+            .rollback(authentication);
+        let _ = sink
+            .send(text_message(json!({
+                "type": "error",
+                "code": "connection_limit",
+                "message": "Authenticated browser capacity is full",
             })))
             .await;
         let _ = sink.send(Message::Close(None)).await;
@@ -795,5 +813,21 @@ mod tests {
         assert!(!valid_id("stream/a"));
         assert!(valid_method("terminal.backend.control"));
         assert!(!valid_method("Terminal.backend.control"));
+    }
+
+    #[test]
+    fn authenticated_capacity_is_bounded_and_released() {
+        let connected = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connected_guards = (0..MAX_CLIENTS)
+            .map(|_| ConnectionGuard::acquire(&connected, MAX_CLIENTS).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            connected.load(std::sync::atomic::Ordering::Acquire),
+            MAX_CLIENTS
+        );
+        assert!(ConnectionGuard::acquire(&connected, MAX_CLIENTS).is_none());
+
+        drop(connected_guards);
+        assert_eq!(connected.load(std::sync::atomic::Ordering::Acquire), 0);
     }
 }
