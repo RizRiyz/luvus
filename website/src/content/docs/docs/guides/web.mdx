@@ -111,6 +111,17 @@ luvus web --control \
   --origin https://luvus-backup.example.test
 ```
 
+You can also add or update the pairing address while the bridge is running.
+From an authorized browser, open **Devices**, enter the tunnel's origin under
+**Pairing address**, and choose **Save address**. New QR codes and links use the
+updated address immediately, including an unspent link already shown in the
+panel. Clear the field to use the address of the current browser again.
+
+The device setting lasts for the current bridge process. Use `--public-url` to
+set its initial value after a restart. Changing the pairing address does not
+create a tunnel, change the loopback listener, or add an allowed origin; configure
+those separately when your provider does not preserve a matching Origin and Host.
+
 The transport provider owns public reachability and TLS. Luvus remains
 loopback-bound and owns pairing, browser tickets, origin checks, and scoped
 authority. Do not publish the local HTTP port directly to the internet.

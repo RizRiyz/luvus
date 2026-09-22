@@ -1,4 +1,4 @@
-import type { BridgeClient, PaneSnapshot, StreamHandle, TerminalFrame } from "@luvus/uhp-client";
+import { BridgeError, type BridgeClient, type PaneSnapshot, type StreamHandle, type TerminalFrame } from "@luvus/uhp-client";
 import { parseAnsi } from "./ansi.js";
 import { button, element } from "./dom.js";
 import { uploadTerminalFile } from "./file-upload.js";
@@ -14,6 +14,17 @@ export interface TerminalPaneOption {
 export class TerminalView {
   readonly root = element("section", { className: "terminal-screen" });
   #stream: StreamHandle | undefined;
+  #streamAttempt = 0;
+  #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  #reconnectRetry = 0;
+  #destroyed = false;
+  #queuedActions: Array<{
+    action: TerminalAction;
+    params: Record<string, unknown>;
+    resolve: (value: unknown) => void;
+    reject: (reason: unknown) => void;
+  }> = [];
+  #status: HTMLElement | undefined;
   #output = element("div", {
     className: "terminal-output",
     attrs: { role: "log", tabindex: "0", "aria-label": "Terminal output" },
@@ -58,7 +69,7 @@ export class TerminalView {
     if (control) {
       this.#input = new NativeTerminalInput(
         (action, params) => this.#action(action, params),
-        (message) => this.#appendStatus(`Input failed: ${message}`),
+        (message) => this.#inputFailed(message),
         (files) => {
           if (this.canUploadFiles) this.#queueFiles(files);
         },
@@ -192,24 +203,59 @@ export class TerminalView {
 
   async start(): Promise<void> {
     if (!this.pane.terminal_id) throw new Error("Pane has no live terminal identity");
-    const method = this.control ? "terminal.backend.control" : "terminal.backend.observe";
-    this.#stream = await this.bridge.openStream(method, {
-      server_generation: this.generation,
-      terminal_id: this.pane.terminal_id,
-      pane_id: this.pane.pane_id,
-      mode: "recent_unwrapped",
-      lines: 120,
-      ansi: true,
-      ...(this.streamCursor ? { cursor: true } : {}),
-    }, (frame) => this.#frame(frame), (reason) => {
-      this.#appendStatus(`Terminal disconnected: ${reason}`);
-    });
+    await this.#connectStream(true);
     if (this.control && matchMedia("(pointer: fine)").matches) this.#input?.focus();
   }
 
+  async #connectStream(initial = false): Promise<void> {
+    if (this.#destroyed || !this.pane.terminal_id) return;
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
+    const attempt = ++this.#streamAttempt;
+    const method = this.control ? "terminal.backend.control" : "terminal.backend.observe";
+    try {
+      await this.bridge.connect();
+      const stream = await this.bridge.openStream(method, {
+        server_generation: this.generation,
+        terminal_id: this.pane.terminal_id,
+        pane_id: this.pane.pane_id,
+        mode: "recent_unwrapped",
+        lines: 120,
+        ansi: true,
+        ...(this.streamCursor ? { cursor: true } : {}),
+      }, (frame) => this.#frame(frame, attempt), (reason) => this.#streamClosed(attempt, reason));
+      if (this.#destroyed || attempt !== this.#streamAttempt) {
+        stream.close();
+        return;
+      }
+      this.#stream = stream;
+      this.#reconnectRetry = 0;
+      this.#clearStatus();
+      this.#restoreInputHint();
+      this.#flushQueuedActions(stream);
+    } catch (error) {
+      if (this.#destroyed || attempt !== this.#streamAttempt) return;
+      this.#stream = undefined;
+      if (!recoverableConnectionError(error)) {
+        this.#failQueuedActions(error);
+        if (initial) throw error;
+        this.#showStatus(error instanceof Error ? error.message : "Terminal connection failed");
+        return;
+      }
+      this.#showStatus("Connection interrupted — reconnecting…");
+      this.#scheduleReconnect();
+    }
+  }
+
   destroy(): void {
+    this.#destroyed = true;
+    this.#streamAttempt += 1;
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
+    this.#failQueuedActions(new BridgeError("Terminal view closed", "closed"));
     this.#input?.destroy();
     this.#stream?.close();
+    this.#stream = undefined;
     if (this.#paintFrame !== undefined) cancelAnimationFrame(this.#paintFrame);
     if (this.#viewportFrame !== undefined) cancelAnimationFrame(this.#viewportFrame);
     window.visualViewport?.removeEventListener("resize", this.#viewportChanged);
@@ -260,9 +306,10 @@ export class TerminalView {
     if (restoreFocus) this.#paneSelector?.focus();
   }
 
-  #frame(raw: Record<string, unknown>): void {
+  #frame(raw: Record<string, unknown>, attempt: number): void {
+    if (this.#destroyed || attempt !== this.#streamAttempt) return;
     if (raw.event === "terminal.resync_required") {
-      this.#appendStatus("Terminal resync required");
+      this.#disconnectStream(attempt, "Terminal changed while the connection was catching up");
       return;
     }
     if (raw.event !== "terminal.frame") return;
@@ -297,17 +344,51 @@ export class TerminalView {
     });
   }
 
-  #appendStatus(message: string): void {
-    const status = element("div", { className: "terminal-status", text: message });
-    this.#output.append(status);
+  #showStatus(message: string): void {
+    if (!this.#status?.isConnected) {
+      this.#status = element("div", { className: "terminal-status terminal-connection-status" });
+      this.#output.append(this.#status);
+    }
+    this.#status.textContent = message;
     this.#output.scrollTop = this.#output.scrollHeight;
   }
 
+  #clearStatus(): void {
+    this.#status?.remove();
+    this.#status = undefined;
+  }
+
+  #inputFailed(message: string): void {
+    if (!this.#stream) {
+      this.#showStatus("Connection interrupted — reconnecting…");
+      this.#scheduleReconnect();
+      return;
+    }
+    this.#showStatus(`Input was not delivered: ${message}`);
+  }
+
   async #action(action: TerminalAction, params: Record<string, unknown>): Promise<unknown> {
-    if (!this.#stream) throw new Error("Terminal is not connected");
     this.#followTail = true;
     this.#scrollToLatest();
-    return this.#stream.action(action, params);
+    const stream = this.#stream;
+    if (!stream) {
+      if (this.#destroyed) throw new BridgeError("Terminal view is closed", "closed");
+      if (this.#queuedActions.length >= 256) {
+        throw new BridgeError("Terminal reconnect input buffer is full", "input_buffer_full");
+      }
+      this.#scheduleReconnect();
+      return new Promise((resolve, reject) => {
+        this.#queuedActions.push({ action, params, resolve, reject });
+      });
+    }
+    try {
+      return await stream.action(action, params);
+    } catch (error) {
+      if (this.#stream === stream && recoverableConnectionError(error)) {
+        this.#disconnectStream(this.#streamAttempt, "Terminal input connection was interrupted");
+      }
+      throw error;
+    }
   }
 
   #queueFiles(files: File[]): void {
@@ -325,7 +406,7 @@ export class TerminalView {
         this.#input?.focus();
       } catch (error) {
         const message = error instanceof Error ? error.message : "File upload failed";
-        this.#appendStatus(`Upload failed: ${message}`);
+        this.#showStatus(`Upload failed: ${message}`);
         this.#inputHint.textContent = "Tap terminal to type";
       } finally {
         if (this.#attach) this.#attach.disabled = !this.canUploadFiles;
@@ -359,6 +440,62 @@ export class TerminalView {
     });
   }
 
+  #streamClosed(attempt: number, reason: string): void {
+    if (this.#destroyed || attempt !== this.#streamAttempt) return;
+    this.#streamAttempt += 1;
+    this.#stream = undefined;
+    this.#showStatus(reason ? "Connection interrupted — reconnecting…" : "Reconnecting terminal…");
+    this.#scheduleReconnect();
+  }
+
+  #disconnectStream(attempt: number, _reason: string): void {
+    if (this.#destroyed || attempt !== this.#streamAttempt) return;
+    const stream = this.#stream;
+    this.#streamAttempt += 1;
+    this.#stream = undefined;
+    stream?.close();
+    this.#showStatus("Connection interrupted — reconnecting…");
+    this.#scheduleReconnect();
+  }
+
+  #scheduleReconnect(): void {
+    if (this.#destroyed || this.#stream || this.#reconnectTimer) return;
+    const delay = Math.min(5_000, 150 * 2 ** Math.min(this.#reconnectRetry++, 5));
+    this.#reconnectTimer = setTimeout(() => {
+      this.#reconnectTimer = undefined;
+      void this.#connectStream();
+    }, delay);
+  }
+
+  #flushQueuedActions(stream: StreamHandle): void {
+    const queued = this.#queuedActions;
+    this.#queuedActions = [];
+    for (const pending of queued) {
+      void stream.action(pending.action, pending.params).then(pending.resolve, pending.reject);
+    }
+  }
+
+  #failQueuedActions(error: unknown): void {
+    const queued = this.#queuedActions;
+    this.#queuedActions = [];
+    for (const pending of queued) pending.reject(error);
+  }
+
+  #restoreInputHint(): void {
+    if (!this.control) {
+      this.#inputHint.textContent = "Read-only terminal";
+    } else if (document.activeElement === this.#input?.element) {
+      this.#inputHint.textContent = "Typing in terminal";
+    } else {
+      this.#inputHint.textContent = "Tap terminal to type";
+    }
+  }
+
+}
+
+function recoverableConnectionError(error: unknown): boolean {
+  if (!(error instanceof BridgeError)) return true;
+  return new Set(["bridge_error", "closed", "disconnected", "stale_stream", "timeout", "unavailable"]).has(error.code);
 }
 
 function headerBackButton(onBack: () => void): HTMLButtonElement {

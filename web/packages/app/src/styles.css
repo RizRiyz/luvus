@@ -188,7 +188,13 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .device-copy { margin: 1rem 0; color: var(--muted); }
 .device-limit-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .device-limit { min-width: 4rem; padding: .45rem .6rem; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: .6rem; }
-.device-help { margin: .8rem 0 1rem; color: var(--muted); font-size: .82rem; line-height: 1.45; }
+.device-url-setting { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .65rem; padding-top: .85rem; }
+.device-url-label { display: grid; gap: .4rem; min-width: 0; color: #e2dfeb; font-size: .82rem; }
+.device-url-input { width: 100%; min-width: 0; padding: .65rem .7rem; color: #e7e4ef; background: var(--bg); border: 1px solid var(--line); border-radius: .65rem; font: .75rem ui-monospace, monospace; }
+.device-url-input:focus { border-color: var(--rally-border-focus); outline: none; box-shadow: 0 0 0 2px #dbc66f14; }
+.device-url-save { min-height: 2.35rem; white-space: nowrap; }
+.device-help { margin: .65rem 0 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
+.device-help + .device-help { margin-bottom: 1rem; }
 .device-pair { width: 100%; }
 .pairing-card { padding: .9rem; background: #11121988; border: 1px solid #ead77855; border-radius: .8rem; }
 .pairing-card strong, .pairing-card p { display: block; }
@@ -197,6 +203,11 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .pairing-qr { display: block; width: min(13.75rem, 70vw); height: auto; padding: .4rem; background: #fff; border-radius: .75rem; image-rendering: pixelated; }
 .pairing-link { width: 100%; padding: .65rem .7rem; color: #d9d7e7; background: var(--bg); border: 1px solid var(--line); border-radius: .6rem; font: .75rem ui-monospace, monospace; }
 .pairing-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .7rem; }
+
+@media (max-width: 34rem) {
+  .device-url-setting { grid-template-columns: 1fr; }
+  .device-url-save { width: 100%; }
+}
 
 .terminal-screen {
   position: fixed; top: var(--terminal-viewport-top, 0); right: 0; left: 0;
