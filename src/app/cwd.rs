@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::git_branch;
 use super::App;
 use crate::ids::PaneId;
@@ -72,7 +72,7 @@ impl App {
     ///
     /// Tests call this synchronously. The live path schedules the same scan on
     /// a worker and applies [`crate::event::AppEvent::CwdScanned`].
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn refresh_cwds(&mut self) {
         let panes: Vec<(PaneId, u32)> = self
             .panes
