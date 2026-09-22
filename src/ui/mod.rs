@@ -84,7 +84,7 @@ mod session_menu;
 mod settings;
 pub(crate) mod sidebar;
 pub(crate) mod workspace_row;
-pub(crate) use sidebar::SIDEBAR_CHROME_ROWS;
+pub(crate) use sidebar::{DOCK_HEADER_ROWS, SIDEBAR_CHROME_ROWS};
 mod status;
 pub(crate) mod switcher;
 mod tabbar;
@@ -1941,7 +1941,7 @@ mod dock_projection_tests {
         let slot = projection
             .shell_dock
             .expect("machine-aware client owns the right Workspaces dock");
-        assert_eq!(slot.height, 37);
+        assert_eq!(slot.height, 38);
         assert!(slot.x > area.width / 2);
         assert_eq!(app.panes[&pane].size(), pty_size);
         assert!(app.client_shell_dock_rect.is_none());
@@ -1955,7 +1955,7 @@ mod dock_projection_tests {
                 .shell_dock
                 .expect("hidden paths retain the client-owned Workspaces dock")
                 .height,
-            37
+            38
         );
 
         let mut remote = Buffer::empty(area);
@@ -1964,7 +1964,7 @@ mod dock_projection_tests {
         let dock = projection
             .shell_dock
             .expect("projection keeps the complete client-owned dock");
-        assert_eq!(dock.height, 37);
+        assert_eq!(dock.height, 38);
         assert_eq!(remote[(dock.x + 2, dock.y)].symbol(), " ");
         assert_eq!(app.panes[&pane].size(), pty_size);
     }

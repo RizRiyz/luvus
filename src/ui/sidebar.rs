@@ -48,10 +48,19 @@ pub(super) type SidebarHits = (
 type WorkspaceHits = (Vec<(usize, Rect)>, Option<Rect>);
 type AgentHits = (Vec<(PaneId, Rect)>, Vec<(String, Rect)>, Vec<(usize, Rect)>);
 
-/// Rows of sidebar chrome above the dock stack: the brand/menu row plus one
-/// blank separator row. The dock body, and therefore dock-height measurement
-/// during a divider drag, starts this many rows below the sidebar origin.
-pub(crate) const SIDEBAR_CHROME_ROWS: u16 = 2;
+/// Rows of sidebar chrome above the dock stack: the brand/menu row alone. The
+/// dock body, and therefore dock-height measurement during a divider drag,
+/// starts this many rows below the sidebar origin. The first dock's title sits
+/// directly under the chrome so it reads as the top of the sidebar rather than
+/// floating in the middle; the breathing room moved below it
+/// (`DOCK_HEADER_ROWS`), between the title and its rows.
+pub(crate) const SIDEBAR_CHROME_ROWS: u16 = 1;
+
+/// Rows every dock spends on its header: the title row plus one blank row that
+/// separates the title from the list. Dock renderers start their content this
+/// far below the slot origin and drop the same count from their row capacity,
+/// so a title never sits flush against the rows it labels.
+pub(crate) const DOCK_HEADER_ROWS: u16 = 2;
 
 /// Rows an expanded list item occupies: two content rows, drawn back-to-back.
 const EXPANDED_ROW_STRIDE: u16 = 2;
@@ -446,8 +455,8 @@ fn draw_workspaces_dock(
     } else {
         None
     };
-    let nlist_top = area.y + 1;
-    let nrows = area.height.saturating_sub(1);
+    let nlist_top = area.y + DOCK_HEADER_ROWS;
+    let nrows = area.height.saturating_sub(DOCK_HEADER_ROWS);
     let paths_visible = app.config.layout.workspace_paths;
     let row_stride = dock_row_stride(paths_visible);
     let ntotal = app.workspaces.len();
@@ -618,7 +627,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     // Workspace scope is controlled by prefix `A`, Settings → Keys, or an
     // agent/session row's context menu. It consumes no extra dock row.
     let scoped = app.agents_scope_active();
-    let alist_top = aheader + 1;
+    let alist_top = aheader + DOCK_HEADER_ROWS;
     let arows = area.bottom().saturating_sub(alist_top);
     let paths_visible = app.config.layout.agent_paths;
     let row_stride = dock_row_stride(paths_visible);
@@ -1026,8 +1035,8 @@ fn draw_module_dock(f: &mut RenderTarget, area: Rect, id: &str, app: &mut App, t
         None => (id.to_string(), Vec::new()),
     };
     line_at(f, area.y, header(&title, t));
-    let list_top = area.y + 1;
-    let cap = area.height.saturating_sub(1) as usize;
+    let list_top = area.y + DOCK_HEADER_ROWS;
+    let cap = area.height.saturating_sub(DOCK_HEADER_ROWS) as usize;
     for (i, row) in rows.iter().take(cap).enumerate() {
         let y = list_top + i as u16;
         let mut spans: Vec<Span> = Vec::new();

@@ -2609,8 +2609,8 @@ mod tests {
             .expect("the file list has rows");
         assert_eq!(
             first_row_y,
-            header_y + 1,
-            "the list starts directly below FILES/DIFF without an identity row"
+            header_y + crate::ui::DOCK_HEADER_ROWS,
+            "the list starts one blank row below FILES/DIFF, with no identity row"
         );
 
         // Click the `src` row (find its rect) and re-render.
