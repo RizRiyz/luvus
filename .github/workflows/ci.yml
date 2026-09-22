@@ -46,10 +46,10 @@ jobs:
       - run: cargo test --locked
       - name: Validate web client and bridge
         run: |
+          cargo build --locked
           npm --prefix web run check
           npm --prefix web test
           npm --prefix web run test:integration
-          cargo build --locked
           LUVUS_BIN="$PWD/target/debug/luvus" npm --prefix web run test:native
       - name: Validate terminal backend contract
         run: |
