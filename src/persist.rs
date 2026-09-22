@@ -26,6 +26,24 @@ pub struct SessionSnapshot {
     pub closed_workspace_paths: Vec<PathBuf>,
 }
 
+impl SessionSnapshot {
+    /// Remove every persisted terminal screen while preserving layout and
+    /// resume metadata. Returns whether an older snapshot needs rewriting.
+    pub(crate) fn discard_pane_screens(&mut self) -> bool {
+        let mut discarded = false;
+        for pane in self
+            .workspaces
+            .iter_mut()
+            .flat_map(|workspace| &mut workspace.tabs)
+            .flat_map(|tab| &mut tab.panes)
+            .map(|(_, pane)| pane)
+        {
+            discarded |= pane.screen.take().is_some();
+        }
+        discarded
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct WsSnap {
     #[serde(default = "new_workspace_id")]
@@ -88,7 +106,7 @@ pub struct PaneSnap {
     #[serde(default)]
     pub agent_launch: Option<Vec<String>>,
     /// The visible screen as ANSI, replayed on restore.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
     /// (module_id, entrypoint) for a module pane (MOD-2), re-spawned on restore.
     #[serde(default)]
@@ -856,13 +874,18 @@ fn snapshot_layout(
                                     .and_then(|cmds| app.manifests.launch_args_for(cmds, k))
                             })
                             .filter(|v| !v.is_empty());
-                        // Capture the visible screen (cap size to keep saves light).
-                        let screen = p
-                            .engine
-                            .lock()
-                            .ok()
-                            .map(|e| e.snapshot_ansi())
-                            .filter(|s| s.len() < 256 * 1024);
+                        // Capture the visible screen only when the user permits
+                        // terminal content on disk. The disabled path avoids the
+                        // engine lock and ANSI allocation entirely.
+                        let screen = if app.config.session.persist_pane_screen {
+                            p.engine
+                                .lock()
+                                .ok()
+                                .map(|e| e.snapshot_ansi())
+                                .filter(|s| s.len() < 256 * 1024)
+                        } else {
+                            None
+                        };
                         let module = app
                             .module_panes
                             .get(&id)
@@ -1101,6 +1124,42 @@ mod tests {
             "zsh",
             "without a process scan, retain the existing safe fallback"
         );
+    }
+
+    #[test]
+    fn pane_screen_opt_out_removes_terminal_content_from_session_json() {
+        let _env = test_env("pane-screen-opt-out");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes
+            .get(&pane)
+            .unwrap()
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[2J\x1b[HLUVUS-PRIVATE-SCREEN-MARKER");
+
+        assert!(save(&app));
+        let default_snapshot = fs::read_to_string(session_path()).unwrap();
+        assert!(
+            default_snapshot.contains("LUVUS-PRIVATE-SCREEN-MARKER"),
+            "screen persistence remains enabled by default"
+        );
+
+        app.config.session.persist_pane_screen = false;
+        assert!(save(&app));
+        let private_snapshot = fs::read_to_string(session_path()).unwrap();
+        assert!(!private_snapshot.contains("LUVUS-PRIVATE-SCREEN-MARKER"));
+        assert!(
+            !private_snapshot.contains("\"screen\""),
+            "the field is omitted rather than serialized as null"
+        );
+        assert!(load().unwrap().workspaces.iter().all(|workspace| workspace
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .all(|(_, pane)| pane.screen.is_none())));
     }
 
     // The control sockets grant command execution as the user, so the state
