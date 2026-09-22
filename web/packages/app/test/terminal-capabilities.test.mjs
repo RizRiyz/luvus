@@ -10,10 +10,10 @@ const uploadActions = [
   "upload_cancel",
 ];
 
-test("file uploads require every advertised upload action", () => {
+test("file uploads require paste and every advertised upload action", () => {
   assert.equal(supportsFileUpload(undefined), false);
   assert.equal(supportsFileUpload([]), false);
-  assert.equal(supportsFileUpload(uploadActions.slice(0, -1)), false);
-  assert.equal(supportsFileUpload(uploadActions), true);
+  assert.equal(supportsFileUpload(["paste_text", ...uploadActions.slice(0, -1)]), false);
+  assert.equal(supportsFileUpload(uploadActions), false);
   assert.equal(supportsFileUpload(["paste_text", ...uploadActions]), true);
 });
