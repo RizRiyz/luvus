@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:native": "vite build --mode native",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "tsc -p tsconfig.test.json && node --test test/*.test.mjs"
   },

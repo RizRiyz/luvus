@@ -34,6 +34,10 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci --prefix web
+      - name: Verify embedded web assets
+        run: |
+          npm --prefix web run build:native
+          git diff --exit-code -- src/web/assets
       # Path dependencies retain their upstream formatting; check Luvus itself.
       - run: cargo fmt --package luvus --check
       # `-D warnings` is scoped to clippy on our own crate — NOT a global
@@ -45,6 +49,8 @@ jobs:
           npm --prefix web run check
           npm --prefix web test
           npm --prefix web run test:integration
+          cargo build --locked
+          LUVUS_BIN="$PWD/target/debug/luvus" npm --prefix web run test:native
       - name: Validate terminal backend contract
         run: |
           python3 examples/uhp/terminal/consumer.py --fixtures

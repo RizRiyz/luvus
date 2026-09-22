@@ -4,6 +4,29 @@ Mobile-first access to a running Luvus session through a private bridge and the
 public UHP contract. The browser never receives a Luvus owner socket, UHP
 pairing code, or delegated UHP token.
 
+## Production run
+
+Released Luvus binaries embed the browser application and serve it through an
+explicit foreground command. Normal `luvus` startup never opens an HTTP port or
+starts a web runtime.
+
+```sh
+# Read-only monitoring of the default session
+luvus web
+
+# Interactive terminal and workspace control
+luvus web --control
+
+# Target one named session
+luvus --session project web --control
+```
+
+The native bridge binds `127.0.0.1` and opens a one-use pairing URL. Pressing
+Ctrl+C stops only the web bridge and revokes its process-bound UHP authority;
+the selected Luvus server, PTYs, TUI clients, and sessions keep running. Run
+`luvus help web` for ports, device limits, browser opening, and private TLS
+tunnel options. Node and npm are required only for web development.
+
 ## Quick development run
 
 From the repository root:

@@ -267,8 +267,12 @@ export class TerminalView {
       const cursorPadding = frame.data.cursor?.padding_cells;
       this.#paint(
         frame.data.text,
-        Number.isSafeInteger(cursorOffset) && cursorOffset >= 0 ? cursorOffset : undefined,
-        Number.isSafeInteger(cursorPadding) && cursorPadding >= 0 ? cursorPadding : 0,
+        typeof cursorOffset === "number" && Number.isSafeInteger(cursorOffset) && cursorOffset >= 0
+          ? cursorOffset
+          : undefined,
+        typeof cursorPadding === "number" && Number.isSafeInteger(cursorPadding) && cursorPadding >= 0
+          ? cursorPadding
+          : 0,
       );
     }
   }
