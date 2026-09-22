@@ -950,11 +950,7 @@ impl App {
                     changed
                 }
             }
-            AppEvent::CwdScanned {
-                panes,
-                branches,
-                workspace_candidates,
-            } => self.apply_cwd_scan(panes, branches, workspace_candidates),
+            AppEvent::CwdScanned { panes, branches } => self.apply_cwd_scan(panes, branches),
             // Mission Control usage (docs/54, MC-2): replace a fleet scan or
             // merge only the keys covered by a workspace scan. Repaint so a
             // visible mission tab updates.
@@ -4922,7 +4918,6 @@ mod tests {
         let dirty = app.handle_event(AppEvent::CwdScanned {
             panes: Vec::new(),
             branches: Vec::new(),
-            workspace_candidates: Vec::new(),
         });
 
         assert!(!dirty, "an empty scan needs no repaint");

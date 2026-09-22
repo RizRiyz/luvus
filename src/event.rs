@@ -288,13 +288,12 @@ pub enum AppEvent {
     /// (Windows) or `ps` failed — detection then falls back to text heuristics
     /// rather than concluding that no agent is running.
     ProcScanned(Option<std::collections::HashMap<u32, Vec<String>>>),
-    /// One process-table snapshot resolved every pane cwd, plus workspace
-    /// branches and complete git-workspace candidates. Process and git probes
+    /// One process-table snapshot resolved every requested pane cwd, plus
+    /// branches for the affected stable workspace roots. Process and Git probes
     /// run off-loop; the app loop only validates and mutates.
     CwdScanned {
         panes: Vec<(crate::ids::PaneId, crate::platform::PaneCwdEvidence)>,
         branches: Vec<(String, Option<String>)>,
-        workspace_candidates: Vec<crate::git::GitRootInfo>,
     },
     /// A Mission Control usage scan finished (docs/54, MC-2/MC-4): best-effort
     /// tokens/context/cost keyed by agent + session id, read off-loop from native

@@ -101,14 +101,14 @@ split terminals with different working directories remain unambiguous.
 - **Jump to its git tab:** right-click the workspace and choose **Open Git
   Tab**, or focus it and press `Ctrl+Space g`.
 
-### Following a pane into another repository
+### Changing directory inside a pane
 
-When a terminal or agent changes its working directory into another Git
-repository or linked worktree, luvus confirms the new root across two scans and
-then moves the complete normal tab to that workspace. If the workspace is not
-open yet, luvus creates it without starting another shell. Split tabs move only
-when every pane agrees on the same destination; mixed-workspace splits and
-dashboard tabs stay where they are.
+Running `cd` changes that pane's live working directory without reorganizing
+the workspace. The tab stays where you placed it, the workspace keeps its
+project root, and an empty source workspace is never created by a directory
+change. Open another repository or linked worktree explicitly when you want it
+to become a workspace. You can still move panes and tabs with their existing
+UI, CLI, and UHP controls.
 
 ### Right-click a workspace
 
