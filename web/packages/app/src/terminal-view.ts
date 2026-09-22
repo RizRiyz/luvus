@@ -20,6 +20,7 @@ export class TerminalView {
   #streamAttempt = 0;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   #reconnectRetry = 0;
+  #targetError: BridgeError | undefined;
   #destroyed = false;
   #queuedActions: Array<{
     action: TerminalAction;
@@ -285,11 +286,13 @@ export class TerminalView {
       this.#streamAttempt += 1;
       this.#stream = undefined;
       stream?.close();
-      this.#failQueuedActions(new BridgeError("Terminal belongs to another session", "stale_stream"));
+      this.#targetError = new BridgeError("Terminal belongs to another session", "stale_stream");
+      this.#failQueuedActions(this.#targetError);
       this.#showStatus("Session changed — return to Mission Control to choose a terminal");
       return;
     }
     const previous = this.#target;
+    const generationChanged = snapshot.server_generation !== this.#targetTracker.serverGeneration;
     const target = this.#targetTracker.resolve(snapshot);
     this.#target = target;
     if (!target) {
@@ -299,9 +302,19 @@ export class TerminalView {
       this.#streamAttempt += 1;
       this.#stream = undefined;
       stream?.close();
-      this.#showStatus("Waiting for terminal to restore…");
+      if (generationChanged) {
+        this.#targetError = new BridgeError(
+          "The server restarted; choose the terminal again before sending input",
+          "stale_server",
+        );
+        this.#failQueuedActions(this.#targetError);
+        this.#showStatus("Server restarted — return to Mission Control and choose the terminal again");
+      } else {
+        this.#showStatus("Waiting for terminal to restore…");
+      }
       return;
     }
+    this.#targetError = undefined;
     const changed = !previous
       || previous.serverGeneration !== target.serverGeneration
       || previous.pane.pane_id !== target.pane.pane_id
@@ -310,6 +323,7 @@ export class TerminalView {
     this.#reconnectRetry = 0;
     if (this.#stream) this.#disconnectStream(this.#streamAttempt, "Terminal identity changed");
     else {
+      this.#streamAttempt += 1;
       if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = undefined;
       this.#scheduleReconnect(true);
@@ -421,6 +435,7 @@ export class TerminalView {
   async #action(action: TerminalAction, params: Record<string, unknown>): Promise<unknown> {
     this.#followTail = true;
     this.#scrollToLatest();
+    if (this.#targetError) throw this.#targetError;
     const stream = this.#stream;
     if (!stream) {
       if (this.#destroyed) throw new BridgeError("Terminal view is closed", "closed");

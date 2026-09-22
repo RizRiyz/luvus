@@ -99,10 +99,10 @@ luvus web --control \
   --max-devices 3
 ```
 
-`--public-url` changes generated pairing links. `--origin` permits that exact
-browser origin during the WebSocket upgrade. Both values must be complete
-HTTP(S) origins without paths. Repeat `--origin` when more than one exact origin
-is required:
+`--public-url` changes generated pairing links and must be a complete HTTPS
+origin without a path. `--origin` permits that exact browser origin during the
+WebSocket upgrade and accepts a complete HTTP(S) origin without a path. Repeat
+`--origin` when more than one exact origin is required:
 
 ```sh
 luvus web --control \

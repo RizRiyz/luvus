@@ -71,8 +71,8 @@ function normalizeOrigin(value: string): string {
 
 export function normalizePublicUrl(value: string): string {
   const parsed = new URL(value);
-  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error("LUVUS_WEB_PUBLIC_URL must be an HTTP(S) URL without credentials, query, or fragment");
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("LUVUS_WEB_PUBLIC_URL must be an HTTPS URL without credentials, query, or fragment");
   }
   if (parsed.pathname !== "/") {
     throw new Error("LUVUS_WEB_PUBLIC_URL must not include a path prefix");

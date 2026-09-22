@@ -79,7 +79,7 @@ LUVUS_WEB_MAX_DEVICES=3 \
 npm --prefix web run dev
 ```
 
-`LUVUS_WEB_PUBLIC_URL` currently accepts an origin only; path-prefixed proxy
+`LUVUS_WEB_PUBLIC_URL` accepts an HTTPS origin only; path-prefixed proxy
 mounts are rejected because the browser assets and WebSocket route live at the
 origin root.
 

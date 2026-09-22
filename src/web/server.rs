@@ -540,12 +540,12 @@ fn device_request(
             let public_url = match params.get("url") {
                 Some(Value::Null) => None,
                 Some(Value::String(url)) => {
-                    let Some(url) = normalize_origin(url) else {
+                    let Some(url) = normalize_public_origin(url) else {
                         return response_error(
                             outgoing,
                             id,
                             "invalid_params",
-                            "Public URL must be an HTTP(S) origin without a path",
+                            "Public URL must be an HTTPS origin without a path",
                         );
                     };
                     Some(url)
@@ -555,7 +555,7 @@ fn device_request(
                         outgoing,
                         id,
                         "invalid_params",
-                        "Public URL must be an HTTP(S) origin without a path",
+                        "Public URL must be an HTTPS origin without a path",
                     );
                 }
             };
@@ -939,6 +939,10 @@ pub(super) fn normalize_origin(value: &str) -> Option<String> {
     ))
 }
 
+pub(super) fn normalize_public_origin(value: &str) -> Option<String> {
+    normalize_origin(value).filter(|origin| origin.starts_with("https://"))
+}
+
 fn set_security_headers(headers: &mut HeaderMap) {
     headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
     headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
@@ -967,6 +971,11 @@ mod tests {
         assert!(normalize_origin("https://phone.example/luvus").is_none());
         assert!(normalize_origin("https://user:secret@phone.example").is_none());
         assert!(normalize_origin("file:///tmp/index.html").is_none());
+        assert_eq!(
+            normalize_public_origin("https://Phone.Example:443/"),
+            Some("https://phone.example:443".to_string())
+        );
+        assert!(normalize_public_origin("http://phone.example").is_none());
     }
 
     #[test]
