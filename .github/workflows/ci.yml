@@ -22,13 +22,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 20.19.0
+          node-version: 22.18.0
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci --prefix web

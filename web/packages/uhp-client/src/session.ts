@@ -2,6 +2,7 @@ import { BridgeClient, BridgeError, type StreamHandle } from "./client.js";
 import type { Capabilities, ConnectionState, JsonObject, SessionSnapshot, UhpEvent } from "./types.js";
 
 const STRUCTURAL_PREFIXES = ["workspace.", "tab.", "pane.", "agent.", "task.", "automation.", "orch."];
+const SESSION_SWITCH_TIMEOUT_MS = 120_000;
 
 export class LiveSession extends EventTarget {
   #state: ConnectionState = "disconnected";
@@ -71,7 +72,7 @@ export class LiveSession extends EventTarget {
     this.#setState("synchronizing");
     let switchError: unknown;
     try {
-      asSessionSwitch(await this.bridge.request("web.sessions.switch", { name }, 30_000), name);
+      asSessionSwitch(await this.bridge.request("web.sessions.switch", { name }, SESSION_SWITCH_TIMEOUT_MS), name);
     } catch (error) {
       switchError = error;
     }

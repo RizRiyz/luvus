@@ -832,8 +832,10 @@ fn valid_terminal_control_frame(frame: &str) -> bool {
                                     | "pagedown"
                                     | "ctrl-c"
                                     | "ctrl-d"
+                                    | "ctrl-k"
                                     | "ctrl-u"
                                     | "ctrl-w"
+                                    | "alt-d"
                                     | "space"
                                     | "digit-0"
                                     | "digit-1"
@@ -1216,6 +1218,12 @@ mod tests {
         ));
         assert!(valid_terminal_control_frame(
             r#"{"id":"key-1","action":"send_key","params":{"key":"ctrl-c"}}"#
+        ));
+        assert!(valid_terminal_control_frame(
+            r#"{"id":"key-2","action":"send_key","params":{"key":"ctrl-k"}}"#
+        ));
+        assert!(valid_terminal_control_frame(
+            r#"{"id":"key-3","action":"send_key","params":{"key":"alt-d"}}"#
         ));
         assert!(!valid_terminal_control_frame(
             r#"{"id":"run-1","action":"pane.run","params":{"text":"id"}}"#

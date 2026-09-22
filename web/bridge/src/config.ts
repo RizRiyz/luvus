@@ -74,7 +74,9 @@ function normalizePublicUrl(value: string): string {
   if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new Error("LUVUS_WEB_PUBLIC_URL must be an HTTP(S) URL without credentials, query, or fragment");
   }
-  parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+  if (parsed.pathname !== "/") {
+    throw new Error("LUVUS_WEB_PUBLIC_URL must not include a path prefix");
+  }
   return parsed.toString().replace(/\/$/, "");
 }
 

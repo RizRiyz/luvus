@@ -27,8 +27,6 @@ export class TerminalView {
   #followTail = true;
   #viewportFrame: number | undefined;
   #viewportChanged = () => this.#syncViewport();
-  #manualScroll = false;
-  #manualScrollTimer: ReturnType<typeof setTimeout> | undefined;
   #paneMenu = element("div", {
     className: "terminal-pane-menu",
     attrs: { role: "menu", "aria-label": "Switch terminal pane", hidden: "" },
@@ -175,18 +173,9 @@ export class TerminalView {
       fileInput,
       ...(this.#input ? [this.#input.element] : []),
     );
-    const markManualScroll = () => {
-      this.#manualScroll = true;
-      if (this.#manualScrollTimer) clearTimeout(this.#manualScrollTimer);
-      this.#manualScrollTimer = setTimeout(() => { this.#manualScroll = false; }, 250);
-    };
-    this.#output.addEventListener("wheel", markManualScroll, { passive: true });
-    this.#output.addEventListener("touchmove", markManualScroll, { passive: true });
     this.#output.addEventListener("scroll", () => {
-      if (!this.#manualScroll) return;
       const distance = this.#output.scrollHeight - this.#output.scrollTop - this.#output.clientHeight;
       this.#followTail = distance < 80;
-      markManualScroll();
     }, { passive: true });
     window.visualViewport?.addEventListener("resize", this.#viewportChanged);
     window.visualViewport?.addEventListener("scroll", this.#viewportChanged);
@@ -218,7 +207,6 @@ export class TerminalView {
     this.#stream?.close();
     if (this.#paintFrame !== undefined) cancelAnimationFrame(this.#paintFrame);
     if (this.#viewportFrame !== undefined) cancelAnimationFrame(this.#viewportFrame);
-    if (this.#manualScrollTimer) clearTimeout(this.#manualScrollTimer);
     window.visualViewport?.removeEventListener("resize", this.#viewportChanged);
     window.visualViewport?.removeEventListener("scroll", this.#viewportChanged);
     window.removeEventListener("resize", this.#viewportChanged);
@@ -279,8 +267,8 @@ export class TerminalView {
       const cursorPadding = frame.data.cursor?.padding_cells;
       this.#paint(
         frame.data.text,
-        Number.isSafeInteger(cursorOffset) ? cursorOffset : undefined,
-        Number.isSafeInteger(cursorPadding) ? cursorPadding : 0,
+        Number.isSafeInteger(cursorOffset) && cursorOffset >= 0 ? cursorOffset : undefined,
+        Number.isSafeInteger(cursorPadding) && cursorPadding >= 0 ? cursorPadding : 0,
       );
     }
   }

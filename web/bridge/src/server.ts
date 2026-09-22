@@ -124,6 +124,7 @@ export class BridgeServer {
       state.authenticated = true;
       const expiresInMs = Math.max(1, result.expiresAt * 1000 - Date.now());
       state.expiryTimer = setTimeout(() => {
+        state.authenticated = false;
         socket.close(1008, "browser ticket expired");
         this.#broadcastDevices(socket);
       }, expiresInMs);
@@ -173,7 +174,16 @@ export class BridgeServer {
       return this.#deviceRequest(socket, id, method, params);
     }
     if (method.startsWith("web.sessions.")) {
-      return this.#sessionRequest(socket, id, method, params);
+      if (state.pending >= MAX_PENDING) {
+        return send(socket, { type: "response", id, error: { code: "limit_exceeded", message: "Too many pending browser requests" } });
+      }
+      state.pending += 1;
+      try {
+        await this.#sessionRequest(socket, id, method, params);
+      } finally {
+        state.pending -= 1;
+      }
+      return;
     }
     if (!this.uhp.methodAllowed(method) || isStreaming(method)) {
       return send(socket, { type: "response", id, error: { code: "forbidden", message: "Method is not available through this bridge path" } });

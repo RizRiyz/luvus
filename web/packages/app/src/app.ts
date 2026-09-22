@@ -545,7 +545,8 @@ function asDeviceStatus(value: unknown): DeviceStatus {
 function asDevicePairing(value: unknown): DevicePairing {
   const pairing = value as Partial<DevicePairing> | undefined;
   if (!pairing || pairing.type !== "browser_device_pairing" || typeof pairing.code !== "string"
-    || !Number.isSafeInteger(pairing.expires_at) || !pairing.devices) {
+    || !Number.isSafeInteger(pairing.expires_at) || !pairing.devices
+    || (pairing.url !== undefined && typeof pairing.url !== "string")) {
     throw new BridgeError("Invalid browser pairing response", "invalid_response");
   }
   return { ...pairing, devices: asDeviceStatus(pairing.devices) } as DevicePairing;

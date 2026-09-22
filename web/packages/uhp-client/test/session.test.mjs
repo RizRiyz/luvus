@@ -7,10 +7,11 @@ class FakeBridge extends EventTarget {
   sessionName = "test";
   streamParams = [];
   switches = [];
+  switchTimeouts = [];
 
   async connect() {}
 
-  async request(method, params = {}) {
+  async request(method, params = {}, timeoutMs) {
     if (method === "uhp.capabilities") {
       return {
         type: "uhp_capabilities",
@@ -31,6 +32,7 @@ class FakeBridge extends EventTarget {
     }
     if (method === "web.sessions.switch") {
       this.switches.push(params.name);
+      this.switchTimeouts.push(timeoutMs);
       this.sessionName = params.name;
       this.generation = "c".repeat(32);
       this.sequence = 0;
@@ -90,6 +92,7 @@ test("session switching replaces the upstream generation and takes a fresh snaps
   assert.equal(session.state, "ready");
   assert.equal(session.snapshot.session, "review");
   assert.deepEqual(bridge.switches, ["review"]);
+  assert.deepEqual(bridge.switchTimeouts, [120_000]);
   assert.deepEqual(bridge.streamParams, [{}, {}]);
   session.stop();
 });

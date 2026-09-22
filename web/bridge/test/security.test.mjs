@@ -38,10 +38,11 @@ test("origins require same host or an explicit allowlist", () => {
 test("device limits and public pairing URLs are bounded configuration", () => {
   const config = loadConfig({
     LUVUS_WEB_MAX_DEVICES: "4",
-    LUVUS_WEB_PUBLIC_URL: "https://phone.example/luvus/",
+    LUVUS_WEB_PUBLIC_URL: "https://phone.example/",
   });
   assert.equal(config.browserMaxDevices, 4);
-  assert.equal(config.publicUrl, "https://phone.example/luvus");
+  assert.equal(config.publicUrl, "https://phone.example");
   assert.throws(() => loadConfig({ LUVUS_WEB_MAX_DEVICES: "9" }), /1 through 8/);
   assert.throws(() => loadConfig({ LUVUS_WEB_PUBLIC_URL: "https://user:secret@phone.example" }), /without credentials/);
+  assert.throws(() => loadConfig({ LUVUS_WEB_PUBLIC_URL: "https://phone.example/luvus" }), /must not include a path prefix/);
 });
