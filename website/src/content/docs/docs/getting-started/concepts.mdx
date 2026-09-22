@@ -68,9 +68,9 @@ Session         normally contains one or more workspaces
   or splits, change directory, or browse to another project.
 - **Workspaces** are the sidebar's top list. `Ctrl+Space N` opens the folder
   picker. Running `luvus` inside a folder adds it automatically. A workspace's
-  project `cwd` stays fixed, while its displayed terminal path follows the
-  focused pane's live cwd. With several splits, focusing a different pane shows
-  that pane's path, and every pane keeps its own working directory.
+  displayed path is its fixed project `cwd`. Each pane keeps its own live
+  working directory, shown in the pane title and reported separately as
+  `terminal_cwd` by the CLI and UHP.
 - **Tabs** hold split layouts. Two special tabs exist: the
   [git tab](/docs/guides/git/) and the
   [orchestration board](/docs/guides/orchestration/).
