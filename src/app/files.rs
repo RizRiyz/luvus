@@ -2696,7 +2696,7 @@ mod tests {
         std::fs::write(root.join(".env"), b"X=1").unwrap();
         std::fs::write(root.join("main.rs"), b"fn main(){}").unwrap();
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         app.workspaces[app.active_ws].cwd = root.clone();
         app.sidebars.left.docks.push(DockKind::Files);
@@ -2722,6 +2722,7 @@ mod tests {
 
         // The choice persists, so a fresh App reads it back off.
         assert!(!app.config.layout.files_show_hidden);
+        app.flush_config_for_test(&rx);
         let reopened = App::new(120, 40, std::sync::mpsc::channel().0).unwrap();
         assert!(
             !reopened.file_tree.show_hidden,

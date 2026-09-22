@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
@@ -23,6 +26,11 @@ enum Generation {
     V2,
 }
 
+#[cfg(test)]
+thread_local! {
+    static PROBE_OVERRIDE: Cell<Option<Option<Generation>>> = const { Cell::new(None) };
+}
+
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_VERSION_OUTPUT: u64 = 4096;
 
@@ -34,6 +42,11 @@ fn major_version(output: &str) -> Option<u64> {
 }
 
 fn probe_generation() -> Option<Generation> {
+    #[cfg(test)]
+    if let Some(generation) = PROBE_OVERRIDE.with(|value| value.get()) {
+        return generation;
+    }
+
     let mut command = Command::new("opencode");
     command
         .arg("--version")
@@ -77,6 +90,16 @@ fn probe_generation() -> Option<Generation> {
     }
 
     None
+}
+
+#[cfg(test)]
+pub(super) fn without_binary_probe<T>(run: impl FnOnce() -> T) -> T {
+    PROBE_OVERRIDE.with(|value| {
+        let previous = value.replace(Some(None));
+        let result = run();
+        value.set(previous);
+        result
+    })
 }
 
 fn select_generation(

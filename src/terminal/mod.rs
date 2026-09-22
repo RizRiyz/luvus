@@ -9,4 +9,5 @@ pub mod host_key;
 pub mod keyboard;
 pub mod pty;
 pub mod theme_probe;
+pub mod upload;
 pub mod vt;
