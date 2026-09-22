@@ -120,15 +120,6 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
                 )),
             );
         }
-    } else if app.files_focused {
-        let hint = " f: find";
-        let x = diff_rect.right();
-        f.buffer_mut().set_line(
-            x,
-            area.y,
-            &Line::from(Span::styled(hint, Style::new().fg(t.overlay1))),
-            area.right().saturating_sub(x),
-        );
     }
     // Clamp scroll first (mutates `file_tree`), *then* borrow the memoized rows —
     // `visible_rows` returns a slice borrowing `file_tree`, so it must come after
