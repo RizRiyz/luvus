@@ -794,6 +794,19 @@ impl App {
                         self.pending_clipboard = Some(text);
                     }
                 }
+                // The PTY grid has already advanced by the time this event is
+                // delivered. A path resolved under the pointer before that
+                // output is no longer authoritative, even when the replacement
+                // happens to occupy the same screen cells. Require another
+                // deliberate mouse move to resolve the new contents.
+                if self
+                    .hover_link
+                    .as_ref()
+                    .is_some_and(|hover| hover.pane == id)
+                {
+                    self.hover_link = None;
+                    self.link_scan_at = None;
+                }
                 self.detection_dirty.insert(id);
                 if self.panes.contains_key(&id) {
                     self.runtime_cwd_dirty_panes.insert(id);
@@ -6076,6 +6089,21 @@ mod link_click_tests {
                 .all(|link| !link.uri.starts_with("http://server/")),
             "the host must never receive iTerm2's guessed server URL"
         );
+    }
+
+    #[test]
+    fn pty_output_invalidates_a_hovered_file_target() {
+        let _env = crate::persist::test_env("link-hover-pty-output");
+        let (mut app, _term, at) = fixture_showing("edit Cargo.toml now", 7);
+        let pane = app.layout().focus;
+
+        assert!(app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::CONTROL,)));
+        assert!(app.hover_link.is_some());
+        assert_eq!(app.link_scan_at, Some(at));
+
+        assert!(app.handle_event(AppEvent::PtyData(pane)));
+        assert!(app.hover_link.is_none());
+        assert!(app.link_scan_at.is_none());
     }
 
     #[test]

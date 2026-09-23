@@ -185,7 +185,7 @@ where
         let mut reader: Box<dyn ClientRead> = Box::new(reader);
         let mut writer: Box<dyn Write + Send> = Box::new(writer);
         loop {
-            let exit = run_inner(reader, writer, &mut terminal, &mut input, &selected)?;
+            let exit = run_inner(reader, writer, &mut terminal, &mut input, &selected, local)?;
             input.route.replace(None);
             match exit {
                 ClientExit::SwitchSession(name) if local => {
@@ -257,6 +257,7 @@ fn run_inner<W>(
     terminal: &mut DefaultTerminal,
     input: &mut ClientInput,
     selected: &str,
+    allow_local_file_links: bool,
 ) -> Result<ClientExit>
 where
     W: Write + Send + 'static,
@@ -411,6 +412,7 @@ where
                         frame.cursor_visible,
                         &mut last_cursor,
                         truecolor,
+                        allow_local_file_links,
                     )?;
                     Ok(())
                 });
@@ -810,16 +812,21 @@ pub(super) fn diff_cells(diff: &FrameDiff, truecolor: bool) -> Vec<(u16, u16, Ce
     cells
 }
 
-fn valid_host_hyperlink(uri: &str) -> bool {
+fn valid_host_hyperlink(uri: &str, allow_local_files: bool) -> bool {
     uri.len() <= 4_096
         && !uri.is_empty()
         && !uri.chars().any(char::is_control)
-        && (crate::links::file_uri_path(uri).is_some() || crate::platform::is_openable_url(uri))
+        && ((allow_local_files && crate::links::file_uri_path(uri).is_some())
+            || crate::platform::is_openable_url(uri))
 }
 
-fn write_osc8<W: Write>(writer: &mut W, uri: Option<&str>) -> std::io::Result<()> {
+fn write_osc8<W: Write>(
+    writer: &mut W,
+    uri: Option<&str>,
+    allow_local_files: bool,
+) -> std::io::Result<()> {
     writer.write_all(b"\x1b]8;;")?;
-    if let Some(uri) = uri.filter(|uri| valid_host_hyperlink(uri)) {
+    if let Some(uri) = uri.filter(|uri| valid_host_hyperlink(uri, allow_local_files)) {
         writer.write_all(uri.as_bytes())?;
     }
     writer.write_all(b"\x1b\\")
@@ -835,6 +842,7 @@ pub(super) fn paint_hyperlink_runs<W>(
     cursor_visible: bool,
     last_cursor: &mut Option<(u16, u16)>,
     truecolor: bool,
+    allow_local_file_links: bool,
 ) -> std::io::Result<()>
 where
     W: Write,
@@ -846,7 +854,7 @@ where
     let backend = terminal.backend_mut();
     let mut wrote = false;
     for run in &frame.hyperlinks {
-        write_osc8(backend, Some(&run.uri))?;
+        write_osc8(backend, Some(&run.uri), allow_local_file_links)?;
         let cells = (run.start..run.end)
             .filter_map(|index| {
                 let cell = frame.cells.get(index as usize)?;
@@ -865,7 +873,7 @@ where
             })
             .collect::<Vec<_>>();
         let draw_result = backend.draw(cells.iter().map(|(x, y, cell)| (*x, *y, cell)));
-        let close_result = write_osc8(backend, None);
+        let close_result = write_osc8(backend, None, allow_local_file_links);
         draw_result?;
         close_result?;
         wrote = true;
@@ -1698,6 +1706,7 @@ mod paint_tests {
         write_osc8(
             &mut output,
             Some("file:///repo/server/scripts/reconcile.mjs"),
+            true,
         )
         .unwrap();
         assert_eq!(
@@ -1706,8 +1715,24 @@ mod paint_tests {
         );
 
         output.clear();
-        write_osc8(&mut output, Some("command://run\x07bad")).unwrap();
+        write_osc8(&mut output, Some("command://run\x07bad"), true).unwrap();
         assert_eq!(output, b"\x1b]8;;\x1b\\");
+    }
+
+    #[test]
+    fn remote_host_suppresses_server_file_targets_but_keeps_web_links() {
+        let mut output = Vec::new();
+        write_osc8(
+            &mut output,
+            Some("file:///repo/server/scripts/reconcile.mjs"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(output, b"\x1b]8;;\x1b\\");
+
+        output.clear();
+        write_osc8(&mut output, Some("https://luvus.dev/docs"), false).unwrap();
+        assert_eq!(output, b"\x1b]8;;https://luvus.dev/docs\x1b\\");
     }
 
     #[test]

@@ -1785,6 +1785,7 @@ fn handle_surface_message(
                     frame.cursor_visible,
                     last_cursor,
                     truecolor,
+                    endpoint == Endpoint::Local,
                 )?;
                 super::client::sync_end();
                 *cursor_visible = frame.cursor_visible;
