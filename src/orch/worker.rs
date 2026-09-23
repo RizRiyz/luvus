@@ -231,19 +231,16 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
         .or_else(|| executable.strip_suffix(".cmd"))
         .or_else(|| executable.strip_suffix(".bat"))
         .unwrap_or(&executable);
-    // Process detection cannot unwrap `env` options. Fail closed rather than
-    // letting `env -i arc-studio` hide a remote-only agent behind the wrapper.
-    if executable == "env"
-        && argv
-            .iter()
-            .skip(1)
-            .find(|arg| arg.starts_with('-') || !arg.contains('='))
-            .is_some_and(|arg| arg.starts_with('-'))
-    {
-        return Err("env options are not supported for local ORCH task agents".to_string());
-    }
+    // Process detection only unwraps plain `env KEY=value command`. Resolve
+    // supported options here so they cannot hide a remote-only agent, without
+    // rejecting unrelated custom workers that use those options.
+    let inspected_argv = if executable == "env" {
+        env_command_argv(&argv)?
+    } else {
+        &argv
+    };
     let descriptor = crate::agent::registry::find(executable).or_else(|| {
-        crate::detect::builtin_agent_in_argv(&argv)
+        crate::detect::builtin_agent_in_argv(inspected_argv)
             .and_then(|agent| crate::agent::registry::find(&agent))
     });
     if let Some(descriptor) = descriptor {
@@ -254,6 +251,50 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(argv)
+}
+
+fn env_command_argv(argv: &[String]) -> Result<&[String], String> {
+    let mut index = 1;
+    let mut options = true;
+    while let Some(arg) = argv.get(index) {
+        if options {
+            match arg.as_str() {
+                "--" => {
+                    options = false;
+                    index += 1;
+                    continue;
+                }
+                "-i" | "--ignore-environment" => {
+                    index += 1;
+                    continue;
+                }
+                "-u" | "--unset" => {
+                    if argv.get(index + 1).is_none_or(|name| name.is_empty()) {
+                        return Err("env unset option requires a variable name".to_string());
+                    }
+                    index += 2;
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some(name) = arg.strip_prefix("--unset=") {
+                if name.is_empty() {
+                    return Err("env unset option requires a variable name".to_string());
+                }
+                index += 1;
+                continue;
+            }
+            if arg.starts_with('-') {
+                return Err("unsupported env option for local ORCH task agent".to_string());
+            }
+        }
+        if arg.contains('=') {
+            index += 1;
+            continue;
+        }
+        return Ok(&argv[index..]);
+    }
+    Err("env command cannot be empty".to_string())
 }
 
 #[cfg(test)]
@@ -313,6 +354,9 @@ mod tests {
             "env FOO=bar -- arc-studio",
             "env --unset=FOO arc-studio",
             "env FOO=bar -i arc-studio",
+            "env -i node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "env -u FOO node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "env -S arc-studio",
         ] {
             assert!(validate_agent_command(command).is_err(), "{command}");
             assert!(launch(command, "briefing", "t1").is_err(), "{command}");
@@ -321,7 +365,17 @@ mod tests {
         assert!(validate_agent_command("codex --model o3").is_ok());
         assert!(validate_agent_command("custom-agent --flag").is_ok());
         assert!(validate_agent_command("env FOO=bar custom-agent --flag").is_ok());
-        assert!(validate_agent_command("env -i custom-agent").is_err());
+        for command in [
+            "env -i custom-agent",
+            "env -u FOO custom-agent",
+            "env --ignore-environment custom-agent",
+            "env --unset=FOO custom-agent",
+            "env FOO=bar -- custom-agent",
+            "env FOO=bar -i custom-agent",
+        ] {
+            assert!(validate_agent_command(command).is_ok(), "{command}");
+        }
+        assert!(validate_agent_command("env -u custom-agent").is_err());
         assert!(
             validate_agent_command("node /opt/node_modules/@other/arc-studio-cli/bin/cli.mjs")
                 .is_ok()
@@ -359,6 +413,13 @@ mod tests {
             "--flag\ntwo words"
         );
         assert_eq!(std::fs::read_to_string(&output).unwrap(), briefing);
+        for wrapper in ["env -i", "env -u FOO"] {
+            let wrapped_command = format!("{wrapper} {agent_command}");
+            assert!(launch(&wrapped_command, &briefing, "t42")
+                .unwrap()
+                .success());
+            assert_eq!(std::fs::read_to_string(&output).unwrap(), briefing);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }
