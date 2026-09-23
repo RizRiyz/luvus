@@ -264,7 +264,7 @@ fn env_command_argv(argv: &[String]) -> Result<&[String], String> {
                     index += 1;
                     continue;
                 }
-                "-i" | "--ignore-environment" => {
+                "-" | "-i" | "--ignore-environment" => {
                     index += 1;
                     continue;
                 }
@@ -350,11 +350,13 @@ mod tests {
             r#""C:\Program Files\nodejs\node.exe" "C:\Users\Ada\node_modules\@circle-fin\arc-studio-cli\bin\arc-studio.mjs""#,
             "env FOO=bar arc-studio",
             "env -i arc-studio",
+            "env - arc-studio",
             "env -u FOO arc-studio",
             "env FOO=bar -- arc-studio",
             "env --unset=FOO arc-studio",
             "env FOO=bar -i arc-studio",
             "env -i node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "env - node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
             "env -u FOO node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
             "env -S arc-studio",
         ] {
@@ -367,6 +369,7 @@ mod tests {
         assert!(validate_agent_command("env FOO=bar custom-agent --flag").is_ok());
         for command in [
             "env -i custom-agent",
+            "env - custom-agent",
             "env -u FOO custom-agent",
             "env --ignore-environment custom-agent",
             "env --unset=FOO custom-agent",
@@ -413,7 +416,7 @@ mod tests {
             "--flag\ntwo words"
         );
         assert_eq!(std::fs::read_to_string(&output).unwrap(), briefing);
-        for wrapper in ["env -i", "env -u FOO"] {
+        for wrapper in ["env -", "env -i", "env -u FOO"] {
             let wrapped_command = format!("{wrapper} {agent_command}");
             assert!(launch(&wrapped_command, &briefing, "t42")
                 .unwrap()
