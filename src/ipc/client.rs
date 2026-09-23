@@ -828,7 +828,7 @@ fn write_osc8<W: Write>(writer: &mut W, uri: Option<&str>) -> std::io::Result<()
 /// Overlay sparse OSC 8 runs after the ordinary Ratatui blit. The server sends
 /// a full frame whenever this projection changes, so clearing that frame also
 /// clears links which disappeared without changing their visible label.
-fn paint_hyperlink_runs<W>(
+pub(super) fn paint_hyperlink_runs<W>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     frame: &FrameData,
     cursor: Option<(u16, u16)>,

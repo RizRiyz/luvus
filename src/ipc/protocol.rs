@@ -617,6 +617,26 @@ pub fn frame_hyperlinks(
     runs
 }
 
+pub fn diff_intersects_hyperlinks(runs: &[DiffRun], hyperlinks: &[FrameHyperlink]) -> bool {
+    let mut link_index = 0;
+    for run in runs {
+        let run_end = run.start.saturating_add(run.symbols.len() as u32);
+        while hyperlinks
+            .get(link_index)
+            .is_some_and(|link| link.end <= run.start)
+        {
+            link_index += 1;
+        }
+        if hyperlinks
+            .get(link_index)
+            .is_some_and(|link| link.start < run_end)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Diff the live ratatui `buf` against `prev` (the last sent frame) **in place**:
 /// returns the changed-cell runs *and* updates `prev`'s cells to match. A frame then
 /// costs one O(screen) comparison and allocates only for cells that actually changed
@@ -1272,6 +1292,32 @@ mod tests {
         assert_eq!(projected[0].end, label.len() as u32);
 
         assert!(frame_hyperlinks(&frame, &[]).is_empty());
+    }
+
+    #[test]
+    fn hyperlink_intersection_detects_only_changed_link_cells() {
+        let hyperlink = FrameHyperlink {
+            start: 4,
+            end: 8,
+            uri: "file:///repo/server/task.mjs".into(),
+        };
+        let run = |start, symbols: &[&str]| DiffRun {
+            start,
+            fg: 7,
+            bg: 0,
+            mods: 0,
+            symbols: symbols.iter().map(|symbol| (*symbol).into()).collect(),
+        };
+
+        assert!(!diff_intersects_hyperlinks(
+            &[run(0, &["a", "b", "c", "d"])],
+            std::slice::from_ref(&hyperlink)
+        ));
+        assert!(diff_intersects_hyperlinks(
+            &[run(7, &["x"])],
+            std::slice::from_ref(&hyperlink)
+        ));
+        assert!(!diff_intersects_hyperlinks(&[run(8, &["x"])], &[hyperlink]));
     }
 
     #[test]

@@ -1743,7 +1743,13 @@ fn render_client(
             shell_workspace_projection(app),
         )
     };
-    if !ui::retained_pty_eligible(app) {
+    // Hover changes terminal styling, so it disables retained row patching,
+    // but it does not cover the freshly rendered link text. Test eligibility
+    // without that one style-only state; every real overlay remains fail-closed.
+    let hover_link = app.hover_link.take();
+    let hyperlinks_uncovered = ui::retained_pty_eligible(app);
+    app.hover_link = hover_link;
+    if !hyperlinks_uncovered {
         client.retained_hyperlinks.clear();
     }
     if scoped_sidebars {
@@ -1827,10 +1833,11 @@ fn render_client(
         let runs = protocol::diff_buffer(previous, &client.render_buf);
         let current_hyperlinks = protocol::frame_hyperlinks(previous, &client.retained_hyperlinks);
         let hyperlinks_changed = previous.hyperlinks != current_hyperlinks;
+        let linked_cells_changed = protocol::diff_intersects_hyperlinks(&runs, &current_hyperlinks);
         previous.hyperlinks = current_hyperlinks;
         previous.cursor = cursor;
         previous.cursor_visible = cursor_visible;
-        if hyperlinks_changed {
+        if hyperlinks_changed || linked_cells_changed {
             Some(ServerMessage::Frame(previous.clone()))
         } else if runs.is_empty() && !cursor_moved {
             None
