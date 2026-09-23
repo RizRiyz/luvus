@@ -129,6 +129,7 @@ pub fn render_into(f: &mut RenderTarget, app: &mut App) {
 /// hit-test state. Each client owns this baseline, never the shared App.
 pub(crate) struct ClientProjection {
     pub pane_content: Vec<(PaneId, Rect)>,
+    pub hyperlinks: Vec<crate::app::RenderedHyperlink>,
     pub shell_dock: Option<Rect>,
     pub left_seam: Option<Rect>,
     pub right_seam: Option<Rect>,
@@ -271,6 +272,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     // client's values aside instead of cloning them on every secondary frame.
     let pane_rects = std::mem::take(&mut app.pane_rects);
     let pane_content_rects = std::mem::take(&mut app.pane_content_rects);
+    let rendered_hyperlinks = std::mem::take(&mut app.rendered_hyperlinks);
     let pane_title_rects = std::mem::take(&mut app.pane_title_rects);
     let tab_rects = std::mem::take(&mut app.tab_rects);
     let tab_close_rects = std::mem::take(&mut app.tab_close_rects);
@@ -426,6 +428,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     app.menu_scroll = menu_scroll;
     app.pane_rects = pane_rects;
     let projected_content = std::mem::replace(&mut app.pane_content_rects, pane_content_rects);
+    let projected_hyperlinks = std::mem::replace(&mut app.rendered_hyperlinks, rendered_hyperlinks);
     app.pane_title_rects = pane_title_rects;
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;
@@ -535,6 +538,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     }
     ClientProjection {
         pane_content: projected_content,
+        hyperlinks: projected_hyperlinks,
         shell_dock: projected_shell_dock,
         left_seam: projected_left_seam,
         right_seam: projected_right_seam,
@@ -599,8 +603,9 @@ pub(crate) fn patch_terminal_damage(
     app: &App,
     content_rects: &[(PaneId, Rect)],
     snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
+    hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
-    panes::patch_terminal_damage(target, app, content_rects, snapshots)
+    panes::patch_terminal_damage(target, app, content_rects, snapshots, hyperlinks)
 }
 
 fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
@@ -617,6 +622,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.mission_automation_rects.clear();
     app.automation_rects.clear();
     app.orch_hits.clear();
+    app.rendered_hyperlinks.clear();
     // Cleared with the other per-frame hit geometry, above every early return:
     // a frame that bails out (window too small, no workspace yet) must not
     // leave a dock divider behind as a live drag target.
@@ -1551,16 +1557,25 @@ mod retained_render_tests {
             let initial = engine.damage_snapshot();
             assert!(engine.acknowledge_damage(initial.generation));
             engine.recycle_damage_snapshot(initial);
-            engine.advance(b"\rA\x1b[K");
+            engine.advance(
+                b"\r\x1b[2K\x1b]8;id=agent;file:///repo/server/task.mjs\x1b\\server/task.mjs\x1b]8;;\x1b\\",
+            );
         }
         let snapshot = engine.lock().expect("engine lock").damage_snapshot();
         assert_eq!(snapshot.kind, crate::terminal::vt::DamageKind::Partial);
         let snapshots = HashMap::from([(focus, snapshot)]);
+        let mut hyperlinks = app.rendered_hyperlinks.clone();
 
         let partial_cursor = {
             let mut target = RenderTarget::new(&mut retained, area);
-            patch_terminal_damage(&mut target, &app, &content_rects, &snapshots)
-                .expect("partial projection eligible");
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                &snapshots,
+                &mut hyperlinks,
+            )
+            .expect("partial projection eligible");
             (target.cursor(), target.cursor_visible())
         };
 
@@ -1571,6 +1586,7 @@ mod retained_render_tests {
             (target.cursor(), target.cursor_visible())
         };
         assert_eq!(retained, forced);
+        assert_eq!(hyperlinks, app.rendered_hyperlinks);
         assert_eq!(partial_cursor, full_cursor);
         let snapshot = snapshots.into_values().next().expect("damage snapshot");
         engine
@@ -1614,6 +1630,7 @@ mod retained_render_tests {
             .recycle_damage_snapshot(initial);
 
         const ITERATIONS: usize = 2_000;
+        let mut hyperlinks = app.rendered_hyperlinks.clone();
         let partial_started = std::time::Instant::now();
         for index in 0..ITERATIONS {
             engine
@@ -1624,7 +1641,14 @@ mod retained_render_tests {
             let generation = snapshot.generation;
             let snapshots = HashMap::from([(focus, snapshot)]);
             let mut target = RenderTarget::new(&mut retained, area);
-            patch_terminal_damage(&mut target, &app, &content_rects, &snapshots).unwrap();
+            patch_terminal_damage(
+                &mut target,
+                &app,
+                &content_rects,
+                &snapshots,
+                &mut hyperlinks,
+            )
+            .unwrap();
             assert!(engine
                 .lock()
                 .expect("engine lock")

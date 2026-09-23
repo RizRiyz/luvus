@@ -1956,6 +1956,17 @@ pub struct HoverLink {
     pub target: LinkTarget,
 }
 
+/// One validated OSC 8 span projected into a client's screen coordinates.
+/// Kept sparse so ordinary terminal cells and frames pay no per-cell metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenderedHyperlink {
+    pub pane: PaneId,
+    pub y: u16,
+    pub start: u16,
+    pub end: u16,
+    pub uri: String,
+}
+
 /// A `Ctrl`+press that landed on a link, held until its release.
 ///
 /// The same gesture dragged is the RESIZE-5 divider grab, so the two are told
@@ -2874,6 +2885,9 @@ pub struct App {
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
     /// position to a grid cell for text selection.
     pub pane_content_rects: Vec<(PaneId, Rect)>,
+    /// Sparse OSC 8 spans from the last interactive render. Secondary clients
+    /// receive their own projection without replacing this geometry.
+    pub(crate) rendered_hyperlinks: Vec<RenderedHyperlink>,
     /// When `Some`, keyboard **scroll mode** is active on this pane: plain keys
     /// scroll its scrollback (see `handle_scroll_mode_key`) instead of reaching
     /// the agent. Entered by wheel-up or `Shift+↑`; left by `q`/typing. A
@@ -3362,6 +3376,7 @@ impl App {
             cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
+            rendered_hyperlinks: Vec::new(),
             scroll_pane: None,
             resize_drag: None,
             hover_divider: None,
@@ -4052,6 +4067,7 @@ impl App {
             cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
+            rendered_hyperlinks: Vec::new(),
             scroll_pane: None,
             resize_drag: None,
             hover_divider: None,

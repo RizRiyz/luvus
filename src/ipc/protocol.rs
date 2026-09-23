@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 /// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
 /// variant one. Its mismatch reply must use that released position.
 const V0141_PROTOCOL_VERSION: u32 = 17;
@@ -388,6 +388,9 @@ pub struct FrameData {
     pub height: u16,
     /// Row-major, `width * height` cells.
     pub cells: Vec<CellData>,
+    /// Sparse validated OSC 8 runs. Empty for the overwhelming majority of
+    /// frames, so ordinary terminal traffic carries no per-cell link metadata.
+    pub hyperlinks: Vec<FrameHyperlink>,
     pub cursor: Option<(u16, u16)>,
     /// When `cursor` is Some, whether the host caret should be shown. Hidden
     /// in-view PTY still parks IME (Pi `?25l` after CUP to its input marker).
@@ -420,6 +423,13 @@ pub struct DiffRun {
     pub bg: u32,
     pub mods: u16,
     pub symbols: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct FrameHyperlink {
+    pub start: u32,
+    pub end: u32,
+    pub uri: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -573,9 +583,38 @@ pub fn frame_from_buffer(
         width: area.width,
         height: area.height,
         cells,
+        hyperlinks: Vec::new(),
         cursor,
         cursor_visible: cursor.is_some() && cursor_visible,
     }
+}
+
+/// Project sparse screen-coordinate link spans onto an already materialized
+/// frame. The text and styling remain in `frame.cells`; links carry only their
+/// bounds and target, keeping the wire bounded by span count.
+pub fn frame_hyperlinks(
+    frame: &FrameData,
+    links: &[crate::app::RenderedHyperlink],
+) -> Vec<FrameHyperlink> {
+    let width = u32::from(frame.width);
+    let height = u32::from(frame.height);
+    let mut runs = Vec::<FrameHyperlink>::new();
+    for link in links {
+        let y = u32::from(link.y);
+        if y >= height {
+            continue;
+        }
+        let start_x = u32::from(link.start).min(width);
+        let end_x = u32::from(link.end).min(width);
+        if start_x < end_x {
+            runs.push(FrameHyperlink {
+                start: y * width + start_x,
+                end: y * width + end_x,
+                uri: link.uri.clone(),
+            });
+        }
+    }
+    runs
 }
 
 /// Diff the live ratatui `buf` against `prev` (the last sent frame) **in place**:
@@ -870,6 +909,7 @@ mod tests {
                     mods: 0,
                 },
             ],
+            hyperlinks: Vec::new(),
             cursor: Some((1, 0)),
             cursor_visible: true,
         });
@@ -1169,6 +1209,7 @@ mod tests {
             width: 3,
             height: 1,
             cells: vec![cell("a"), cell("b"), cell("c")],
+            hyperlinks: Vec::new(),
             cursor: Some((0, 0)),
             cursor_visible: true,
         };
@@ -1197,6 +1238,43 @@ mod tests {
     }
 
     #[test]
+    fn hyperlink_projection_preserves_mjs_target_and_can_be_removed() {
+        let label = "server/scripts/reconcile.mjs";
+        let cells = label
+            .chars()
+            .map(|character| CellData {
+                symbol: character.to_string(),
+                fg: 7,
+                bg: 0,
+                mods: 0,
+            })
+            .collect::<Vec<_>>();
+        let frame = FrameData {
+            width: cells.len() as u16,
+            height: 1,
+            cells,
+            hyperlinks: Vec::new(),
+            cursor: None,
+            cursor_visible: false,
+        };
+        let links = [crate::app::RenderedHyperlink {
+            pane: crate::ids::PaneId(7),
+            y: 0,
+            start: 0,
+            end: frame.width,
+            uri: "file:///repo/server/scripts/reconcile.mjs".into(),
+        }];
+
+        let projected = frame_hyperlinks(&frame, &links);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].uri, links[0].uri);
+        assert_eq!(projected[0].start, 0);
+        assert_eq!(projected[0].end, label.len() as u32);
+
+        assert!(frame_hyperlinks(&frame, &[]).is_empty());
+    }
+
+    #[test]
     fn diff_coalesces_adjacent_same_style_into_one_run() {
         let c = |s: &str, fg: u32| CellData {
             symbol: s.into(),
@@ -1208,6 +1286,7 @@ mod tests {
             width: 5,
             height: 1,
             cells: vec![c(" ", 0), c(" ", 0), c(" ", 0), c(" ", 0), c(" ", 0)],
+            hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
         };
@@ -1241,6 +1320,7 @@ mod tests {
             width: 2,
             height: 2,
             cells: vec![cell("a", 1), cell("b", 2), cell("c", 3), cell("d", 4)],
+            hyperlinks: Vec::new(),
             cursor: Some((0, 0)),
             cursor_visible: true,
         };
@@ -1314,6 +1394,7 @@ mod size_probe {
             width: w,
             height: h,
             cells,
+            hyperlinks: Vec::new(),
             cursor: Some((0, 0)),
             cursor_visible: true,
         }

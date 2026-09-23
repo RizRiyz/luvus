@@ -236,6 +236,7 @@ struct ClientState {
     behind: bool,
     force_full: bool,
     retained_pane_content: Vec<(crate::ids::PaneId, Rect)>,
+    retained_hyperlinks: Vec<crate::app::RenderedHyperlink>,
     retained_ready: bool,
     last_activity: u64,
     interest: SurfaceInterest,
@@ -280,6 +281,7 @@ impl ClientState {
             behind: false,
             force_full: true,
             retained_pane_content: Vec::new(),
+            retained_hyperlinks: Vec::new(),
             retained_ready: false,
             last_activity,
             interest: SurfaceInterest::Active,
@@ -1553,6 +1555,7 @@ fn render_client(
         client.last_frame = None;
         client.force_full = true;
         client.retained_ready = false;
+        client.retained_hyperlinks.clear();
     }
 
     let may_patch = partial_pass
@@ -1562,9 +1565,15 @@ fn render_client(
         && client.last_frame.is_some();
     let patched = if may_patch {
         let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
-        ui::patch_terminal_damage(&mut target, app, &client.retained_pane_content, damage)
-            .map(|()| (target.cursor(), target.cursor_visible()))
-            .ok()
+        ui::patch_terminal_damage(
+            &mut target,
+            app,
+            &client.retained_pane_content,
+            damage,
+            &mut client.retained_hyperlinks,
+        )
+        .map(|()| (target.cursor(), target.cursor_visible()))
+        .ok()
     } else {
         None
     };
@@ -1637,6 +1646,9 @@ fn render_client(
             client
                 .retained_pane_content
                 .clone_from(&app.pane_content_rects);
+            client
+                .retained_hyperlinks
+                .clone_from(&app.rendered_hyperlinks);
             client.retained_ready = true;
             (
                 ui::shell_overlay_rect(app, area),
@@ -1652,6 +1664,7 @@ fn render_client(
         } else {
             let projection = ui::render_projection(&mut target, app);
             client.retained_pane_content = projection.pane_content;
+            client.retained_hyperlinks = projection.hyperlinks;
             client.retained_ready = true;
             app.client_shell_dock_rect = projection.shell_dock;
             (
@@ -1730,6 +1743,9 @@ fn render_client(
             shell_workspace_projection(app),
         )
     };
+    if !ui::retained_pty_eligible(app) {
+        client.retained_hyperlinks.clear();
+    }
     if scoped_sidebars {
         std::mem::swap(
             &mut app.sidebars,
@@ -1799,11 +1815,9 @@ fn render_client(
                 || previous.height != client.render_buf.area.height
         });
     let message = if full {
-        client.last_frame = Some(protocol::frame_from_buffer(
-            &client.render_buf,
-            cursor,
-            cursor_visible,
-        ));
+        let mut frame = protocol::frame_from_buffer(&client.render_buf, cursor, cursor_visible);
+        frame.hyperlinks = protocol::frame_hyperlinks(&frame, &client.retained_hyperlinks);
+        client.last_frame = Some(frame);
         Some(ServerMessage::Frame(
             client.last_frame.as_ref().expect("frame stored").clone(),
         ))
@@ -1811,9 +1825,14 @@ fn render_client(
         let previous = client.last_frame.as_mut().expect("frame baseline exists");
         let cursor_moved = previous.cursor != cursor || previous.cursor_visible != cursor_visible;
         let runs = protocol::diff_buffer(previous, &client.render_buf);
+        let current_hyperlinks = protocol::frame_hyperlinks(previous, &client.retained_hyperlinks);
+        let hyperlinks_changed = previous.hyperlinks != current_hyperlinks;
+        previous.hyperlinks = current_hyperlinks;
         previous.cursor = cursor;
         previous.cursor_visible = cursor_visible;
-        if runs.is_empty() && !cursor_moved {
+        if hyperlinks_changed {
+            Some(ServerMessage::Frame(previous.clone()))
+        } else if runs.is_empty() && !cursor_moved {
             None
         } else {
             Some(ServerMessage::FrameDiff(protocol::FrameDiff {

@@ -173,6 +173,40 @@ struct PaneRenderContext<'a> {
     diff_source_rects: &'a mut Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
     diff_note_rects: &'a mut Vec<(PaneId, String, Rect)>,
     preview_link_rects: &'a mut Vec<(PaneId, String, Rect)>,
+    rendered_hyperlinks: &'a mut Vec<crate::app::RenderedHyperlink>,
+}
+
+const MAX_RENDERED_HYPERLINKS: usize = 256;
+
+fn push_rendered_hyperlink(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    x: u16,
+    y: u16,
+    width: u16,
+    uri: &str,
+) {
+    if width == 0
+        || (crate::links::file_uri_path(uri).is_none() && !crate::platform::is_openable_url(uri))
+    {
+        return;
+    }
+    let end = x.saturating_add(width);
+    if let Some(previous) = links.last_mut().filter(|previous| {
+        previous.pane == pane && previous.y == y && previous.end == x && previous.uri == uri
+    }) {
+        previous.end = end;
+        return;
+    }
+    if links.len() < MAX_RENDERED_HYPERLINKS {
+        links.push(crate::app::RenderedHyperlink {
+            pane,
+            y,
+            start: x,
+            end,
+            uri: uri.to_string(),
+        });
+    }
 }
 
 pub(super) fn draw_panes(
@@ -187,12 +221,14 @@ pub(super) fn draw_panes(
     let mut diff_source_rects = Vec::new();
     let mut diff_note_rects = Vec::new();
     let mut preview_link_rects = Vec::new();
+    let mut rendered_hyperlinks = Vec::new();
     {
         let mut context = PaneRenderContext {
             app,
             diff_source_rects: &mut diff_source_rects,
             diff_note_rects: &mut diff_note_rects,
             preview_link_rects: &mut preview_link_rects,
+            rendered_hyperlinks: &mut rendered_hyperlinks,
         };
         for (id, rect) in rects {
             if let Some(c) = draw_one_pane(f, *rect, *id, *id == focus, bordered, &mut context, t) {
@@ -203,6 +239,8 @@ pub(super) fn draw_panes(
     app.diff_source_rects = diff_source_rects;
     app.diff_note_rects = diff_note_rects;
     app.preview_link_rects = preview_link_rects;
+    rendered_hyperlinks.sort_by_key(|link| (link.y, link.start, link.pane.0));
+    app.rendered_hyperlinks = rendered_hyperlinks;
     cursor
 }
 
@@ -215,6 +253,7 @@ pub(super) fn patch_terminal_damage(
     app: &App,
     content_rects: &[(PaneId, Rect)],
     snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
+    hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
     let leaves = app.layout().leaves();
     if leaves.len() != content_rects.len()
@@ -255,6 +294,7 @@ pub(super) fn patch_terminal_damage(
                 continue;
             }
             let y = content.y + row.row;
+            hyperlinks.retain(|link| !(link.pane == id && link.y == y));
             for x in content.x..content.x.saturating_add(content.width) {
                 let cell = &mut buffer[(x, y)];
                 cell.reset();
@@ -273,6 +313,20 @@ pub(super) fn patch_terminal_damage(
                 };
                 paint_terminal_cell(buffer, content, row.row, cell.column, symbol, style);
             }
+            for hyperlink in &row.hyperlinks {
+                let start = hyperlink.start.min(content.width);
+                let end = hyperlink.end.min(content.width);
+                if start < end {
+                    push_rendered_hyperlink(
+                        hyperlinks,
+                        id,
+                        content.x + start,
+                        y,
+                        end - start,
+                        &hyperlink.uri,
+                    );
+                }
+            }
         }
 
         if id == focus {
@@ -283,6 +337,7 @@ pub(super) fn patch_terminal_damage(
     if let Some((x, y, visible)) = cursor {
         f.set_cursor_anchor(x, y, visible);
     }
+    hyperlinks.sort_by_key(|link| (link.y, link.start, link.pane.0));
     Ok(())
 }
 
@@ -417,7 +472,7 @@ fn draw_one_pane(
             let mut pi_caret: Option<(u16, u16)> = None;
             {
                 let buf = f.buffer_mut();
-                engine.for_each_cell(&mut |row, col, sym, cell| {
+                engine.for_each_linked_cell(&mut |row, col, sym, cell, hyperlink| {
                     if row >= content.height || col >= content.width {
                         return;
                     }
@@ -469,6 +524,16 @@ fn draw_one_pane(
                             .add_modifier(ratatui::style::Modifier::UNDERLINED);
                     }
                     paint_terminal_cell(buf, content, row, col, sym, style);
+                    if let Some(uri) = hyperlink {
+                        push_rendered_hyperlink(
+                            context.rendered_hyperlinks,
+                            id,
+                            content.x + col,
+                            content.y + row,
+                            crate::ui::display_width(sym).max(1) as u16,
+                            uri,
+                        );
+                    }
                 });
             }
             scrolled = engine.scroll_offset();
