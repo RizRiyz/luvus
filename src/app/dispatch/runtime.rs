@@ -594,7 +594,7 @@ impl App {
                 running_for_detection,
                 &self.manifests,
             );
-            let probe_arc_studio = known_agent.is_empty() && running_for_detection.is_empty();
+            let probe_arc_studio = running_for_detection.is_empty();
             let inspect_codex_composer = known_agent.eq_ignore_ascii_case("codex")
                 || self
                     .manifests

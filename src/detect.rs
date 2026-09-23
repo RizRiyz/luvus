@@ -1903,6 +1903,22 @@ Would you like to proceed?
         assert_eq!(detection.state, State::Blocked);
         assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
 
+        // A failed process scan can leave a stale prior identity. The live
+        // banner must still replace it before prompt routing considers Ready.
+        let stale_identity = classify(
+            Some("zsh"),
+            &screen,
+            false,
+            false,
+            "zsh",
+            "gemini",
+            &[],
+            &manifests,
+        );
+        assert_eq!(stale_identity.agent, "arc-studio");
+        assert_eq!(stale_identity.state, State::Blocked);
+        assert_eq!(stale_identity.prompt_evidence, PromptEvidence::Blocked);
+
         // The extra scan must not promote a shell printing only the slogan.
         engine.advance(b"\x1b[2J\x1b[Hbuild onchain apps \xc2\xb7");
         assert!(screen_text_for_detection(&engine, 14, false, true)

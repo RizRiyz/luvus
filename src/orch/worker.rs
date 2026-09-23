@@ -231,6 +231,17 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
         .or_else(|| executable.strip_suffix(".cmd"))
         .or_else(|| executable.strip_suffix(".bat"))
         .unwrap_or(&executable);
+    // Process detection cannot unwrap `env` options. Fail closed rather than
+    // letting `env -i arc-studio` hide a remote-only agent behind the wrapper.
+    if executable == "env"
+        && argv
+            .iter()
+            .skip(1)
+            .find(|arg| arg.starts_with('-') || !arg.contains('='))
+            .is_some_and(|arg| arg.starts_with('-'))
+    {
+        return Err("env options are not supported for local ORCH task agents".to_string());
+    }
     let descriptor = crate::agent::registry::find(executable).or_else(|| {
         crate::detect::builtin_agent_in_argv(&argv)
             .and_then(|agent| crate::agent::registry::find(&agent))
@@ -296,6 +307,12 @@ mod tests {
             "node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
             "node --require helper /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
             r#""C:\Program Files\nodejs\node.exe" "C:\Users\Ada\node_modules\@circle-fin\arc-studio-cli\bin\arc-studio.mjs""#,
+            "env FOO=bar arc-studio",
+            "env -i arc-studio",
+            "env -u FOO arc-studio",
+            "env FOO=bar -- arc-studio",
+            "env --unset=FOO arc-studio",
+            "env FOO=bar -i arc-studio",
         ] {
             assert!(validate_agent_command(command).is_err(), "{command}");
             assert!(launch(command, "briefing", "t1").is_err(), "{command}");
@@ -303,6 +320,8 @@ mod tests {
         assert!(validate_agent_command("codex").is_ok());
         assert!(validate_agent_command("codex --model o3").is_ok());
         assert!(validate_agent_command("custom-agent --flag").is_ok());
+        assert!(validate_agent_command("env FOO=bar custom-agent --flag").is_ok());
+        assert!(validate_agent_command("env -i custom-agent").is_err());
         assert!(
             validate_agent_command("node /opt/node_modules/@other/arc-studio-cli/bin/cli.mjs")
                 .is_ok()
