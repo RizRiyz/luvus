@@ -3060,28 +3060,26 @@ impl App {
             pane,
             query: String::new(),
             editing: true,
+            case_sensitive: false,
             matches: Vec::new(),
             current: 0,
             saved_scroll,
         });
     }
 
-    fn commit_pane_search(&mut self) {
-        let Some((pane_id, query, saved_scroll)) = self
+    fn refresh_pane_search_matches(&mut self) {
+        let Some((pane_id, query, case_sensitive)) = self
             .pane_search
             .as_ref()
-            .map(|search| (search.pane, search.query.clone(), search.saved_scroll))
+            .map(|search| (search.pane, search.query.clone(), search.case_sensitive))
         else {
             return;
         };
-        if query.is_empty() {
-            self.pane_search = None;
-            return;
-        }
         let mut matches = Vec::new();
         if let Some(pane) = self.panes.get(&pane_id) {
             pane.for_each_retained_row(&mut |row, _history, _row_count, line| {
-                for (col, width) in super::search::match_display_spans(line, &query) {
+                for (col, width) in super::search::match_display_spans(line, &query, case_sensitive)
+                {
                     matches.push(super::search::PaneSearchMatch { row, col, width });
                 }
             });
@@ -3089,21 +3087,47 @@ impl App {
         let viewport_top = self
             .panes
             .get(&pane_id)
-            .map(|pane| pane.scroll_state().1.saturating_sub(saved_scroll))
+            .map(|pane| {
+                let (scroll, history) = pane.scroll_state();
+                history.saturating_sub(scroll)
+            })
             .unwrap_or(0);
         let current = matches
             .iter()
             .position(|search_match| search_match.row >= viewport_top)
             .unwrap_or(0);
-        self.pane_search = Some(super::search::PaneSearch {
-            pane: pane_id,
-            query,
-            editing: false,
-            matches,
-            current,
-            saved_scroll,
-        });
+        if let Some(search) = self.pane_search.as_mut() {
+            search.matches = matches;
+            search.current = current;
+        }
+    }
+
+    fn commit_pane_search(&mut self) {
+        let Some(query) = self.pane_search.as_ref().map(|search| search.query.clone()) else {
+            return;
+        };
+        if query.is_empty() {
+            self.pane_search = None;
+            return;
+        }
+        if let Some(search) = self.pane_search.as_mut() {
+            search.editing = false;
+        }
+        self.refresh_pane_search_matches();
         self.reveal_current_pane_search_match();
+    }
+
+    fn toggle_pane_search_case(&mut self) {
+        let committed = if let Some(search) = self.pane_search.as_mut() {
+            search.case_sensitive = !search.case_sensitive;
+            !search.editing && !search.query.is_empty()
+        } else {
+            false
+        };
+        if committed {
+            self.refresh_pane_search_matches();
+            self.reveal_current_pane_search_match();
+        }
     }
 
     fn reveal_current_pane_search_match(&mut self) {
@@ -3156,6 +3180,9 @@ impl App {
         match key.code {
             KeyCode::Esc => self.cancel_pane_search(),
             KeyCode::Enter if editing => self.commit_pane_search(),
+            KeyCode::Char('i') if super::keys::is_ctrl_chord(key.modifiers) => {
+                self.toggle_pane_search_case();
+            }
             KeyCode::Char('u') if editing && super::keys::is_ctrl_chord(key.modifiers) => {
                 if let Some(search) = self.pane_search.as_mut() {
                     search.query.clear();
@@ -4918,6 +4945,42 @@ mod tests {
         assert_eq!(app.pane_search.as_ref().unwrap().current, (first + 2) % 3);
         app.handle_event(AppEvent::Key(plain('n')));
         assert_eq!(app.pane_search.as_ref().unwrap().current, first);
+    }
+
+    #[test]
+    fn pane_search_case_mode_toggles_and_rescans_without_pty_leaks() {
+        let _env = crate::persist::test_env("pane-search-case-toggle");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        add_scrollback(&app, pane, &["needle", "Needle"]);
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        enter_search(&mut app);
+        for character in "needle".chars() {
+            app.handle_event(AppEvent::Key(plain(character)));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.pane_search.as_ref().unwrap().matches.len(), 2);
+
+        let ctrl_i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::CONTROL);
+        app.handle_event(AppEvent::Key(ctrl_i));
+        let search = app.pane_search.as_ref().unwrap();
+        assert!(search.case_sensitive);
+        assert_eq!(search.matches.len(), 1);
+
+        app.handle_event(AppEvent::Key(ctrl_i));
+        let search = app.pane_search.as_ref().unwrap();
+        assert!(!search.case_sensitive);
+        assert_eq!(search.matches.len(), 2);
+        assert!(input_rx.try_recv().is_err(), "Ctrl-I reached the PTY");
     }
 
     #[test]

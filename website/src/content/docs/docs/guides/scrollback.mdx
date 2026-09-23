@@ -52,8 +52,10 @@ plain keys navigate without reaching the program in the pane:
 The inline `/` search is owned by Luvus, so query and navigation keys never
 reach the child process. Type a query and press **Enter** to jump to the first
 case-insensitive match at or after the current viewport (wrapping to the oldest
-match when needed). Press **`Ctrl-U`** while editing to clear the query without
-leaving search. Matches are highlighted in place like FILE search: the current
+match when needed). Press **`Ctrl-I`** to toggle case sensitivity; sensitive
+mode adds `Aa` after the query, while the default insensitive mode stays
+unmarked. Press **`Ctrl-U`** while editing to clear the query without leaving
+search. Matches are highlighted in place like FILE search: the current
 word uses the accent color, and other visible hits use amber. Press
 **`n`** / **`N`** for the next / previous match; both wrap within that pane's
 retained rows. **Esc** while editing or after committing

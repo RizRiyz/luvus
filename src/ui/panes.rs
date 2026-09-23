@@ -935,6 +935,7 @@ mod tests {
             pane: PaneId(1),
             query: "needle".into(),
             editing: false,
+            case_sensitive: false,
             matches: vec![
                 crate::app::PaneSearchMatch {
                     row: 10,

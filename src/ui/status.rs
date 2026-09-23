@@ -108,7 +108,11 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
             )
         };
         left.push(Span::styled(query, Style::new().fg(t.text).bold()));
+        if search.case_sensitive {
+            left.push(Span::styled("  Aa", Style::new().fg(t.overlay1)));
+        }
         left.push(Span::raw("  "));
+        left.extend(hint("Ctrl-I", cat.act_case, t));
         if search.editing {
             left.extend(hint("Ctrl-U", cat.act_clear, t));
             left.extend(hint("Enter", cat.act_select, t));
@@ -601,6 +605,7 @@ mod tests {
             pane,
             query: "needle".into(),
             editing: true,
+            case_sensitive: false,
             matches: Vec::new(),
             current: 0,
             saved_scroll: 0,
@@ -608,6 +613,20 @@ mod tests {
         let editing = text(&app);
         assert!(editing.contains("SEARCH"), "search mode label: {editing}");
         assert!(editing.contains("/needle▏"), "query caret: {editing}");
+        assert!(
+            editing.contains("Ctrl-I case"),
+            "search must show its case toggle: {editing}"
+        );
+        assert!(
+            !editing.contains(" Aa"),
+            "insensitive mode stays quiet: {editing}"
+        );
+        app.pane_search.as_mut().unwrap().case_sensitive = true;
+        let sensitive = text(&app);
+        assert!(
+            sensitive.contains("/needle▏  Aa"),
+            "sensitive mode marks the query: {sensitive}"
+        );
         assert!(
             editing.contains("Ctrl-U clear"),
             "editing search must hint Ctrl-U: {editing}"

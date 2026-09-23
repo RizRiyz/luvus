@@ -35,9 +35,13 @@ pub struct PaneSearchMatch {
     pub width: usize,
 }
 
-/// Case-insensitive matches in `line`, expressed as display-cell columns and
-/// widths so navigation and terminal rendering agree for wide glyphs.
-pub(super) fn match_display_spans(line: &str, query: &str) -> Vec<(usize, usize)> {
+/// Literal matches in `line`, expressed as display-cell columns and widths so
+/// navigation and terminal rendering agree for wide glyphs.
+pub(super) fn match_display_spans(
+    line: &str,
+    query: &str,
+    case_sensitive: bool,
+) -> Vec<(usize, usize)> {
     use unicode_width::UnicodeWidthChar;
     let needle: Vec<char> = query.chars().collect();
     if needle.is_empty() {
@@ -59,7 +63,10 @@ pub(super) fn match_display_spans(line: &str, query: &str) -> Vec<(usize, usize)
         if chars[start..end]
             .iter()
             .zip(needle.iter())
-            .all(|(hay, query_ch)| hay.to_lowercase().eq(query_ch.to_lowercase()))
+            .all(|(hay, query_ch)| {
+                hay == query_ch
+                    || (!case_sensitive && hay.to_lowercase().eq(query_ch.to_lowercase()))
+            })
         {
             matches.push((
                 columns[start],
@@ -78,6 +85,7 @@ pub struct PaneSearch {
     pub pane: PaneId,
     pub query: String,
     pub editing: bool,
+    pub case_sensitive: bool,
     pub matches: Vec<PaneSearchMatch>,
     pub current: usize,
     pub saved_scroll: usize,
@@ -2169,13 +2177,20 @@ mod tests {
     }
 
     #[test]
-    fn match_display_spans_are_case_insensitive_and_use_display_cells() {
+    fn match_display_spans_respects_case_mode_and_uses_display_cells() {
         assert_eq!(
-            match_display_spans("hello Needle world", "needle"),
+            match_display_spans("hello Needle world", "needle", false),
             vec![(6, 6)]
         );
-        assert!(match_display_spans("nope", "needle").is_empty());
-        assert_eq!(match_display_spans("前Needle后", "needle"), vec![(2, 6)]);
-        assert_eq!(match_display_spans("hit hit", "hit"), vec![(0, 3), (4, 3)]);
+        assert!(match_display_spans("hello Needle world", "needle", true).is_empty());
+        assert!(match_display_spans("nope", "needle", false).is_empty());
+        assert_eq!(
+            match_display_spans("前Needle后", "needle", false),
+            vec![(2, 6)]
+        );
+        assert_eq!(
+            match_display_spans("hit hit", "hit", true),
+            vec![(0, 3), (4, 3)]
+        );
     }
 }
