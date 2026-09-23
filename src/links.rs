@@ -7,7 +7,47 @@
 //! one cell to the token's edges and stops. A pane full of text costs the same
 //! as an empty one, which is what keeps this off the render hot path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Encode an absolute local path as an OSC 8-safe `file://` URI.
+///
+/// Host terminals use this projection to distinguish a validated file from a
+/// domain-shaped label such as `server/scripts/task.mjs`. Paths that cannot be
+/// represented as UTF-8 remain available to Luvus's native file view but are
+/// not exposed to the host terminal.
+pub fn file_path_uri(path: &Path) -> Option<String> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let path = path.to_str()?;
+    #[cfg(windows)]
+    let path = path.replace('\\', "/");
+    #[cfg(windows)]
+    let path = path.as_str();
+
+    let mut uri = String::with_capacity(path.len() + 16);
+    uri.push_str("file://");
+    #[cfg(windows)]
+    if !path.starts_with('/') {
+        uri.push('/');
+    }
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            uri.push(char::from(byte));
+        } else {
+            uri.push('%');
+            uri.push(char::from(HEX[(byte >> 4) as usize]));
+            uri.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+
+    // Keep the encoder and the security boundary used by the thin client in
+    // lockstep. This also rejects platform-specific path forms we cannot safely
+    // round-trip.
+    file_uri_path(&uri).is_some().then_some(uri)
+}
 
 /// Decode an OSC 8 `file://` target into an absolute local path.
 ///
@@ -397,6 +437,34 @@ pub fn link_at(rows: &[String], col: u16, row: u16) -> Option<Link> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_absolute_paths_as_local_file_uris() {
+        #[cfg(unix)]
+        {
+            let path = Path::new("/repo/server/task name#1?.mjs");
+            let uri = file_path_uri(path).expect("absolute UTF-8 path");
+            assert_eq!(
+                uri, "file:///repo/server/task%20name%231%3F.mjs",
+                "reserved characters cannot change the URI target"
+            );
+            assert_eq!(file_uri_path(&uri).as_deref(), Some(path));
+
+            let unicode = Path::new("/repo/日本語.rs");
+            let uri = file_path_uri(unicode).expect("UTF-8 path");
+            assert_eq!(uri, "file:///repo/%E6%97%A5%E6%9C%AC%E8%AA%9E.rs");
+            assert_eq!(file_uri_path(&uri).as_deref(), Some(unicode));
+        }
+        #[cfg(windows)]
+        {
+            let path = Path::new(r"C:\repo\server\task name.mjs");
+            let uri = file_path_uri(path).expect("absolute UTF-8 path");
+            assert_eq!(uri, "file:///C:/repo/server/task%20name.mjs");
+            assert_eq!(file_uri_path(&uri).as_deref(), Some(path));
+        }
+
+        assert_eq!(file_path_uri(Path::new("server/task.mjs")), None);
+    }
 
     #[test]
     fn decodes_only_absolute_local_file_uris() {

@@ -250,6 +250,47 @@ fn clip_rendered_hyperlinks(
     links.extend(right_halves.into_iter().take(remaining));
 }
 
+/// Give the outer terminal an authoritative target for a plain path that Luvus
+/// has already resolved during the deliberate Ctrl/Super hover scan. Without
+/// this projection, terminals such as iTerm2 can reinterpret a label beginning
+/// with `server/` as an HTTP address before Luvus receives the click.
+///
+/// This performs no IO and no grid scan on the render path. It reuses the
+/// bounded spans and validated absolute path already stored in `HoverLink`.
+fn project_hover_file_hyperlink(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    content: Rect,
+    hover: Option<&crate::app::HoverLink>,
+) {
+    let Some(hover) = hover.filter(|hover| hover.pane == pane) else {
+        return;
+    };
+    let crate::app::LinkTarget::File { path, .. } = &hover.target else {
+        return;
+    };
+    let Some(uri) = crate::links::file_path_uri(path) else {
+        return;
+    };
+
+    for &(row, start, end) in &hover.link.spans {
+        if row >= content.height {
+            continue;
+        }
+        let start = start.min(content.width);
+        let end = end.min(content.width);
+        if start >= end {
+            continue;
+        }
+        let cover = Rect::new(content.x + start, content.y + row, end - start, 1);
+        // The resolved file is authoritative for these cells. Replace any stale
+        // child projection rather than leaving overlapping OSC 8 targets whose
+        // winner would depend on terminal implementation details.
+        clip_rendered_hyperlinks(links, pane, cover);
+        push_rendered_hyperlink(links, pane, cover.x, cover.y, cover.width, &uri);
+    }
+}
+
 pub(super) fn draw_panes(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
@@ -326,6 +367,7 @@ pub(super) fn patch_terminal_damage(
             return Err(());
         }
 
+        let hover_link = app.hover_link.as_ref().filter(|hover| hover.pane == id);
         let blank = Style::new().bg(theme.mantle);
         let buffer = f.buffer_mut();
         let mut stack = [0u8; 4];
@@ -343,7 +385,12 @@ pub(super) fn patch_terminal_damage(
                 cell.set_style(blank);
             }
             for cell in &row.cells {
-                let style = terminal_cell_style(cell.style, theme, app.downsample);
+                let mut style = terminal_cell_style(cell.style, theme, app.downsample);
+                if hover_link.is_some_and(|hover| hover.link.covers(cell.column, row.row)) {
+                    style = style
+                        .fg(theme.accent)
+                        .add_modifier(ratatui::style::Modifier::UNDERLINED);
+                }
                 let symbol: &str = if cell.zero_width.is_empty() {
                     cell.character.encode_utf8(&mut stack)
                 } else {
@@ -369,6 +416,7 @@ pub(super) fn patch_terminal_damage(
                 }
             }
         }
+        project_hover_file_hyperlink(hyperlinks, id, content, hover_link);
 
         if id == focus {
             cursor = pane_ime_cursor(content, snapshot.cursor);
@@ -484,11 +532,7 @@ fn draw_one_pane(
     // The link under a `Ctrl`-held cursor (docs/58). Borrowed, not cloned: this
     // is the render path, and the spans are recomputed only when the hovered
     // cell changes anyway.
-    let hover_link = app
-        .hover_link
-        .as_ref()
-        .filter(|h| h.pane == id)
-        .map(|h| &h.link);
+    let hover_link = app.hover_link.as_ref().filter(|h| h.pane == id);
     // The line a search jump landed on (docs/63): (content row, scroll offset it
     // was jumped to). Banded only while the view is unchanged, so any scroll or
     // new output hides it.
@@ -559,7 +603,7 @@ fn draw_one_pane(
                     // Underline the `Ctrl`-hovered link, so it reads as clickable
                     // before you commit to the click. Applied after the selection
                     // so a link inside selected text keeps both.
-                    if hover_link.is_some_and(|l| l.covers(col, row)) {
+                    if hover_link.is_some_and(|hover| hover.link.covers(col, row)) {
                         style = style
                             .fg(t.accent)
                             .add_modifier(ratatui::style::Modifier::UNDERLINED);
@@ -593,6 +637,7 @@ fn draw_one_pane(
         }
         Err(_) => None,
     };
+    project_hover_file_hyperlink(context.rendered_hyperlinks, id, content, hover_link);
 
     if let Some(region) = composer_region {
         draw_codex_composer(

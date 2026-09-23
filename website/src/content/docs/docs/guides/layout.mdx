@@ -294,6 +294,10 @@ When an agent such as Claude prints a terminal file hyperlink, luvus uses its
 validated local file target rather than guessing from the visible label. It
 then follows the same **File click behavior** and **Open files with** settings.
 
+If the agent prints a plain path instead, holding `Ctrl` lets luvus project the
+validated path as a local file link for the outer terminal too. This prevents a
+label such as `server/scripts/task.mjs` from being mistaken for a web address.
+
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell
 you are looking at. Text that merely looks like a path stays inert, and so do

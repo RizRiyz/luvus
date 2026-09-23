@@ -6040,6 +6040,44 @@ mod link_click_tests {
         assert!(app.hover_link.is_none());
     }
 
+    /// Plain file labels do not carry OSC 8 metadata from the child. Once a
+    /// deliberate hover resolves one against the pane CWD, the rendered frame
+    /// must expose that file target to the host terminal instead of letting it
+    /// guess that a `server/...`-shaped label is an HTTP address.
+    #[test]
+    fn ctrl_hover_projects_a_plain_file_path_to_the_host_terminal() {
+        let _env = crate::persist::test_env("link-hover-file-projection");
+        let (mut app, mut term, at) = fixture_showing("edit Cargo.toml now", 7);
+        let pane = app.layout().focus;
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let uri = crate::links::file_path_uri(&path).expect("repo path has a file URI");
+
+        assert!(
+            !app.rendered_hyperlinks.iter().any(|link| link.uri == uri),
+            "plain text has no child-supplied OSC 8 target"
+        );
+        assert!(app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::CONTROL,)));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        assert!(
+            app.rendered_hyperlinks.iter().any(|link| {
+                link.pane == pane
+                    && link.y == at.1
+                    && link.start <= at.0
+                    && link.end > at.0
+                    && link.uri == uri
+            }),
+            "the host projection must carry the validated local file target"
+        );
+        assert!(
+            app.rendered_hyperlinks
+                .iter()
+                .all(|link| !link.uri.starts_with("http://server/")),
+            "the host must never receive iTerm2's guessed server URL"
+        );
+    }
+
     #[test]
     fn any_motion_forwarding_does_not_mark_luvus_dirty() {
         let _env = crate::persist::test_env("mouse-any-motion-dirty");
