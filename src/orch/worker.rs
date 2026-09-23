@@ -76,8 +76,14 @@ pub(crate) fn staged_for_test(pane: crate::ids::PaneId) -> bool {
 }
 
 pub(crate) fn validate_agent_command(agent: &str) -> Result<(), String> {
-    if crate::agent::registry::find(agent).is_some() {
-        return Ok(());
+    if let Some(descriptor) = crate::agent::registry::find(agent) {
+        return if crate::agent::registry::supports_local_task(descriptor) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{agent} cannot work in a local ORCH task workspace"
+            ))
+        };
     }
     custom_agent_argv(agent).map(|_| ())
 }
@@ -186,6 +192,11 @@ fn owner_ready(task_id: &str, pane: u32) -> Result<bool> {
 
 fn launch(agent: &str, briefing: &str, task_id: &str) -> Result<ExitStatus> {
     let mut command = if let Some(descriptor) = crate::agent::registry::find(agent) {
+        if !crate::agent::registry::supports_local_task(descriptor) {
+            return Err(anyhow!(
+                "{agent} cannot work in a local ORCH task workspace"
+            ));
+        }
         let mut command = Command::new(descriptor.launch_command);
         command.args(descriptor.task_prompt_args);
         command
@@ -252,6 +263,13 @@ mod tests {
 
         let error = wait_for_owner_with(Duration::ZERO, || Ok(false)).unwrap_err();
         assert!(error.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn remote_sandbox_agent_cannot_claim_a_local_task() {
+        assert!(validate_agent_command("arc-studio").is_err());
+        assert!(launch("arc-studio", "briefing", "t1").is_err());
+        assert!(validate_agent_command("codex").is_ok());
     }
 
     #[cfg(unix)]

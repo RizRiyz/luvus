@@ -1786,6 +1786,7 @@ impl App {
         let descriptor = if start_now {
             Some(
                 crate::agent::registry::find(&agent)
+                    .filter(|descriptor| crate::agent::registry::supports_local_task(descriptor))
                     .ok_or_else(|| format!("unsupported agent: {agent}"))?,
             )
         } else {
@@ -2649,8 +2650,7 @@ pub fn agent_choices() -> &'static [(&'static str, Option<&'static str>)] {
     static CHOICES: std::sync::OnceLock<Vec<(&'static str, Option<&'static str>)>> =
         std::sync::OnceLock::new();
     CHOICES.get_or_init(|| {
-        crate::agent::registry::descriptors()
-            .iter()
+        crate::agent::registry::local_task_descriptors()
             .map(|descriptor| (descriptor.id, Some(descriptor.id)))
             .chain(std::iter::once(("shell", None)))
             .collect()
@@ -2663,8 +2663,7 @@ pub fn agent_choices() -> &'static [(&'static str, Option<&'static str>)] {
 pub fn task_agent_choices() -> &'static [&'static str] {
     static CHOICES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
     CHOICES.get_or_init(|| {
-        crate::agent::registry::descriptors()
-            .iter()
+        crate::agent::registry::local_task_descriptors()
             .map(|descriptor| descriptor.id)
             .collect()
     })
@@ -4303,7 +4302,7 @@ mod tests {
             ("aider", "aider --message"),
             ("amp", "amp --execute"),
             ("antigravity", "agy -p"),
-            ("arc-studio", "arc-studio run"),
+            ("arc-studio", "arc-studio"),
             ("claude", "claude"),
             ("codex", "codex"),
             ("copilot", "copilot --interactive"),
@@ -4396,8 +4395,7 @@ mod tests {
         let agents = &choices[..choices.len() - 1];
         assert_eq!(
             agents.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            crate::agent::registry::descriptors()
-                .iter()
+            crate::agent::registry::local_task_descriptors()
                 .map(|descriptor| descriptor.id)
                 .collect::<Vec<_>>()
         );
@@ -4407,11 +4405,11 @@ mod tests {
         assert!(choices.contains(&("kiro", Some("kiro"))));
         assert_eq!(
             task_agent_choices(),
-            crate::agent::registry::descriptors()
-                .iter()
+            crate::agent::registry::local_task_descriptors()
                 .map(|descriptor| descriptor.id)
                 .collect::<Vec<_>>()
         );
+        assert!(!task_agent_choices().contains(&"arc-studio"));
     }
 
     #[test]

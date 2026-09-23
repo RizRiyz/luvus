@@ -336,7 +336,7 @@ pub(crate) fn screen_rows(known_agent: &str, running: &[String], manifests: &Man
     }
 }
 
-/// Claude, Codex, Hermes, and Devin can place a live interaction panel above a
+/// Claude, Codex, Hermes, Devin, and Arc Studio can place an interaction above a
 /// tall blank footer. Keep their most recent non-empty live rows without pulling
 /// in scrollback. For Codex this also keeps the first-run sign-in chooser
 /// visible to prompt admission instead of mistaking its blank footer for a
@@ -348,6 +348,8 @@ pub(crate) fn screen_uses_non_empty_rows(
 ) -> bool {
     known_agent.eq_ignore_ascii_case("claude")
         || manifests.process_has_agent(running, "claude")
+        || known_agent.eq_ignore_ascii_case("arc-studio")
+        || manifests.process_has_agent(running, "arc-studio")
         || known_agent.eq_ignore_ascii_case("codex")
         || manifests.process_has_agent(running, "codex")
         || known_agent.eq_ignore_ascii_case("hermes")
@@ -1387,6 +1389,14 @@ impl Manifests {
         }
         // Incidental signal: pane output. Only names that can't be ordinary words.
         self.best_agent(|agent| {
+            if agent.name == "arc-studio" {
+                // The slogan or a copied CLI command alone is incidental shell
+                // output. Arc Studio's actual TUI prints both on one banner row.
+                return low_bottom.lines().any(|line| {
+                    contains_agent_word(line, "arc studio")
+                        && contains_agent_word(line, "build onchain apps ·")
+                });
+            }
             agent
                 .distinct
                 .iter()
@@ -1709,6 +1719,27 @@ Would you like to proceed?
             "zsh",
             "a shell printing Arc Studio prose is still a shell"
         );
+        for incidental in [
+            "build onchain apps ·",
+            "Run arc-studio to begin",
+            "Arc Studio\nbuild onchain apps ·",
+        ] {
+            assert_eq!(
+                classify(
+                    Some("zsh"),
+                    incidental,
+                    false,
+                    false,
+                    "zsh",
+                    "",
+                    &[],
+                    &manifests
+                )
+                .agent,
+                "zsh",
+                "incidental output must not identify Arc Studio: {incidental}"
+            );
+        }
         assert_eq!(
             classify(
                 Some("zsh"),
@@ -1757,6 +1788,33 @@ Would you like to proceed?
             ),
             State::Blocked
         );
+    }
+
+    #[test]
+    fn arc_studio_login_above_a_tall_blank_footer_stays_blocked() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/local/bin/arc-studio".to_string()];
+        let rows = screen_rows("arc-studio", &running, &manifests);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(100, 32, tx, 1024 * 1024);
+        engine.advance(
+            b"\x1b[2J\x1b[HYou're not logged in yet. Press Enter to get the login command, or Esc to quit.",
+        );
+        assert!(engine.detection_text(rows).trim().is_empty());
+        assert!(screen_uses_non_empty_rows("arc-studio", &[], &manifests));
+        assert!(screen_uses_non_empty_rows("", &running, &manifests));
+        let detection = classify(
+            Some("zsh"),
+            &engine.detection_text_non_empty(rows),
+            false,
+            false,
+            "zsh",
+            "arc-studio",
+            &running,
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
     }
 
     #[test]

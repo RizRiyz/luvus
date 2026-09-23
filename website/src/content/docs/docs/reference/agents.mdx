@@ -32,11 +32,11 @@ description: What luvus supports per agent, covering live status, session resume
 Arc Studio CLI requires Node.js 20 or later. Install it with
 `npm install -g @circle-fin/arc-studio-cli`, then run `arc-studio login`. Luvus
 recognizes the `arc-studio` process and its working and question screens. Run
-`arc-studio` in a pane for its interactive TUI. Luvus can also pass a task
-briefing to `arc-studio run`, but that one-turn command receives the prompt,
-not the local project files. The agent and generated files live in Arc Studio's
-remote sandbox. Review them with `arc-studio pull --changed --dry-run --diff`
-and pull selected files explicitly. The current TUI has no exact-session
+`arc-studio` in a pane for its interactive TUI. The agent and generated files
+live in Arc Studio's remote sandbox. Review them with
+`arc-studio pull --changed --dry-run --diff` and pull selected files explicitly.
+Arc Studio is not offered as a local ORCH task worker, because its remote edits
+do not appear in the assigned checkout. The current TUI has no exact-session
 resume flag; Luvus does not advertise resume, fork, precise hooks, or
 scheduled automation for Arc Studio. Arc Studio currently deploys to Arc
 testnet.
