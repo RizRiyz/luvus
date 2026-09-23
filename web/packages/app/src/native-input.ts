@@ -36,7 +36,6 @@ export class NativeTerminalInput {
   #destroyed = false;
   #flushFrame: number | undefined;
   #ignoreCommittedInput = "";
-  #tail = Promise.resolve();
 
   constructor(
     private readonly dispatch: Dispatch,
@@ -176,13 +175,13 @@ export class NativeTerminalInput {
 
   #enqueue(action: TerminalAction, params: Record<string, unknown>): void {
     if (this.#destroyed) return;
-    this.#tail = this.#tail
-      .then(() => this.dispatch(action, params))
-      .then(() => undefined)
-      .catch((error: unknown) => {
-        if (this.#destroyed) return;
-        const message = error instanceof Error ? error.message : "Terminal input failed";
-        this.onError(message);
-      });
+    // WebSocket frames and the upstream terminal stream both preserve send
+    // order. Do not serialize input on round-trip acknowledgements: doing so
+    // makes fast typing accumulate one network RTT per key on remote links.
+    void this.dispatch(action, params).catch((error: unknown) => {
+      if (this.#destroyed) return;
+      const message = error instanceof Error ? error.message : "Terminal input failed";
+      this.onError(message);
+    });
   }
 }

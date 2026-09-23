@@ -43,6 +43,7 @@ test("device limits and public pairing URLs are bounded configuration", () => {
   assert.equal(config.browserMaxDevices, 4);
   assert.equal(config.publicUrl, "https://phone.example");
   assert.throws(() => loadConfig({ LUVUS_WEB_MAX_DEVICES: "9" }), /1 through 8/);
+  assert.throws(() => loadConfig({ LUVUS_WEB_PUBLIC_URL: "http://phone.example" }), /HTTPS URL/);
   assert.throws(() => loadConfig({ LUVUS_WEB_PUBLIC_URL: "https://user:secret@phone.example" }), /without credentials/);
   assert.throws(() => loadConfig({ LUVUS_WEB_PUBLIC_URL: "https://phone.example/luvus" }), /must not include a path prefix/);
 });

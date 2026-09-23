@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,7 +17,7 @@ use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Notify};
 use tokio::task::JoinHandle;
 
 use super::assets;
@@ -32,13 +33,46 @@ const UPLOAD_CHUNKS_PER_MINUTE: u32 = 256;
 const UPLOAD_ENCODED_BYTES_PER_MINUTE: usize = 48 * 1024 * 1024;
 const MAX_UPLOAD_CHUNK: usize = 218_456;
 const MAX_UPSTREAM_LINE: usize = 2 * 1024 * 1024;
+const TERMINAL_ACTIONS_PER_MINUTE: u32 = 3_600;
+
+#[derive(Clone)]
+struct Outbound {
+    reliable: mpsc::Sender<Value>,
+    terminal_frames: Arc<Mutex<HashMap<String, Value>>>,
+    terminal_ready: Arc<Notify>,
+}
+
+impl Outbound {
+    fn reliable(&self, frame: Value) -> Result<(), ()> {
+        self.reliable.try_send(frame).map_err(|_| ())
+    }
+
+    fn terminal(&self, stream_id: &str, frame: Value) {
+        self.terminal_frames
+            .lock()
+            .expect("terminal frame queue poisoned")
+            .insert(stream_id.to_string(), frame);
+        self.terminal_ready.notify_one();
+    }
+
+    async fn reliable_wait(&self, frame: Value) -> Result<(), ()> {
+        self.reliable.send(frame).await.map_err(|_| ())
+    }
+
+    fn close_stream(&self, stream_id: &str) {
+        self.terminal_frames
+            .lock()
+            .expect("terminal frame queue poisoned")
+            .remove(stream_id);
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct BridgeState {
     authority: Arc<Mutex<BrowserAuthority>>,
     uhp: Arc<UhpAccess>,
     origins: Arc<Vec<String>>,
-    public_url: Option<String>,
+    public_url: Arc<Mutex<Option<String>>>,
     devices: broadcast::Sender<Value>,
     connected: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -76,7 +110,7 @@ impl BridgeState {
             authority: Arc::new(Mutex::new(authority)),
             uhp,
             origins: Arc::new(origins),
-            public_url,
+            public_url: Arc::new(Mutex::new(public_url)),
             devices,
             connected: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
@@ -88,7 +122,12 @@ impl BridgeState {
             .lock()
             .expect("browser authority poisoned")
             .status();
-        device_status(status)
+        let public_url = self
+            .public_url
+            .lock()
+            .expect("browser public URL poisoned")
+            .clone();
+        device_status(status, public_url.as_deref())
     }
 
     fn broadcast_devices(&self) {
@@ -231,11 +270,33 @@ async fn client(socket: WebSocket, state: BridgeState) {
     }
     state.broadcast_devices();
 
-    let (outgoing, mut outbound) = mpsc::channel::<Value>(OUTBOUND_FRAMES);
+    let (reliable, mut reliable_rx) = mpsc::channel::<Value>(OUTBOUND_FRAMES);
+    let terminal_frames = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+    let terminal_ready = Arc::new(Notify::new());
+    let outgoing = Outbound {
+        reliable,
+        terminal_frames: Arc::clone(&terminal_frames),
+        terminal_ready: Arc::clone(&terminal_ready),
+    };
     let writer = tokio::spawn(async move {
-        while let Some(frame) = outbound.recv().await {
-            if sink.send(text_message(frame)).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                biased;
+                frame = reliable_rx.recv() => {
+                    let Some(frame) = frame else { break; };
+                    if sink.send(text_message(frame)).await.is_err() { break; }
+                }
+                _ = terminal_ready.notified() => {
+                    let frames = {
+                        let mut pending = terminal_frames
+                            .lock()
+                            .expect("terminal frame queue poisoned");
+                        std::mem::take(&mut *pending)
+                    };
+                    for (_, frame) in frames {
+                        if sink.send(text_message(frame)).await.is_err() { return; }
+                    }
+                }
             }
         }
     });
@@ -267,11 +328,7 @@ async fn client(socket: WebSocket, state: BridgeState) {
                 };
                 let Ok(frame) = parse_object(text.as_str()) else { break; };
                 if !rate.allow(&frame) {
-                    let _ = send(&outgoing, json!({
-                        "type": "error",
-                        "code": "rate_limited",
-                        "message": "Browser request rate exceeded",
-                    }));
+                    let _ = rate_limited(&outgoing, &frame);
                     continue;
                 }
                 if handle_frame(&state, &outgoing, &mut streams, frame).await.is_err() {
@@ -290,7 +347,7 @@ async fn client(socket: WebSocket, state: BridgeState) {
 
 async fn handle_frame(
     state: &BridgeState,
-    outgoing: &mpsc::Sender<Value>,
+    outgoing: &Outbound,
     streams: &mut HashMap<String, BrowserStream>,
     frame: Map<String, Value>,
 ) -> Result<(), ()> {
@@ -301,6 +358,7 @@ async fn handle_frame(
         Some("stream.action") => stream_action(outgoing, streams, frame).await,
         Some("stream.close") => {
             let id = required_string(&frame, "stream_id", valid_id)?;
+            outgoing.close_stream(id);
             if let Some(stream) = streams.remove(id) {
                 stream.task.abort();
             }
@@ -319,7 +377,7 @@ async fn handle_frame(
 
 async fn request(
     state: &BridgeState,
-    outgoing: &mpsc::Sender<Value>,
+    outgoing: &Outbound,
     frame: Map<String, Value>,
 ) -> Result<(), ()> {
     let id = required_string(&frame, "id", valid_id)?.to_string();
@@ -403,7 +461,7 @@ async fn request(
 
 fn device_request(
     state: &BridgeState,
-    outgoing: &mpsc::Sender<Value>,
+    outgoing: &Outbound,
     id: &str,
     method: &str,
     params: Map<String, Value>,
@@ -432,7 +490,12 @@ fn device_request(
                 "expires_at": pairing.expires_at,
                 "devices": state.device_status(),
             });
-            if let Some(base) = &state.public_url {
+            if let Some(base) = state
+                .public_url
+                .lock()
+                .expect("browser public URL poisoned")
+                .as_deref()
+            {
                 result["url"] = Value::String(format!("{base}/#pair={}", pairing.code));
             }
             response_result(outgoing, id, result)?;
@@ -473,6 +536,38 @@ fn device_request(
             state.broadcast_devices();
             Ok(())
         }
+        "web.devices.set_public_url" if params.len() == 1 => {
+            let public_url = match params.get("url") {
+                Some(Value::Null) => None,
+                Some(Value::String(url)) => {
+                    let Some(url) = normalize_public_origin(url) else {
+                        return response_error(
+                            outgoing,
+                            id,
+                            "invalid_params",
+                            "Public URL must be an HTTPS origin without a path",
+                        );
+                    };
+                    Some(url)
+                }
+                _ => {
+                    return response_error(
+                        outgoing,
+                        id,
+                        "invalid_params",
+                        "Public URL must be an HTTPS origin without a path",
+                    );
+                }
+            };
+            *state
+                .public_url
+                .lock()
+                .expect("browser public URL poisoned") = public_url;
+            let status = state.device_status();
+            response_result(outgoing, id, status)?;
+            state.broadcast_devices();
+            Ok(())
+        }
         _ => response_error(
             outgoing,
             id,
@@ -484,12 +579,13 @@ fn device_request(
 
 struct BrowserStream {
     writer: Arc<tokio::sync::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    closed: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
 
 async fn open_stream(
     state: &BridgeState,
-    outgoing: &mpsc::Sender<Value>,
+    outgoing: &Outbound,
     streams: &mut HashMap<String, BrowserStream>,
     frame: Map<String, Value>,
 ) -> Result<(), ()> {
@@ -499,6 +595,13 @@ async fn open_stream(
     if !state.uhp.method_allowed(&method) || !is_streaming(&method) {
         return response_error(outgoing, &id, "forbidden", "Stream method is not allowed");
     }
+    streams.retain(|stream_id, stream| {
+        let active = !stream.closed.load(Ordering::Acquire);
+        if !active {
+            outgoing.close_stream(stream_id);
+        }
+        active
+    });
     if streams.len() >= MAX_STREAMS || streams.contains_key(&id) {
         return response_error(
             outgoing,
@@ -517,8 +620,10 @@ async fn open_stream(
     };
     let (reader, writer) = stream.into_split();
     let writer = Arc::new(tokio::sync::Mutex::new(writer));
+    let closed = Arc::new(AtomicBool::new(false));
     let stream_id = id.clone();
     let sender = outgoing.clone();
+    let task_closed = Arc::clone(&closed);
     let task = tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
         let mut acknowledged = false;
@@ -549,24 +654,35 @@ async fn open_stream(
                 } else {
                     json!({"type": "stream.frame", "stream_id": stream_id, "frame": frame})
                 };
-            if sender.send(browser).await.is_err() {
-                return;
+            if frame.get("event").and_then(Value::as_str) == Some("terminal.frame") {
+                sender.terminal(&stream_id, browser);
+            } else if sender.reliable_wait(browser).await.is_err() {
+                break;
             }
         }
+        task_closed.store(true, Ordering::Release);
+        sender.close_stream(&stream_id);
         let _ = sender
-            .send(json!({
+            .reliable_wait(json!({
                 "type": "stream.closed",
                 "stream_id": stream_id,
                 "reason": "upstream closed",
             }))
             .await;
     });
-    streams.insert(id, BrowserStream { writer, task });
+    streams.insert(
+        id,
+        BrowserStream {
+            writer,
+            closed,
+            task,
+        },
+    );
     Ok(())
 }
 
 async fn stream_action(
-    outgoing: &mpsc::Sender<Value>,
+    outgoing: &Outbound,
     streams: &mut HashMap<String, BrowserStream>,
     frame: Map<String, Value>,
 ) -> Result<(), ()> {
@@ -574,32 +690,32 @@ async fn stream_action(
     let id = required_string(&frame, "id", valid_id)?.to_string();
     let action = required_string(&frame, "action", valid_method)?.to_string();
     let params = object_field(&frame, "params")?;
-    if !matches!(
-        action.as_str(),
-        "type_literal"
-            | "paste_text"
-            | "paste_image"
-            | "submit_text"
-            | "send_key"
-            | "upload_start"
-            | "upload_chunk"
-            | "upload_finish"
-            | "upload_cancel"
-    ) {
+    if !terminal_action(&action) {
         return response_error(outgoing, &id, "invalid_params", "Unknown terminal action");
     }
-    let Some(stream) = streams.get_mut(&stream_id) else {
+    let Some(stream) = streams.get(&stream_id) else {
         return response_error(outgoing, &id, "stale_stream", "Terminal stream is closed");
     };
+    if stream.closed.load(Ordering::Acquire) {
+        if let Some(stream) = streams.remove(&stream_id) {
+            stream.task.abort();
+        }
+        return response_error(outgoing, &id, "stale_stream", "Terminal stream is closed");
+    }
+    let writer = Arc::clone(&stream.writer);
+    let closed = Arc::clone(&stream.closed);
     let frame = json!({"id": id, "action": action, "params": params});
-    if stream
-        .writer
+    if writer
         .lock()
         .await
         .write_all(format!("{frame}\n").as_bytes())
         .await
         .is_err()
     {
+        closed.store(true, Ordering::Release);
+        if let Some(stream) = streams.remove(&stream_id) {
+            stream.task.abort();
+        }
         return response_error(
             outgoing,
             &id,
@@ -610,19 +726,14 @@ async fn stream_action(
     Ok(())
 }
 
-fn response_result(outgoing: &mpsc::Sender<Value>, id: &str, result: Value) -> Result<(), ()> {
+fn response_result(outgoing: &Outbound, id: &str, result: Value) -> Result<(), ()> {
     send(
         outgoing,
         json!({"type": "response", "id": id, "result": result}),
     )
 }
 
-fn response_error(
-    outgoing: &mpsc::Sender<Value>,
-    id: &str,
-    code: &str,
-    message: &str,
-) -> Result<(), ()> {
+fn response_error(outgoing: &Outbound, id: &str, code: &str, message: &str) -> Result<(), ()> {
     send(
         outgoing,
         json!({
@@ -633,12 +744,36 @@ fn response_error(
     )
 }
 
-fn response_uhp_error(outgoing: &mpsc::Sender<Value>, id: &str, error: UhpError) -> Result<(), ()> {
+fn response_uhp_error(outgoing: &Outbound, id: &str, error: UhpError) -> Result<(), ()> {
     response_error(outgoing, id, &error.code, &error.message)
 }
 
-fn send(outgoing: &mpsc::Sender<Value>, frame: Value) -> Result<(), ()> {
-    outgoing.try_send(frame).map_err(|_| ())
+fn send(outgoing: &Outbound, frame: Value) -> Result<(), ()> {
+    outgoing.reliable(frame)
+}
+
+fn rate_limited(outgoing: &Outbound, frame: &Map<String, Value>) -> Result<(), ()> {
+    if let Some(id) = frame
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| valid_id(id))
+    {
+        response_error(
+            outgoing,
+            id,
+            "rate_limited",
+            "Browser request rate exceeded",
+        )
+    } else {
+        send(
+            outgoing,
+            json!({
+                "type": "error",
+                "code": "rate_limited",
+                "message": "Browser request rate exceeded",
+            }),
+        )
+    }
 }
 
 fn text_message(frame: Value) -> Message {
@@ -688,6 +823,7 @@ fn valid_method(value: &str) -> bool {
 struct RateState {
     window_started: Instant,
     requests: u32,
+    terminal_actions: u32,
     upload_chunks: u32,
     upload_encoded_bytes: usize,
 }
@@ -697,6 +833,7 @@ impl RateState {
         Self {
             window_started: Instant::now(),
             requests: 0,
+            terminal_actions: 0,
             upload_chunks: 0,
             upload_encoded_bytes: 0,
         }
@@ -725,17 +862,42 @@ impl RateState {
             return self.upload_chunks <= UPLOAD_CHUNKS_PER_MINUTE
                 && self.upload_encoded_bytes <= UPLOAD_ENCODED_BYTES_PER_MINUTE;
         }
+        let terminal = frame.get("type").and_then(Value::as_str) == Some("stream.action")
+            && frame
+                .get("action")
+                .and_then(Value::as_str)
+                .is_some_and(terminal_action);
+        if terminal {
+            self.terminal_actions = self.terminal_actions.saturating_add(1);
+            return self.terminal_actions <= TERMINAL_ACTIONS_PER_MINUTE;
+        }
         self.requests = self.requests.saturating_add(1);
         self.requests <= REQUESTS_PER_MINUTE
     }
 }
 
-fn device_status(status: BrowserDeviceStatus) -> Value {
+fn terminal_action(action: &str) -> bool {
+    matches!(
+        action,
+        "type_literal"
+            | "paste_text"
+            | "paste_image"
+            | "submit_text"
+            | "send_key"
+            | "upload_start"
+            | "upload_chunk"
+            | "upload_finish"
+            | "upload_cancel"
+    )
+}
+
+fn device_status(status: BrowserDeviceStatus, public_url: Option<&str>) -> Value {
     json!({
         "type": "browser_device_status",
         "paired_devices": status.paired_devices,
         "pending_pairings": status.pending_pairings,
         "max_devices": status.max_devices,
+        "public_url": public_url,
     })
 }
 
@@ -777,6 +939,10 @@ pub(super) fn normalize_origin(value: &str) -> Option<String> {
     ))
 }
 
+pub(super) fn normalize_public_origin(value: &str) -> Option<String> {
+    normalize_origin(value).filter(|origin| origin.starts_with("https://"))
+}
+
 fn set_security_headers(headers: &mut HeaderMap) {
     headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"));
     headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
@@ -805,6 +971,11 @@ mod tests {
         assert!(normalize_origin("https://phone.example/luvus").is_none());
         assert!(normalize_origin("https://user:secret@phone.example").is_none());
         assert!(normalize_origin("file:///tmp/index.html").is_none());
+        assert_eq!(
+            normalize_public_origin("https://Phone.Example:443/"),
+            Some("https://phone.example:443".to_string())
+        );
+        assert!(normalize_public_origin("http://phone.example").is_none());
     }
 
     #[test]
@@ -829,5 +1000,50 @@ mod tests {
 
         drop(connected_guards);
         assert_eq!(connected.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn terminal_frames_are_latest_wins_per_stream() {
+        let (reliable, _receiver) = mpsc::channel(1);
+        let outbound = Outbound {
+            reliable,
+            terminal_frames: Arc::new(Mutex::new(HashMap::new())),
+            terminal_ready: Arc::new(Notify::new()),
+        };
+        outbound.terminal("terminal-a", json!({"frame": 1}));
+        outbound.terminal("terminal-a", json!({"frame": 2}));
+        outbound.terminal("terminal-b", json!({"frame": 3}));
+
+        let pending = outbound
+            .terminal_frames
+            .lock()
+            .expect("terminal frame queue poisoned");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending["terminal-a"], json!({"frame": 2}));
+    }
+
+    #[test]
+    fn interactive_input_has_an_independent_rate_budget() {
+        let mut rate = RateState::new();
+        let input = json!({
+            "type": "stream.action",
+            "id": "input",
+            "stream_id": "terminal",
+            "action": "send_key",
+            "params": {"key": "left"},
+        });
+        let input = input.as_object().unwrap();
+        for _ in 0..TERMINAL_ACTIONS_PER_MINUTE {
+            assert!(rate.allow(input));
+        }
+        assert!(!rate.allow(input));
+
+        let request = json!({
+            "type": "request",
+            "id": "request",
+            "method": "session.snapshot",
+            "params": {},
+        });
+        assert!(rate.allow(request.as_object().unwrap()));
     }
 }

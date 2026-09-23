@@ -35,6 +35,7 @@ type Pending = {
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
+  streamId?: string;
 };
 
 type StreamState = {
@@ -138,6 +139,9 @@ export class BridgeClient extends EventTarget {
     return {
       id,
       action: (action, actionParams) => {
+        if (!this.#streams.has(id)) {
+          return Promise.reject(new BridgeError("Terminal stream is closed", "stale_stream"));
+        }
         const actionId = this.#nextId("action");
         return this.#sendPending(actionId, {
           type: "stream.action",
@@ -145,11 +149,16 @@ export class BridgeClient extends EventTarget {
           id: actionId,
           action,
           params: actionParams,
-        }, 10_000);
+        }, 10_000, id);
       },
       close: () => {
         this.#streams.delete(id);
-        this.#send({ type: "stream.close", stream_id: id });
+        this.#rejectStream(id, new BridgeError("Terminal stream is closed", "stale_stream"));
+        try {
+          this.#send({ type: "stream.close", stream_id: id });
+        } catch {
+          // Local cleanup is complete even when the socket is already closing.
+        }
       },
     };
   }
@@ -162,13 +171,13 @@ export class BridgeClient extends EventTarget {
     this.#rejectAll(new BridgeError(reason, "closed"));
   }
 
-  #sendPending(id: string, frame: JsonObject, timeoutMs: number): Promise<unknown> {
+  #sendPending(id: string, frame: JsonObject, timeoutMs: number, streamId?: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(new BridgeError("Bridge request timed out", "timeout"));
       }, timeoutMs);
-      this.#pending.set(id, { resolve, reject, timer });
+      this.#pending.set(id, { resolve, reject, timer, ...(streamId ? { streamId } : {}) });
       try {
         this.#send(frame);
       } catch (error) {
@@ -213,6 +222,7 @@ export class BridgeClient extends EventTarget {
     if (frame.type === "stream.closed") {
       const stream = this.#streams.get(frame.stream_id);
       this.#streams.delete(frame.stream_id);
+      this.#rejectStream(frame.stream_id, new BridgeError(frame.reason || "Terminal stream is closed", "stale_stream"));
       stream?.onClose(frame.reason);
       return;
     }
@@ -241,6 +251,15 @@ export class BridgeClient extends EventTarget {
     this.#pending.clear();
     for (const stream of this.#streams.values()) stream.onClose(error.message);
     this.#streams.clear();
+  }
+
+  #rejectStream(streamId: string, error: Error): void {
+    for (const [id, pending] of this.#pending) {
+      if (pending.streamId !== streamId) continue;
+      clearTimeout(pending.timer);
+      pending.reject(error);
+      this.#pending.delete(id);
+    }
   }
 
   #nextId(prefix: string): string {

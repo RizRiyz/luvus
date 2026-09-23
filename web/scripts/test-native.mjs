@@ -50,6 +50,15 @@ try {
   assert.equal(capabilities.type, "uhp_capabilities");
   assert.ok(capabilities.access.allowed_methods.includes("terminal.backend.control"));
 
+  const deviceStatus = await request(socket, "device-status", "web.devices.status", {});
+  assert.equal(deviceStatus.public_url, null);
+  const publicStatus = await request(socket, "public-url", "web.devices.set_public_url", {
+    url: "https://phone.example",
+  });
+  assert.equal(publicStatus.public_url, "https://phone.example");
+  const phonePairing = await request(socket, "phone-pairing", "web.devices.create_pairing", {});
+  assert.equal(phonePairing.url, `https://phone.example/#pair=${encodeURIComponent(phonePairing.code)}`);
+
   const snapshot = await request(socket, "snapshot", "session.snapshot", {});
   const pane = snapshot.workspaces.flatMap((workspace) => workspace.tabs)
     .flatMap((tab) => tab.panes)
@@ -87,6 +96,28 @@ try {
   }));
   assert.equal((await action).result.type, "terminal_backend_action");
   await output;
+
+  // Interactive input has its own high-rate budget. This burst crosses both
+  // former administrative limits (90 in the web bridge and 120 in UHP access)
+  // while also exercising latest-frame coalescing under output pressure.
+  const burstCount = 180;
+  const burstStarted = performance.now();
+  const burst = waitForCount(socket, (frame) => frame.type === "response"
+    && typeof frame.id === "string"
+    && frame.id.startsWith("burst-"), burstCount, 10_000);
+  for (let index = 0; index < burstCount; index += 1) {
+    socket.send(JSON.stringify({
+      type: "stream.action",
+      stream_id: "control",
+      id: `burst-${index}`,
+      action: "send_key",
+      params: { key: index % 2 === 0 ? "left" : "right" },
+    }));
+  }
+  const burstFrames = await burst;
+  const burstElapsed = performance.now() - burstStarted;
+  assert.ok(burstFrames.every((frame) => frame.result?.type === "terminal_backend_action"));
+  assert.ok(burstElapsed < 5_000, `terminal input burst took ${Math.round(burstElapsed)}ms`);
   socket.close();
 
   child.kill("SIGINT");
@@ -95,7 +126,7 @@ try {
   const status = run(["--session", session, "server", "status"], env);
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /running/);
-  process.stdout.write("native luvus web integration passed\n");
+  process.stdout.write(`native luvus web integration passed (${burstCount} inputs in ${Math.round(burstElapsed)}ms)\n`);
 } finally {
   if (child?.exitCode === null) child.kill("SIGINT");
   run(["--session", session, "server", "stop"], env, true);
@@ -160,6 +191,29 @@ function waitFor(socket, predicate, timeoutMs = 5_000) {
       if (predicate(frame)) finish(undefined, frame);
     };
     const onClose = () => finish(new Error("WebSocket closed"));
+    const finish = (error, value) => {
+      clearTimeout(timer);
+      socket.off("message", onMessage);
+      socket.off("close", onClose);
+      if (error) reject(error); else resolve(value);
+    };
+    socket.on("message", onMessage);
+    socket.on("close", onClose);
+  });
+}
+
+function waitForCount(socket, predicate, count, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const frames = [];
+    const timer = setTimeout(() => finish(new Error("WebSocket response burst timed out")), timeoutMs);
+    const onMessage = (data) => {
+      let frame;
+      try { frame = JSON.parse(data.toString()); } catch { return; }
+      if (!predicate(frame)) return;
+      frames.push(frame);
+      if (frames.length === count) finish(undefined, frames);
+    };
+    const onClose = () => finish(new Error("WebSocket closed during response burst"));
     const finish = (error, value) => {
       clearTimeout(timer);
       socket.off("message", onMessage);

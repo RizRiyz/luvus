@@ -20,6 +20,7 @@ const ACCEPT_ERROR_DELAY: Duration = Duration::from_millis(10);
 const ACCEPT_WAKE_ATTEMPTS: usize = 3;
 const MAX_CONNECTIONS: usize = 16;
 const MAX_REQUESTS_PER_MINUTE: u32 = 120;
+const MAX_TERMINAL_ACTIONS_PER_MINUTE: u32 = 3_600;
 
 pub(super) struct Gateway {
     address: SocketAddr,
@@ -64,12 +65,12 @@ struct RateWindow {
 }
 
 impl RateWindow {
-    fn allow(&mut self, now: Instant) -> bool {
+    fn allow(&mut self, now: Instant, limit: u32) -> bool {
         if now.duration_since(self.started) >= Duration::from_secs(60) {
             self.started = now;
             self.requests = 0;
         }
-        if self.requests >= MAX_REQUESTS_PER_MINUTE {
+        if self.requests >= limit {
             return false;
         }
         self.requests += 1;
@@ -305,7 +306,7 @@ fn handle_connection(mut stream: TcpStream, shared: &Shared) -> Result<()> {
         .rate
         .lock()
         .map_err(|_| anyhow!("gateway rate limiter unavailable"))?
-        .allow(Instant::now())
+        .allow(Instant::now(), MAX_REQUESTS_PER_MINUTE)
     {
         write_gateway_error(stream, id, "rate_limited")?;
         return Ok(());
@@ -597,7 +598,7 @@ struct TerminalForwarder {
 impl TerminalForwarder {
     fn spawn(
         mut local_reader: LocalFrameReader,
-        mut remote: TcpStream,
+        remote: Arc<Mutex<TcpStream>>,
         cancelled: Arc<AtomicBool>,
         expires_at: Option<u64>,
     ) -> Result<Self> {
@@ -613,7 +614,10 @@ impl TerminalForwarder {
                 {
                     match local_reader.read_frame(CANCELLATION_POLL) {
                         Ok(Some(frame)) => {
-                            if writeln!(remote, "{frame}")
+                            let Ok(mut remote) = remote.lock() else {
+                                break;
+                            };
+                            if writeln!(&mut *remote, "{frame}")
                                 .and_then(|_| remote.flush())
                                 .is_err()
                             {
@@ -671,28 +675,38 @@ fn stream_terminal(
     validate_response_id(&first, expected_id)?;
     writeln!(remote, "{first}")?;
     remote.flush()?;
+    let remote = Arc::new(Mutex::new(remote));
 
     let mut forwarder = TerminalForwarder::spawn(
         local_reader,
-        remote,
+        Arc::clone(&remote),
         Arc::clone(&shared.cancelled),
         shared.authority_expires_unix,
     )?;
 
     let mut input = RemoteFrameReader::new(remote_reader)?;
+    let mut terminal_rate = RateWindow {
+        started: Instant::now(),
+        requests: 0,
+    };
     while forwarder.is_active()
         && !shared.cancelled.load(Ordering::Acquire)
         && !authority_expired(shared)
     {
         match input.read_frame(Duration::from_millis(250)) {
             Ok(Some(frame)) if control && valid_terminal_control_frame(&frame) => {
-                if !shared
-                    .rate
-                    .lock()
-                    .map_err(|_| anyhow!("gateway rate limiter unavailable"))?
-                    .allow(Instant::now())
-                {
-                    break;
+                if !terminal_rate.allow(Instant::now(), MAX_TERMINAL_ACTIONS_PER_MINUTE) {
+                    let id = serde_json::from_str::<Value>(&frame)?["id"].clone();
+                    let response = json!({"id":id,"error":{
+                        "code":"rate_limited",
+                        "message":"private gateway terminal input limit reached"
+                    }});
+                    let mut remote = remote
+                        .lock()
+                        .map_err(|_| anyhow!("terminal output unavailable"))?;
+                    writeln!(&mut *remote, "{response}")?;
+                    remote.flush()?;
+                    continue;
                 }
                 writeln!(local, "{frame}")?;
                 local.flush()?;
@@ -1244,10 +1258,10 @@ mod tests {
             requests: 0,
         };
         for _ in 0..MAX_REQUESTS_PER_MINUTE {
-            assert!(window.allow(start));
+            assert!(window.allow(start, MAX_REQUESTS_PER_MINUTE));
         }
-        assert!(!window.allow(start));
-        assert!(window.allow(start + Duration::from_secs(60)));
+        assert!(!window.allow(start, MAX_REQUESTS_PER_MINUTE));
+        assert!(window.allow(start + Duration::from_secs(60), MAX_REQUESTS_PER_MINUTE));
     }
 
     #[test]
@@ -1381,7 +1395,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_control_stream_relays_frames_and_bounded_actions() {
+    fn terminal_control_stream_outlives_the_general_request_budget() {
         let _env = crate::persist::test_env("uhp-terminal-stream");
         let socket_path = crate::persist::ensure_config_dir().join("uhp-terminal.sock");
         let listener = crate::ipc::transport::bind(&socket_path).unwrap();
@@ -1411,19 +1425,21 @@ mod tests {
             .unwrap();
             connection.get_mut().flush().unwrap();
 
-            let action = crate::ipc::api::read_response_frame(&mut connection).unwrap();
-            let action: Value = serde_json::from_str(&action).unwrap();
-            assert_eq!(action["action"], "submit_text");
-            assert_eq!(action["params"]["text"], "echo ok");
-            writeln!(
-                connection.get_mut(),
-                "{}",
-                json!({"id":"input-1","result":{
-                    "type":"terminal_backend_action","state":"succeeded","dispatch":"queued"
-                }})
-            )
-            .unwrap();
-            connection.get_mut().flush().unwrap();
+            for index in 0..=MAX_REQUESTS_PER_MINUTE {
+                let action = crate::ipc::api::read_response_frame(&mut connection).unwrap();
+                let action: Value = serde_json::from_str(&action).unwrap();
+                assert_eq!(action["action"], "submit_text");
+                assert_eq!(action["params"]["text"], "x");
+                writeln!(
+                    connection.get_mut(),
+                    "{}",
+                    json!({"id":format!("input-{index}"),"result":{
+                        "type":"terminal_backend_action","state":"succeeded","dispatch":"queued"
+                    }})
+                )
+                .unwrap();
+                connection.get_mut().flush().unwrap();
+            }
         });
 
         let pairing = Pairing::new(Duration::from_secs(60)).unwrap();
@@ -1471,18 +1487,19 @@ mod tests {
             serde_json::from_str::<Value>(&frame).unwrap()["data"]["text"],
             "ready"
         );
-        writeln!(
-            stream,
-            "{}",
-            json!({"id":"input-1","action":"submit_text","params":{"text":"echo ok"}})
-        )
-        .unwrap();
-        stream.flush().unwrap();
-        let action = crate::ipc::api::read_response_frame(&mut reader).unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&action).unwrap()["result"]["state"],
-            "succeeded"
-        );
+        for index in 0..=MAX_REQUESTS_PER_MINUTE {
+            writeln!(
+                stream,
+                "{}",
+                json!({"id":format!("input-{index}"),"action":"submit_text","params":{"text":"x"}})
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            let action = crate::ipc::api::read_response_frame(&mut reader).unwrap();
+            let action: Value = serde_json::from_str(&action).unwrap();
+            assert_eq!(action["id"], format!("input-{index}"));
+            assert_eq!(action["result"]["state"], "succeeded");
+        }
 
         drop(stream);
         local_server.join().unwrap();
