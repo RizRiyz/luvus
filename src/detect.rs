@@ -762,6 +762,23 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![all(&["yes, proceed", "yes, don't ask again this session"])],
         ),
+        // Arc Studio's live question picker uses this navigation footer. It
+        // may remain visible beside the generic working interrupt hint, so
+        // the question must win over the working rule.
+        per(
+            "arc-studio",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["↑/↓ move", "esc to"])],
+        ),
+        per(
+            "arc-studio",
+            State::Blocked,
+            315,
+            Region::Screen,
+            vec![all(&["not logged in yet", "press enter"])],
+        ),
         // Devin's first-run workspace-trust screen is a numbered menu without
         // the generic paired enter/esc controls, worded both "…authors of this
         // directory?" and "…authors of <dir>?". Match the shared stem together
@@ -1653,6 +1670,92 @@ Would you like to proceed?
         assert_eq!(
             incidental.agent, "zsh",
             "bare muse is never trusted from pane output"
+        );
+    }
+
+    #[test]
+    fn arc_studio_identity_matches_its_cli_and_scoped_node_package() {
+        let manifests = Manifests::builtin();
+        for command in [
+            "/usr/local/bin/arc-studio",
+            "node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            r#""C:\Program Files\nodejs\node.exe" "C:\Users\Ada Lovelace\AppData\Roaming\npm\node_modules\@circle-fin\arc-studio-cli\bin\arc-studio.mjs""#,
+        ] {
+            assert_eq!(
+                manifests.agent_in_processes(&[command.into()]),
+                Some("arc-studio".into()),
+                "failed to recognize {command}"
+            );
+        }
+        assert_eq!(
+            manifests.agent_in_processes(&[
+                "node /opt/node_modules/@other/arc-studio-cli/bin/cli.mjs".into()
+            ]),
+            None,
+            "a different package must not inherit Arc Studio's identity"
+        );
+        assert_eq!(
+            classify(
+                Some("zsh"),
+                "Arc Studio can deploy a contract",
+                true,
+                false,
+                "zsh",
+                "",
+                &["zsh".into()],
+                &manifests
+            )
+            .agent,
+            "zsh",
+            "a shell printing Arc Studio prose is still a shell"
+        );
+        assert_eq!(
+            classify(
+                Some("zsh"),
+                "◆ ARC STUDIO build onchain apps · v1.1.3\nnew session",
+                false,
+                false,
+                "zsh",
+                "",
+                &[],
+                &manifests
+            )
+            .agent,
+            "arc-studio",
+            "the TUI banner identifies the agent when process scanning is unavailable"
+        );
+    }
+
+    #[test]
+    fn arc_studio_tui_state_follows_work_and_question_evidence() {
+        let manifests = Manifests::builtin();
+        let detect = |screen: &str| {
+            classify(
+                Some("zsh"),
+                screen,
+                true,
+                false,
+                "zsh",
+                "",
+                &["node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs".into()],
+                &manifests,
+            )
+            .state
+        };
+        assert_eq!(detect("Arc Studio · new session"), State::Idle);
+        assert_eq!(
+            detect("⠹ working 12s · compile\nesc to interrupt"),
+            State::Working
+        );
+        assert_eq!(
+            detect("⠹ working 12s · compile\nesc to interrupt\n↑/↓ move · enter to submit · esc to dismiss"),
+            State::Blocked
+        );
+        assert_eq!(
+            detect(
+                "You're not logged in yet. Press Enter to get the login command, or Esc to quit."
+            ),
+            State::Blocked
         );
     }
 

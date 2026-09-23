@@ -5,6 +5,7 @@ pub(crate) static BUILTINS: &[&AgentDescriptor] = &[
     &super::codex::DESCRIPTOR,
     &super::gemini::DESCRIPTOR,
     &super::antigravity::DESCRIPTOR,
+    &super::arc_studio::DESCRIPTOR,
     &super::letta::DESCRIPTOR,
     &super::aider::DESCRIPTOR,
     &super::opencode::DESCRIPTOR,
@@ -142,6 +143,7 @@ mod tests {
         assert!(aider.supports(AutomationAccess::FullAccess));
 
         assert!(find("antigravity").unwrap().automation.is_none());
+        assert!(find("arc-studio").unwrap().automation.is_none());
         assert!(find("amp").unwrap().automation.is_none());
         assert!(find("devin").unwrap().automation.is_none());
         assert!(find("letta").unwrap().automation.is_none());
@@ -224,6 +226,11 @@ mod tests {
             ("codex", &["codex"][..], &[][..]),
             ("gemini", &["gemini"][..], &[][..]),
             ("antigravity", &["antigravity-cli"][..], &["agy"][..]),
+            (
+                "arc-studio",
+                &["arc-studio", "build onchain apps ·"][..],
+                &["arc studio"][..],
+            ),
             ("letta", &["letta-code"][..], &["letta"][..]),
             ("aider", &["aider"][..], &[][..]),
             ("opencode", &["opencode", "opencode2"][..], &[][..]),

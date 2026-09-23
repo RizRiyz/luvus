@@ -4303,6 +4303,7 @@ mod tests {
             ("aider", "aider --message"),
             ("amp", "amp --execute"),
             ("antigravity", "agy -p"),
+            ("arc-studio", "arc-studio run"),
             ("claude", "claude"),
             ("codex", "codex"),
             ("copilot", "copilot --interactive"),

@@ -93,6 +93,7 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | Claude Code | ✓ | ✓ | ✓ |
 | GitHub Copilot CLI | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ |
+| Arc Studio CLI | ✓ | No | No |
 | Antigravity CLI | ✓ | ✓ | session only |
 | Letta Code | ✓ | ✓ with integration | session only |
 | opencode | ✓ | ✓ | ✓ |
