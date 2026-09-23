@@ -3156,6 +3156,11 @@ impl App {
         match key.code {
             KeyCode::Esc => self.cancel_pane_search(),
             KeyCode::Enter if editing => self.commit_pane_search(),
+            KeyCode::Char('u') if editing && super::keys::is_ctrl_chord(key.modifiers) => {
+                if let Some(search) = self.pane_search.as_mut() {
+                    search.query.clear();
+                }
+            }
             KeyCode::Backspace if editing => {
                 if let Some(search) = self.pane_search.as_mut() {
                     search.query.pop();
@@ -4965,6 +4970,14 @@ mod tests {
             .replace_input_sender_for_test(input_tx);
 
         enter_search(&mut app);
+        app.handle_event(AppEvent::Paste("discard me".into()));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.pane_search.as_ref().unwrap().query, "");
+        assert!(input_rx.try_recv().is_err(), "Ctrl-U reached the PTY");
+
         app.handle_event(AppEvent::Paste("needle".into()));
         assert_eq!(app.pane_search.as_ref().unwrap().query, "needle");
         app.handle_event(AppEvent::Key(KeyEvent::new(

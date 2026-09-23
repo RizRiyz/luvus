@@ -110,6 +110,7 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         left.push(Span::styled(query, Style::new().fg(t.text).bold()));
         left.push(Span::raw("  "));
         if search.editing {
+            left.extend(hint("Ctrl-U", cat.act_clear, t));
             left.extend(hint("Enter", cat.act_select, t));
         } else if !search.matches.is_empty() {
             left.extend(hint("n/N", cat.act_move, t));
@@ -607,6 +608,10 @@ mod tests {
         let editing = text(&app);
         assert!(editing.contains("SEARCH"), "search mode label: {editing}");
         assert!(editing.contains("/needle▏"), "query caret: {editing}");
+        assert!(
+            editing.contains("Ctrl-U clear"),
+            "editing search must hint Ctrl-U: {editing}"
+        );
         assert!(
             editing.contains("Enter select"),
             "editing search must hint Enter: {editing}"
