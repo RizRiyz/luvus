@@ -2249,7 +2249,9 @@ impl App {
                     self.press_diff_source(pane, row, side);
                     return;
                 }
-                if m.modifiers.contains(KeyModifiers::CONTROL) {
+                if m.modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                {
                     // A link under the cursor claims the press, but only
                     // provisionally: `Ctrl`+drag is the RESIZE-5 divider grab, so
                     // which gesture this was is decided by whether it moves (see
@@ -2429,7 +2431,9 @@ impl App {
                 // gesture's own affordance and what keeps this off the hot path:
                 // ordinary mouse motion never scans a grid and never takes the
                 // engine lock (the PTY reader holds that during output bursts).
-                if m.modifiers.contains(KeyModifiers::CONTROL) {
+                if m.modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                {
                     // Guarded on the cell *this* resolved for, not on `hover`:
                     // pointing at a link and only then pressing `Ctrl` is the
                     // natural gesture, and it never moves the mouse.
@@ -6639,6 +6643,14 @@ mod link_click_tests {
     }
 
     #[test]
+    fn super_click_on_a_file_path_uses_the_same_native_preview() {
+        let _env = crate::persist::test_env("link-file-super");
+        let (app, id, tabs) = click_cargo_toml(KeyModifiers::SUPER);
+        assert_eq!(app.ws().tabs.len(), tabs, "no new tab");
+        assert!(app.preview_views.contains(&id), "it is the preview pane");
+    }
+
+    #[test]
     fn osc8_file_target_overrides_a_domain_shaped_label() {
         let _env = crate::persist::test_env("link-osc8-file");
         let path = std::env::current_dir().unwrap().join("Cargo.toml");
@@ -6653,6 +6665,27 @@ mod link_click_tests {
             other => panic!("OSC 8 file target must win over its label, got {other:?}"),
         }
         assert!(app.pending_open_url.is_none());
+    }
+
+    #[test]
+    fn osc8_file_target_overrides_server_prefixed_mjs_label() {
+        let _env = crate::persist::test_env("link-osc8-mjs");
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let uri = format!("file://{}", path.display());
+        let (app, _term, at) = fixture_showing_osc8(
+            "server/scripts/reconcile-communication-deliveries.mjs",
+            &uri,
+            8,
+        );
+
+        assert!(
+            app.rendered_hyperlinks.iter().any(|link| link.uri == uri),
+            "the thin-client projection retains the authoritative OSC 8 target"
+        );
+        assert!(matches!(
+            app.link_at_screen(at.0, at.1).map(|hover| hover.target),
+            Some(LinkTarget::File { path: target, line: None }) if target == path
+        ));
     }
 
     #[test]

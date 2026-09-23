@@ -173,6 +173,81 @@ struct PaneRenderContext<'a> {
     diff_source_rects: &'a mut Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
     diff_note_rects: &'a mut Vec<(PaneId, String, Rect)>,
     preview_link_rects: &'a mut Vec<(PaneId, String, Rect)>,
+    rendered_hyperlinks: &'a mut Vec<crate::app::RenderedHyperlink>,
+}
+
+const MAX_RENDERED_HYPERLINKS: usize = 256;
+
+fn push_rendered_hyperlink(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    x: u16,
+    y: u16,
+    width: u16,
+    uri: &str,
+) {
+    if width == 0
+        || uri.len() > crate::terminal::vt::MAX_TERMINAL_HYPERLINK_URI_BYTES
+        || (crate::links::file_uri_path(uri).is_none() && !crate::platform::is_openable_url(uri))
+    {
+        return;
+    }
+    let end = x.saturating_add(width);
+    if let Some(previous) = links.last_mut().filter(|previous| {
+        previous.pane == pane && previous.y == y && previous.end == x && previous.uri == uri
+    }) {
+        previous.end = end;
+        return;
+    }
+    if links.len() < MAX_RENDERED_HYPERLINKS {
+        links.push(crate::app::RenderedHyperlink {
+            pane,
+            y,
+            start: x,
+            end,
+            uri: uri.to_string(),
+        });
+    }
+}
+
+fn clip_rendered_hyperlinks(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    cover: Rect,
+) {
+    if cover.is_empty() {
+        return;
+    }
+    let mut right_halves = Vec::new();
+    links.retain_mut(|link| {
+        if link.pane != pane
+            || link.y < cover.y
+            || link.y >= cover.bottom()
+            || link.end <= cover.x
+            || link.start >= cover.right()
+        {
+            return true;
+        }
+        if cover.x <= link.start && cover.right() >= link.end {
+            return false;
+        }
+        if cover.x <= link.start {
+            link.start = cover.right().min(link.end);
+            return link.start < link.end;
+        }
+        if cover.right() >= link.end {
+            link.end = cover.x.max(link.start);
+            return link.start < link.end;
+        }
+
+        let mut right = link.clone();
+        right.start = cover.right();
+        link.end = cover.x;
+        right_halves.push(right);
+        true
+    });
+    let remaining = MAX_RENDERED_HYPERLINKS.saturating_sub(links.len());
+    links.extend(right_halves.into_iter().take(remaining));
 }
 
 pub(super) fn draw_panes(
@@ -187,12 +262,14 @@ pub(super) fn draw_panes(
     let mut diff_source_rects = Vec::new();
     let mut diff_note_rects = Vec::new();
     let mut preview_link_rects = Vec::new();
+    let mut rendered_hyperlinks = Vec::new();
     {
         let mut context = PaneRenderContext {
             app,
             diff_source_rects: &mut diff_source_rects,
             diff_note_rects: &mut diff_note_rects,
             preview_link_rects: &mut preview_link_rects,
+            rendered_hyperlinks: &mut rendered_hyperlinks,
         };
         for (id, rect) in rects {
             if let Some(c) = draw_one_pane(f, *rect, *id, *id == focus, bordered, &mut context, t) {
@@ -203,6 +280,8 @@ pub(super) fn draw_panes(
     app.diff_source_rects = diff_source_rects;
     app.diff_note_rects = diff_note_rects;
     app.preview_link_rects = preview_link_rects;
+    rendered_hyperlinks.sort_by_key(|link| (link.y, link.start, link.pane.0));
+    app.rendered_hyperlinks = rendered_hyperlinks;
     cursor
 }
 
@@ -215,6 +294,7 @@ pub(super) fn patch_terminal_damage(
     app: &App,
     content_rects: &[(PaneId, Rect)],
     snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
+    hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
     let leaves = app.layout().leaves();
     if leaves.len() != content_rects.len()
@@ -255,6 +335,7 @@ pub(super) fn patch_terminal_damage(
                 continue;
             }
             let y = content.y + row.row;
+            hyperlinks.retain(|link| !(link.pane == id && link.y == y));
             for x in content.x..content.x.saturating_add(content.width) {
                 let cell = &mut buffer[(x, y)];
                 cell.reset();
@@ -273,6 +354,20 @@ pub(super) fn patch_terminal_damage(
                 };
                 paint_terminal_cell(buffer, content, row.row, cell.column, symbol, style);
             }
+            for hyperlink in &row.hyperlinks {
+                let start = hyperlink.start.min(content.width);
+                let end = hyperlink.end.min(content.width);
+                if start < end {
+                    push_rendered_hyperlink(
+                        hyperlinks,
+                        id,
+                        content.x + start,
+                        y,
+                        end - start,
+                        &hyperlink.uri,
+                    );
+                }
+            }
         }
 
         if id == focus {
@@ -283,6 +378,7 @@ pub(super) fn patch_terminal_damage(
     if let Some((x, y, visible)) = cursor {
         f.set_cursor_anchor(x, y, visible);
     }
+    hyperlinks.sort_by_key(|link| (link.y, link.start, link.pane.0));
     Ok(())
 }
 
@@ -417,7 +513,7 @@ fn draw_one_pane(
             let mut pi_caret: Option<(u16, u16)> = None;
             {
                 let buf = f.buffer_mut();
-                engine.for_each_cell(&mut |row, col, sym, cell| {
+                engine.for_each_linked_cell(&mut |row, col, sym, cell, hyperlink| {
                     if row >= content.height || col >= content.width {
                         return;
                     }
@@ -469,6 +565,16 @@ fn draw_one_pane(
                             .add_modifier(ratatui::style::Modifier::UNDERLINED);
                     }
                     paint_terminal_cell(buf, content, row, col, sym, style);
+                    if let Some(uri) = hyperlink {
+                        push_rendered_hyperlink(
+                            context.rendered_hyperlinks,
+                            id,
+                            content.x + col,
+                            content.y + row,
+                            crate::ui::display_width(sym).max(1) as u16,
+                            uri,
+                        );
+                    }
                 });
             }
             scrolled = engine.scroll_offset();
@@ -529,6 +635,9 @@ fn draw_one_pane(
                 ))),
                 badge,
             );
+            // The badge replaces terminal cells, so those cells must not keep
+            // the hidden OSC 8 target emitted by the PTY underneath it.
+            clip_rendered_hyperlinks(context.rendered_hyperlinks, id, badge);
         }
     }
     cursor_pos
@@ -731,5 +840,49 @@ mod tests {
         assert_eq!(pick_bottom_left_caret(Some((3, 2)), (5, 18)), (5, 18));
         assert_eq!(pick_bottom_left_caret(Some((5, 18)), (5, 4)), (5, 4));
         assert_eq!(pick_bottom_left_caret(Some((5, 4)), (4, 0)), (5, 4));
+    }
+
+    #[test]
+    fn rendered_hyperlinks_reject_oversized_uris_before_frame_projection() {
+        let mut links = Vec::new();
+        let uri = format!(
+            "https://example.com/{}",
+            "a".repeat(crate::terminal::vt::MAX_TERMINAL_HYPERLINK_URI_BYTES)
+        );
+        push_rendered_hyperlink(&mut links, PaneId(1), 0, 0, 4, &uri);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn pane_chrome_clips_covered_hyperlink_cells() {
+        let pane = PaneId(1);
+        let other = PaneId(2);
+        let uri = "file:///repo/server/task.mjs".to_string();
+        let mut links = vec![
+            crate::app::RenderedHyperlink {
+                pane,
+                y: 3,
+                start: 4,
+                end: 18,
+                uri: uri.clone(),
+            },
+            crate::app::RenderedHyperlink {
+                pane: other,
+                y: 3,
+                start: 4,
+                end: 18,
+                uri,
+            },
+        ];
+
+        clip_rendered_hyperlinks(&mut links, pane, Rect::new(12, 3, 6, 1));
+
+        assert_eq!(links.len(), 2);
+        let clipped = links.iter().find(|link| link.pane == pane).unwrap();
+        assert_eq!((clipped.start, clipped.end), (4, 12));
+        assert_eq!(
+            links.iter().find(|link| link.pane == other).unwrap().end,
+            18
+        );
     }
 }
