@@ -1340,6 +1340,36 @@ fn snapshot_alias_excludes_native_views_and_handles_no_workspace() {
 }
 
 #[test]
+fn runtime_snapshot_projects_agent_session_title_without_using_the_alias() {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    {
+        let status = app.status.get_mut(&pane).unwrap();
+        status.agent = "pi".into();
+        status.agent_session = Some(crate::app::AgentSession {
+            agent: "pi".into(),
+            session_id: "live-1".into(),
+        });
+    }
+    app.agent_names.insert("web".into(), pane);
+    assert!(app.set_agent_row_title_for_session(
+        "pi".into(),
+        "live-1".into(),
+        Some("Build the web dashboard".into()),
+    ));
+
+    let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+    let row = &snapshot["workspaces"][0]["tabs"][0]["panes"][0];
+    assert_eq!(row["agent_name"], "web");
+    assert_eq!(row["agent_session_title"], "Build the web dashboard");
+
+    assert!(app.set_agent_row_title_for_session("pi".into(), "live-1".into(), None));
+    let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+    assert!(snapshot["workspaces"][0]["tabs"][0]["panes"][0]["agent_session_title"].is_null());
+}
+
+#[test]
 fn runtime_snapshot_is_global_fenced_and_processes_hide_arguments() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();

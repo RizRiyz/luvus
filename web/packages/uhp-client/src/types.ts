@@ -10,6 +10,7 @@ export interface PaneSnapshot {
   agent_name?: string | null;
   agent?: string | null;
   agent_status?: "idle" | "working" | "blocked" | "done" | null;
+  agent_session_title?: string | null;
 }
 
 export interface TabSnapshot {
