@@ -482,7 +482,7 @@ export class WebApp {
           on: { click: () => this.#openTerminal(snapshot, pane) },
         },
         element("div", { className: "agent-copy" },
-          element("small", { className: "agent-context", text: `${displayText(pane.agent, displayText(pane.agent_name, "Agent"))} · ${workspace}` }),
+          element("small", { className: "agent-context", text: `${displayText(pane.agent_name, displayText(pane.agent, "Agent"))} · ${workspace}` }),
           element("strong", { className: `agent-session-title${displayText(pane.agent_session_title, "") ? "" : " absent"}`, text: displayText(pane.agent_session_title, "Untitled session") }),
         ),
         element("span", { className: "agent-state", text: displayText(pane.agent_status, "unknown") }),

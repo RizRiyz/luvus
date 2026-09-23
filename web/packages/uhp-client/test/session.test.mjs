@@ -8,6 +8,8 @@ class FakeBridge extends EventTarget {
   streamParams = [];
   switches = [];
   switchTimeouts = [];
+  snapshotRequests = 0;
+  onEvent;
 
   async connect() {}
 
@@ -22,6 +24,7 @@ class FakeBridge extends EventTarget {
       };
     }
     if (method === "session.snapshot") {
+      this.snapshotRequests += 1;
       return {
         type: "session_snapshot",
         session: this.sessionName,
@@ -44,10 +47,16 @@ class FakeBridge extends EventTarget {
     throw new Error(`unexpected method: ${method}`);
   }
 
-  async openStream(method, params) {
+  async openStream(method, params, onEvent) {
     assert.equal(method, "events.subscribe");
     this.streamParams.push(params);
+    this.onEvent = onEvent;
     return { id: "events", action: async () => ({}), close() {} };
+  }
+
+  emitEvent(event) {
+    this.sequence += 1;
+    this.onEvent({ event, sequence: this.sequence, data: {} });
   }
 
   close() {}
@@ -94,5 +103,21 @@ test("session switching replaces the upstream generation and takes a fresh snaps
   assert.deepEqual(bridge.switches, ["review"]);
   assert.deepEqual(bridge.switchTimeouts, [120_000]);
   assert.deepEqual(bridge.streamParams, [{}, {}]);
+  session.stop();
+});
+
+test("agent title events refresh the snapshot without refreshing on terminal output", async () => {
+  const { LiveSession } = await import("../dist/index.js");
+  const bridge = new FakeBridge();
+  const session = new LiveSession(bridge);
+  await session.start();
+
+  bridge.emitEvent("terminal.output_ready");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(bridge.snapshotRequests, 1);
+
+  bridge.emitEvent("agent.title_changed");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(bridge.snapshotRequests, 2);
   session.stop();
 });

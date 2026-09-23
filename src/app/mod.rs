@@ -4780,12 +4780,26 @@ impl App {
     }
 
     pub(crate) fn hidden_title_changed(&self, id: PaneId) -> bool {
-        self.config.layout.agent_title
-            && self.is_agent_pane(id)
-            && self
+        let changed = self.agent_session_title_changed(id);
+        self.config.layout.agent_title && changed
+    }
+
+    /// Emit a snapshot refresh only when an agent's OSC title generation moves.
+    pub(crate) fn agent_session_title_changed(&self, id: PaneId) -> bool {
+        if !self.is_agent_pane(id)
+            || !self
                 .panes
                 .get(&id)
                 .is_some_and(|pane| pane.take_title_change())
+        {
+            return false;
+        }
+        crate::ipc::api::publish_event(
+            &self.events,
+            "agent.title_changed",
+            json!({"pane": id.0.to_string()}),
+        );
+        true
     }
 
     /// Whether any PTY reader is currently coalescing an output notification.
@@ -7693,8 +7707,12 @@ impl App {
             sessions.retain(|_, title| title.owner.as_deref() != Some(owner));
             !sessions.is_empty()
         });
-        pane_count != self.agent_title_panes.len()
-            || session_count != agent_session_title_count(&self.agent_title_sessions)
+        let changed = pane_count != self.agent_title_panes.len()
+            || session_count != agent_session_title_count(&self.agent_title_sessions);
+        if changed {
+            crate::ipc::api::publish_event(&self.events, "agent.title_changed", json!({}));
+        }
+        changed
     }
 
     pub(crate) fn agent_row_title_for_session(

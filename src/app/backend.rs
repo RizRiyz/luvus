@@ -89,6 +89,7 @@ impl App {
     }
 
     pub(super) fn backend_output_changed(&mut self, pane_id: PaneId) {
+        self.agent_session_title_changed(pane_id);
         self.check_backend_revision_waits(pane_id);
         let Some(revision) = self.panes.get(&pane_id).map(Pane::content_revision) else {
             return;
@@ -1605,6 +1606,49 @@ mod tests {
         let events = backend_events_after(&app, floor, "terminal.output_ready");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["data"]["content_revision"], 2);
+    }
+
+    #[test]
+    fn agent_osc_title_change_publishes_one_structural_event() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+
+        let _env = crate::persist::test_env("backend-agent-title-event");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "pi".into();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.config.layout.agent_title = false;
+        let floor = crate::ipc::api::current_sequence(&app.events);
+
+        engine.lock().unwrap().advance(b"\x1b]2;Reviewing\x07");
+        app.backend_output_changed(pane);
+        let events = backend_events_after(&app, floor, "agent.title_changed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["data"]["pane"], pane.0.to_string());
+
+        app.backend_output_changed(pane);
+        assert_eq!(
+            backend_events_after(&app, floor, "agent.title_changed").len(),
+            1
+        );
+
+        engine.lock().unwrap().advance(b"\x1b]2;Done\x07");
+        app.backend_output_changed(pane);
+        assert_eq!(
+            backend_events_after(&app, floor, "agent.title_changed").len(),
+            2
+        );
     }
 
     fn assert_capture_succeeds(app: &mut App, mut params: Value) {
