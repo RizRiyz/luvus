@@ -246,11 +246,7 @@ mod tests {
             ("codex", &["codex"][..], &[][..]),
             ("gemini", &["gemini"][..], &[][..]),
             ("antigravity", &["antigravity-cli"][..], &["agy"][..]),
-            (
-                "arc-studio",
-                &["arc-studio", "build onchain apps ·"][..],
-                &["arc studio"][..],
-            ),
+            ("arc-studio", &["arc-studio"][..], &["arc studio"][..]),
             ("letta", &["letta-code"][..], &["letta"][..]),
             ("aider", &["aider"][..], &[][..]),
             ("opencode", &["opencode", "opencode2"][..], &[][..]),

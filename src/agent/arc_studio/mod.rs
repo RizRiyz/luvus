@@ -14,7 +14,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         // The TUI's footer does not print the executable name. Screen-text
         // fallback requires the full product-name-and-slogan banner in detect.rs;
         // the exact executable and package remain primary evidence.
-        distinct: &["arc-studio", "build onchain apps ·"],
+        distinct: &["arc-studio"],
         ambiguous: &["arc studio"],
         binary_matcher: None,
         interpreter_packages: &["@circle-fin/arc-studio-cli"],

@@ -1742,6 +1742,21 @@ Would you like to proceed?
         }
         assert_eq!(
             classify(
+                Some("build onchain apps ·"),
+                "",
+                false,
+                false,
+                "zsh",
+                "",
+                &[],
+                &manifests
+            )
+            .agent,
+            "zsh",
+            "the slogan alone in an OSC title is not Arc Studio identity"
+        );
+        assert_eq!(
+            classify(
                 Some("zsh"),
                 "◆ ARC STUDIO build onchain apps · v1.1.3\nnew session",
                 false,
