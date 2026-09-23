@@ -124,13 +124,24 @@ so `w` and `e` behave like vim's `W` and `E`:
 | arrows or `h`/`j`/`k`/`l` | character and line movement |
 | `w` / `e` / `B` | next word start / word end / previous word start |
 | `Space` or `f` / `b` | page down / up |
-| `Ctrl+D` / `Ctrl+U` | half a page down / up |
+| `Ctrl+D` / `Ctrl+U` | half a page down / up when search is closed |
+| `/` | search retained output from the copy cursor |
 | `g` / `G` | oldest / newest retained row |
 | `1`–`9` then a motion | repeat it, so `12j` moves twelve rows |
 | `N` then `g` or `G` | jump to retained row `N`, like vim's `NG` |
 | `v` | reset the selection anchor at the cursor |
 | `y` or Enter | copy and return to live output |
 | `q` or Esc | cancel and restore the viewport where copy mode began |
+
+Copy mode's `/` search uses the same exact, case-insensitive matching and
+word-level highlights as SCROLL search. Press **Enter** to commit and move the
+copy cursor to the first match at or after its current position; the selection
+anchor stays unchanged. Use **`n`** / **`N`** to move between matches and
+**`Ctrl-I`** to toggle case sensitivity. While SEARCH is active, **`Ctrl-U`**
+clears the query and returns to editing instead of moving half a page. **Esc**
+clears SEARCH and returns to COPY; press **Esc** again to cancel COPY and restore
+its entry viewport. After committing a search, **`y`** or **Enter** copies the
+selection and returns to live output.
 
 A typed count shows in the status bar until a motion consumes it. `0` only joins
 a count already being typed — on its own it stays "first column". Counts are
