@@ -15,8 +15,16 @@ use std::sync::Arc;
 impl App {
     /// Modal workflows take input precedence over the persistent composer.
     pub(crate) fn command_center_accepts_input(&self) -> bool {
-        self.mode == Mode::Normal
-            && self.bar.overflow.is_none()
+        self.mode == Mode::Normal && self.command_center_overlays_clear()
+    }
+
+    /// A strip click may reclaim focus while a prefix shortcut is pending.
+    pub(crate) fn command_center_accepts_mouse_focus(&self) -> bool {
+        matches!(self.mode, Mode::Normal | Mode::Prefix) && self.command_center_overlays_clear()
+    }
+
+    fn command_center_overlays_clear(&self) -> bool {
+        self.bar.overflow.is_none()
             && self.cmd_inspect.is_none()
             && !self.help_open
             && !self.changelog_open

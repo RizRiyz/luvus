@@ -1338,7 +1338,7 @@ impl App {
         let kind = m.kind;
         // The strip is persistent, not modal. Its own hitbox focuses editing;
         // clicks outside hand the event to normal tab/sidebar/pane hit testing.
-        if self.command_center_accepts_input() {
+        if self.command_center_accepts_mouse_focus() {
             if let Some(center) = self.command_center.as_mut() {
                 let inside = self.command_center_area.is_some_and(|rect| {
                     m.column >= rect.x
@@ -1348,8 +1348,8 @@ impl App {
                 });
                 if inside {
                     if matches!(kind, MouseEventKind::Down(_)) {
-                        center.focused = true;
                         self.mode = Mode::Normal;
+                        center.focused = true;
                         return true;
                     }
                     return false;

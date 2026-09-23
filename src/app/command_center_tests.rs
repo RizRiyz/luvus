@@ -494,6 +494,43 @@ fn clicking_the_strip_restores_editing_without_blocking_pane_paste() {
 }
 
 #[test]
+fn clicking_the_strip_in_prefix_mode_resumes_editing() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let _env = crate::persist::test_env("command-center-prefix-click");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.new_tab();
+    app.switch_tab(0);
+    app.open_command_center();
+    app.command_center_area = Some(Rect::new(0, 20, 80, 4));
+    let draft = app.command_center.as_ref().unwrap().draft.clone();
+
+    app.handle_event(AppEvent::Key(app.prefix.key_event()));
+    assert_eq!(app.mode, Mode::Prefix);
+    assert!(!app.command_center.as_ref().unwrap().focused);
+
+    app.handle_event(AppEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row: 21,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.command_center.as_ref().unwrap().focused);
+
+    app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('n'),
+        KeyModifiers::NONE,
+    )));
+    assert_eq!(
+        app.command_center.as_ref().unwrap().draft,
+        format!("{draft}n")
+    );
+    assert_eq!(app.ws().active_tab, 0);
+}
+
+#[test]
 fn clicking_another_tab_works_while_the_strip_stays_open() {
     use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
