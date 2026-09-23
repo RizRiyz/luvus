@@ -5,6 +5,19 @@ use super::*;
 use std::sync::Arc;
 
 impl App {
+    /// Retain cached processes for lifecycle recovery, but never let an
+    /// unavailable scan's stale snapshot veto current PTY screen evidence.
+    pub(crate) fn running_for_detection(&self, id: PaneId) -> &[String] {
+        if self.proc_scan_unavailable {
+            &[]
+        } else {
+            self.proc_commands
+                .get(&id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        }
+    }
+
     /// Recover a stale persisted selection before any periodic work indexes it.
     ///
     /// Workspace and tab mutations normally keep these indices valid. A restored
@@ -397,6 +410,7 @@ impl App {
     }
 
     pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
+        self.runtime_clients_attached = clients_attached;
         let repaired_location = self.repair_active_location();
         self.schedule_config_save(now);
         self.schedule_automation_save(now);
@@ -572,11 +586,7 @@ impl App {
                     }
                 })
                 .unwrap_or_default();
-            let running_for_detection = self
-                .proc_commands
-                .get(&id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let running_for_detection = self.running_for_detection(id);
             let detection_rows =
                 detect::screen_rows(&known_agent, running_for_detection, &self.manifests);
             let non_empty_rows = detect::screen_uses_non_empty_rows(
@@ -666,11 +676,7 @@ impl App {
             // across frames where the agent's UI doesn't show its own name.
             let known = known_agent;
             // Ground truth for identity, when the last scan could see this pane.
-            let running = self
-                .proc_commands
-                .get(&id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let running = self.running_for_detection(id);
             let det = match report.as_ref() {
                 Some(report) => detect::Detection {
                     state: report.state,

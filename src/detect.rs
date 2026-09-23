@@ -229,6 +229,17 @@ pub struct Manifests {
     agents: Vec<AgentIdent>,
 }
 
+/// Resolve a custom launch argv using the same built-in binary and interpreter
+/// package identity rules as live process detection, without loading user
+/// manifests or scanning processes.
+pub(crate) fn builtin_agent_in_argv(argv: &[String]) -> Option<String> {
+    Manifests {
+        rules: Vec::new(),
+        agents: builtin_agents(),
+    }
+    .agent_in_argv(argv)
+}
+
 impl Manifests {
     /// Just the compiled-in defaults (test helper; production uses `load`).
     #[cfg(test)]
@@ -1234,7 +1245,16 @@ impl Manifests {
     fn agent_in_process_command(&self, cmd: &str) -> Option<String> {
         let low = cmd.to_lowercase();
         let tokens = Self::command_tokens(&low);
-        let tokens = unwrap_leading_env(&tokens);
+        self.agent_in_lowercase_argv(&tokens)
+    }
+
+    pub(crate) fn agent_in_argv(&self, argv: &[String]) -> Option<String> {
+        let lowercase: Vec<String> = argv.iter().map(|arg| arg.to_lowercase()).collect();
+        self.agent_in_lowercase_argv(&lowercase)
+    }
+
+    fn agent_in_lowercase_argv(&self, argv: &[String]) -> Option<String> {
+        let tokens = unwrap_leading_env(argv);
         let (first, rest) = tokens.split_first()?;
         let first = binary_name(first);
         if let Some(a) = self.match_binary(first) {

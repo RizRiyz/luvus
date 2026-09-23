@@ -222,8 +222,8 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
     if argv.is_empty() || argv[0].trim().is_empty() {
         return Err("agent command cannot be empty".to_string());
     }
-    // Custom commands may add flags or use an absolute path, but a known
-    // remote-only agent must not become eligible for a local task that way.
+    // Keep the CLI shim handling for direct commands, and use the same
+    // interpreter-package rules as process detection for wrapped agents.
     let executable = argv[0].rsplit(['/', '\\']).next().unwrap_or(&argv[0]);
     let executable = executable.to_ascii_lowercase();
     let executable = executable
@@ -231,7 +231,11 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
         .or_else(|| executable.strip_suffix(".cmd"))
         .or_else(|| executable.strip_suffix(".bat"))
         .unwrap_or(&executable);
-    if let Some(descriptor) = crate::agent::registry::find(executable) {
+    let descriptor = crate::agent::registry::find(executable).or_else(|| {
+        crate::detect::builtin_agent_in_argv(&argv)
+            .and_then(|agent| crate::agent::registry::find(&agent))
+    });
+    if let Some(descriptor) = descriptor {
         if !crate::agent::registry::supports_local_task(descriptor) {
             return Err(format!(
                 "{agent} cannot work in a local ORCH task workspace"
@@ -289,6 +293,9 @@ mod tests {
             "arc-studio --continue",
             "/usr/local/bin/arc-studio --continue",
             r#""C:\Program Files\nodejs\arc-studio.cmd" --continue"#,
+            "node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "node --require helper /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            r#""C:\Program Files\nodejs\node.exe" "C:\Users\Ada\node_modules\@circle-fin\arc-studio-cli\bin\arc-studio.mjs""#,
         ] {
             assert!(validate_agent_command(command).is_err(), "{command}");
             assert!(launch(command, "briefing", "t1").is_err(), "{command}");
@@ -296,6 +303,11 @@ mod tests {
         assert!(validate_agent_command("codex").is_ok());
         assert!(validate_agent_command("codex --model o3").is_ok());
         assert!(validate_agent_command("custom-agent --flag").is_ok());
+        assert!(
+            validate_agent_command("node /opt/node_modules/@other/arc-studio-cli/bin/cli.mjs")
+                .is_ok()
+        );
+        assert!(validate_agent_command("node app.js --example arc-studio").is_ok());
     }
 
     #[cfg(unix)]
