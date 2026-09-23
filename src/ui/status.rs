@@ -624,15 +624,11 @@ mod tests {
         app.pane_search.as_mut().unwrap().matches = vec![
             crate::app::PaneSearchMatch {
                 row: 0,
-                offset: 1,
-                above: 1,
                 col: 0,
                 width: 6,
             },
             crate::app::PaneSearchMatch {
                 row: 2,
-                offset: 3,
-                above: 0,
                 col: 0,
                 width: 6,
             },

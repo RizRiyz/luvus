@@ -3080,17 +3080,10 @@ impl App {
         }
         let mut matches = Vec::new();
         if let Some(pane) = self.panes.get(&pane_id) {
-            pane.for_each_retained_row(&mut |row, history, row_count, line| {
-                let Some((col, width)) = super::search::match_display_span(line, &query) else {
-                    return;
-                };
-                matches.push(super::search::PaneSearchMatch {
-                    row,
-                    offset: history.saturating_sub(row),
-                    above: row_count.saturating_sub(1).saturating_sub(row),
-                    col,
-                    width,
-                });
+            pane.for_each_retained_row(&mut |row, _history, _row_count, line| {
+                for (col, width) in super::search::match_display_spans(line, &query) {
+                    matches.push(super::search::PaneSearchMatch { row, col, width });
+                }
             });
         }
         let viewport_top = self
@@ -3115,21 +3108,18 @@ impl App {
 
     fn reveal_current_pane_search_match(&mut self) {
         let target = self.pane_search.as_ref().and_then(|search| {
-            search.matches.get(search.current).map(|search_match| {
-                (
-                    search.pane,
-                    search_match.offset,
-                    search_match.above,
-                    (
-                        search_match.col.min(u16::MAX as usize) as u16,
-                        search_match.width.min(u16::MAX as usize) as u16,
-                    ),
-                )
-            })
+            search
+                .matches
+                .get(search.current)
+                .map(|search_match| (search.pane, search_match.row))
         });
-        if let Some((pane, offset, above, span)) = target {
-            self.reveal_output_position(pane, offset, above, Some(span));
+        if let Some((pane_id, row)) = target {
+            if let Some(pane) = self.panes.get(&pane_id) {
+                let history = pane.scroll_state().1;
+                pane.scroll_to(history.saturating_sub(row));
+            }
         }
+        self.search_flash = None;
     }
 
     fn step_pane_search(&mut self, forward: bool) {
@@ -4889,11 +4879,6 @@ mod tests {
         let search = app.pane_search.as_ref().unwrap();
         assert_eq!(search.pane, first);
         assert_eq!(search.matches.len(), 1, "other pane output is excluded");
-        assert_eq!(
-            (search.matches[0].col, search.matches[0].width),
-            (6, 6),
-            "the hit is the first pane's needle, not the sibling"
-        );
 
         app.layout_mut().focus = second;
         app.handle_event(AppEvent::Key(plain('x')));
@@ -4907,7 +4892,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
-        add_scrollback(&app, pane, &["hit alpha", "skip", "hit beta"]);
+        add_scrollback(&app, pane, &["hit hit", "skip", "hit beta"]);
         enter_search(&mut app);
         for character in "HIT".chars() {
             app.handle_event(AppEvent::Key(plain(character)));
@@ -4916,14 +4901,18 @@ mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         )));
-        assert_eq!(app.pane_search.as_ref().unwrap().matches.len(), 2);
+        assert_eq!(app.pane_search.as_ref().unwrap().matches.len(), 3);
         let first = app.pane_search.as_ref().unwrap().current;
         app.handle_event(AppEvent::Key(plain('N')));
-        assert_eq!(app.pane_search.as_ref().unwrap().current, (first + 1) % 2);
+        assert_eq!(app.pane_search.as_ref().unwrap().current, (first + 2) % 3);
         app.handle_event(AppEvent::Key(plain('n')));
         assert_eq!(app.pane_search.as_ref().unwrap().current, first);
         app.handle_event(AppEvent::Key(plain('n')));
-        assert_eq!(app.pane_search.as_ref().unwrap().current, (first + 1) % 2);
+        assert_eq!(app.pane_search.as_ref().unwrap().current, (first + 1) % 3);
+        app.handle_event(AppEvent::Key(plain('n')));
+        assert_eq!(app.pane_search.as_ref().unwrap().current, (first + 2) % 3);
+        app.handle_event(AppEvent::Key(plain('n')));
+        assert_eq!(app.pane_search.as_ref().unwrap().current, first);
     }
 
     #[test]
@@ -4993,7 +4982,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_search_flash_spans_the_matched_word() {
+    fn pane_search_word_highlight_does_not_use_global_flash() {
         let _env = crate::persist::test_env("pane-search-word-span");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
@@ -5009,12 +4998,24 @@ mod tests {
             KeyCode::Enter,
             KeyModifiers::NONE,
         )));
-        let hit = &app.pane_search.as_ref().unwrap().matches[0];
+        let hit = app.pane_search.as_ref().unwrap().matches[0].clone();
         assert_eq!((hit.col, hit.width), (6, 6));
+        assert!(
+            app.search_flash.is_none(),
+            "pane search highlighting must not expire with the global finder flash"
+        );
+        if let Some(pane) = app.panes.get(&pane) {
+            let mut engine = pane.engine.lock().unwrap();
+            for index in 0..3 {
+                engine.advance(format!("new output {index}\r\n").as_bytes());
+            }
+        }
+        app.handle_event(AppEvent::Key(plain('n')));
+        let (offset, history) = app.panes.get(&pane).unwrap().scroll_state();
         assert_eq!(
-            app.search_flash.as_ref().and_then(|flash| flash.span),
-            Some((6, 6)),
-            "the landed-row flash must mark the selected word"
+            offset,
+            history.saturating_sub(hit.row),
+            "navigation recomputes its offset after new output"
         );
     }
 

@@ -496,12 +496,12 @@ fn draw_one_pane(
         .search_flash
         .as_ref()
         .filter(|fl| fl.pane == id)
-        .map(|fl| (fl.row, fl.scroll, fl.span));
-    let pane_query = app
+        .map(|fl| (fl.row, fl.scroll));
+    let pane_search = app
         .pane_search
         .as_ref()
-        .filter(|search| search.pane == id && !search.editing && !search.query.is_empty())
-        .map(|search| search.query.clone());
+        .filter(|search| search.pane == id && !search.editing && !search.query.is_empty());
+    let mut retained_top = 0usize;
     let mut scrolled = 0usize;
     let agent = app.status.get(&id).map(|s| s.agent.as_str()).unwrap_or("");
     let is_codex = agent == "codex";
@@ -582,6 +582,7 @@ fn draw_one_pane(
                     }
                 });
             }
+            retained_top = engine.history_len().saturating_sub(engine.scroll_offset());
             scrolled = engine.scroll_offset();
             if is_codex {
                 composer_region = engine.codex_composer_region();
@@ -609,27 +610,12 @@ fn draw_one_pane(
         );
     }
 
-    // Pane-local search highlights the matched word from the painted cells so
-    // columns stay aligned with wide glyphs. The current hit uses accent; other
-    // visible hits use amber. Global finder jumps without a query keep the row band.
-    if let Some(query) = pane_query.as_deref() {
-        let current_y = flash
-            .filter(|(fr, fscroll, _)| *fr < content.height && scrolled == *fscroll)
-            .map(|(fr, _, _)| content.y + fr);
-        let buf = f.buffer_mut();
-        for vis in 0..content.height {
-            let y = content.y + vis;
-            highlight_query_on_row(
-                buf,
-                y,
-                content.x,
-                content.right(),
-                query,
-                current_y == Some(y),
-                t,
-            );
-        }
-    } else if let Some((fr, fscroll, _)) = flash {
+    // Pane-local search uses retained-row and display-cell coordinates captured
+    // by the committed scan. The current hit uses accent; other visible hits use
+    // amber. Global finder jumps keep their existing transient row band.
+    if let Some(search) = pane_search {
+        draw_pane_search_matches(f.buffer_mut(), content, retained_top, search, t);
+    } else if let Some((fr, fscroll)) = flash {
         if fr < content.height && scrolled == fscroll {
             let y = content.y + fr;
             let buf = f.buffer_mut();
@@ -676,47 +662,36 @@ fn pane_ime_cursor(content: Rect, cur: crate::terminal::vt::Cursor) -> Option<(u
     Some((content.x + cur.x, content.y + cur.y, cur.visible))
 }
 
-fn highlight_query_on_row(
+fn draw_pane_search_matches(
     buf: &mut ratatui::buffer::Buffer,
-    y: u16,
-    x0: u16,
-    x1: u16,
-    query: &str,
-    current: bool,
+    content: Rect,
+    retained_top: usize,
+    search: &crate::app::PaneSearch,
     t: &Theme,
 ) {
-    let needle: Vec<char> = query.chars().collect();
-    if needle.is_empty() {
-        return;
-    }
-    let mut cells: Vec<(u16, char)> = Vec::new();
-    for x in x0..x1 {
-        let Some(cell) = buf.cell((x, y)) else {
+    for (index, search_match) in search.matches.iter().enumerate() {
+        let Some(screen_row) = search_match.row.checked_sub(retained_top) else {
             continue;
         };
-        let symbol = cell.symbol();
-        if symbol.is_empty() {
+        if screen_row >= usize::from(content.height) {
             continue;
         }
-        for ch in symbol.chars() {
-            cells.push((x, ch));
-        }
-    }
-    if cells.len() < needle.len() {
-        return;
-    }
-    let background = if current { t.accent } else { t.amber };
-    for start in 0..=cells.len() - needle.len() {
-        if cells[start..start + needle.len()]
-            .iter()
-            .zip(needle.iter())
-            .all(|((_, hay), query_ch)| hay.to_lowercase().eq(query_ch.to_lowercase()))
-        {
-            for (x, _) in &cells[start..start + needle.len()] {
-                if let Some(cell) = buf.cell_mut((*x, y)) {
-                    cell.set_bg(background);
-                    cell.set_fg(t.base);
-                }
+        let start = content
+            .x
+            .saturating_add(search_match.col.min(u16::MAX as usize) as u16);
+        let end = start
+            .saturating_add(search_match.width.min(u16::MAX as usize) as u16)
+            .min(content.right());
+        let background = if index == search.current {
+            t.accent
+        } else {
+            t.amber
+        };
+        let y = content.y + screen_row as u16;
+        for x in start..end {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_bg(background);
+                cell.set_fg(t.base);
             }
         }
     }
@@ -941,9 +916,7 @@ mod tests {
                 uri,
             },
         ];
-
         clip_rendered_hyperlinks(&mut links, pane, Rect::new(12, 3, 6, 1));
-
         assert_eq!(links.len(), 2);
         let clipped = links.iter().find(|link| link.pane == pane).unwrap();
         assert_eq!((clipped.start, clipped.end), (4, 12));
@@ -954,18 +927,36 @@ mod tests {
     }
 
     #[test]
-    fn pane_search_highlights_the_matched_word_not_the_whole_row() {
+    fn pane_search_highlights_words_by_retained_row() {
         let t = Theme::noir();
-        let area = Rect::new(0, 0, 20, 1);
+        let area = Rect::new(0, 0, 20, 2);
         let mut buf = ratatui::buffer::Buffer::empty(area);
-        for (column, ch) in "hello Needle world".chars().enumerate() {
-            buf[(column as u16, 0)].set_symbol(&ch.to_string());
-        }
-        highlight_query_on_row(&mut buf, 0, 0, 20, "needle", true, &t);
-        assert_eq!(buf[(5, 0)].bg, ratatui::style::Color::Reset);
-        assert_eq!(buf[(6, 0)].bg, t.accent);
-        assert_eq!(buf[(11, 0)].bg, t.accent);
-        assert_eq!(buf[(12, 0)].bg, ratatui::style::Color::Reset);
-        assert_eq!(buf[(6, 0)].fg, t.base);
+        let search = crate::app::PaneSearch {
+            pane: PaneId(1),
+            query: "needle".into(),
+            editing: false,
+            matches: vec![
+                crate::app::PaneSearchMatch {
+                    row: 10,
+                    col: 1,
+                    width: 3,
+                },
+                crate::app::PaneSearchMatch {
+                    row: 11,
+                    col: 6,
+                    width: 6,
+                },
+            ],
+            current: 1,
+            saved_scroll: 0,
+        };
+        draw_pane_search_matches(&mut buf, area, 10, &search, &t);
+        assert_eq!(buf[(0, 0)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(1, 0)].bg, t.amber);
+        assert_eq!(buf[(3, 0)].bg, t.amber);
+        assert_eq!(buf[(6, 1)].bg, t.accent);
+        assert_eq!(buf[(11, 1)].bg, t.accent);
+        assert_eq!(buf[(12, 1)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(6, 1)].fg, t.base);
     }
 }
