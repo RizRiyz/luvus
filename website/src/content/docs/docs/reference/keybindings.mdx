@@ -111,8 +111,9 @@ Luvus home. A plain `/` while [keyboard scroll mode](/docs/guides/scrollback/)
 is active instead searches retained output only in that exact PTY pane. This
 pane-local binding does not replace or remap the global finder. `Ctrl-I`
 toggles case sensitivity; sensitive mode adds `Aa` after the query, while the
-default insensitive mode stays unmarked. While entering the pane-local query,
-`Ctrl-U` clears it without leaving search.
+default insensitive mode stays unmarked. While entering or after committing the
+pane-local query, `Ctrl-U` clears it and returns to editing without leaving
+search or moving the viewport.
 
 The global finder ranks named sessions,
 workspaces, tabs, panes, agents, file paths, and retained pane output. Use

@@ -113,8 +113,8 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         }
         left.push(Span::raw("  "));
         left.extend(hint("Ctrl-I", cat.act_case, t));
+        left.extend(hint("Ctrl-U", cat.act_clear, t));
         if search.editing {
-            left.extend(hint("Ctrl-U", cat.act_clear, t));
             left.extend(hint("Enter", cat.act_select, t));
         } else if !search.matches.is_empty() {
             left.extend(hint("n/N", cat.act_move, t));
@@ -665,6 +665,10 @@ mod tests {
         assert!(
             committed.contains("n/N move"),
             "committed search must hint n/N: {committed}"
+        );
+        assert!(
+            committed.contains("Ctrl-U clear"),
+            "committed search must hint Ctrl-U: {committed}"
         );
         assert!(committed.contains("Esc cancel"));
         assert!(!committed.contains("Enter select"));

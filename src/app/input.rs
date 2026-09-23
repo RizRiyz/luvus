@@ -3183,10 +3183,14 @@ impl App {
             KeyCode::Char('i') if super::keys::is_ctrl_chord(key.modifiers) => {
                 self.toggle_pane_search_case();
             }
-            KeyCode::Char('u') if editing && super::keys::is_ctrl_chord(key.modifiers) => {
+            KeyCode::Char('u') if super::keys::is_ctrl_chord(key.modifiers) => {
                 if let Some(search) = self.pane_search.as_mut() {
                     search.query.clear();
+                    search.editing = true;
+                    search.matches.clear();
+                    search.current = 0;
                 }
+                self.search_flash = None;
             }
             KeyCode::Backspace if editing => {
                 if let Some(search) = self.pane_search.as_mut() {
@@ -5050,6 +5054,25 @@ mod tests {
         app.handle_event(AppEvent::Key(plain('n')));
         app.handle_event(AppEvent::Key(plain('N')));
         app.handle_event(AppEvent::Paste("must not leak".into()));
+        let committed_scroll = app.panes.get(&pane).unwrap().scroll_state().0;
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        let search = app.pane_search.as_ref().unwrap();
+        assert!(
+            search.editing,
+            "Ctrl-U must return committed search to editing"
+        );
+        assert!(search.query.is_empty());
+        assert!(search.matches.is_empty());
+        assert_eq!(search.current, 0);
+        assert_eq!(
+            app.panes.get(&pane).unwrap().scroll_state().0,
+            committed_scroll,
+            "Ctrl-U must keep the current viewport"
+        );
+        assert!(input_rx.try_recv().is_err(), "Ctrl-U reached the PTY");
         app.handle_event(AppEvent::Key(KeyEvent::new(
             KeyCode::Esc,
             KeyModifiers::NONE,
