@@ -181,11 +181,19 @@ where
     crate::install_tui_panic_hook();
     let mut input = ClientInput::default();
     let mut selected = crate::session::display_name();
+    let allow_local_file_links = local && host_terminal_shares_local_filesystem();
     let result = (|| {
         let mut reader: Box<dyn ClientRead> = Box::new(reader);
         let mut writer: Box<dyn Write + Send> = Box::new(writer);
         loop {
-            let exit = run_inner(reader, writer, &mut terminal, &mut input, &selected, local)?;
+            let exit = run_inner(
+                reader,
+                writer,
+                &mut terminal,
+                &mut input,
+                &selected,
+                allow_local_file_links,
+            )?;
             input.route.replace(None);
             match exit {
                 ClientExit::SwitchSession(name) if local => {
@@ -818,6 +826,22 @@ fn valid_host_hyperlink(uri: &str, allow_local_files: bool) -> bool {
         && !uri.chars().any(char::is_control)
         && ((allow_local_files && crate::links::file_uri_path(uri).is_some())
             || crate::platform::is_openable_url(uri))
+}
+
+/// Whether file URIs from a server on this machine also name files on the
+/// machine that owns the outer terminal. An SSH client process is local to its
+/// server socket but its terminal emulator usually runs on another machine, so
+/// host-handled `file://` links must fail closed there.
+pub(super) fn host_terminal_shares_local_filesystem() -> bool {
+    host_terminal_shares_local_filesystem_with(|key| std::env::var_os(key))
+}
+
+fn host_terminal_shares_local_filesystem_with(
+    mut read_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> bool {
+    !["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .into_iter()
+        .any(|key| read_env(key).is_some_and(|value| !value.is_empty()))
 }
 
 fn write_osc8<W: Write>(
@@ -1685,7 +1709,7 @@ mod render_tests {
 
 #[cfg(test)]
 mod paint_tests {
-    use super::{paint, write_osc8};
+    use super::{host_terminal_shares_local_filesystem_with, paint, write_osc8};
     use crate::ipc::protocol::{self, FrameData, FrameDiff};
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
@@ -1733,6 +1757,17 @@ mod paint_tests {
         output.clear();
         write_osc8(&mut output, Some("https://luvus.dev/docs"), false).unwrap();
         assert_eq!(output, b"\x1b]8;;https://luvus.dev/docs\x1b\\");
+    }
+
+    #[test]
+    fn ssh_terminal_does_not_claim_the_server_filesystem() {
+        assert!(host_terminal_shares_local_filesystem_with(|_| None));
+        assert!(host_terminal_shares_local_filesystem_with(|_| {
+            Some(std::ffi::OsString::new())
+        }));
+        assert!(!host_terminal_shares_local_filesystem_with(|key| {
+            (key == "SSH_TTY").then(|| std::ffi::OsString::from("/dev/pts/4"))
+        }));
     }
 
     #[test]

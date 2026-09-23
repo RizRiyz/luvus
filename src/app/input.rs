@@ -806,6 +806,11 @@ impl App {
                 {
                     self.hover_link = None;
                     self.link_scan_at = None;
+                    // Retained PTY patching only repaints the engine's damaged
+                    // rows. The hover may span other rows, so repair the whole
+                    // client projection once to remove every OSC 8 target and
+                    // underline that belonged to the old path.
+                    self.force_redraw = true;
                 }
                 self.detection_dirty.insert(id);
                 if self.panes.contains_key(&id) {
@@ -6104,6 +6109,10 @@ mod link_click_tests {
         assert!(app.handle_event(AppEvent::PtyData(pane)));
         assert!(app.hover_link.is_none());
         assert!(app.link_scan_at.is_none());
+        assert!(
+            app.force_redraw,
+            "clearing a hover must repair decorations outside the damaged PTY rows"
+        );
     }
 
     #[test]
