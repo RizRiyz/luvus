@@ -190,7 +190,15 @@ impl App {
         };
         if view.search.as_ref().is_some_and(|search| search.editing) {
             match key_event.code {
-                KeyCode::Char(ch) => view.search_push(ch),
+                KeyCode::Char('i') if super::keys::is_ctrl_chord(key_event.modifiers) => {
+                    view.search_toggle_case(layout_key, viewport)
+                }
+                KeyCode::Char('u') if super::keys::is_ctrl_chord(key_event.modifiers) => {
+                    view.search_clear()
+                }
+                KeyCode::Char(ch) if !super::keys::is_ctrl_chord(key_event.modifiers) => {
+                    view.search_push(ch)
+                }
                 KeyCode::Backspace => view.search_backspace(),
                 KeyCode::Enter => view.search_commit(layout_key, viewport),
                 KeyCode::Esc => view.search_cancel(),
@@ -199,6 +207,16 @@ impl App {
             return true;
         }
         match key_event.code {
+            KeyCode::Char('i')
+                if super::keys::is_ctrl_chord(key_event.modifiers) && view.search.is_some() =>
+            {
+                view.search_toggle_case(layout_key, viewport)
+            }
+            KeyCode::Char('u')
+                if super::keys::is_ctrl_chord(key_event.modifiers) && view.search.is_some() =>
+            {
+                view.search_clear()
+            }
             KeyCode::Char('j') | KeyCode::Down => view.scroll_by(1, viewport, layout_key),
             KeyCode::Char('k') | KeyCode::Up => view.scroll_by(-1, viewport, layout_key),
             KeyCode::Char('d') => view.scroll_by(viewport as i32 / 2, viewport, layout_key),

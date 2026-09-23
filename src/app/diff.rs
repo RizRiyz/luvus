@@ -798,6 +798,7 @@ impl App {
                     .position(|line| source_anchor(line) == Some(anchor))
             })
             .unwrap_or(0);
+        view.search_refresh();
         if let Some(diff) = cache {
             let mut fingerprint = String::new();
             if let Some(file) =
@@ -1763,32 +1764,24 @@ impl App {
                     view.scroll = view.selected.saturating_sub(viewport.saturating_sub(1));
                 }
                 view.ensure_horizontal_visible(pane_width, marker_style, is_split);
-            } else if view.search_editing {
+            } else if view.search.as_ref().is_some_and(|search| search.editing) {
                 match key.code {
-                    KeyCode::Char(c) => view.search.get_or_insert_with(String::new).push(c),
-                    KeyCode::Backspace => {
-                        view.search.get_or_insert_with(String::new).pop();
+                    KeyCode::Char('i') if super::keys::is_ctrl_chord(key.modifiers) => {
+                        view.search_toggle_case()
                     }
+                    KeyCode::Char('u') if super::keys::is_ctrl_chord(key.modifiers) => {
+                        view.search_clear()
+                    }
+                    KeyCode::Char(c) if !super::keys::is_ctrl_chord(key.modifiers) => {
+                        view.search_push(c)
+                    }
+                    KeyCode::Backspace => view.search_backspace(),
                     KeyCode::Enter => {
-                        view.search_editing = false;
-                        if let Some(query) =
-                            view.search.as_deref().filter(|query| !query.is_empty())
-                        {
-                            if let Some(index) = view
-                                .stack_rows
-                                .iter()
-                                .position(|line| line.text.contains(query))
-                            {
-                                view.selected = index;
-                                view.scroll = index.saturating_sub(viewport / 2);
-                                view.ensure_horizontal_visible(pane_width, marker_style, is_split);
-                            }
-                        }
+                        view.search_commit();
+                        view.scroll = view.selected.saturating_sub(viewport / 2);
+                        view.ensure_horizontal_visible(pane_width, marker_style, is_split);
                     }
-                    KeyCode::Esc => {
-                        view.search = None;
-                        view.search_editing = false;
-                    }
+                    KeyCode::Esc => view.search = None,
                     _ => return false,
                 }
             } else {
@@ -1796,6 +1789,25 @@ impl App {
                 let max = row_count.saturating_sub(1);
                 let old_selected = view.selected;
                 match key.code {
+                    KeyCode::Char('i')
+                        if super::keys::is_ctrl_chord(key.modifiers) && view.search.is_some() =>
+                    {
+                        view.search_toggle_case();
+                        view.scroll = view.selected.saturating_sub(viewport / 2);
+                    }
+                    KeyCode::Char('u')
+                        if super::keys::is_ctrl_chord(key.modifiers) && view.search.is_some() =>
+                    {
+                        view.search_clear();
+                    }
+                    KeyCode::Char('n') if view.search.is_some() => {
+                        view.search_step(true);
+                        view.scroll = view.selected.saturating_sub(viewport / 2);
+                    }
+                    KeyCode::Char('N') if view.search.is_some() => {
+                        view.search_step(false);
+                        view.scroll = view.selected.saturating_sub(viewport / 2);
+                    }
                     KeyCode::Char('j') | KeyCode::Down => {
                         view.selected = (view.selected + 1).min(max)
                     }
@@ -1872,10 +1884,7 @@ impl App {
                             view.ensure_horizontal_visible(pane_width, marker_style, is_split);
                         }
                     }
-                    KeyCode::Char('/') => {
-                        view.search = Some(String::new());
-                        view.search_editing = true;
-                    }
+                    KeyCode::Char('/') => view.search_begin(),
                     KeyCode::Char('v') => {
                         view.range_anchor = match (view.range_anchor, current_anchor) {
                             (Some(_), _) => None,

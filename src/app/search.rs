@@ -35,49 +35,16 @@ pub struct PaneSearchMatch {
     pub width: usize,
 }
 
-/// Literal matches in `line`, expressed as display-cell columns and widths so
-/// navigation and terminal rendering agree for wide glyphs.
+/// Terminal adapter for the shared local-search matcher.
 pub(super) fn match_display_spans(
     line: &str,
     query: &str,
     case_sensitive: bool,
 ) -> Vec<(usize, usize)> {
-    use unicode_width::UnicodeWidthChar;
-    let needle: Vec<char> = query.chars().collect();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let chars: Vec<char> = line.chars().collect();
-    if chars.len() < needle.len() {
-        return Vec::new();
-    }
-    let mut columns = Vec::with_capacity(chars.len() + 1);
-    columns.push(0usize);
-    for ch in &chars {
-        columns.push(columns.last().copied().unwrap_or(0) + ch.width().unwrap_or(0));
-    }
-    let mut matches = Vec::new();
-    let mut start = 0usize;
-    while start + needle.len() <= chars.len() {
-        let end = start + needle.len();
-        if chars[start..end]
-            .iter()
-            .zip(needle.iter())
-            .all(|(hay, query_ch)| {
-                hay == query_ch
-                    || (!case_sensitive && hay.to_lowercase().eq(query_ch.to_lowercase()))
-            })
-        {
-            matches.push((
-                columns[start],
-                columns[end].saturating_sub(columns[start]).max(1),
-            ));
-            start = end;
-        } else {
-            start += 1;
-        }
-    }
-    matches
+    crate::search::local::match_spans(line, query, case_sensitive)
+        .into_iter()
+        .map(|search_match| (search_match.column, search_match.width))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,12 +57,22 @@ pub enum PaneSearchOwner {
 pub struct PaneSearch {
     pub pane: PaneId,
     pub owner: PaneSearchOwner,
-    pub query: String,
-    pub editing: bool,
-    pub case_sensitive: bool,
-    pub matches: Vec<PaneSearchMatch>,
-    pub current: usize,
+    pub local: crate::search::local::LocalSearch<PaneSearchMatch>,
     pub saved_scroll: usize,
+}
+
+impl std::ops::Deref for PaneSearch {
+    type Target = crate::search::local::LocalSearch<PaneSearchMatch>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.local
+    }
+}
+
+impl std::ops::DerefMut for PaneSearch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.local
+    }
 }
 
 pub struct LegacySearchHit {

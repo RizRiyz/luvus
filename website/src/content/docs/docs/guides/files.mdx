@@ -119,9 +119,19 @@ file an agent is editing stays current in front of you.
 | `g` / `G` | top / bottom |
 | `h` / `l` | scroll sideways when wrapping is off |
 | `w` | toggle soft wrap |
-| `/`, then `n` / `N` | search, next / previous match |
+| `/`, then `Enter` | search exact text in this file (case-insensitive by default) |
+| `n` / `N` | next / previous match, wrapping at the ends |
+| `Ctrl-I` | toggle case sensitivity (`Aa` marks sensitive mode) |
+| `Ctrl-U` | clear the active query and return to editing |
 | `y` or `c` | copy the whole file |
 | `x` / `q` / `Esc` | close |
+
+Read-only FILE views, Markdown previews, Mermaid previews, and DIFF use the
+same local-search controls. Search is an exact substring match rather than the
+global finder's fuzzy ranking. `Enter` commits, `n` and `N` wrap through
+matches, `Ctrl-I` toggles case sensitivity, and `Ctrl-U` clears the query while
+keeping search open. `Esc` cancels search before it closes the native view.
+Current matches use the accent color; other visible matches use amber.
 
 Dragging across the text selects and copies it, the same as in any pane. Visual
 wraps rejoin into their original source line while real file line breaks remain.
@@ -184,7 +194,10 @@ bounded layout cache.
 | `j` / `k`, `↓` / `↑` | rendered row down / up |
 | `d` / `u`, Space / PageUp | half page or page navigation |
 | `g` / `G` | top / bottom |
-| `/`, then `n` / `N` | search rendered text |
+| `/`, then `Enter` | search exact rendered text (case-insensitive by default) |
+| `n` / `N` | next / previous match, wrapping at the ends |
+| `Ctrl-I` | toggle case sensitivity (`Aa` marks sensitive mode) |
+| `Ctrl-U` | clear the active query and return to editing |
 | `y` or `c` | copy the canonical raw source |
 | Ctrl/Cmd+click a link | open an HTTP(S) URL or an existing linked file |
 | `q` / `Esc` | close (or clear an active search first) |

@@ -62,7 +62,10 @@ source lines remain inside the pane at every responsive width.
 | Left / Right | select the old or new side in Split |
 | `s` | cycle Auto, Split, Stack |
 | `w` | toggle wrapping for an explicitly selected Stack layout; Split and Auto wrap at every responsive width |
-| `/` | search the loaded file diff |
+| `/`, then `Enter` | search exact text in the loaded diff (case-insensitive by default) |
+| `n` / `N` | next / previous search match, wrapping at the ends |
+| `Ctrl-I` | toggle search case sensitivity (`Aa` marks sensitive mode) |
+| `Ctrl-U` | clear the active search and return to query editing |
 | `{` / `}` | previous or next hunk |
 | `K` / `J` | previous or next file |
 | `P` / `N` | previous or next note |
@@ -71,6 +74,14 @@ source lines remain inside the pane at every responsive width.
 | `m` | mark the current version viewed |
 | `f` | cycle All, Unviewed, Changed, and Notes filters |
 | `q` / `Esc` | close the native view |
+
+Search follows the same local-content contract as FILE and document previews:
+`Enter` commits the literal query, `n` and `N` wrap through matches, `Ctrl-I`
+toggles case sensitivity, `Ctrl-U` clears the query without closing search, and
+`Esc` cancels search before it closes DIFF. The current match uses the accent
+color and other visible matches use amber in Auto, Split, and Stack layouts.
+This is separate from the DIFF sidebar's `f` state filter and from the global
+fuzzy finder.
 
 Binary files and conflicts show an explicit summary instead of misleading
 text. Large patches and lines are bounded and visibly marked **TRUNCATED**.
