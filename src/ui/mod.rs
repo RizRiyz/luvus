@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Widget};
+use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::{App, DockKind, Mode, Side};
@@ -563,6 +563,7 @@ pub(crate) fn retained_pty_eligible(app: &App) -> bool {
         && app.hover_link.is_none()
         && app.search_flash.is_none()
         && app.settings.is_none()
+        && app.command_center.is_none()
         && app.picker.is_none()
         && !app.help_open
         && !app.changelog_open
@@ -731,13 +732,31 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.right_seam = sidebar_right.map(|a| Rect::new(a.x, a.y, 1, a.height));
 
     let mobile_layout = app.compact.then(|| mobile::compute_layout(content));
-    let (tabbar, pane_area) = if let Some(layout) = mobile_layout {
+    let (tabbar, full_pane_area) = if let Some(layout) = mobile_layout {
         (layout.header, layout.content)
     } else {
         let [tabbar, pane_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
         (tabbar, pane_area)
     };
+    // The interactive Command Center has its own bottom strip, rather than
+    // painting over terminal cells. Passive clients keep their full viewport.
+    let command_height = if resize_panes && app.command_center.is_some() {
+        4.min(full_pane_area.height.saturating_sub(1))
+    } else {
+        0
+    };
+    let (pane_area, command_area) = if command_height >= 3 {
+        let [panes, command] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(command_height)])
+                .areas(full_pane_area);
+        (panes, Some(command))
+    } else {
+        (full_pane_area, None)
+    };
+    if resize_panes {
+        app.command_center_area = command_area;
+    }
 
     app.last_pane_area = pane_area;
 
@@ -1212,6 +1231,11 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     }
 
     let cursor = if settings_hits.is_some()
+        || (resize_panes
+            && app
+                .command_center
+                .as_ref()
+                .is_some_and(|center| center.focused))
         || app.search.is_some()
         || picker_open
         || app.bar.overflow.is_some()
@@ -1258,6 +1282,130 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.automation_rects = automation_rects;
     app.session_rects = session_rects;
     app.new_ws_rect = new_ws_rect;
+    // This is a separate pane-style strip, never over terminal output.
+    if let (Some(command_area), Some(center)) = (command_area, app.command_center.as_ref()) {
+        if let Some((x, y)) = draw_command_center(f, command_area, app, center, cat, &t) {
+            if center.focused {
+                f.set_cursor_anchor(x, y, true);
+                app.last_cursor = Some((x, y));
+            }
+        }
+    }
+}
+
+fn draw_command_center(
+    f: &mut RenderTarget,
+    rect: Rect,
+    app: &App,
+    center: &crate::command_center::CommandCenter,
+    cat: &crate::i18n::Catalog,
+    t: &Theme,
+) -> Option<(u16, u16)> {
+    use unicode_width::UnicodeWidthStr;
+    if rect.width < 24 || rect.height < 3 {
+        return None;
+    }
+    let preview = center
+        .preview
+        .iter()
+        .filter_map(|id| {
+            let status = app.status.get(id)?;
+            app.panes.contains_key(id).then(|| {
+                if app.is_agent_pane(*id) {
+                    format!("p{} {} {}", id.0, status.agent, status.state.label())
+                } else {
+                    format!("p{} {}", id.0, status.agent)
+                }
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let title = if preview.is_empty() {
+        cat.cc_title.to_string()
+    } else {
+        format!("{} · {}", cat.cc_title, preview)
+    };
+    // Match split-pane chrome: plain border and dark terminal background.
+    // Clear the whole strip first so underlying/previous frame glyphs cannot
+    // show through the composer (including stale split-pane dividers).
+    f.render_widget(Block::new().style(Style::new().bg(t.mantle)), rect);
+    let title = truncate(&title, rect.width.saturating_sub(4) as usize);
+    let block = Block::bordered()
+        .border_type(BorderType::Plain)
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::new().fg(t.accent).bg(t.mantle).bold(),
+        ))
+        .border_style(
+            Style::new()
+                .fg(if center.focused {
+                    t.border_focus
+                } else {
+                    t.border
+                })
+                .bg(t.mantle),
+        )
+        .style(Style::new().bg(t.mantle).fg(t.text));
+    f.render_widget(block, rect);
+    let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2);
+    let before = center.draft[..center.cursor]
+        .replace('\n', "↵")
+        .replace('\t', "⇥");
+    let cursor_columns = 2 + UnicodeWidthStr::width(before.as_str());
+    let offset = cursor_columns.saturating_sub(inner.width.saturating_sub(1) as usize);
+    let display = |text: &str| text.replace('\n', "↵").replace('\t', "⇥");
+    let line = if let Some(selected) = center.selection() {
+        Line::from(vec![
+            Span::raw("› "),
+            Span::raw(display(&center.draft[..selected.start])),
+            Span::styled(
+                display(&center.draft[selected.clone()]),
+                Style::new().fg(t.text).bg(t.sel_bg),
+            ),
+            Span::raw(display(&center.draft[selected.end..])),
+        ])
+    } else {
+        Line::raw(format!("› {}", display(&center.draft)))
+    };
+    f.render_widget(
+        Paragraph::new(line)
+            .style(Style::new().bg(t.mantle).fg(t.text))
+            .scroll((0, offset.min(u16::MAX as usize) as u16)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let footer = if let Some(result) = center.delivery_results.get(center.delivery_index) {
+        result
+    } else if let Some(receipt) = center.receipt.as_deref() {
+        receipt
+    } else {
+        if inner.width < 64 {
+            cat.cc_hint_compact
+        } else {
+            cat.cc_hint
+        }
+    };
+    if inner.height > 1 {
+        f.render_widget(
+            Paragraph::new(if center.delivery_results.len() > 1 {
+                format!(
+                    "{}/{} {footer}  ↑↓",
+                    center.delivery_index + 1,
+                    center.delivery_results.len()
+                )
+            } else {
+                footer.to_string()
+            })
+            .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+        );
+    }
+    Some((
+        inner.x
+            + cursor_columns
+                .saturating_sub(offset)
+                .min(inner.width.saturating_sub(1) as usize) as u16,
+        inner.y,
+    ))
 }
 
 // ── shared layout + state helpers (used across the ui submodules) ──
@@ -2035,5 +2183,51 @@ mod dock_projection_tests {
             "the owner-local dock remains visible outside the picker"
         );
         assert_ne!(projection.shell_overlay, Some(area));
+    }
+}
+
+#[cfg(test)]
+mod command_center_tests {
+    use super::*;
+
+    #[test]
+    fn composer_gets_own_bottom_strip_and_is_private_to_active_view() {
+        let _env = crate::persist::test_env("command-center-projection");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let pane = app.layout().focus;
+        let area = Rect::new(0, 0, 100, 30);
+        let mut initial = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut initial, area), &mut app);
+        let size = app.panes[&pane].size();
+        let content = app.pane_content_rects.clone();
+
+        app.open_command_center();
+        let center = app.command_center.as_mut().unwrap();
+        center.draft = "private prompt".into();
+        center.cursor = center.draft.len();
+        let mut active = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut active, area), &mut app);
+        let row = app.last_pane_area.bottom() + 1;
+        let active_line: String = (0..area.width).map(|x| active[(x, row)].symbol()).collect();
+        assert!(active_line.contains("private prompt"));
+        assert!(app.panes[&pane].size().1 < size.1);
+        assert!(app.pane_content_rects[0].1.bottom() <= app.last_pane_area.bottom());
+        assert_ne!(app.pane_content_rects, content);
+        let strip = app.command_center_area.expect("interactive strip hitbox");
+        assert!(app.last_cursor.is_some_and(|(_, y)| y >= strip.y));
+
+        app.command_center.as_mut().unwrap().focused = false;
+        let mut unfocused = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut unfocused, area), &mut app);
+        assert!(app.last_cursor.is_none_or(|(_, y)| y < strip.y));
+
+        let mut passive = Buffer::empty(area);
+        render_projection(&mut RenderTarget::new(&mut passive, area), &mut app);
+        let passive_line: String = (0..area.width)
+            .map(|x| passive[(x, row)].symbol())
+            .collect();
+        assert!(!passive_line.contains("private prompt"));
+        assert!(app.command_center.is_some());
     }
 }

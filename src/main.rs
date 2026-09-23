@@ -11,6 +11,7 @@ mod changelog;
 mod cli;
 mod clipboard;
 mod clipboard_image;
+mod command_center;
 mod config;
 mod detect;
 mod diff;
@@ -1583,6 +1584,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(ev) => {
                 app.handle_event(ev); // --local redraws every loop, so ignore the dirty bool
+                flush_local_command_center_clipboard(&mut app);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -1590,6 +1592,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         // Coalesce any queued events before drawing.
         while let Ok(ev) = rx.try_recv() {
             app.handle_event(ev);
+            flush_local_command_center_clipboard(&mut app);
         }
         // Parked `wait.output` deadlines lapse on the tick (docs/81).
         app.tick_output_waits(Instant::now());
@@ -1655,6 +1658,16 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     let detached = app.detach_requested;
     app.finish_session_persistence();
     Ok(detached)
+}
+
+fn flush_local_command_center_clipboard(app: &mut App) {
+    if let Some(text) = app
+        .command_center
+        .as_mut()
+        .and_then(|center| center.pending_clipboard.take())
+    {
+        emit_clipboard(&text);
+    }
 }
 
 /// Clean up a just-bound Unix socket before a local startup aborts. The caller

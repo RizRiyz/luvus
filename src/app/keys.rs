@@ -117,6 +117,7 @@ pub enum Cmd {
     OpenGit,
     OpenDiff,
     OpenMission,
+    OpenCommandCenter,
     OpenBoard,
     OpenSettings,
     OpenSessions,
@@ -176,6 +177,7 @@ impl Cmd {
         Cmd::OpenGit,
         Cmd::OpenDiff,
         Cmd::OpenMission,
+        Cmd::OpenCommandCenter,
         Cmd::OpenBoard,
         Cmd::OpenSettings,
         Cmd::OpenSessions,
@@ -233,6 +235,7 @@ impl Cmd {
             Cmd::OpenGit => "open_git",
             Cmd::OpenDiff => "open_diff",
             Cmd::OpenMission => "open_mission",
+            Cmd::OpenCommandCenter => "open_command_center",
             Cmd::OpenBoard => "open_board",
             Cmd::OpenSettings => "open_settings",
             Cmd::OpenSessions => "open_sessions",
@@ -283,6 +286,7 @@ impl Cmd {
             Cmd::OpenGit => cat.cmd_open_git,
             Cmd::OpenDiff => cat.cmd_open_diff,
             Cmd::OpenMission => cat.mc_open,
+            Cmd::OpenCommandCenter => cat.cc_open,
             Cmd::OpenBoard => cat.cmd_open_board,
             Cmd::OpenSettings => cat.cmd_open_settings,
             Cmd::OpenSessions => cat.cmd_open_sessions,
@@ -331,6 +335,7 @@ impl Cmd {
             Cmd::OpenGit
             | Cmd::OpenDiff
             | Cmd::OpenMission
+            | Cmd::OpenCommandCenter
             | Cmd::OpenBoard
             | Cmd::OpenSettings
             | Cmd::ToggleSidebar
@@ -378,6 +383,7 @@ impl Cmd {
             Cmd::OpenGit => "g",
             Cmd::OpenDiff => "i",
             Cmd::OpenMission => "m",
+            Cmd::OpenCommandCenter => "Enter",
             Cmd::OpenBoard => "o",
             // `=` opens Settings (`,` now renames the tab, matching tmux). The
             // Menu button is always available too, so this is just the shortcut.
@@ -447,6 +453,7 @@ pub fn key_string(key: &KeyEvent) -> Option<String> {
         KeyCode::Down => "↓".into(),
         KeyCode::Tab => "⇥".into(),
         KeyCode::BackTab => "⇧⇥".into(),
+        KeyCode::Enter => "Enter".into(),
         _ => return None,
     })
 }
@@ -1015,6 +1022,7 @@ impl App {
             Cmd::OpenGit => self.open_git_tab_active(),
             Cmd::OpenDiff => self.focus_diff_list(),
             Cmd::OpenMission => self.open_mission_control(self.active_ws),
+            Cmd::OpenCommandCenter => self.open_command_center(),
             Cmd::OpenBoard => self.open_orch_board(),
             Cmd::OpenSettings => self.open_settings(),
             Cmd::OpenSessions => self.open_named_session_menu(),

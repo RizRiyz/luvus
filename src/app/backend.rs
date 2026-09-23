@@ -942,7 +942,7 @@ impl App {
         let _ = reply.send(response);
     }
 
-    pub(super) fn pane_location(&self, pane_id: PaneId) -> Option<(usize, usize)> {
+    pub(crate) fn pane_location(&self, pane_id: PaneId) -> Option<(usize, usize)> {
         self.workspaces
             .iter()
             .enumerate()

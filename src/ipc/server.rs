@@ -820,6 +820,7 @@ fn apply(
                     activity,
                 ),
             );
+            app.command_center = None;
             *foreground = Some(id);
             apply_foreground_client(app, clients, *foreground);
             app.mark_runtime_scans_dirty();
@@ -837,6 +838,7 @@ fn apply(
             clients.remove(&id);
             app.client_files_visible = client_files_visible(clients);
             if was_foreground {
+                app.command_center = None;
                 *foreground = latest_client(clients);
                 apply_foreground_client(app, clients, *foreground);
             }
@@ -858,6 +860,7 @@ fn apply(
             client.retained_ready = false;
             client.retained_pane_content.clear();
             if *foreground == Some(id) {
+                app.command_center = None;
                 *foreground = latest_client(clients);
                 apply_foreground_client(app, clients, *foreground);
             }
@@ -886,9 +889,13 @@ fn apply(
             if interest == SurfaceInterest::Active {
                 client.last_activity = *next_activity;
                 *next_activity = next_activity.saturating_add(1);
+                if *foreground != Some(id) {
+                    app.command_center = None;
+                }
                 *foreground = Some(id);
                 apply_foreground_client(app, clients, *foreground);
             } else if *foreground == Some(id) {
+                app.command_center = None;
                 *foreground = latest_client(clients);
                 apply_foreground_client(app, clients, *foreground);
             }
@@ -1083,6 +1090,7 @@ fn apply(
             // geometry and PTY dimensions synchronously.
             let promoted = *foreground != Some(id);
             if promoted {
+                app.command_center = None;
                 *foreground = Some(id);
                 apply_foreground_client(app, clients, *foreground);
             }
@@ -1116,7 +1124,15 @@ fn apply(
                 .expect("input client remains registered");
             let scoped = client.machine_capable && client.shell_dock_layout.owns_workspaces;
             if !scoped {
-                return app.handle_event(event);
+                let changed = app.handle_event(event);
+                if let Some(text) = app
+                    .command_center
+                    .as_mut()
+                    .and_then(|center| center.pending_clipboard.take())
+                {
+                    let _ = client.send_control(ServerMessage::Clipboard(text));
+                }
+                return changed;
             }
             let previous = app.sidebars.clone();
             let previous_workspace_paths = app.config.layout.workspace_paths;
@@ -1126,6 +1142,16 @@ fn apply(
             }
             app.client_sidebar_input = true;
             let changed = app.handle_event(event);
+            // The composer belongs to this exact input client. Deliver its
+            // copy/cut effect here, before another input can take foreground,
+            // rather than using the ordinary all-clients clipboard broadcast.
+            if let Some(text) = app
+                .command_center
+                .as_mut()
+                .and_then(|center| center.pending_clipboard.take())
+            {
+                let _ = client.send_control(ServerMessage::Clipboard(text));
+            }
             app.client_sidebar_input = false;
             let layout = app.sidebars.to_config();
             let workspace_paths = app.config.layout.workspace_paths;
@@ -1299,6 +1325,7 @@ fn render_clients(
         return false;
     }
     if foreground.is_none_or(|id| !clients.contains_key(&id)) {
+        app.command_center = None;
         *foreground = latest_client(clients);
         apply_foreground_client(app, clients, *foreground);
     }
@@ -1361,6 +1388,7 @@ fn render_clients(
         clients.remove(&id);
     }
     if foreground.is_some_and(|id| !clients.contains_key(&id)) {
+        app.command_center = None;
         *foreground = latest_client(clients);
         apply_foreground_client(app, clients, *foreground);
     }
@@ -2563,6 +2591,73 @@ mod tests {
             ),
             rx,
         )
+    }
+
+    #[test]
+    fn foreground_handoff_discards_command_center_draft() {
+        let _env = crate::persist::test_env("command-center-handoff");
+        let (tx, _) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (first, _first_rx) = display_client(80, 24, 1);
+        let (second, _second_rx) = display_client(80, 24, 2);
+        let mut clients = HashMap::from([(1, first), (2, second)]);
+        let mut foreground = Some(1);
+        let mut size = (80, 24);
+        let mut activity = 3;
+        app.open_command_center();
+        app.command_center.as_mut().unwrap().draft = "private".into();
+
+        apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        );
+        assert_eq!(foreground, Some(2));
+        assert!(app.command_center.is_none());
+    }
+
+    #[test]
+    fn command_center_copy_reaches_only_the_input_client() {
+        let _env = crate::persist::test_env("command-center-private-copy");
+        let (tx, _) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (first, first_rx) = display_client(80, 24, 1);
+        let (second, second_rx) = display_client(80, 24, 2);
+        let mut clients = HashMap::from([(1, first), (2, second)]);
+        let mut foreground = Some(1);
+        let mut size = (80, 24);
+        let mut activity = 3;
+        app.open_command_center();
+        let center = app.command_center.as_mut().unwrap();
+        center.draft = "private command".into();
+        center.cursor = center.draft.len();
+        for character in ['a', 'c'] {
+            apply(
+                AppEvent::ClientInput {
+                    id: 1,
+                    input: ClientInput::Key(KeyEvent::new(
+                        KeyCode::Char(character),
+                        KeyModifiers::SUPER,
+                    )),
+                },
+                &mut app,
+                &mut clients,
+                &mut foreground,
+                &mut size,
+                &mut activity,
+            );
+        }
+        assert!(matches!(
+            first_rx.try_recv(),
+            Ok(ServerMessage::Clipboard(text)) if text == "private command"
+        ));
+        assert!(second_rx.try_recv().is_err());
     }
 
     #[test]

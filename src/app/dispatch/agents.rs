@@ -750,10 +750,7 @@ impl App {
     /// agent **kind** (`claude`, `kimi`, …) when exactly one live agent is that
     /// kind. Two agents of the same kind are ambiguous, so the error names the
     /// candidates and asks for a pane id or a name.
-    pub(in crate::app::dispatch) fn resolve_agent_target(
-        &self,
-        p: &Value,
-    ) -> Result<PaneId, (String, String)> {
+    pub(crate) fn resolve_agent_target(&self, p: &Value) -> Result<PaneId, (String, String)> {
         let t = p.get("target").and_then(|v| v.as_str()).unwrap_or("");
         if t.is_empty() {
             return Err(agent_not_found());

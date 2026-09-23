@@ -732,6 +732,9 @@ impl App {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
+                if self.command_center_paste(&s) {
+                    return true;
+                }
                 // Copy mode owns input just like scroll mode: never leak a
                 // pasted command into the pane while the user is selecting.
                 if self.copy_mode.is_some() {
@@ -747,6 +750,9 @@ impl App {
                 false // goes to the pane; its echo (PtyData) renders it
             }
             AppEvent::PasteImage(path) => {
+                if self.command_center_image_paste(&path) {
+                    return true;
+                }
                 // Image paths are terminal input, never modal text. Restrict
                 // delivery to the same normal focused-pane state that accepts
                 // ordinary typing so an image cannot leak through an overlay,
@@ -1327,6 +1333,30 @@ impl App {
         use ratatui::crossterm::event::MouseEventKind;
 
         let kind = m.kind;
+        // The strip is persistent, not modal. Its own hitbox focuses editing;
+        // clicks outside hand the event to normal tab/sidebar/pane hit testing.
+        if let Some(center) = self.command_center.as_mut() {
+            let inside = self.command_center_area.is_some_and(|rect| {
+                m.column >= rect.x
+                    && m.column < rect.right()
+                    && m.row >= rect.y
+                    && m.row < rect.bottom()
+            });
+            if inside {
+                if matches!(kind, MouseEventKind::Down(_)) {
+                    center.focused = true;
+                    self.mode = Mode::Normal;
+                    return true;
+                }
+                return false;
+            }
+            if matches!(kind, MouseEventKind::Down(_)) {
+                center.focused = false;
+                if self.mode == Mode::Prefix {
+                    self.mode = Mode::Normal;
+                }
+            }
+        }
         // Copy mode is keyboard-owned. Any deliberate mouse action cancels it
         // and restores its saved viewport rather than forwarding a click/wheel
         // into the child while a selection is active.
@@ -3851,6 +3881,13 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return false; // ignored — nothing changed
+        }
+        if self
+            .command_center
+            .as_ref()
+            .is_some_and(|center| center.focused)
+        {
+            return self.command_center_key(key);
         }
         if self.bar.overflow.take().is_some() {
             return true;

@@ -26,6 +26,8 @@ mod automation;
 mod automation_persistence;
 mod backend;
 mod board;
+#[cfg(test)]
+mod command_center_tests;
 mod config_persistence;
 mod cwd;
 pub use board::{
@@ -40,6 +42,7 @@ mod git;
 mod input;
 pub(crate) mod io_jobs;
 mod keys;
+pub(crate) use keys::is_ctrl_chord;
 pub(crate) mod line_edit;
 mod mission;
 mod modules;
@@ -2355,6 +2358,11 @@ pub struct App {
     pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
     pub settings: Option<SettingsUi>,
+    /// Ephemeral foreground-client composer; never persisted or projected to
+    /// passive clients. A foreground handoff discards it before input routing.
+    pub(crate) command_center: Option<crate::command_center::CommandCenter>,
+    /// Hitbox of the visible Command Center strip on the interactive client.
+    pub(crate) command_center_area: Option<Rect>,
     /// The open folder picker (workspace chooser), if any (captures input).
     pub picker: Option<FolderPicker>,
     /// Clickable targets in the open folder picker. Specific controls precede
@@ -3153,6 +3161,8 @@ impl App {
             prefix,
             agent_names: HashMap::new(),
             settings: None,
+            command_center: None,
+            command_center_area: None,
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
@@ -3846,6 +3856,8 @@ impl App {
             prefix,
             agent_names,
             settings: None,
+            command_center: None,
+            command_center_area: None,
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
