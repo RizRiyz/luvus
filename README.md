@@ -10,7 +10,7 @@
 [![ci](https://github.com/RizRiyz/luvus/actions/workflows/ci.yml/badge.svg)](https://github.com/RizRiyz/luvus/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-luvus.dev-c6ff1a.svg)](https://luvus.dev/docs/)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
-![platforms](https://img.shields.io/badge/platforms-macOS%20·%20Linux%20·%20Windows-lightgrey.svg)
+![platforms](https://img.shields.io/badge/platforms-macOS%20·%20Linux%20·%20FreeBSD%20·%20Windows-lightgrey.svg)
 
 **[Website](https://luvus.dev)** · **[Documentation](https://luvus.dev/docs/)** · **[Releases](https://github.com/RizRiyz/luvus/releases)**
 
@@ -24,6 +24,8 @@
 
 - **Persistent workspaces:** Open, rename, pin, and switch projects. A background
   server keeps tabs, panes, layouts, terminal state, and named sessions alive.
+  Disable saved pane screens when terminal content should not be written to the
+  session snapshot.
 - **Complete pane and tab control:** Split, resize, zoom, move, name, focus, run,
   inspect, close, reorder, and swap with the mouse, TUI, or CLI.
 - **Agent awareness:** Detect supported agents automatically and show blocked,
@@ -33,34 +35,42 @@
   keys to agents. Fork Claude, Grok, Codex, Pi, and OMP sessions with their
   context intact.
 - **Files and code:** Browse a Git-aware file tree, inspect files and changes,
-  reveal paths, and open files in a pane, tab, preview, or external editor.
+  fuzzy-find files, create or rename them from the FILES dock, reveal paths,
+  and open files in a pane, tab, preview, or external editor.
 - **Git and GitHub:** View status, branches, commits, contributors, pull
   requests, issues, and repository activity without leaving Luvus.
 - **Worktrees and orchestration:** Create worktrees, coordinate dependent tasks,
   keep task queues and path leases scoped to their projects, assign agents,
   schedule timezone-aware recurring work, run quality gates, and merge completed
-  work.
-- **Remote and multi-machine use:** Attach over SSH, save persistent machine
-  profiles, switch complete remote sessions from one TUI, connect several
-  clients with independent viewports, and use the compact mobile selector.
+  work. Modules can provide worktree creation and removal.
+- **Luvus Web:** An optional, read-only-by-default browser client for live
+  workspaces, terminals, and agent session titles. Pair multiple devices by
+  link or QR code and switch named sessions; control is opt-in. The loopback
+  bridge needs a trusted TLS tunnel for phone access, and stopping it leaves
+  the TUI, server, and panes running.
+- **Remote machines:** Save SSH machine profiles and switch between local and
+  remote workspaces in one TUI, or attach directly with `--remote`. Each machine
+  targets a remote named session whose panes stay alive when you switch away;
+  these SSH connections are separate from Luvus Web pairing.
 - **Terminal tools:** Configure per-pane Scrollback Memory, search across pane
-  history, use copy mode, click detected links, and run full-screen terminal apps.
+  history, jump through pane focus history, use copy mode, follow terminal
+  hyperlinks, paste clipboard images, and run full-screen terminal apps.
 - **Extensible surfaces:** Install modules with actions, events, settings,
   startup hooks, panes, sidebar docks, and Top or Bottom Luvus Bar widgets.
 - **Universal Harness Protocol:** Build harnesses and orchestrators on the
   single versioned UHP 1.0 method registry, with owner-only local IPC,
   snapshots, event streams, exact input, and semantic waits.
 - **Custom interface:** Move and resize two sidebars, remap keys and the prefix,
-  use presets, select from 8 languages, and install composable local or
-  community themes.
-- **Cross-platform delivery:** Install on macOS, Linux, or Windows, migrate from
-  previous releases, update with `luvus update`, and inspect the environment with
-  `luvus doctor`.
+  use presets and a help view of effective shortcuts, select from 8 languages,
+  and install composable local or community themes.
+- **Cross-platform delivery:** Install on macOS, Linux, FreeBSD (amd64), or
+  Windows, migrate from previous releases, update with `luvus update`, and
+  inspect the environment with `luvus doctor`.
 
 ## Install
 
 ```sh
-# macOS and Linux
+# macOS, Linux, and FreeBSD
 curl -fsSL https://luvus.dev/install.sh | sh
 
 # Homebrew
