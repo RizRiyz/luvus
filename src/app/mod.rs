@@ -2680,6 +2680,12 @@ pub struct App {
     /// authoritative answer to "which agent is this?", since an agent is a
     /// process, not a word on screen. Empty for a pane we could not scan.
     pub(crate) proc_commands: HashMap<PaneId, Vec<String>>,
+    /// A failed scan leaves the cache intact for lifecycle recovery, but its
+    /// commands are no longer fresh enough to override live screen identity.
+    pub(crate) proc_scan_unavailable: bool,
+    /// Last server-tick client presence; failed scans only wake visible clients
+    /// for screen reclassification, never a detached idle server.
+    runtime_clients_attached: bool,
     /// One process scan at a time, same guard as the session scan.
     proc_scan_inflight: bool,
     /// A one-shot process scan explicitly requested by an API or by the first
@@ -3272,6 +3278,8 @@ impl App {
             agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
+            proc_scan_unavailable: false,
+            runtime_clients_attached: false,
             proc_scan_inflight: false,
             proc_scan_requested: false,
             proc_scan_demand_inflight: false,
@@ -3963,6 +3971,8 @@ impl App {
             agent_title_sessions: HashMap::new(),
             sessions_scan_inflight: false,
             proc_commands: HashMap::new(),
+            proc_scan_unavailable: false,
+            runtime_clients_attached: false,
             proc_scan_inflight: false,
             proc_scan_requested: false,
             proc_scan_demand_inflight: false,
@@ -7556,6 +7566,12 @@ impl App {
         let demand_inflight = std::mem::take(&mut self.proc_scan_demand_inflight);
         let demanded_panes = std::mem::take(&mut self.proc_scan_demand_panes_inflight);
         let Some(by_pid) = found else {
+            self.proc_scan_unavailable = true;
+            if self.runtime_clients_attached {
+                for status in self.status.values_mut() {
+                    status.force_detect = true;
+                }
+            }
             if demand_inflight && self.proc_scan_failure_retries > 0 {
                 self.proc_scan_failure_retries -= 1;
                 self.proc_scan_requested = true;
@@ -7592,6 +7608,7 @@ impl App {
             }
             return false;
         };
+        let was_unavailable = std::mem::replace(&mut self.proc_scan_unavailable, false);
         let mut next: HashMap<PaneId, Vec<String>> = HashMap::new();
         for (id, pane) in self.panes.iter() {
             let pid = pane.child_pid.load(std::sync::atomic::Ordering::SeqCst);
@@ -7656,7 +7673,7 @@ impl App {
         }
         let processes_changed = self.proc_commands != next;
         self.proc_commands = next;
-        if processes_changed {
+        if processes_changed || was_unavailable {
             for status in self.status.values_mut() {
                 status.force_detect = true;
             }
@@ -11747,6 +11764,26 @@ fi
         let old: persist::PaneSnap =
             serde_json::from_str(r#"{"cwd":"/tmp/x","command":"sh"}"#).unwrap();
         assert_eq!(old.agent_launch, None);
+    }
+
+    #[test]
+    fn failed_process_scan_keeps_cache_but_releases_stale_detection_evidence() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.proc_commands.insert(pane, vec!["zsh".into()]);
+        app.runtime_clients_attached = true;
+        app.status.get_mut(&pane).unwrap().force_detect = false;
+        assert_eq!(app.running_for_detection(pane), &["zsh"]);
+
+        assert!(!app.apply_proc_scan(None));
+        assert_eq!(app.proc_commands.get(&pane).unwrap(), &["zsh"]);
+        assert!(app.running_for_detection(pane).is_empty());
+        assert!(app.status.get(&pane).unwrap().force_detect);
+
+        assert!(!app.apply_proc_scan(Some(HashMap::new())));
+        app.proc_commands.insert(pane, vec!["zsh".into()]);
+        assert_eq!(app.running_for_detection(pane), &["zsh"]);
     }
 
     /// A Devin pane restores from the exact binding Luvus persisted (it has no
