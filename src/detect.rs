@@ -29,6 +29,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::terminal::vt::VtEngine;
 use crate::ui::theme::State;
 
 /// The runtime identity form is owned so `~/.luvus/manifests/*.toml` can refine
@@ -356,6 +357,35 @@ pub(crate) fn screen_uses_non_empty_rows(
         || manifests.process_has_agent(running, "hermes")
         || known_agent.eq_ignore_ascii_case("devin")
         || manifests.process_has_agent(running, "devin")
+}
+
+/// Probe a blank bottom window for Arc Studio's full live banner only while
+/// identity and process evidence are unavailable. Other unknown panes keep
+/// the cheap bottom-row extraction and its existing false-positive boundary.
+pub(crate) fn screen_text_for_detection(
+    engine: &dyn VtEngine,
+    rows: u16,
+    non_empty_rows: bool,
+    probe_arc_studio: bool,
+) -> String {
+    if non_empty_rows {
+        return engine.detection_text_non_empty(rows);
+    }
+    let bottom = engine.detection_text(rows);
+    if probe_arc_studio && bottom.trim().is_empty() {
+        let probe = engine.detection_text_non_empty(rows);
+        if arc_studio_banner(&probe.to_lowercase()) {
+            return probe;
+        }
+    }
+    bottom
+}
+
+/// The banner must contain both phrases on one row, not unrelated shell prose.
+fn arc_studio_banner(lowercase_screen: &str) -> bool {
+    lowercase_screen.lines().any(|line| {
+        contains_agent_word(line, "arc studio") && contains_agent_word(line, "build onchain apps ·")
+    })
 }
 
 /// The compiled-in default rules (generic first, then per-agent).
@@ -1392,10 +1422,7 @@ impl Manifests {
             if agent.name == "arc-studio" {
                 // The slogan or a copied CLI command alone is incidental shell
                 // output. Arc Studio's actual TUI prints both on one banner row.
-                return low_bottom.lines().any(|line| {
-                    contains_agent_word(line, "arc studio")
-                        && contains_agent_word(line, "build onchain apps ·")
-                });
+                return arc_studio_banner(low_bottom);
             }
             agent
                 .distinct
@@ -1830,6 +1857,37 @@ Would you like to proceed?
         );
         assert_eq!(detection.state, State::Blocked);
         assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+    }
+
+    #[test]
+    fn arc_studio_banner_above_blank_footer_identifies_first_frame() {
+        let manifests = Manifests::builtin();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(100, 32, tx, 1024 * 1024);
+        engine.advance(b"\x1b[2J\x1b[HARC STUDIO build onchain apps \xc2\xb7 v1.1.3\r\nYou're not logged in yet. Press Enter to get the login command, or Esc to quit.");
+        assert!(engine.detection_text(14).trim().is_empty());
+
+        let screen = screen_text_for_detection(&engine, 14, false, true);
+        let detection = classify(
+            Some("zsh"),
+            &screen,
+            false,
+            false,
+            "zsh",
+            "",
+            &[],
+            &manifests,
+        );
+        assert_eq!(detection.agent, "arc-studio");
+        assert_eq!(detection.identity_source, "screen_text");
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+
+        // The extra scan must not promote a shell printing only the slogan.
+        engine.advance(b"\x1b[2J\x1b[Hbuild onchain apps \xc2\xb7");
+        assert!(screen_text_for_detection(&engine, 14, false, true)
+            .trim()
+            .is_empty());
     }
 
     #[test]

@@ -222,6 +222,22 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
     if argv.is_empty() || argv[0].trim().is_empty() {
         return Err("agent command cannot be empty".to_string());
     }
+    // Custom commands may add flags or use an absolute path, but a known
+    // remote-only agent must not become eligible for a local task that way.
+    let executable = argv[0].rsplit(['/', '\\']).next().unwrap_or(&argv[0]);
+    let executable = executable.to_ascii_lowercase();
+    let executable = executable
+        .strip_suffix(".exe")
+        .or_else(|| executable.strip_suffix(".cmd"))
+        .or_else(|| executable.strip_suffix(".bat"))
+        .unwrap_or(&executable);
+    if let Some(descriptor) = crate::agent::registry::find(executable) {
+        if !crate::agent::registry::supports_local_task(descriptor) {
+            return Err(format!(
+                "{agent} cannot work in a local ORCH task workspace"
+            ));
+        }
+    }
     Ok(argv)
 }
 
@@ -269,7 +285,17 @@ mod tests {
     fn remote_sandbox_agent_cannot_claim_a_local_task() {
         assert!(validate_agent_command("arc-studio").is_err());
         assert!(launch("arc-studio", "briefing", "t1").is_err());
+        for command in [
+            "arc-studio --continue",
+            "/usr/local/bin/arc-studio --continue",
+            r#""C:\Program Files\nodejs\arc-studio.cmd" --continue"#,
+        ] {
+            assert!(validate_agent_command(command).is_err(), "{command}");
+            assert!(launch(command, "briefing", "t1").is_err(), "{command}");
+        }
         assert!(validate_agent_command("codex").is_ok());
+        assert!(validate_agent_command("codex --model o3").is_ok());
+        assert!(validate_agent_command("custom-agent --flag").is_ok());
     }
 
     #[cfg(unix)]

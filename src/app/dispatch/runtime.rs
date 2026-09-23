@@ -584,6 +584,7 @@ impl App {
                 running_for_detection,
                 &self.manifests,
             );
+            let probe_arc_studio = known_agent.is_empty() && running_for_detection.is_empty();
             let inspect_codex_composer = known_agent.eq_ignore_ascii_case("codex")
                 || self
                     .manifests
@@ -602,11 +603,12 @@ impl App {
                     Ok(engine) => {
                         let generation = engine.output_generation();
                         if force_detect || last_generation != Some(generation) {
-                            let text = if non_empty_rows {
-                                engine.detection_text_non_empty(detection_rows)
-                            } else {
-                                engine.detection_text(detection_rows)
-                            };
+                            let text = detect::screen_text_for_detection(
+                                &*engine,
+                                detection_rows,
+                                non_empty_rows,
+                                probe_arc_studio,
+                            );
                             let codex_composer_ready = inspect_codex_composer
                                 .then(|| engine.codex_composer_region().is_some());
                             Some((
