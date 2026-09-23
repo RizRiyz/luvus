@@ -18,14 +18,14 @@ use crate::terminal::pty::InputSender;
 /// a wide glyph without being confused with an actual space between words.
 pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
 
-const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = 4_096;
+pub(crate) const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = 4_096;
 const MAX_TERMINAL_HYPERLINK_ID_BYTES: usize = 256;
 
 /// One OSC 8 hyperlink retained by the terminal engine.
 ///
 /// The URI is engine-neutral and its spans use visible grid coordinates. This
-/// metadata is materialized only for deliberate text/link gestures, never for
-/// ordinary rendering or agent detection.
+/// metadata remains sparse. Rendering projects only validated visible spans;
+/// agent detection continues to consume plain text without link metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TerminalHyperlink {
     id: String,
@@ -192,6 +192,8 @@ pub struct RenderCell {
     pub mods: Modifier,
 }
 
+pub type LinkedCellVisitor<'a> = dyn FnMut(u16, u16, &str, RenderCell, Option<&str>) + 'a;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub x: u16,
@@ -221,6 +223,16 @@ pub struct DamageCell {
 pub struct DamageRow {
     pub row: u16,
     pub cells: Vec<DamageCell>,
+    /// Sparse OSC 8 links present in this damaged row. Spans are terminal-grid
+    /// columns with an exclusive end and never contain control characters.
+    pub hyperlinks: Vec<DamageHyperlink>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DamageHyperlink {
+    pub start: u16,
+    pub end: u16,
+    pub uri: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,6 +365,12 @@ pub trait VtEngine: Send {
     /// so emoji and accented text render whole. Wide-char spacer cells are
     /// skipped by the implementation.
     fn for_each_cell(&self, f: &mut dyn FnMut(u16, u16, &str, RenderCell));
+
+    /// Visit visible cells together with their OSC 8 target, when present.
+    /// Engines without hyperlink metadata inherit the allocation-free fallback.
+    fn for_each_linked_cell(&self, f: &mut LinkedCellVisitor<'_>) {
+        self.for_each_cell(&mut |row, col, symbol, style| f(row, col, symbol, style, None));
+    }
 
     /// Capture owned visible rows affected since the last acknowledged render.
     /// Implementations may conservatively return [`DamageKind::Full`].

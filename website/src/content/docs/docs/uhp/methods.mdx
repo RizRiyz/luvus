@@ -467,6 +467,12 @@ reconcile later events without a snapshot race. Neither method reads terminal
 text or starts a process.
 
 Every snapshot terminal row includes `pane_id` and nullable `agent_name`.
+It also includes nullable `agent_session_title`: the bounded, single-line title
+used by the AGENTS sidebar for a live agent pane (OSC title first, then a
+module-provided pane or session title). It is `null` when no title is available
+or the pane is not an agent. Native `kind:"view"` rows omit it.
+OSC and module title changes emit `agent.title_changed`, allowing subscribed
+clients to refresh the snapshot without polling terminal output.
 `agent_name` is the operator alias set by `agent.name` or `pane.rename`; a terminal-backend title
 does not mask it. This differs from the presentation name in `agent.get` and
 `agent.list`, which prefer a backend title. Clearing an alias returns JSON

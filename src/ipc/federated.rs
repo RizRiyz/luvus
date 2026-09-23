@@ -1778,6 +1778,14 @@ fn handle_surface_message(
                     true,
                     last_cursor,
                 )?;
+                super::client::paint_hyperlink_runs(
+                    terminal,
+                    &frame,
+                    frame.cursor,
+                    frame.cursor_visible,
+                    last_cursor,
+                    truecolor,
+                )?;
                 super::client::sync_end();
                 *cursor_visible = frame.cursor_visible;
                 dock.machine_form_backdrop_pending = false;

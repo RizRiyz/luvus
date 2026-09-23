@@ -13,8 +13,9 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb
 use ratatui::style::{Color, Modifier};
 
 use super::{
-    AlignedRows, CodexComposerRegion, Cursor, DamageCell, DamageKind, DamageRow, DamageSnapshot,
-    HistoryMetrics, RenderCell, RetainedRowLayout, VtEngine, ALIGNED_WIDE_CELL,
+    AlignedRows, CodexComposerRegion, Cursor, DamageCell, DamageHyperlink, DamageKind, DamageRow,
+    DamageSnapshot, HistoryMetrics, LinkedCellVisitor, RenderCell, RetainedRowLayout, VtEngine,
+    ALIGNED_WIDE_CELL,
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
@@ -600,6 +601,45 @@ impl VtEngine for AlacrittyEngine {
         }
     }
 
+    fn for_each_linked_cell(&self, f: &mut LinkedCellVisitor<'_>) {
+        let grid = self.term.grid();
+        let rows = grid.screen_lines() as i32;
+        let offset = grid.display_offset() as i32;
+        let mut stack = [0u8; 4];
+        let mut combined = String::new();
+        for indexed in grid.display_iter() {
+            let row = indexed.point.line.0 + offset;
+            if !(0..rows).contains(&row) {
+                continue;
+            }
+            let cell = indexed.cell;
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let sym: &str = match cell.zerowidth() {
+                None => cell.c.encode_utf8(&mut stack),
+                Some(zw) => {
+                    combined.clear();
+                    combined.push(cell.c);
+                    combined.extend(zw.iter());
+                    &combined
+                }
+            };
+            let hyperlink = cell.hyperlink();
+            f(
+                row as u16,
+                indexed.point.column.0 as u16,
+                sym,
+                RenderCell {
+                    fg: map_color(cell.fg),
+                    bg: map_color(cell.bg),
+                    mods: map_flags(cell.flags),
+                },
+                hyperlink.as_ref().map(|hyperlink| hyperlink.uri()),
+            );
+        }
+    }
+
     fn damage_snapshot(&mut self) -> DamageSnapshot {
         self.damage_line_indices.clear();
         let mut kind = match self.term.damage() {
@@ -641,6 +681,7 @@ impl VtEngine for AlacrittyEngine {
             damaged_rows.push(DamageRow {
                 row: 0,
                 cells: Vec::with_capacity(columns),
+                hyperlinks: Vec::new(),
             });
         }
         damaged_rows.truncate(row_indices.len());
@@ -649,10 +690,24 @@ impl VtEngine for AlacrittyEngine {
                 continue;
             }
             damaged_row.row = row;
+            damaged_row.hyperlinks.clear();
             let line = Line(row as i32 - display_offset);
             let mut used = 0;
             for column in 0..columns {
                 let cell = &grid[line][Column(column)];
+                if let Some(hyperlink) = cell.hyperlink() {
+                    let uri = hyperlink.uri();
+                    match damaged_row.hyperlinks.last_mut() {
+                        Some(previous) if previous.end == column as u16 && previous.uri == uri => {
+                            previous.end = previous.end.saturating_add(1);
+                        }
+                        _ => damaged_row.hyperlinks.push(DamageHyperlink {
+                            start: column as u16,
+                            end: (column as u16).saturating_add(1),
+                            uri: uri.to_string(),
+                        }),
+                    }
+                }
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
@@ -721,6 +776,7 @@ impl VtEngine for AlacrittyEngine {
             for cell in &mut row.cells {
                 cell.zero_width.clear();
             }
+            row.hyperlinks.clear();
         }
         self.damage_rows = snapshot.rows;
     }
@@ -1691,6 +1747,41 @@ mod tests {
         assert_eq!(hyperlink.spans(), &[(0, 7, 14)]);
         assert!(rows.hyperlink_at(0, 6).is_none());
         assert!(rows.hyperlink_at(0, 14).is_none());
+
+        let mut linked = Vec::new();
+        engine.for_each_linked_cell(&mut |row, col, symbol, _, uri| {
+            if let Some(uri) = uri {
+                linked.push((row, col, symbol.to_string(), uri.to_string()));
+            }
+        });
+        assert_eq!(linked.len(), 7);
+        assert_eq!(
+            linked[0],
+            (0, 7, "m".into(), "file:///repo/src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn partial_damage_carries_sparse_osc8_spans() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 2, tx, budget_for_rows(40, 20));
+        let initial = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(initial.generation));
+        engine.recycle_damage_snapshot(initial);
+
+        engine.advance(
+            b"\x1b]8;id=claude;file:///repo/server/task.mjs\x1b\\server/task.mjs\x1b]8;;\x1b\\",
+        );
+        let damage = engine.damage_snapshot();
+        assert_eq!(damage.kind, DamageKind::Partial);
+        assert_eq!(damage.rows.len(), 1);
+        assert_eq!(damage.rows[0].hyperlinks.len(), 1);
+        assert_eq!(damage.rows[0].hyperlinks[0].start, 0);
+        assert_eq!(damage.rows[0].hyperlinks[0].end, 15);
+        assert_eq!(
+            damage.rows[0].hyperlinks[0].uri,
+            "file:///repo/server/task.mjs"
+        );
     }
 
     #[test]

@@ -1956,6 +1956,17 @@ pub struct HoverLink {
     pub target: LinkTarget,
 }
 
+/// One validated OSC 8 span projected into a client's screen coordinates.
+/// Kept sparse so ordinary terminal cells and frames pay no per-cell metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenderedHyperlink {
+    pub pane: PaneId,
+    pub y: u16,
+    pub start: u16,
+    pub end: u16,
+    pub uri: String,
+}
+
 /// A `Ctrl`+press that landed on a link, held until its release.
 ///
 /// The same gesture dragged is the RESIZE-5 divider grab, so the two are told
@@ -2880,6 +2891,9 @@ pub struct App {
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
     /// position to a grid cell for text selection.
     pub pane_content_rects: Vec<(PaneId, Rect)>,
+    /// Sparse OSC 8 spans from the last interactive render. Secondary clients
+    /// receive their own projection without replacing this geometry.
+    pub(crate) rendered_hyperlinks: Vec<RenderedHyperlink>,
     /// When `Some`, keyboard **scroll mode** is active on this pane: plain keys
     /// scroll its scrollback (see `handle_scroll_mode_key`) instead of reaching
     /// the agent. Entered by wheel-up or `Shift+↑`; left by `q`/typing. A
@@ -3370,6 +3384,7 @@ impl App {
             cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
+            rendered_hyperlinks: Vec::new(),
             scroll_pane: None,
             resize_drag: None,
             hover_divider: None,
@@ -4062,6 +4077,7 @@ impl App {
             cell_height_px: 0,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
+            rendered_hyperlinks: Vec::new(),
             scroll_pane: None,
             resize_drag: None,
             hover_divider: None,
@@ -4790,12 +4806,26 @@ impl App {
     }
 
     pub(crate) fn hidden_title_changed(&self, id: PaneId) -> bool {
-        self.config.layout.agent_title
-            && self.is_agent_pane(id)
-            && self
+        let changed = self.agent_session_title_changed(id);
+        self.config.layout.agent_title && changed
+    }
+
+    /// Emit a snapshot refresh only when an agent's OSC title generation moves.
+    pub(crate) fn agent_session_title_changed(&self, id: PaneId) -> bool {
+        if !self.is_agent_pane(id)
+            || !self
                 .panes
                 .get(&id)
                 .is_some_and(|pane| pane.take_title_change())
+        {
+            return false;
+        }
+        crate::ipc::api::publish_event(
+            &self.events,
+            "agent.title_changed",
+            json!({"pane": id.0.to_string()}),
+        );
+        true
     }
 
     /// Whether any PTY reader is currently coalescing an output notification.
@@ -7710,8 +7740,12 @@ impl App {
             sessions.retain(|_, title| title.owner.as_deref() != Some(owner));
             !sessions.is_empty()
         });
-        pane_count != self.agent_title_panes.len()
-            || session_count != agent_session_title_count(&self.agent_title_sessions)
+        let changed = pane_count != self.agent_title_panes.len()
+            || session_count != agent_session_title_count(&self.agent_title_sessions);
+        if changed {
+            crate::ipc::api::publish_event(&self.events, "agent.title_changed", json!({}));
+        }
+        changed
     }
 
     pub(crate) fn agent_row_title_for_session(
