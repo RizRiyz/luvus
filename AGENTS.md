@@ -462,10 +462,11 @@ debug binary and an isolated temporary Luvus home; do not aim it at a running
 production session. Preserve coverage without turning ordinary CI tests into
 unbounded input bursts or timing benchmarks.
 
-The CI matrix currently covers formatting, Clippy, locked tests on Ubuntu and
-macOS, FreeBSD amd64, targeted Windows protocol/ConPTY boundaries, UHP fixtures
-and live conformance, web client/bridge checks, patched terminal crates,
-packageability, RustSec audit, and Nix flake evaluation/build.
+The CI matrix currently covers formatting and Clippy on Ubuntu and Windows,
+locked tests on Ubuntu and macOS, FreeBSD amd64, targeted Windows
+protocol/ConPTY boundaries, UHP fixtures and live conformance, web
+client/bridge checks, patched terminal crates, packageability, RustSec audit,
+and Nix flake evaluation/build.
 
 ## Repository and contribution conventions
 
