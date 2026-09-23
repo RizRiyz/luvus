@@ -222,24 +222,15 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
     if argv.is_empty() || argv[0].trim().is_empty() {
         return Err("agent command cannot be empty".to_string());
     }
-    // Keep the CLI shim handling for direct commands, and use the same
-    // interpreter-package rules as process detection for wrapped agents.
-    let executable = argv[0].rsplit(['/', '\\']).next().unwrap_or(&argv[0]);
-    let executable = executable.to_ascii_lowercase();
-    let executable = executable
-        .strip_suffix(".exe")
-        .or_else(|| executable.strip_suffix(".cmd"))
-        .or_else(|| executable.strip_suffix(".bat"))
-        .unwrap_or(&executable);
     // Process detection only unwraps plain `env KEY=value command`. Resolve
-    // supported options here so they cannot hide a remote-only agent, without
-    // rejecting unrelated custom workers that use those options.
-    let inspected_argv = if executable == "env" {
-        env_command_argv(&argv)?
-    } else {
-        &argv
-    };
-    let descriptor = crate::agent::registry::find(executable).or_else(|| {
+    // supported options, including nested wrappers, before checking whether
+    // the actual executable is allowed in a local task.
+    let mut inspected_argv = argv.as_slice();
+    while executable_name(&inspected_argv[0]) == "env" {
+        inspected_argv = env_command_argv(inspected_argv)?;
+    }
+    let executable = executable_name(&inspected_argv[0]);
+    let descriptor = crate::agent::registry::find(&executable).or_else(|| {
         crate::detect::builtin_agent_in_argv(inspected_argv)
             .and_then(|agent| crate::agent::registry::find(&agent))
     });
@@ -251,6 +242,17 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
         }
     }
     Ok(argv)
+}
+
+fn executable_name(command: &str) -> String {
+    let basename = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let lowercase = basename.to_ascii_lowercase();
+    lowercase
+        .strip_suffix(".exe")
+        .or_else(|| lowercase.strip_suffix(".cmd"))
+        .or_else(|| lowercase.strip_suffix(".bat"))
+        .unwrap_or(&lowercase)
+        .to_string()
 }
 
 fn env_command_argv(argv: &[String]) -> Result<&[String], String> {
@@ -352,12 +354,15 @@ mod tests {
             "env -i arc-studio",
             "env - arc-studio",
             "env -u FOO arc-studio",
+            "env -i env -i arc-studio",
+            "env - /usr/bin/env -u FOO arc-studio",
             "env FOO=bar -- arc-studio",
             "env --unset=FOO arc-studio",
             "env FOO=bar -i arc-studio",
             "env -i node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
             "env - node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
             "env -u FOO node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "env -i env -u FOO node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
             "env -S arc-studio",
         ] {
             assert!(validate_agent_command(command).is_err(), "{command}");
@@ -375,6 +380,7 @@ mod tests {
             "env --unset=FOO custom-agent",
             "env FOO=bar -- custom-agent",
             "env FOO=bar -i custom-agent",
+            "env -i env -u FOO custom-agent",
         ] {
             assert!(validate_agent_command(command).is_ok(), "{command}");
         }
@@ -423,6 +429,9 @@ mod tests {
                 .success());
             assert_eq!(std::fs::read_to_string(&output).unwrap(), briefing);
         }
+        let nested_command = format!("env - /usr/bin/env -i {agent_command}");
+        assert!(launch(&nested_command, &briefing, "t42").unwrap().success());
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), briefing);
         let _ = std::fs::remove_dir_all(root);
     }
 }
