@@ -409,6 +409,7 @@ where
                         &frame,
                         frame.cursor,
                         frame.cursor_visible,
+                        &mut last_cursor,
                         truecolor,
                     )?;
                     Ok(())
@@ -832,6 +833,7 @@ fn paint_hyperlink_runs<W>(
     frame: &FrameData,
     cursor: Option<(u16, u16)>,
     cursor_visible: bool,
+    last_cursor: &mut Option<(u16, u16)>,
     truecolor: bool,
 ) -> std::io::Result<()>
 where
@@ -871,17 +873,14 @@ where
     if !wrote {
         return Ok(());
     }
-    match cursor.filter(|(x, y)| *x < size.width && *y < size.height) {
-        Some((x, y)) => {
-            backend.set_cursor_position(Position::new(x, y))?;
-            if cursor_visible {
-                backend.show_cursor()?;
-            } else {
-                backend.hide_cursor()?;
-            }
-        }
-        None => backend.hide_cursor()?,
-    }
+    restore_host_cursor(
+        backend,
+        size.width,
+        size.height,
+        cursor,
+        cursor_visible,
+        last_cursor,
+    )?;
     Backend::flush(backend)
 }
 
@@ -889,6 +888,35 @@ where
 /// onto the status line, and does not invent a prompt row.
 fn ime_position(cursor: Option<(u16, u16)>, tw: u16, th: u16) -> Option<(u16, u16)> {
     cursor.filter(|(x, y)| *x < tw && *y < th)
+}
+
+fn restore_host_cursor<B: Backend>(
+    backend: &mut B,
+    width: u16,
+    height: u16,
+    cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
+    last_cursor: &mut Option<(u16, u16)>,
+) -> std::result::Result<(), B::Error> {
+    match ime_position(cursor, width, height) {
+        Some((x, y)) => {
+            *last_cursor = Some((x, y));
+            backend.set_cursor_position(Position::new(x, y))?;
+            if cursor_visible {
+                backend.show_cursor()
+            } else {
+                backend.hide_cursor()
+            }
+        }
+        None => {
+            if let Some((x, y)) = *last_cursor {
+                if x < width && y < height {
+                    backend.set_cursor_position(Position::new(x, y))?;
+                }
+            }
+            backend.hide_cursor()
+        }
+    }
 }
 
 /// Write `cells` straight to the terminal via the backend (no full re-blit / no
@@ -924,25 +952,7 @@ where
             .filter(|(x, y, _)| *x < tw && *y < th)
             .map(|(x, y, c)| (*x, *y, c)),
     )?;
-    match ime_position(cursor, tw, th) {
-        Some((x, y)) => {
-            *last_cursor = Some((x, y));
-            backend.set_cursor_position(Position::new(x, y))?;
-            if cursor_visible {
-                backend.show_cursor()?;
-            } else {
-                backend.hide_cursor()?;
-            }
-        }
-        None => {
-            if let Some((x, y)) = *last_cursor {
-                if x < tw && y < th {
-                    backend.set_cursor_position(Position::new(x, y))?;
-                }
-            }
-            backend.hide_cursor()?;
-        }
-    }
+    restore_host_cursor(backend, tw, th, cursor, cursor_visible, last_cursor)?;
     backend.flush()?;
     Ok(())
 }

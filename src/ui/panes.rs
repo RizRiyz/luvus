@@ -187,6 +187,7 @@ fn push_rendered_hyperlink(
     uri: &str,
 ) {
     if width == 0
+        || uri.len() > crate::terminal::vt::MAX_TERMINAL_HYPERLINK_URI_BYTES
         || (crate::links::file_uri_path(uri).is_none() && !crate::platform::is_openable_url(uri))
     {
         return;
@@ -207,6 +208,46 @@ fn push_rendered_hyperlink(
             uri: uri.to_string(),
         });
     }
+}
+
+fn clip_rendered_hyperlinks(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    cover: Rect,
+) {
+    if cover.is_empty() {
+        return;
+    }
+    let mut right_halves = Vec::new();
+    links.retain_mut(|link| {
+        if link.pane != pane
+            || link.y < cover.y
+            || link.y >= cover.bottom()
+            || link.end <= cover.x
+            || link.start >= cover.right()
+        {
+            return true;
+        }
+        if cover.x <= link.start && cover.right() >= link.end {
+            return false;
+        }
+        if cover.x <= link.start {
+            link.start = cover.right().min(link.end);
+            return link.start < link.end;
+        }
+        if cover.right() >= link.end {
+            link.end = cover.x.max(link.start);
+            return link.start < link.end;
+        }
+
+        let mut right = link.clone();
+        right.start = cover.right();
+        link.end = cover.x;
+        right_halves.push(right);
+        true
+    });
+    let remaining = MAX_RENDERED_HYPERLINKS.saturating_sub(links.len());
+    links.extend(right_halves.into_iter().take(remaining));
 }
 
 pub(super) fn draw_panes(
@@ -594,6 +635,9 @@ fn draw_one_pane(
                 ))),
                 badge,
             );
+            // The badge replaces terminal cells, so those cells must not keep
+            // the hidden OSC 8 target emitted by the PTY underneath it.
+            clip_rendered_hyperlinks(context.rendered_hyperlinks, id, badge);
         }
     }
     cursor_pos
@@ -796,5 +840,49 @@ mod tests {
         assert_eq!(pick_bottom_left_caret(Some((3, 2)), (5, 18)), (5, 18));
         assert_eq!(pick_bottom_left_caret(Some((5, 18)), (5, 4)), (5, 4));
         assert_eq!(pick_bottom_left_caret(Some((5, 4)), (4, 0)), (5, 4));
+    }
+
+    #[test]
+    fn rendered_hyperlinks_reject_oversized_uris_before_frame_projection() {
+        let mut links = Vec::new();
+        let uri = format!(
+            "https://example.com/{}",
+            "a".repeat(crate::terminal::vt::MAX_TERMINAL_HYPERLINK_URI_BYTES)
+        );
+        push_rendered_hyperlink(&mut links, PaneId(1), 0, 0, 4, &uri);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn pane_chrome_clips_covered_hyperlink_cells() {
+        let pane = PaneId(1);
+        let other = PaneId(2);
+        let uri = "file:///repo/server/task.mjs".to_string();
+        let mut links = vec![
+            crate::app::RenderedHyperlink {
+                pane,
+                y: 3,
+                start: 4,
+                end: 18,
+                uri: uri.clone(),
+            },
+            crate::app::RenderedHyperlink {
+                pane: other,
+                y: 3,
+                start: 4,
+                end: 18,
+                uri,
+            },
+        ];
+
+        clip_rendered_hyperlinks(&mut links, pane, Rect::new(12, 3, 6, 1));
+
+        assert_eq!(links.len(), 2);
+        let clipped = links.iter().find(|link| link.pane == pane).unwrap();
+        assert_eq!((clipped.start, clipped.end), (4, 12));
+        assert_eq!(
+            links.iter().find(|link| link.pane == other).unwrap().end,
+            18
+        );
     }
 }

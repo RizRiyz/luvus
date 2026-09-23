@@ -18,7 +18,7 @@ use crate::terminal::pty::InputSender;
 /// a wide glyph without being confused with an actual space between words.
 pub(crate) const ALIGNED_WIDE_CELL: char = '\0';
 
-const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = 4_096;
+pub(crate) const MAX_TERMINAL_HYPERLINK_URI_BYTES: usize = 4_096;
 const MAX_TERMINAL_HYPERLINK_ID_BYTES: usize = 256;
 
 /// One OSC 8 hyperlink retained by the terminal engine.
