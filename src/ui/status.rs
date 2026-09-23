@@ -169,12 +169,16 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         let diff = app.files_mode == crate::diff::FilesMode::Diff;
         left.push(mode_label(if diff { "DIFF" } else { "FILES" }, t));
         left.push(Span::raw("  "));
+        if !diff && app.file_tree.filter.is_some() {
+            left.extend(hint("↑/↓", cat.act_move, t));
+            left.extend(hint("Enter", cat.act_right_click, t));
+            left.extend(hint("Esc", cat.act_back, t));
+            return (Line::from(left), false);
+        }
         left.extend(hint(if diff { "j/k" } else { "hjkl" }, cat.act_move, t));
         left.extend(hint("Enter", cat.act_open_menu, t));
         left.extend(hint("a", cat.act_right_click, t));
-        if diff {
-            left.extend(hint("f", cat.act_filter, t));
-        }
+        left.extend(hint("f", cat.act_filter, t));
         left.extend(hint("Esc", cat.act_back, t));
         return (Line::from(left), false);
     }
