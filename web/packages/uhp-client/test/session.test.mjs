@@ -9,6 +9,8 @@ class FakeBridge extends EventTarget {
   switches = [];
   switchTimeouts = [];
   snapshotRequests = 0;
+  rateLimitSnapshots = false;
+  snapshotGate;
   onEvent;
 
   async connect() {}
@@ -25,13 +27,27 @@ class FakeBridge extends EventTarget {
     }
     if (method === "session.snapshot") {
       this.snapshotRequests += 1;
-      return {
+      if (this.rateLimitSnapshots) {
+        const { BridgeError } = await import("../dist/index.js");
+        throw new BridgeError("private gateway request limit reached", "rate_limited");
+      }
+      const snapshot = {
         type: "session_snapshot",
         session: this.sessionName,
         server_generation: this.generation,
         event_sequence: this.sequence,
-        workspaces: [],
+        workspaces: [{
+          index: 0,
+          name: "workspace",
+          cwd: "/workspace",
+          active: true,
+          tabs: [{ index: 1, name: "tab", kind: "terminal", active: true, panes: [{
+            pane_id: "1", kind: "terminal", focused: true, agent_session_title: "Old title",
+          }] }],
+        }],
       };
+      if (this.snapshotGate) await this.snapshotGate;
+      return snapshot;
     }
     if (method === "web.sessions.switch") {
       this.switches.push(params.name);
@@ -54,9 +70,9 @@ class FakeBridge extends EventTarget {
     return { id: "events", action: async () => ({}), close() {} };
   }
 
-  emitEvent(event) {
+  emitEvent(event, data = {}) {
     this.sequence += 1;
-    this.onEvent({ event, sequence: this.sequence, data: {} });
+    this.onEvent({ event, sequence: this.sequence, data });
   }
 
   close() {}
@@ -106,18 +122,81 @@ test("session switching replaces the upstream generation and takes a fresh snaps
   session.stop();
 });
 
-test("agent title events refresh the snapshot without refreshing on terminal output", async () => {
+test("agent title events update the live snapshot without gateway requests", async () => {
   const { LiveSession } = await import("../dist/index.js");
   const bridge = new FakeBridge();
   const session = new LiveSession(bridge);
+  let rendered = 0;
+  session.addEventListener("snapshot", () => { rendered += 1; });
   await session.start();
 
   bridge.emitEvent("terminal.output_ready");
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(bridge.snapshotRequests, 1);
 
-  bridge.emitEvent("agent.title_changed");
+  for (let index = 0; index < 150; index += 1) {
+    bridge.emitEvent("agent.title_changed", { pane: "1", title: `Title ${index}` });
+  }
+  assert.equal(session.snapshot.workspaces[0].tabs[0].panes[0].agent_session_title, "Title 149");
+  assert.equal(bridge.snapshotRequests, 1);
+  bridge.emitEvent("agent.title_changed", { pane: "1", title: null });
+  assert.equal(session.snapshot.workspaces[0].tabs[0].panes[0].agent_session_title, null);
+  assert.equal(bridge.snapshotRequests, 1);
   await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(rendered, 2);
+  session.stop();
+});
+
+test("legacy title events still refresh, but rate limiting keeps the dashboard ready", async () => {
+  const { LiveSession } = await import("../dist/index.js");
+  const bridge = new FakeBridge();
+  const session = new LiveSession(bridge);
+  await session.start();
+
+  bridge.rateLimitSnapshots = true;
+  bridge.emitEvent("agent.title_changed");
+  await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(bridge.snapshotRequests, 2);
+  assert.equal(session.state, "ready");
+  await session.refresh();
+  assert.equal(bridge.snapshotRequests, 2);
+  bridge.emitEvent("agent.title_changed");
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(bridge.snapshotRequests, 2);
+  session.stop();
+});
+
+test("events arriving during a snapshot refresh are replayed onto its result", async () => {
+  const { LiveSession } = await import("../dist/index.js");
+  const bridge = new FakeBridge();
+  const session = new LiveSession(bridge);
+  await session.start();
+
+  let release;
+  bridge.snapshotGate = new Promise((resolve) => { release = resolve; });
+  const refresh = session.refresh();
+  bridge.emitEvent("agent.title_changed", { pane: "1", title: "Latest title" });
+  release();
+  await refresh;
+  assert.equal(session.snapshot.workspaces[0].tabs[0].panes[0].agent_session_title, "Latest title");
+  assert.equal(bridge.snapshotRequests, 2);
+  session.stop();
+});
+
+test("session switching waits for an in-flight snapshot", async () => {
+  const { LiveSession } = await import("../dist/index.js");
+  const bridge = new FakeBridge();
+  const session = new LiveSession(bridge);
+  await session.start();
+
+  let release;
+  bridge.snapshotGate = new Promise((resolve) => { release = resolve; });
+  const refresh = session.refresh();
+  const switching = session.switchSession("review");
+  assert.deepEqual(bridge.switches, []);
+  release();
+  await refresh;
+  await switching;
+  assert.equal(session.snapshot.session, "review");
   session.stop();
 });

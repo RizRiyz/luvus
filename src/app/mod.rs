@@ -4825,9 +4825,30 @@ impl App {
         crate::ipc::api::publish_event(
             &self.events,
             "agent.title_changed",
-            json!({"pane": id.0.to_string()}),
+            json!({"pane": id.0.to_string(), "title": self.web_agent_session_title(id)}),
         );
         true
+    }
+
+    pub(crate) fn web_agent_session_title(&self, id: PaneId) -> Option<String> {
+        self.is_agent_pane(id)
+            .then(|| self.pane_title(id))
+            .flatten()
+            .and_then(|title| {
+                let title = title
+                    .chars()
+                    .take(160)
+                    .map(|character| {
+                        if character.is_whitespace() || character.is_control() {
+                            ' '
+                        } else {
+                            character
+                        }
+                    })
+                    .collect::<String>();
+                let title = title.trim();
+                (!title.is_empty()).then(|| title.to_string())
+            })
     }
 
     /// Whether any PTY reader is currently coalescing an output notification.
