@@ -124,6 +124,12 @@ workspaces, tabs, panes, agents, file paths, and retained pane output. Use
 opens the selected target. A non-empty query needs one `Esc` to clear and a
 second `Esc` to close.
 
+Plain `/` inside a native FILE, Markdown preview, Mermaid preview, or DIFF view
+uses exact local content search instead. `Enter` commits, `n` / `N` wrap through
+matches, `Ctrl-I` toggles case sensitivity, `Ctrl-U` clears and returns to query
+editing, and `Esc` cancels search before closing the view. This does not replace
+the FILES tree's `f` path filter or the DIFF sidebar's `f` state filter.
+
 For a file in the current session, `Alt+A`, `F2`, or right-click opens the
 same action menu as FILES: choose a native read-only tab or an available editor.
 Actions target the result's workspace. Plain `a` remains query text.

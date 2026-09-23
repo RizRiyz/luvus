@@ -934,22 +934,24 @@ mod tests {
         let search = crate::app::PaneSearch {
             pane: PaneId(1),
             owner: crate::app::PaneSearchOwner::Scroll,
-            query: "needle".into(),
-            editing: false,
-            case_sensitive: false,
-            matches: vec![
-                crate::app::PaneSearchMatch {
-                    row: 10,
-                    col: 1,
-                    width: 3,
-                },
-                crate::app::PaneSearchMatch {
-                    row: 11,
-                    col: 6,
-                    width: 6,
-                },
-            ],
-            current: 1,
+            local: crate::search::local::LocalSearch {
+                query: "needle".into(),
+                editing: false,
+                case_sensitive: false,
+                matches: vec![
+                    crate::app::PaneSearchMatch {
+                        row: 10,
+                        col: 1,
+                        width: 3,
+                    },
+                    crate::app::PaneSearchMatch {
+                        row: 11,
+                        col: 6,
+                        width: 6,
+                    },
+                ],
+                current: 1,
+            },
             saved_scroll: 0,
         };
         draw_pane_search_matches(&mut buf, area, 10, &search, &t);

@@ -437,13 +437,23 @@ pub(super) fn draw_file_view(
         .unwrap_or_default();
     // A search overrides the footer with the query + hit position.
     let foot = if let Some(s) = &v.search {
-        if s.editing {
-            format!(" /{}", s.query)
+        let case = if s.case_sensitive { " · Aa" } else { "" };
+        let position = if s.editing {
+            String::new()
         } else if s.matches.is_empty() {
-            format!(" /{} · no matches", s.query)
+            " · 0/0".to_string()
         } else {
-            format!(" /{} · {}/{}", s.query, s.current + 1, s.matches.len())
-        }
+            format!(" · {}/{}", s.current + 1, s.matches.len())
+        };
+        let navigation = if !s.editing && !s.matches.is_empty() {
+            " · n/N match"
+        } else {
+            ""
+        };
+        format!(
+            " /{}{}{}{} · Ctrl-U clear · Ctrl-I case · Esc cancel",
+            s.query, position, case, navigation
+        )
     } else {
         match &v.load {
             FileLoad::Text(lines) => format!(" {name} · {} lines · UTF-8", lines.len()),
@@ -531,10 +541,7 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
                 }
                 gutter_cell(f, y, (si == 0).then_some(i + 1), i + 1);
                 f.render_widget(
-                    Paragraph::new(Span::styled(
-                        crate::files::seg_text(line, range),
-                        Style::new().fg(t.text),
-                    )),
+                    Paragraph::new(search_range(v, i, line, range, t)),
                     Rect::new(text_x, y, text_w, 1),
                 );
                 y += 1;
@@ -548,7 +555,7 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     for (i, line) in lines.iter().enumerate().skip(v.scroll).take(rows) {
         let y = body.y + (i - v.scroll) as u16;
         gutter_cell(f, y, Some(i + 1), i + 1);
-        let line_ui = search_line(v, i, line, t);
+        let line_ui = search_range(v, i, line, (0, line.chars().count()), t);
         f.render_widget(
             Paragraph::new(line_ui).scroll((0, v.hscroll)),
             Rect::new(text_x, y, text_w, 1),
@@ -586,42 +593,63 @@ fn human(n: u64) -> String {
 
 /// Build a line's spans, highlighting any search matches on it (the current
 /// match brighter). No match → one plain span.
-fn search_line<'a>(v: &FileView, line_idx: usize, line: &'a str, t: &Theme) -> Line<'a> {
-    let Some(s) = &v.search else {
-        return Line::from(Span::styled(line, Style::new().fg(t.text)));
+fn search_range<'a>(
+    v: &FileView,
+    line_idx: usize,
+    line: &'a str,
+    char_range: (usize, usize),
+    t: &Theme,
+) -> Line<'a> {
+    let byte_at = |char_index: usize| {
+        line.char_indices()
+            .nth(char_index)
+            .map_or(line.len(), |(byte, _)| byte)
     };
-    let hits: Vec<(usize, usize)> = s
+    let range_start = byte_at(char_range.0);
+    let range_end = byte_at(char_range.1);
+    let Some(s) = &v.search else {
+        return Line::from(Span::styled(
+            &line[range_start..range_end],
+            Style::new().fg(t.text),
+        ));
+    };
+    let hits: Vec<(usize, &crate::search::local::RowMatch)> = s
         .matches
         .iter()
         .enumerate()
-        .filter(|(_, (l, _))| *l == line_idx)
-        .map(|(i, (_, c))| (i, *c))
+        .filter(|(_, search_match)| {
+            search_match.row == line_idx
+                && search_match.byte_start < range_end
+                && search_match.byte_end > range_start
+        })
         .collect();
     if hits.is_empty() || s.query.is_empty() {
-        return Line::from(Span::styled(line, Style::new().fg(t.text)));
+        return Line::from(Span::styled(
+            &line[range_start..range_end],
+            Style::new().fg(t.text),
+        ));
     }
-    let qlen = s.query.chars().count();
     let mut spans: Vec<Span> = Vec::new();
-    let mut cursor = 0usize; // char index
-    let chars: Vec<char> = line.chars().collect();
-    for (mi, col) in hits {
-        if col > cursor {
-            let seg: String = chars[cursor..col.min(chars.len())].iter().collect();
-            spans.push(Span::styled(seg, Style::new().fg(t.text)));
+    let mut cursor = range_start;
+    for (match_index, search_match) in hits {
+        let start = search_match.byte_start.max(range_start);
+        let end = search_match.byte_end.min(range_end);
+        if start > cursor {
+            spans.push(Span::styled(&line[cursor..start], Style::new().fg(t.text)));
         }
-        let end = (col + qlen).min(chars.len());
-        let seg: String = chars[col..end].iter().collect();
-        let hl = if mi == s.current {
+        let hl = if match_index == s.current {
             Style::new().fg(t.base).bg(t.accent).bold()
         } else {
             Style::new().fg(t.base).bg(t.amber)
         };
-        spans.push(Span::styled(seg, hl));
+        spans.push(Span::styled(&line[start..end], hl));
         cursor = end;
     }
-    if cursor < chars.len() {
-        let seg: String = chars[cursor..].iter().collect();
-        spans.push(Span::styled(seg, Style::new().fg(t.text)));
+    if cursor < range_end {
+        spans.push(Span::styled(
+            &line[cursor..range_end],
+            Style::new().fg(t.text),
+        ));
     }
     Line::from(spans)
 }

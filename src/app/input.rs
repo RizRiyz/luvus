@@ -740,6 +740,24 @@ impl App {
                     }
                     return true;
                 }
+                let focused_view = self
+                    .workspaces
+                    .get(self.active_ws)
+                    .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+                    .map(|tab| tab.layout.focus);
+                if let Some(view) = focused_view.and_then(|pane| self.views.get_mut(&pane)) {
+                    let search = match view {
+                        ViewKind::File(view) => view.search.as_mut(),
+                        ViewKind::Preview(view) => view.search.as_mut(),
+                        ViewKind::Diff(view) => view.search.as_mut(),
+                    };
+                    if let Some(search) = search {
+                        if search.editing {
+                            search.query.extend(s.chars().filter(|ch| !ch.is_control()));
+                        }
+                        return true;
+                    }
+                }
                 // Copy mode owns input just like scroll mode: never leak a
                 // pasted command into the pane while the user is selecting.
                 if self.copy_mode.is_some() {
@@ -3059,11 +3077,7 @@ impl App {
         self.pane_search = Some(super::search::PaneSearch {
             pane,
             owner,
-            query: String::new(),
-            editing: true,
-            case_sensitive: false,
-            matches: Vec::new(),
-            current: 0,
+            local: crate::search::local::LocalSearch::editing(),
             saved_scroll,
         });
     }
@@ -3102,13 +3116,11 @@ impl App {
                 0,
             ),
         };
-        let current = matches
-            .iter()
-            .position(|search_match| (search_match.row, search_match.col) >= origin)
-            .unwrap_or(0);
+        let current = crate::search::local::first_at_or_after(&matches, origin, |search_match| {
+            (search_match.row, search_match.col)
+        });
         if let Some(search) = self.pane_search.as_mut() {
-            search.matches = matches;
-            search.current = current;
+            search.replace_matches(matches, current);
         }
     }
 
@@ -3121,19 +3133,17 @@ impl App {
             return;
         }
         if let Some(search) = self.pane_search.as_mut() {
-            search.editing = false;
+            search.commit();
         }
         self.refresh_pane_search_matches();
         self.reveal_current_pane_search_match();
     }
 
     fn toggle_pane_search_case(&mut self) {
-        let committed = if let Some(search) = self.pane_search.as_mut() {
-            search.case_sensitive = !search.case_sensitive;
-            !search.editing && !search.query.is_empty()
-        } else {
-            false
-        };
+        let committed = self
+            .pane_search
+            .as_mut()
+            .is_some_and(|search| search.toggle_case());
         if committed {
             self.refresh_pane_search_matches();
             self.reveal_current_pane_search_match();
@@ -3167,20 +3177,12 @@ impl App {
     }
 
     fn step_pane_search(&mut self, forward: bool) {
-        let Some(search) = self
-            .pane_search
-            .as_mut()
-            .filter(|search| !search.editing && !search.matches.is_empty())
-        else {
+        let Some(search) = self.pane_search.as_mut() else {
             return;
         };
-        let count = search.matches.len();
-        search.current = if forward {
-            (search.current + 1) % count
-        } else {
-            (search.current + count - 1) % count
-        };
-        self.reveal_current_pane_search_match();
+        if search.step(forward) {
+            self.reveal_current_pane_search_match();
+        }
     }
 
     pub(super) fn cancel_pane_search(&mut self) {
@@ -3220,23 +3222,20 @@ impl App {
             }
             KeyCode::Char('u') if super::keys::is_ctrl_chord(key.modifiers) => {
                 if let Some(search) = self.pane_search.as_mut() {
-                    search.query.clear();
-                    search.editing = true;
-                    search.matches.clear();
-                    search.current = 0;
+                    search.clear();
                 }
                 self.search_flash = None;
             }
             KeyCode::Backspace if editing => {
                 if let Some(search) = self.pane_search.as_mut() {
-                    search.query.pop();
+                    search.backspace();
                 }
             }
             KeyCode::Char('n') if !editing => self.step_pane_search(true),
             KeyCode::Char('N') if !editing => self.step_pane_search(false),
             KeyCode::Char(ch) if editing && !super::keys::is_ctrl_chord(key.modifiers) => {
                 if let Some(search) = self.pane_search.as_mut() {
-                    search.query.push(ch);
+                    search.push(ch);
                 }
             }
             _ => {}
@@ -4932,6 +4931,67 @@ mod tests {
             KeyModifiers::SHIFT,
         ))));
         assert!(app.handle_event(AppEvent::Key(plain('/'))));
+    }
+
+    #[test]
+    fn native_view_search_owns_paste_while_editing_and_after_commit() {
+        let _env = crate::persist::test_env("native-search-paste");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes.remove(&pane);
+
+        let path = std::path::PathBuf::from("sample.txt");
+        let diff_path = crate::diff::RepoPath::from_path(std::path::Path::new("sample.txt"))
+            .expect("valid relative path");
+        let mut views = vec![
+            ViewKind::File(crate::files::FileView::new(path.clone())),
+            ViewKind::Preview(crate::files::preview::DocumentView::new(
+                path,
+                crate::files::preview::PreviewKind::Markdown,
+            )),
+            ViewKind::Diff(Box::new(crate::diff::DiffView::new(
+                std::path::PathBuf::from("/repo"),
+                crate::diff::DiffKey {
+                    repo_id: "repo".into(),
+                    worktree_id: "tree".into(),
+                    layer: crate::diff::DiffLayer::Worktree,
+                    old_path: Some(diff_path.clone()),
+                    new_path: Some(diff_path),
+                },
+                crate::diff::DiffLayoutPreference::Stack,
+                3,
+                false,
+                false,
+            ))),
+        ];
+
+        for mut view in views.drain(..) {
+            let search = match &mut view {
+                ViewKind::File(view) => &mut view.search,
+                ViewKind::Preview(view) => &mut view.search,
+                ViewKind::Diff(view) => &mut view.search,
+            };
+            *search = Some(crate::search::local::LocalSearch::editing());
+            app.views.insert(pane, view);
+
+            assert!(app.handle_event(AppEvent::Paste("pa\nst\ted".into())));
+            let search = match app.views.get_mut(&pane).expect("native view") {
+                ViewKind::File(view) => view.search.as_mut().unwrap(),
+                ViewKind::Preview(view) => view.search.as_mut().unwrap(),
+                ViewKind::Diff(view) => view.search.as_mut().unwrap(),
+            };
+            assert_eq!(search.query, "pasted");
+            assert!(search.commit());
+
+            assert!(app.handle_event(AppEvent::Paste("ignored".into())));
+            let query = match app.views.get(&pane).expect("native view") {
+                ViewKind::File(view) => &view.search.as_ref().unwrap().query,
+                ViewKind::Preview(view) => &view.search.as_ref().unwrap().query,
+                ViewKind::Diff(view) => &view.search.as_ref().unwrap().query,
+            };
+            assert_eq!(query, "pasted");
+        }
     }
 
     #[test]

@@ -608,11 +608,13 @@ mod tests {
         app.pane_search = Some(crate::app::PaneSearch {
             pane,
             owner: crate::app::PaneSearchOwner::Scroll,
-            query: "needle".into(),
-            editing: true,
-            case_sensitive: false,
-            matches: Vec::new(),
-            current: 0,
+            local: crate::search::local::LocalSearch {
+                query: "needle".into(),
+                editing: true,
+                case_sensitive: false,
+                matches: Vec::new(),
+                current: 0,
+            },
             saved_scroll: 0,
         });
         let editing = text(&app);

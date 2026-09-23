@@ -1308,11 +1308,15 @@ impl App {
         // While typing a search query, keys edit the query.
         if v.search.as_ref().is_some_and(|s| s.editing) {
             match key.code {
-                KeyCode::Char(c) => v.search_push(c),
+                KeyCode::Char('i') if super::keys::is_ctrl_chord(key.modifiers) => {
+                    v.search_toggle_case()
+                }
+                KeyCode::Char('u') if super::keys::is_ctrl_chord(key.modifiers) => v.search_clear(),
+                KeyCode::Char(c) if !super::keys::is_ctrl_chord(key.modifiers) => v.search_push(c),
                 KeyCode::Backspace => v.search_backspace(),
                 KeyCode::Enter => {
                     v.search_commit();
-                    v.search_step(true, viewport); // reveal the first hit
+                    v.reveal_current_match(viewport);
                 }
                 KeyCode::Esc => v.search_cancel(),
                 _ => return false,
@@ -1320,6 +1324,16 @@ impl App {
             return true;
         }
         match key.code {
+            KeyCode::Char('i')
+                if super::keys::is_ctrl_chord(key.modifiers) && v.search.is_some() =>
+            {
+                v.search_toggle_case()
+            }
+            KeyCode::Char('u')
+                if super::keys::is_ctrl_chord(key.modifiers) && v.search.is_some() =>
+            {
+                v.search_clear()
+            }
             KeyCode::Char('j') | KeyCode::Down => v.scroll_by(1, viewport, text_w),
             KeyCode::Char('k') | KeyCode::Up => v.scroll_by(-1, viewport, text_w),
             KeyCode::Char('d') => v.scroll_by(viewport as i32 / 2, viewport, text_w),

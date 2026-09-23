@@ -6,6 +6,7 @@
 pub mod federation;
 pub mod files;
 mod fuzzy;
+pub mod local;
 
 pub use fuzzy::{FuzzyField, FuzzyQuery, PreparedText};
 

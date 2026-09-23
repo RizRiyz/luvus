@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::search::local::{first_at_or_after, match_spans, LocalSearch, RowMatch};
+
 /// Files larger than this are not read into memory — a viewer is not an excuse
 /// to allocate hundreds of MB on a whim.
 pub const SIZE_CAP: u64 = 5 * 1024 * 1024;
@@ -29,17 +31,7 @@ pub enum FileLoad {
 }
 
 /// A live in-file search over the loaded text.
-#[derive(Clone, Debug, Default)]
-pub struct Search {
-    /// The query being typed / active (lowercased match is case-insensitive).
-    pub query: String,
-    /// True while the user is still typing the query (before Enter).
-    pub editing: bool,
-    /// `(line, start_col)` of every match, in document order.
-    pub matches: Vec<(usize, usize)>,
-    /// Index into `matches` of the current hit.
-    pub current: usize,
-}
+pub type Search = LocalSearch<RowMatch>;
 
 /// One open file: what it is, and where the viewport sits.
 pub struct FileView {
@@ -108,10 +100,11 @@ impl FileView {
         let max = self.line_count().saturating_sub(1);
         self.scroll = self.scroll.min(max);
         self.hscroll = 0;
-        if let Some(s) = self.search.take() {
-            if !s.query.is_empty() {
-                self.run_search(&s.query);
-            }
+        let committed_query = self.search.as_ref().and_then(|search| {
+            (!search.editing && !search.query.is_empty()).then(|| search.query.clone())
+        });
+        if let Some(query) = committed_query {
+            self.run_search(&query);
         }
     }
 
@@ -186,23 +179,20 @@ impl FileView {
 
     /// Begin typing a query.
     pub fn search_begin(&mut self) {
-        self.search = Some(Search {
-            editing: true,
-            ..Default::default()
-        });
+        self.search = Some(Search::editing());
     }
 
     /// A char typed into the active query.
     pub fn search_push(&mut self, c: char) {
-        if let Some(s) = self.search.as_mut().filter(|s| s.editing) {
-            s.query.push(c);
+        if let Some(search) = self.search.as_mut() {
+            search.push(c);
         }
     }
 
     /// Backspace in the active query.
     pub fn search_backspace(&mut self) {
-        if let Some(s) = self.search.as_mut().filter(|s| s.editing) {
-            s.query.pop();
+        if let Some(search) = self.search.as_mut() {
+            search.backspace();
         }
     }
 
@@ -216,6 +206,9 @@ impl FileView {
             self.search = None;
             return;
         }
+        if let Some(search) = self.search.as_mut() {
+            search.commit();
+        }
         self.run_search(&query);
     }
 
@@ -224,62 +217,66 @@ impl FileView {
         self.search = None;
     }
 
+    pub fn search_clear(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            search.clear();
+        }
+    }
+
+    pub fn search_toggle_case(&mut self) {
+        let rebuild = self
+            .search
+            .as_mut()
+            .is_some_and(|search| search.toggle_case());
+        if rebuild {
+            let query = self.search.as_ref().map(|search| search.query.clone());
+            if let Some(query) = query {
+                self.run_search(&query);
+            }
+        }
+    }
+
     /// Step to the next (`forward`) / previous match, wrapping, and scroll it
     /// into view.
     pub fn search_step(&mut self, forward: bool, viewport: usize) {
-        let (len, next) = match self.search.as_ref() {
-            Some(s) if !s.matches.is_empty() => {
-                let n = s.matches.len();
-                let cur = s.current;
-                (
-                    n,
-                    if forward {
-                        (cur + 1) % n
-                    } else {
-                        (cur + n - 1) % n
-                    },
-                )
-            }
-            _ => return,
-        };
-        if let Some(s) = self.search.as_mut() {
-            s.current = next;
+        if self
+            .search
+            .as_mut()
+            .is_some_and(|search| search.step(forward))
+        {
+            self.reveal_current_match(viewport);
         }
-        let _ = len;
-        self.reveal_current_match(viewport);
     }
 
     fn run_search(&mut self, query: &str) {
-        let needle = query.to_lowercase();
+        let case_sensitive = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.case_sensitive);
         let mut matches = Vec::new();
         if let FileLoad::Text(lines) = &self.load {
-            for (li, line) in lines.iter().enumerate() {
-                let hay = line.to_lowercase();
-                let mut from = 0;
-                while let Some(rel) = hay[from..].find(&needle) {
-                    let col = from + rel;
-                    matches.push((li, col));
-                    from = col + needle.len().max(1);
-                }
+            for (row, line) in lines.iter().enumerate() {
+                matches.extend(
+                    match_spans(line, query, case_sensitive)
+                        .into_iter()
+                        .map(|search_match| RowMatch::at(row, search_match)),
+                );
             }
         }
-        // Jump to the first match at/after the current viewport top.
-        let current = matches
-            .iter()
-            .position(|(l, _)| *l >= self.scroll)
-            .unwrap_or(0);
-        self.search = Some(Search {
-            query: query.to_string(),
-            editing: false,
-            matches,
-            current,
+        let current = first_at_or_after(&matches, (self.scroll, 0), |search_match| {
+            (search_match.row, search_match.column)
         });
+        if let Some(search) = self.search.as_mut() {
+            search.query = query.to_string();
+            search.editing = false;
+            search.replace_matches(matches, current);
+        }
     }
 
-    fn reveal_current_match(&mut self, viewport: usize) {
+    pub(crate) fn reveal_current_match(&mut self, viewport: usize) {
         if let Some(s) = &self.search {
-            if let Some((line, _)) = s.matches.get(s.current).copied() {
-                // Center-ish: keep the match on screen.
+            if let Some(search_match) = s.matches.get(s.current) {
+                let line = search_match.row;
                 if line < self.scroll || line >= self.scroll + viewport.max(1) {
                     self.scroll = line.saturating_sub(viewport / 2);
                 }
@@ -813,6 +810,15 @@ mod tests {
         // A refreshed read re-evaluates the query against new text.
         v.apply(FileLoad::Text(vec!["only foo".into()]));
         assert_eq!(v.search.as_ref().unwrap().matches.len(), 1);
+
+        // Refreshing while the query editor is open must not commit it.
+        v.search_begin();
+        for c in "draft".chars() {
+            v.search_push(c);
+        }
+        v.apply(FileLoad::Text(vec!["draft".into()]));
+        assert!(v.search.as_ref().unwrap().editing);
+        assert!(v.search.as_ref().unwrap().matches.is_empty());
 
         v.search_cancel();
         assert!(v.search.is_none());
