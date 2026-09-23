@@ -53,6 +53,8 @@ mod switcher;
 
 pub use search::{GlobalSearch, SearchFlash};
 
+#[cfg(test)]
+pub(crate) use keys::build_direct_keymap;
 pub use keys::{key_reference_rows, presets, Cmd, PrefixSpec};
 pub use modules::ModuleMenuAction;
 pub use picker::{FolderPicker, PickerHit, Row};
