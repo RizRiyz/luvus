@@ -1,8 +1,9 @@
-import type { BridgeClient, PaneSnapshot, StreamHandle, TerminalFrame } from "@luvus/uhp-client";
+import { BridgeError, type BridgeClient, type PaneSnapshot, type SessionSnapshot, type StreamHandle, type TerminalFrame } from "@luvus/uhp-client";
 import { parseAnsi } from "./ansi.js";
 import { button, element } from "./dom.js";
 import { uploadTerminalFile } from "./file-upload.js";
 import { NativeTerminalInput, type TerminalAction } from "./native-input.js";
+import { TerminalTargetTracker, type TerminalTarget } from "./terminal-target.js";
 
 export interface TerminalPaneOption {
   pane: PaneSnapshot;
@@ -14,6 +15,20 @@ export interface TerminalPaneOption {
 export class TerminalView {
   readonly root = element("section", { className: "terminal-screen" });
   #stream: StreamHandle | undefined;
+  #target: TerminalTarget | undefined;
+  #targetTracker: TerminalTargetTracker;
+  #streamAttempt = 0;
+  #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  #reconnectRetry = 0;
+  #targetError: BridgeError | undefined;
+  #destroyed = false;
+  #queuedActions: Array<{
+    action: TerminalAction;
+    params: Record<string, unknown>;
+    resolve: (value: unknown) => void;
+    reject: (reason: unknown) => void;
+  }> = [];
+  #status: HTMLElement | undefined;
   #output = element("div", {
     className: "terminal-output",
     attrs: { role: "log", tabindex: "0", "aria-label": "Terminal output" },
@@ -45,8 +60,8 @@ export class TerminalView {
 
   constructor(
     private readonly bridge: BridgeClient,
-    private readonly generation: string,
-    private readonly pane: PaneSnapshot,
+    snapshot: SessionSnapshot,
+    pane: PaneSnapshot,
     private readonly control: boolean,
     private readonly canUploadFiles: boolean,
     private readonly streamCursor: boolean,
@@ -54,11 +69,13 @@ export class TerminalView {
     private readonly onSelectPane: (pane: PaneSnapshot) => void,
     onBack: () => void,
   ) {
+    this.#targetTracker = new TerminalTargetTracker(snapshot, pane);
+    this.#target = this.#targetTracker.resolve(snapshot);
     const title = pane.agent_name || pane.agent || `Pane ${pane.pane_id}`;
     if (control) {
       this.#input = new NativeTerminalInput(
         (action, params) => this.#action(action, params),
-        (message) => this.#appendStatus(`Input failed: ${message}`),
+        (message) => this.#inputFailed(message),
         (files) => {
           if (this.canUploadFiles) this.#queueFiles(files);
         },
@@ -191,25 +208,65 @@ export class TerminalView {
   }
 
   async start(): Promise<void> {
-    if (!this.pane.terminal_id) throw new Error("Pane has no live terminal identity");
-    const method = this.control ? "terminal.backend.control" : "terminal.backend.observe";
-    this.#stream = await this.bridge.openStream(method, {
-      server_generation: this.generation,
-      terminal_id: this.pane.terminal_id,
-      pane_id: this.pane.pane_id,
-      mode: "recent_unwrapped",
-      lines: 120,
-      ansi: true,
-      ...(this.streamCursor ? { cursor: true } : {}),
-    }, (frame) => this.#frame(frame), (reason) => {
-      this.#appendStatus(`Terminal disconnected: ${reason}`);
-    });
+    if (!this.#target) throw new Error("Pane has no live terminal identity");
+    await this.#connectStream(true);
     if (this.control && matchMedia("(pointer: fine)").matches) this.#input?.focus();
   }
 
+  async #connectStream(initial = false): Promise<void> {
+    if (this.#destroyed) return;
+    const target = this.#target;
+    if (!target?.pane.terminal_id) {
+      if (initial) throw new Error("Pane has no live terminal identity");
+      return;
+    }
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
+    const attempt = ++this.#streamAttempt;
+    const method = this.control ? "terminal.backend.control" : "terminal.backend.observe";
+    try {
+      await this.bridge.connect();
+      const stream = await this.bridge.openStream(method, {
+        server_generation: target.serverGeneration,
+        terminal_id: target.pane.terminal_id,
+        pane_id: target.pane.pane_id,
+        mode: "recent_unwrapped",
+        lines: 120,
+        ansi: true,
+        ...(this.streamCursor ? { cursor: true } : {}),
+      }, (frame) => this.#frame(frame, attempt), (reason) => this.#streamClosed(attempt, reason));
+      if (this.#destroyed || attempt !== this.#streamAttempt) {
+        stream.close();
+        return;
+      }
+      this.#stream = stream;
+      this.#reconnectRetry = 0;
+      this.#clearStatus();
+      this.#restoreInputHint();
+      this.#flushQueuedActions(stream);
+    } catch (error) {
+      if (this.#destroyed || attempt !== this.#streamAttempt) return;
+      this.#stream = undefined;
+      if (!recoverableConnectionError(error)) {
+        this.#failQueuedActions(error);
+        if (initial) throw error;
+        this.#showStatus(error instanceof Error ? error.message : "Terminal connection failed");
+        return;
+      }
+      this.#showStatus("Connection interrupted — reconnecting…");
+      this.#scheduleReconnect();
+    }
+  }
+
   destroy(): void {
+    this.#destroyed = true;
+    this.#streamAttempt += 1;
+    if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = undefined;
+    this.#failQueuedActions(new BridgeError("Terminal view closed", "closed"));
     this.#input?.destroy();
     this.#stream?.close();
+    this.#stream = undefined;
     if (this.#paintFrame !== undefined) cancelAnimationFrame(this.#paintFrame);
     if (this.#viewportFrame !== undefined) cancelAnimationFrame(this.#viewportFrame);
     window.visualViewport?.removeEventListener("resize", this.#viewportChanged);
@@ -217,6 +274,60 @@ export class TerminalView {
     window.removeEventListener("resize", this.#viewportChanged);
     document.removeEventListener("pointerdown", this.#outsidePaneMenu);
     document.removeEventListener("keydown", this.#paneMenuKeydown);
+  }
+
+  updateSnapshot(snapshot: SessionSnapshot): void {
+    if (this.#destroyed) return;
+    if (snapshot.session !== this.#targetTracker.session) {
+      this.#target = undefined;
+      if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+      const stream = this.#stream;
+      this.#streamAttempt += 1;
+      this.#stream = undefined;
+      stream?.close();
+      this.#targetError = new BridgeError("Terminal belongs to another session", "stale_stream");
+      this.#failQueuedActions(this.#targetError);
+      this.#showStatus("Session changed — return to Mission Control to choose a terminal");
+      return;
+    }
+    const previous = this.#target;
+    const generationChanged = snapshot.server_generation !== this.#targetTracker.serverGeneration;
+    const target = this.#targetTracker.resolve(snapshot);
+    this.#target = target;
+    if (!target) {
+      if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+      const stream = this.#stream;
+      this.#streamAttempt += 1;
+      this.#stream = undefined;
+      stream?.close();
+      if (generationChanged) {
+        this.#targetError = new BridgeError(
+          "The server restarted; choose the terminal again before sending input",
+          "stale_server",
+        );
+        this.#failQueuedActions(this.#targetError);
+        this.#showStatus("Server restarted — return to Mission Control and choose the terminal again");
+      } else {
+        this.#showStatus("Waiting for terminal to restore…");
+      }
+      return;
+    }
+    this.#targetError = undefined;
+    const changed = !previous
+      || previous.serverGeneration !== target.serverGeneration
+      || previous.pane.pane_id !== target.pane.pane_id
+      || previous.pane.terminal_id !== target.pane.terminal_id;
+    if (!changed) return;
+    this.#reconnectRetry = 0;
+    if (this.#stream) this.#disconnectStream(this.#streamAttempt, "Terminal identity changed");
+    else {
+      this.#streamAttempt += 1;
+      if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = undefined;
+      this.#scheduleReconnect(true);
+    }
   }
 
   #togglePaneMenu(): void {
@@ -227,8 +338,8 @@ export class TerminalView {
   #openPaneMenu(): void {
     const options = this.paneOptions();
     this.#paneMenu.replaceChildren(...options.map((option) => {
-      const active = option.pane.pane_id === this.pane.pane_id
-        && option.pane.terminal_id === this.pane.terminal_id;
+      const active = option.pane.pane_id === this.#target?.pane.pane_id
+        && option.pane.terminal_id === this.#target?.pane.terminal_id;
       return element("button", {
         className: `terminal-pane-option${active ? " active" : ""}`,
         attrs: { type: "button", role: "menuitem", ...(active ? { "aria-current": "true" } : {}) },
@@ -260,9 +371,10 @@ export class TerminalView {
     if (restoreFocus) this.#paneSelector?.focus();
   }
 
-  #frame(raw: Record<string, unknown>): void {
+  #frame(raw: Record<string, unknown>, attempt: number): void {
+    if (this.#destroyed || attempt !== this.#streamAttempt) return;
     if (raw.event === "terminal.resync_required") {
-      this.#appendStatus("Terminal resync required");
+      this.#disconnectStream(attempt, "Terminal changed while the connection was catching up");
       return;
     }
     if (raw.event !== "terminal.frame") return;
@@ -297,17 +409,52 @@ export class TerminalView {
     });
   }
 
-  #appendStatus(message: string): void {
-    const status = element("div", { className: "terminal-status", text: message });
-    this.#output.append(status);
+  #showStatus(message: string): void {
+    if (!this.#status?.isConnected) {
+      this.#status = element("div", { className: "terminal-status terminal-connection-status" });
+      this.#output.append(this.#status);
+    }
+    this.#status.textContent = message;
     this.#output.scrollTop = this.#output.scrollHeight;
   }
 
+  #clearStatus(): void {
+    this.#status?.remove();
+    this.#status = undefined;
+  }
+
+  #inputFailed(message: string): void {
+    if (!this.#stream) {
+      this.#showStatus("Connection interrupted — reconnecting…");
+      this.#scheduleReconnect();
+      return;
+    }
+    this.#showStatus(`Input was not delivered: ${message}`);
+  }
+
   async #action(action: TerminalAction, params: Record<string, unknown>): Promise<unknown> {
-    if (!this.#stream) throw new Error("Terminal is not connected");
     this.#followTail = true;
     this.#scrollToLatest();
-    return this.#stream.action(action, params);
+    if (this.#targetError) throw this.#targetError;
+    const stream = this.#stream;
+    if (!stream) {
+      if (this.#destroyed) throw new BridgeError("Terminal view is closed", "closed");
+      if (this.#queuedActions.length >= 256) {
+        throw new BridgeError("Terminal reconnect input buffer is full", "input_buffer_full");
+      }
+      this.#scheduleReconnect();
+      return new Promise((resolve, reject) => {
+        this.#queuedActions.push({ action, params, resolve, reject });
+      });
+    }
+    try {
+      return await stream.action(action, params);
+    } catch (error) {
+      if (this.#stream === stream && recoverableConnectionError(error)) {
+        this.#disconnectStream(this.#streamAttempt, "Terminal input connection was interrupted");
+      }
+      throw error;
+    }
   }
 
   #queueFiles(files: File[]): void {
@@ -325,7 +472,7 @@ export class TerminalView {
         this.#input?.focus();
       } catch (error) {
         const message = error instanceof Error ? error.message : "File upload failed";
-        this.#appendStatus(`Upload failed: ${message}`);
+        this.#showStatus(`Upload failed: ${message}`);
         this.#inputHint.textContent = "Tap terminal to type";
       } finally {
         if (this.#attach) this.#attach.disabled = !this.canUploadFiles;
@@ -359,6 +506,62 @@ export class TerminalView {
     });
   }
 
+  #streamClosed(attempt: number, reason: string): void {
+    if (this.#destroyed || attempt !== this.#streamAttempt) return;
+    this.#streamAttempt += 1;
+    this.#stream = undefined;
+    this.#showStatus(reason ? "Connection interrupted — reconnecting…" : "Reconnecting terminal…");
+    this.#scheduleReconnect();
+  }
+
+  #disconnectStream(attempt: number, _reason: string): void {
+    if (this.#destroyed || attempt !== this.#streamAttempt) return;
+    const stream = this.#stream;
+    this.#streamAttempt += 1;
+    this.#stream = undefined;
+    stream?.close();
+    this.#showStatus("Connection interrupted — reconnecting…");
+    this.#scheduleReconnect();
+  }
+
+  #scheduleReconnect(immediate = false): void {
+    if (this.#destroyed || this.#stream || this.#reconnectTimer) return;
+    const delay = immediate ? 0 : Math.min(5_000, 150 * 2 ** Math.min(this.#reconnectRetry++, 5));
+    this.#reconnectTimer = setTimeout(() => {
+      this.#reconnectTimer = undefined;
+      void this.#connectStream();
+    }, delay);
+  }
+
+  #flushQueuedActions(stream: StreamHandle): void {
+    const queued = this.#queuedActions;
+    this.#queuedActions = [];
+    for (const pending of queued) {
+      void stream.action(pending.action, pending.params).then(pending.resolve, pending.reject);
+    }
+  }
+
+  #failQueuedActions(error: unknown): void {
+    const queued = this.#queuedActions;
+    this.#queuedActions = [];
+    for (const pending of queued) pending.reject(error);
+  }
+
+  #restoreInputHint(): void {
+    if (!this.control) {
+      this.#inputHint.textContent = "Read-only terminal";
+    } else if (document.activeElement === this.#input?.element) {
+      this.#inputHint.textContent = "Typing in terminal";
+    } else {
+      this.#inputHint.textContent = "Tap terminal to type";
+    }
+  }
+
+}
+
+function recoverableConnectionError(error: unknown): boolean {
+  if (!(error instanceof BridgeError)) return true;
+  return new Set(["bridge_error", "closed", "disconnected", "stale_server", "stale_stream", "timeout", "unavailable"]).has(error.code);
 }
 
 function headerBackButton(onBack: () => void): HTMLButtonElement {

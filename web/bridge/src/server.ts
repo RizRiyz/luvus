@@ -4,7 +4,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import type { BridgeConfig } from "./config.js";
-import { originAllowed } from "./config.js";
+import { normalizePublicUrl, originAllowed } from "./config.js";
 import { BrowserAuthority } from "./auth.js";
 import { UhpAccess, type UpstreamStream } from "./uhp.js";
 
@@ -14,19 +14,27 @@ const MAX_PENDING = 16;
 const MAX_STREAMS = 3;
 const MAX_BUFFERED_OUTBOUND = 1024 * 1024;
 const REQUESTS_PER_MINUTE = 90;
+const TERMINAL_ACTIONS_PER_MINUTE = 3_600;
 const UPLOAD_CHUNKS_PER_MINUTE = 256;
 const UPLOAD_ENCODED_BYTES_PER_MINUTE = 48 * 1024 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const METHOD_PATTERN = /^[a-z][a-z0-9_.]{0,127}$/;
+const TERMINAL_ACTIONS = new Set([
+  "type_literal", "paste_text", "paste_image", "submit_text", "send_key",
+  "upload_start", "upload_chunk", "upload_finish", "upload_cancel",
+]);
 
 type ClientState = {
   authenticated: boolean;
   pending: number;
   requests: number;
+  terminalActions: number;
   uploadChunks: number;
   uploadEncodedBytes: number;
   windowStarted: number;
   streams: Map<string, UpstreamStream>;
+  terminalFrames: Map<string, object>;
+  terminalFlush: ReturnType<typeof setTimeout> | undefined;
   expiryTimer?: ReturnType<typeof setTimeout>;
 };
 
@@ -36,9 +44,11 @@ export class BridgeServer {
   #wss: WebSocketServer | undefined;
   #clients = new Map<WebSocket, ClientState>();
   #sessionSwitching = false;
+  #publicUrl: string | undefined;
 
   constructor(private readonly config: BridgeConfig, private readonly uhp: UhpAccess) {
     this.authority = new BrowserAuthority(config.browserTicketSeconds, config.browserMaxDevices);
+    this.#publicUrl = config.publicUrl;
   }
 
   get port(): number {
@@ -88,10 +98,13 @@ export class BridgeServer {
       authenticated: false,
       pending: 0,
       requests: 0,
+      terminalActions: 0,
       uploadChunks: 0,
       uploadEncodedBytes: 0,
       windowStarted: Date.now(),
       streams: new Map(),
+      terminalFrames: new Map(),
+      terminalFlush: undefined,
     };
     this.#clients.set(socket, state);
     const authTimer = setTimeout(() => socket.close(1008, "authentication timeout"), 5_000);
@@ -103,6 +116,7 @@ export class BridgeServer {
       this.#clients.delete(socket);
       clearTimeout(authTimer);
       if (state.expiryTimer) clearTimeout(state.expiryTimer);
+      if (state.terminalFlush) clearTimeout(state.terminalFlush);
       for (const stream of state.streams.values()) stream.close();
       state.streams.clear();
     });
@@ -137,9 +151,11 @@ export class BridgeServer {
       this.#broadcastDevices(socket);
       return;
     }
-    const uploadChunk = frame.type === "stream.action" && frame.action === "upload_chunk";
-    if (!(uploadChunk ? uploadRateAllowed(state, frame) : rateAllowed(state))) {
-      send(socket, { type: "error", code: "rate_limited", message: "Browser request rate exceeded" });
+    if (!rateAllowed(state, frame)) {
+      const id = typeof frame.id === "string" && ID_PATTERN.test(frame.id) ? frame.id : undefined;
+      send(socket, id
+        ? { type: "response", id, error: { code: "rate_limited", message: "Browser request rate exceeded" } }
+        : { type: "error", code: "rate_limited", message: "Browser request rate exceeded" });
       return;
     }
     switch (frame.type) {
@@ -156,6 +172,7 @@ export class BridgeServer {
         const streamId = requiredString(frame, "stream_id", ID_PATTERN);
         state.streams.get(streamId)?.close();
         state.streams.delete(streamId);
+        state.terminalFrames.delete(streamId);
         return;
       }
       case "ping":
@@ -205,14 +222,14 @@ export class BridgeServer {
 
   #deviceRequest(socket: WebSocket, id: string, method: string, params: Record<string, unknown>): void {
     if (method === "web.devices.status") {
-      return send(socket, { type: "response", id, result: deviceStatus(this.authority.status()) });
+      return send(socket, { type: "response", id, result: deviceStatus(this.authority.status(), this.#publicUrl) });
     }
     if (method === "web.devices.create_pairing") {
       const pairing = this.authority.createPairing();
       if (!pairing) {
         return send(socket, { type: "response", id, error: { code: "device_limit", message: "Device limit reached or another pairing link is still pending" } });
       }
-      const base = this.config.publicUrl;
+      const base = this.#publicUrl;
       send(socket, {
         type: "response",
         id,
@@ -221,7 +238,7 @@ export class BridgeServer {
           code: pairing.code,
           expires_at: pairing.expiresAt,
           ...(base ? { url: `${base}/#pair=${encodeURIComponent(pairing.code)}` } : {}),
-          devices: deviceStatus(this.authority.status()),
+          devices: deviceStatus(this.authority.status(), this.#publicUrl),
         },
       });
       this.#broadcastDevices();
@@ -235,7 +252,21 @@ export class BridgeServer {
       if (!this.authority.setMaxDevices(limit as number)) {
         return send(socket, { type: "response", id, error: { code: "device_limit", message: "Device limit cannot be lower than paired devices and pending links" } });
       }
-      send(socket, { type: "response", id, result: deviceStatus(this.authority.status()) });
+      send(socket, { type: "response", id, result: deviceStatus(this.authority.status(), this.#publicUrl) });
+      this.#broadcastDevices();
+      return;
+    }
+    if (method === "web.devices.set_public_url") {
+      if (Object.keys(params).length !== 1 || !("url" in params)
+        || (params.url !== null && typeof params.url !== "string")) {
+        return send(socket, { type: "response", id, error: { code: "invalid_params", message: "Public URL must be an HTTP(S) origin without a path" } });
+      }
+      try {
+        this.#publicUrl = params.url === null ? undefined : normalizePublicUrl(params.url);
+      } catch {
+        return send(socket, { type: "response", id, error: { code: "invalid_params", message: "Public URL must be an HTTP(S) origin without a path" } });
+      }
+      send(socket, { type: "response", id, result: deviceStatus(this.authority.status(), this.#publicUrl) });
       this.#broadcastDevices();
       return;
     }
@@ -275,7 +306,7 @@ export class BridgeServer {
   }
 
   #broadcastDevices(except?: WebSocket): void {
-    const devices = deviceStatus(this.authority.status());
+    const devices = deviceStatus(this.authority.status(), this.#publicUrl);
     for (const [client, state] of this.#clients) {
       if (client !== except && state.authenticated) send(client, { type: "devices", devices });
     }
@@ -314,9 +345,12 @@ export class BridgeServer {
           });
           return;
         }
-        send(socket, { type: "stream.frame", stream_id: id, frame: upstream });
+        const browserFrame = { type: "stream.frame", stream_id: id, frame: upstream };
+        if (upstream.event === "terminal.frame") this.#queueTerminalFrame(socket, state, id, browserFrame);
+        else send(socket, browserFrame);
       }, (reason) => {
         state.streams.delete(id);
+        state.terminalFrames.delete(id);
         send(socket, { type: "stream.closed", stream_id: id, reason });
       });
       state.streams.set(id, stream);
@@ -341,15 +375,32 @@ export class BridgeServer {
     const params = objectField(frame, "params");
     const stream = state.streams.get(streamId);
     if (!stream) return send(socket, { type: "response", id, error: { code: "stale_stream", message: "Terminal stream is closed" } });
-    if (!new Set([
-      "type_literal", "paste_text", "paste_image", "submit_text", "send_key",
-      "upload_start", "upload_chunk", "upload_finish", "upload_cancel",
-    ]).has(action)) {
+    if (!terminalAction(action)) {
       return send(socket, { type: "response", id, error: { code: "invalid_params", message: "Unknown terminal action" } });
     }
     if (!stream.write({ id, action, params })) {
       send(socket, { type: "response", id, error: { code: "send_failed", message: "Terminal stream could not accept input" } });
     }
+  }
+
+  #queueTerminalFrame(socket: WebSocket, state: ClientState, streamId: string, frame: object): void {
+    state.terminalFrames.set(streamId, frame);
+    if (state.terminalFlush) return;
+    const flush = () => {
+      state.terminalFlush = undefined;
+      if (socket.readyState !== WebSocket.OPEN) {
+        state.terminalFrames.clear();
+        return;
+      }
+      if (socket.bufferedAmount > MAX_BUFFERED_OUTBOUND / 2) {
+        state.terminalFlush = setTimeout(flush, 16);
+        return;
+      }
+      const frames = [...state.terminalFrames.values()];
+      state.terminalFrames.clear();
+      for (const pending of frames) send(socket, pending);
+    };
+    state.terminalFlush = setTimeout(flush, 0);
   }
 
   async #serve(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -426,8 +477,15 @@ function isStreaming(method: string): boolean {
   return new Set(["events.subscribe", "terminal.backend.events.subscribe", "terminal.backend.observe", "terminal.backend.control"]).has(method);
 }
 
-function rateAllowed(state: ClientState): boolean {
+function rateAllowed(state: ClientState, frame: Record<string, unknown>): boolean {
   resetRateWindow(state);
+  if (frame.type === "stream.action" && frame.action === "upload_chunk") {
+    return uploadRateAllowed(state, frame);
+  }
+  if (frame.type === "stream.action" && typeof frame.action === "string" && terminalAction(frame.action)) {
+    state.terminalActions += 1;
+    return state.terminalActions <= TERMINAL_ACTIONS_PER_MINUTE;
+  }
   state.requests += 1;
   return state.requests <= REQUESTS_PER_MINUTE;
 }
@@ -450,8 +508,13 @@ function resetRateWindow(state: ClientState): void {
   if (now - state.windowStarted < 60_000) return;
   state.windowStarted = now;
   state.requests = 0;
+  state.terminalActions = 0;
   state.uploadChunks = 0;
   state.uploadEncodedBytes = 0;
+}
+
+function terminalAction(action: string): boolean {
+  return TERMINAL_ACTIONS.has(action);
 }
 
 function publicError(error: unknown): { code: string; message: string } {
@@ -471,12 +534,13 @@ function recoverable(error: unknown): boolean {
   return code === undefined || code === "forbidden" || code === "unavailable" || code === "stale_server";
 }
 
-function deviceStatus(status: { pairedDevices: number; pendingPairings: number; maxDevices: number }): object {
+function deviceStatus(status: { pairedDevices: number; pendingPairings: number; maxDevices: number }, publicUrl?: string): object {
   return {
     type: "browser_device_status",
     paired_devices: status.pairedDevices,
     pending_pairings: status.pendingPairings,
     max_devices: status.maxDevices,
+    public_url: publicUrl ?? null,
   };
 }
 
