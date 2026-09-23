@@ -933,6 +933,7 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let search = crate::app::PaneSearch {
             pane: PaneId(1),
+            owner: crate::app::PaneSearchOwner::Scroll,
             query: "needle".into(),
             editing: false,
             case_sensitive: false,

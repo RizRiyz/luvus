@@ -80,9 +80,16 @@ pub(super) fn match_display_spans(
     matches
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneSearchOwner {
+    Scroll,
+    Copy,
+}
+
 #[derive(Clone, Debug)]
 pub struct PaneSearch {
     pub pane: PaneId,
+    pub owner: PaneSearchOwner,
     pub query: String,
     pub editing: bool,
     pub case_sensitive: bool,

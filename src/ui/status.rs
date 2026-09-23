@@ -142,7 +142,11 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         // leave without it, so these give way instead, last one first. Arrows are
         // guessable in a selection mode and the anchor is a refinement; being
         // unable to find `q` is not recoverable by guessing.
-        let optional = [("hjkl arrows", cat.act_move), ("v", cat.copy_anchor)];
+        let optional = [
+            ("/", cat.act_search),
+            ("hjkl arrows", cat.act_move),
+            ("v", cat.copy_anchor),
+        ];
         let mut keep = optional.len();
         loop {
             let line = copy_guidance(cat, t, count.as_deref(), &optional[..keep]);
@@ -603,6 +607,7 @@ mod tests {
 
         app.pane_search = Some(crate::app::PaneSearch {
             pane,
+            owner: crate::app::PaneSearchOwner::Scroll,
             query: "needle".into(),
             editing: true,
             case_sensitive: false,
@@ -840,7 +845,9 @@ mod tests {
         let (line, _) = fixed_guidance(&app, &t, budget);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            text.contains(app.catalog.act_move) && text.contains(app.catalog.copy_anchor),
+            text.contains("/ search")
+                && text.contains(app.catalog.act_move)
+                && text.contains(app.catalog.copy_anchor),
             "an uncrowded row keeps its optional hints:\n{text}"
         );
     }

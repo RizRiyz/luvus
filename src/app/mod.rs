@@ -52,9 +52,9 @@ mod settings;
 mod switcher;
 
 pub(crate) use search::PaneSearch;
-#[cfg(test)]
-pub(crate) use search::PaneSearchMatch;
 pub use search::{GlobalSearch, SearchFlash};
+#[cfg(test)]
+pub(crate) use search::{PaneSearchMatch, PaneSearchOwner};
 
 #[cfg(test)]
 pub(crate) use keys::build_direct_keymap;

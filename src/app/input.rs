@@ -3049,7 +3049,7 @@ impl App {
         true
     }
 
-    fn begin_pane_search(&mut self, pane: PaneId) {
+    fn begin_pane_search(&mut self, pane: PaneId, owner: super::search::PaneSearchOwner) {
         let saved_scroll = self
             .panes
             .get(&pane)
@@ -3058,6 +3058,7 @@ impl App {
         self.search_flash = None;
         self.pane_search = Some(super::search::PaneSearch {
             pane,
+            owner,
             query: String::new(),
             editing: true,
             case_sensitive: false,
@@ -3084,17 +3085,26 @@ impl App {
                 }
             });
         }
-        let viewport_top = self
-            .panes
-            .get(&pane_id)
-            .map(|pane| {
-                let (scroll, history) = pane.scroll_state();
-                history.saturating_sub(scroll)
-            })
-            .unwrap_or(0);
+        let origin = match self.pane_search.as_ref().map(|search| search.owner) {
+            Some(super::search::PaneSearchOwner::Copy) => self
+                .copy_mode
+                .filter(|copy| copy.pane == pane_id)
+                .map(|copy| copy.cursor)
+                .unwrap_or((0, 0)),
+            _ => (
+                self.panes
+                    .get(&pane_id)
+                    .map(|pane| {
+                        let (scroll, history) = pane.scroll_state();
+                        history.saturating_sub(scroll)
+                    })
+                    .unwrap_or(0),
+                0,
+            ),
+        };
         let current = matches
             .iter()
-            .position(|search_match| search_match.row >= viewport_top)
+            .position(|search_match| (search_match.row, search_match.col) >= origin)
             .unwrap_or(0);
         if let Some(search) = self.pane_search.as_mut() {
             search.matches = matches;
@@ -3132,13 +3142,23 @@ impl App {
 
     fn reveal_current_pane_search_match(&mut self) {
         let target = self.pane_search.as_ref().and_then(|search| {
-            search
-                .matches
-                .get(search.current)
-                .map(|search_match| (search.pane, search_match.row))
+            search.matches.get(search.current).map(|search_match| {
+                (
+                    search.pane,
+                    search.owner,
+                    search_match.row,
+                    search_match.col,
+                )
+            })
         });
-        if let Some((pane_id, row)) = target {
-            if let Some(pane) = self.panes.get(&pane_id) {
+        if let Some((pane_id, owner, row, col)) = target {
+            if owner == super::search::PaneSearchOwner::Copy {
+                if let Some(copy) = self.copy_mode.as_mut().filter(|copy| copy.pane == pane_id) {
+                    copy.cursor = (row, col);
+                    copy.pending_count = 0;
+                    self.reveal_copy_cursor();
+                }
+            } else if let Some(pane) = self.panes.get(&pane_id) {
                 let history = pane.scroll_state().1;
                 pane.scroll_to(history.saturating_sub(row));
             }
@@ -3165,21 +3185,36 @@ impl App {
 
     pub(super) fn cancel_pane_search(&mut self) {
         if let Some(search) = self.pane_search.take() {
-            if let Some(pane) = self.panes.get(&search.pane) {
-                pane.scroll_to(search.saved_scroll);
+            if search.owner == super::search::PaneSearchOwner::Scroll {
+                if let Some(pane) = self.panes.get(&search.pane) {
+                    pane.scroll_to(search.saved_scroll);
+                }
             }
         }
         self.search_flash = None;
     }
 
     fn handle_pane_search_key(&mut self, key: KeyEvent) -> bool {
-        let editing = self
+        let Some((editing, owner)) = self
             .pane_search
             .as_ref()
-            .is_some_and(|search| search.editing);
+            .map(|search| (search.editing, search.owner))
+        else {
+            return false;
+        };
         match key.code {
             KeyCode::Esc => self.cancel_pane_search(),
             KeyCode::Enter if editing => self.commit_pane_search(),
+            KeyCode::Enter | KeyCode::Char('y')
+                if !editing && owner == super::search::PaneSearchOwner::Copy =>
+            {
+                self.pane_search = None;
+                self.finish_copy_mode();
+            }
+            KeyCode::Char('q') if !editing && owner == super::search::PaneSearchOwner::Copy => {
+                self.pane_search = None;
+                self.cancel_copy_mode();
+            }
             KeyCode::Char('i') if super::keys::is_ctrl_chord(key.modifiers) => {
                 self.toggle_pane_search_case();
             }
@@ -3218,7 +3253,7 @@ impl App {
         }
         let page = self.focused_page();
         if key.code == KeyCode::Char('/') {
-            self.begin_pane_search(id);
+            self.begin_pane_search(id, super::search::PaneSearchOwner::Scroll);
             return true;
         }
         let newline = self.config.shift_enter_bytes();
@@ -3369,9 +3404,16 @@ impl App {
     /// `Ctrl+D`/`Ctrl+U` move by half a page. Anything unrecognised is swallowed
     /// rather than forwarded, so a stray key can never reach the selected program.
     fn handle_copy_mode_key(&mut self, key: KeyEvent) -> bool {
+        if self.pane_search.is_some() {
+            return self.handle_pane_search_key(key);
+        }
         let Some(mut copy) = self.copy_mode else {
             return false;
         };
+        if key.code == KeyCode::Char('/') {
+            self.begin_pane_search(copy.pane, super::search::PaneSearchOwner::Copy);
+            return true;
+        }
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
             self.cancel_copy_mode();
             return true;
@@ -5078,6 +5120,98 @@ mod tests {
             KeyModifiers::NONE,
         )));
         assert!(input_rx.try_recv().is_err(), "search input reached the PTY");
+    }
+
+    #[test]
+    fn copy_mode_search_moves_cursor_and_preserves_copy_state() {
+        let _env = crate::persist::test_env("copy-mode-pane-search");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        add_scrollback(&app, pane, &["start", "wide 前needle后", "needle two"]);
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+
+        assert!(app.begin_copy_mode());
+        let anchor = (0, 1);
+        if let Some(copy) = app.copy_mode.as_mut() {
+            copy.anchor = anchor;
+            copy.cursor = (0, 0);
+        }
+        app.handle_event(AppEvent::Key(plain('/')));
+        let search = app.pane_search.as_ref().unwrap();
+        assert_eq!(search.owner, crate::app::PaneSearchOwner::Copy);
+        app.handle_event(AppEvent::Paste("needle".into()));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let matches = app.pane_search.as_ref().unwrap().matches.clone();
+        assert_eq!(matches.len(), 2);
+        let first = &matches[0];
+        assert_eq!(app.copy_mode.unwrap().cursor, (first.row, first.col));
+        assert_eq!(app.copy_mode.unwrap().anchor, anchor);
+        app.handle_event(AppEvent::Key(plain('n')));
+        let second = &matches[1];
+        assert_eq!(app.copy_mode.unwrap().cursor, (second.row, second.col));
+        app.handle_event(AppEvent::Key(plain('N')));
+        assert_eq!(app.copy_mode.unwrap().cursor, (first.row, first.col));
+
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        let search = app.pane_search.as_ref().unwrap();
+        assert!(search.editing);
+        assert!(search.query.is_empty());
+        assert!(app.copy_mode.is_some());
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.pane_search.is_none());
+        assert!(app.copy_mode.is_some(), "first Esc returns to COPY");
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.copy_mode.is_none(), "second Esc exits COPY");
+        assert!(input_rx.try_recv().is_err(), "copy search reached the PTY");
+    }
+
+    #[test]
+    fn committed_copy_search_enter_copies_and_returns_live() {
+        let _env = crate::persist::test_env("copy-search-enter");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        add_scrollback(&app, pane, &["needle"]);
+
+        assert!(app.begin_copy_mode());
+        app.handle_event(AppEvent::Key(plain('/')));
+        app.handle_event(AppEvent::Paste("needle".into()));
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let hit = app.pane_search.as_ref().unwrap().matches[0].clone();
+        if let Some(copy) = app.copy_mode.as_mut() {
+            copy.anchor = (hit.row, hit.col);
+            copy.cursor = (hit.row, hit.col + hit.width - 1);
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(app.pane_search.is_none());
+        assert!(app.copy_mode.is_none());
+        assert_eq!(app.pending_clipboard.as_deref(), Some("needle"));
+        assert_eq!(app.panes.get(&pane).unwrap().scroll_state().0, 0);
     }
 
     #[test]
