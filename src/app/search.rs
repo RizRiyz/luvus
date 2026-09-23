@@ -26,50 +26,51 @@ pub struct SearchFlash {
     pub row: u16,
     pub scroll: usize,
     pub until: std::time::Instant,
-    /// Display-cell span of the current match on `row`, when known.
-    pub span: Option<(u16, u16)>,
 }
 
 #[derive(Clone, Debug)]
 pub struct PaneSearchMatch {
     pub row: usize,
-    pub offset: usize,
-    pub above: usize,
     pub col: usize,
     pub width: usize,
 }
 
-/// First case-insensitive match of `query` in `line`, as display-cell column
-/// and width so terminal rendering can highlight the same cells.
-pub(super) fn match_display_span(line: &str, query: &str) -> Option<(usize, usize)> {
+/// Case-insensitive matches in `line`, expressed as display-cell columns and
+/// widths so navigation and terminal rendering agree for wide glyphs.
+pub(super) fn match_display_spans(line: &str, query: &str) -> Vec<(usize, usize)> {
     use unicode_width::UnicodeWidthChar;
     let needle: Vec<char> = query.chars().collect();
     if needle.is_empty() {
-        return None;
+        return Vec::new();
     }
     let chars: Vec<char> = line.chars().collect();
     if chars.len() < needle.len() {
-        return None;
+        return Vec::new();
     }
-    let width_of = |slice: &[char]| {
-        slice
-            .iter()
-            .map(|ch| ch.width().unwrap_or(0))
-            .sum::<usize>()
-    };
-    for start in 0..=chars.len() - needle.len() {
-        if chars[start..start + needle.len()]
+    let mut columns = Vec::with_capacity(chars.len() + 1);
+    columns.push(0usize);
+    for ch in &chars {
+        columns.push(columns.last().copied().unwrap_or(0) + ch.width().unwrap_or(0));
+    }
+    let mut matches = Vec::new();
+    let mut start = 0usize;
+    while start + needle.len() <= chars.len() {
+        let end = start + needle.len();
+        if chars[start..end]
             .iter()
             .zip(needle.iter())
             .all(|(hay, query_ch)| hay.to_lowercase().eq(query_ch.to_lowercase()))
         {
-            return Some((
-                width_of(&chars[..start]),
-                width_of(&chars[start..start + needle.len()]).max(1),
+            matches.push((
+                columns[start],
+                columns[end].saturating_sub(columns[start]).max(1),
             ));
+            start = end;
+        } else {
+            start += 1;
         }
     }
-    None
+    matches
 }
 
 #[derive(Clone, Debug)]
@@ -1083,16 +1084,10 @@ impl App {
             }
             None => return,
         };
-        self.reveal_output_position(pane_id, offset, above, None);
+        self.reveal_output_position(pane_id, offset, above);
     }
 
-    pub(super) fn reveal_output_position(
-        &mut self,
-        pane_id: PaneId,
-        offset: usize,
-        above: usize,
-        span: Option<(u16, u16)>,
-    ) {
+    pub(super) fn reveal_output_position(&mut self, pane_id: PaneId, offset: usize, above: usize) {
         if let Some(pane) = self.panes.get(&pane_id) {
             pane.scroll_to(offset);
         }
@@ -1109,7 +1104,6 @@ impl App {
                     row: row as u16,
                     scroll: offset,
                     until: std::time::Instant::now() + std::time::Duration::from_secs(60),
-                    span,
                 });
             }
         }
@@ -2175,12 +2169,13 @@ mod tests {
     }
 
     #[test]
-    fn match_display_span_is_case_insensitive_and_uses_display_cells() {
+    fn match_display_spans_are_case_insensitive_and_use_display_cells() {
         assert_eq!(
-            match_display_span("hello Needle world", "needle"),
-            Some((6, 6))
+            match_display_spans("hello Needle world", "needle"),
+            vec![(6, 6)]
         );
-        assert_eq!(match_display_span("nope", "needle"), None);
-        assert_eq!(match_display_span("前Needle后", "needle"), Some((2, 6)));
+        assert!(match_display_spans("nope", "needle").is_empty());
+        assert_eq!(match_display_spans("前Needle后", "needle"), vec![(2, 6)]);
+        assert_eq!(match_display_spans("hit hit", "hit"), vec![(0, 3), (4, 3)]);
     }
 }
