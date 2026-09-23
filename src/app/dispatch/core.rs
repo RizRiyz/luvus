@@ -170,24 +170,7 @@ impl App {
                         if let Some(pane) = self.panes.get(&pane_id) {
                             let runtime = pane.terminal_runtime();
                             let status = self.status.get(&pane_id);
-                            let agent_session_title = self.is_agent_pane(pane_id)
-                                .then(|| self.pane_title(pane_id))
-                                .flatten()
-                                .and_then(|title| {
-                                    let title = title
-                                        .chars()
-                                        .take(160)
-                                        .map(|character| {
-                                            if character.is_whitespace() || character.is_control() {
-                                                ' '
-                                            } else {
-                                                character
-                                            }
-                                        })
-                                        .collect::<String>();
-                                    let title = title.trim();
-                                    (!title.is_empty()).then(|| title.to_string())
-                                });
+                            let agent_session_title = self.web_agent_session_title(pane_id);
                             json!({
                                 "pane_id":pane_id.0.to_string(),
                                 "kind":"terminal",

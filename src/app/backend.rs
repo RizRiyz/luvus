@@ -1636,6 +1636,7 @@ mod tests {
         let events = backend_events_after(&app, floor, "agent.title_changed");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["data"]["pane"], pane.0.to_string());
+        assert_eq!(events[0]["data"]["title"], "Reviewing");
 
         app.backend_output_changed(pane);
         assert_eq!(
@@ -1645,10 +1646,9 @@ mod tests {
 
         engine.lock().unwrap().advance(b"\x1b]2;Done\x07");
         app.backend_output_changed(pane);
-        assert_eq!(
-            backend_events_after(&app, floor, "agent.title_changed").len(),
-            2
-        );
+        let events = backend_events_after(&app, floor, "agent.title_changed");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["data"]["title"], "Done");
     }
 
     fn assert_capture_succeeds(app: &mut App, mut params: Value) {
