@@ -34,7 +34,15 @@ several roles:
   session switcher. Switching starts the target if needed without detaching
   other clients.
 - `--local` is a monolithic development escape hatch.
-- `--remote <host>` attaches through an SSH byte bridge.
+- `--remote <host>` attaches directly through an SSH byte bridge. Saved machine
+  profiles place remote workspaces beside Local in one TUI; each profile selects
+  one remote named session. Remote endpoint connections and viewport state
+  belong to the client, while the remote server retains its own PTYs.
+- `web` starts an optional foreground browser bridge for the selected session.
+  It is loopback-only and read-only by default; `web --control` opts into
+  terminal and workspace control. Normal TUI/server startup does not open an
+  HTTP port. Stopping the bridge revokes its authority without stopping the
+  server, PTYs, or other clients.
 - `uhp access` starts a temporary loopback NDJSON gateway for independent
   transport providers. It is read-only by default; control is explicit,
   scoped, and paired. Finite authority advertises `authority.expires_at`;
@@ -104,6 +112,9 @@ boundaries are:
   backpressure, and frame delivery.
 - `src/ipc/client.rs`: terminal client, input forwarding, frame application, and
   client-side effects.
+- `src/ipc/federated.rs` and `src/machine/`: client-owned local/remote endpoint
+  switching, SSH transport and recovery, per-local-session saved-machine
+  catalogs, and explicit remote setup/provisioning.
 - `src/ipc/api.rs` and `src/ipc/transport.rs`: bounded local API handling plus
   Unix-socket and Windows-named-pipe transport.
 - `src/ui/`: Ratatui rendering, panes, sidebars, docks, tab bar, settings,
@@ -130,6 +141,8 @@ boundaries are:
   review and notes, file browsing, and bounded Markdown/Mermaid parsing and
   layout under `src/files/preview/`; app/UI preview ownership stays in
   `src/app/preview.rs` and `src/ui/preview.rs`.
+- `src/search/` and `src/app/search.rs`: bounded global finder, fuzzy file-path
+  indexing, and FILES filtering; directory reads stay off the app loop.
 - `src/module/`: manifest-driven extensions that run out of process and call the
   same local API as other clients.
 - `src/bar/`: Top and Bottom Luvus Bar declarations and rendering.
@@ -141,6 +154,11 @@ boundaries are:
 - `src/uhp/`: the foreground, transport-neutral UHP access gateway, one-use
   pairing, delegated authority, and shutdown cleanup. It does not own a public
   transport or run when `uhp access` is absent.
+- `src/web/`: the production browser bridge, loopback HTTP/WebSocket server,
+  pairing and device authority, UHP forwarding, and embedded assets. `web/`
+  owns the TypeScript browser client, UHP client, development bridge, and
+  focused web tests. Build the browser source before updating embedded assets;
+  do not hand-edit the generated bundle.
 - `src/platform.rs` and `src/platform/windows.rs`: operating-system boundaries.
 
 The main concurrency invariant is one mutable `App` owner. Background threads
@@ -169,13 +187,31 @@ lock scopes short and never hold it across unrelated slow work.
 - User configuration and snapshots must remain forward-tolerant through serde
   defaults and conservative migrations. Never hardcode a maintainer's home
   path, username, agent installation, or terminal.
+- `session.persist_pane_screen` defaults to `true`. When disabled, restore
+  layout and resumable agent metadata without persisting or loading visible
+  terminal screens; scrollback is never part of the snapshot. Interactive
+  nested Luvus clients require the separate opt-in `allow_nested` setting.
 - `direct_keybindings` is separate from prefix `keybindings`, empty by default,
   and stores semantic chords such as `alt+right`, never raw escape bytes. Direct
   shortcuts are global in normal mode; overlays, modal text input,
-  scroll/copy/resize modes, and the configured prefix retain precedence.
+  scroll/copy/resize modes, and the configured prefix retain precedence. Help
+  must show effective bindings after user overrides, not only defaults.
+- Pane focus history crosses tabs and workspaces, skips closed panes, and clears
+  the forward branch after a new ordinary focus change.
 - Named-session listing and startup are user-triggered background work. Fence
   results by generation so a closed or replaced selector cannot apply stale
   discovery or launch results; do not add idle session polling.
+- Saved machines are not workspaces or named sessions. Their owner-local
+  catalog is scoped to the selected local session; each machine selects one
+  remote session. Prepare SSH, compatible-binary checks, and endpoint proof off
+  the app loop. Installation or replacement requires fresh approval, and setup
+  must not restart an already-running remote server. Inactive endpoints must
+  not own input, cursor, effects, or PTY size; route actions to the selected
+  endpoint and destination workspace rather than a same-index Local workspace.
+- The global finder and FILES filtering use bounded, Git-aware file-path
+  indexes; never turn a query into synchronous filesystem traversal on the app
+  loop. File actions must preserve the selected workspace and focused pane,
+  validate paths before mutation, and keep confirmation for deletion.
 - Active-agent automations initially bind to an exact pane and terminal
   lifetime. When a resumable built-in adapter supplies a trusted native session
   ID, the private durable identity may rebind after restart only to one exact
@@ -195,20 +231,40 @@ lock scopes short and never hold it across unrelated slow work.
   `authority.expires_on_close:true`. Shutdown revokes both modes. The external
   provider owns secure transport exposure while Luvus owns pairing and scoped
   upstream authority.
+- Luvus Web is a separate disposable client. Keep its native bridge bound to
+  loopback, require explicit control, and use one-use pairing plus independent
+  per-device tickets and limits. A public phone URL needs an external trusted
+  TLS/WSS tunnel and exact allowed origin; changing the pairing address does
+  not create a tunnel or widen origin policy. The browser must never receive
+  owner-socket paths or upstream credentials. Uploads paste a server-side path,
+  never a local browser path. One bridge selects one upstream session, so a web
+  session switch moves all devices on that bridge, not attached TUI clients.
+  Keep browser input and terminal output bounded, with reliable action
+  responses and coalesced visual frames. Agent session-title changes need a
+  snapshot-refresh event. The browser bridge does not inherit the TUI client's
+  saved SSH-machine connections; remote browser access requires a bridge on
+  the destination host behind a trusted TLS/WSS tunnel.
+- A configured module worktree provider may create worktrees and optionally
+  remove them, but remains out of process and cannot bypass validation or
+  mutate `App` directly. Internal rollback and task merge remain Git-backed.
 - Cross-workspace operations must mutate the resolved destination workspace and
   tab, never whichever node happens to be active. Preserve explicit workspace
   closures across reattach instead of recreating the launch directory.
 - Selection text preserves indentation and hard line breaks, joins soft wraps,
   and uses terminal display cells for wide characters across panes and native
-  file/preview views.
+  file/preview views. Preserve OSC 8 hyperlink targets and forward bounded
+  pane-originated OSC 52 clipboard writes through the client clipboard path;
+  never enable OSC 52 clipboard reads implicitly.
 
 ## CLI API UHP and documentation parity
 
 `luvus help all` is the command inventory. Major surfaces include workspaces,
 tabs, panes, agents, files, Git, semantic diff notes, Mission Control,
-worktrees, tasks, leases, modules, bars, UI docks, themes, sessions, skills,
-integrations, document previews, direct shortcuts, search, waits, logs, and UHP
-access.
+worktrees, tasks, leases, modules, bars, UI docks, themes, sessions, machines,
+skills, integrations, document previews, direct shortcuts, search, waits,
+logs, and UHP access. `web` is the optional browser-client command;
+`luvus help web` is its option reference. `luvus help machine` covers saved SSH
+profiles; `--remote` is the direct-attach path.
 
 When adding or changing a user-visible control:
 
@@ -334,9 +390,9 @@ not the current public contract.
 
 Prefer a module when a feature can live outside core without weakening the user
 experience. Modules are directories with `luvus-module.toml`, executable argv
-commands, settings, actions, event hooks, panes, docks, and bar widgets. They
-receive canonical `LUVUS_*` context. They must not receive direct in-process
-access to `App`.
+commands, settings, actions, event hooks, panes, docks, bar widgets, and
+optional worktree providers. They receive canonical `LUVUS_*` context. They
+must not receive direct in-process access to `App`.
 
 New dependencies require a concrete benefit and review of maintenance,
 licensing, supply-chain exposure, binary size, compile time, and cross-platform
@@ -379,7 +435,7 @@ Luvus should remain fast and memory-efficient with many panes and agents:
 - Preserve Unix socket ownership and permissions, signal/process lifecycle, and
   long-socket-path handling.
 - A platform-specific fix needs tests on that platform when available and must
-  not silently change macOS/Linux/Windows behavior outside its scope.
+  not silently change macOS/Linux/FreeBSD/Windows behavior outside its scope.
 
 ## Testing and verification
 
@@ -400,14 +456,22 @@ tests plus the broad checks proportionate to risk. Platform, PTY, IPC, rendering
 and lifecycle changes also need a real debug-client/server test in an isolated
 development home. Do not claim an untested platform is verified.
 
+For web changes, use `npm --prefix web run check` and the focused web tests.
+Native bridge integration uses `web/scripts/test-native.mjs` with the exact
+debug binary and an isolated temporary Luvus home; do not aim it at a running
+production session. Preserve coverage without turning ordinary CI tests into
+unbounded input bursts or timing benchmarks.
+
 The CI matrix currently covers formatting, Clippy, locked tests on Ubuntu and
-macOS, targeted Windows protocol/ConPTY boundaries, UHP fixtures and live
-conformance, patched terminal crates, packageability, RustSec audit, and Nix
-flake evaluation/build.
+macOS, FreeBSD amd64, targeted Windows protocol/ConPTY boundaries, UHP fixtures
+and live conformance, web client/bridge checks, patched terminal crates,
+packageability, RustSec audit, and Nix flake evaluation/build.
 
 ## Repository and contribution conventions
 
 - `website/` is the Astro site and public documentation source.
+- `web/` is the browser source and development harness; `src/web/assets/`
+  contains the assets embedded in the production binary.
 - `.github/` contains CI, release automation, issue templates, and the PR body
   template.
 - `docs/` and `CLAUDE.md` are intentionally ignored local maintainer material.
