@@ -170,6 +170,24 @@ impl App {
                         if let Some(pane) = self.panes.get(&pane_id) {
                             let runtime = pane.terminal_runtime();
                             let status = self.status.get(&pane_id);
+                            let agent_session_title = self.is_agent_pane(pane_id)
+                                .then(|| self.pane_title(pane_id))
+                                .flatten()
+                                .and_then(|title| {
+                                    let title = title
+                                        .chars()
+                                        .take(160)
+                                        .map(|character| {
+                                            if character.is_whitespace() || character.is_control() {
+                                                ' '
+                                            } else {
+                                                character
+                                            }
+                                        })
+                                        .collect::<String>();
+                                    let title = title.trim();
+                                    (!title.is_empty()).then(|| title.to_string())
+                                });
                             json!({
                                 "pane_id":pane_id.0.to_string(),
                                 "kind":"terminal",
@@ -186,6 +204,7 @@ impl App {
                                 "agent_name":agent_names.get(&pane_id).copied(),
                                 "agent":status.map(|status| status.agent.clone()),
                                 "agent_status":status.map(|status| state_str(status.state)),
+                                "agent_session_title":agent_session_title,
                                 "agent_authority":status.map(|status| status.identity_source),
                                 "agent_session":status.and_then(|status| status.agent_session.as_ref().map(|session| session.session_id.clone())),
                             })
