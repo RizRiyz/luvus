@@ -26,14 +26,21 @@ by pane ID to run a one-line command:
 =p17 review this with @p24
 ```
 
+In the review examples, p17 and p24 are agent panes. A shell target executes
+the text as a shell command, so use a command valid for every selected shell.
+
 The focused terminal pane's `=pID` is filled in when Command Center opens.
 Add `@pID` mentions before, within, or after the message to select more panes;
 they are removed from the delivered text. `=pID` tokens also work anywhere.
 `Tab` and `Shift+Tab` add a pane mention at the cursor or cycle a mention the
-cursor is on. A unique agent kind such as `=codex` also works; an ambiguous
-kind requires a pane ID or alias. Shells require a pane ID. Targets can be in
-another tab or workspace of the **same** named session. The title shows the
+cursor is on. A unique agent kind such as `=codex` also works as the first
+word; an ambiguous kind requires a pane ID or alias. Shells require a pane ID.
+Targets can be in another tab or workspace of the **same** named session. The title shows the
 recognized targets before you send.
+
+Only exact `@pID` and `=pID` words are pane mentions; package names such as
+`@types/node` and arguments such as `=value` remain prompt text. Prefix an
+exact mention with `\` to send it literally, for example `\@p24`.
 
 To send the same text to several panes, list each exact target:
 

@@ -27,6 +27,22 @@ fn parser_requires_explicit_targets_and_prompt() {
 }
 
 #[test]
+fn literal_arguments_and_escaped_mentions_remain_in_the_prompt() {
+    let _env = crate::persist::test_env("command-center-literal-arguments");
+    let (tx, _) = std::sync::mpsc::channel();
+    let app = App::new(80, 24, tx).unwrap();
+    let id = app.layout().focus;
+    let draft = format!("=p{} npm install @types/node =value \\@p88 \\=p99", id.0);
+    let plan = app.command_center_parse(&draft).unwrap();
+    assert_eq!(plan.targets.len(), 1);
+    assert_eq!(plan.targets[0].pane, id);
+    assert_eq!(plan.prompt, "npm install @types/node =value @p88 =p99");
+    assert!(app
+        .command_center_parse(&format!("=p{} echo hi @p999999", id.0))
+        .is_err());
+}
+
+#[test]
 fn inline_mentions_select_multiple_exact_panes_without_entering_the_message() {
     let _env = crate::persist::test_env("command-center-mentions");
     let (tx, _) = std::sync::mpsc::channel();
@@ -172,7 +188,7 @@ fn editing_chords_selection_and_clipboard_paste_stay_private() {
 }
 
 #[test]
-fn clipboard_image_inserts_staged_path_instead_of_discarding_it() {
+fn clipboard_image_is_discarded_when_draft_is_abandoned_or_edited_away() {
     let _env = crate::persist::test_env("command-center-image-paste");
     let (tx, _) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
@@ -187,7 +203,87 @@ fn clipboard_image_inserts_staged_path_instead_of_discarding_it() {
         .unwrap()
         .draft
         .contains(&staged.to_string_lossy().to_string()));
+    assert!(staged.exists());
+    app.open_command_center();
+    assert!(!staged.exists());
+
+    app.open_command_center();
+    let staged = crate::clipboard_image::stage_png(&png).expect("second staged image");
+    assert!(app.handle_event(AppEvent::PasteImage(staged.clone())));
+    app.command_center_key(KeyEvent::new(
+        KeyCode::Backspace,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(!staged.exists());
+}
+
+#[test]
+fn delivered_image_path_survives_composer_close() {
+    let _env = crate::persist::test_env("command-center-image-delivery");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let id = app.layout().focus;
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&id)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+    app.open_command_center();
+    let png =
+        crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255]).expect("valid png");
+    let staged = crate::clipboard_image::stage_png(&png).expect("staged image");
+    assert!(app.handle_event(AppEvent::PasteImage(staged.clone())));
+    app.command_center_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(input_rx.try_recv().is_ok());
+    app.open_command_center();
+    assert!(staged.exists());
     crate::clipboard_image::discard_staged_png(&staged);
+}
+
+#[test]
+fn full_draft_tab_does_not_move_cursor_after_rejected_insert() {
+    let _env = crate::persist::test_env("command-center-full-draft-tab");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_command_center();
+    let center = app.command_center.as_mut().unwrap();
+    center.draft = "λ".repeat(16_384);
+    center.cursor = 0;
+    app.command_center_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let center = app.command_center.as_ref().unwrap();
+    assert_eq!(center.cursor, 0);
+    assert_eq!(center.draft.chars().count(), 16_384);
+}
+
+#[test]
+fn help_overlay_owns_keys_mouse_and_paste_above_the_composer() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let _env = crate::persist::test_env("command-center-help-priority");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_command_center();
+    app.command_center_area = Some(Rect::new(0, 20, 80, 4));
+    let draft = app.command_center.as_ref().unwrap().draft.clone();
+    app.help_open = true;
+    assert!(app.handle_event(AppEvent::Paste("hidden input".into())));
+    assert_eq!(app.command_center.as_ref().unwrap().draft, draft);
+    assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+    ))));
+    assert!(!app.help_open);
+    assert_eq!(app.command_center.as_ref().unwrap().draft, draft);
+
+    app.help_open = true;
+    app.handle_event(AppEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row: 21,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert!(!app.help_open);
+    assert_eq!(app.command_center.as_ref().unwrap().draft, draft);
 }
 
 #[test]

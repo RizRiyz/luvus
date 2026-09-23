@@ -960,6 +960,13 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
                 .collect()
         };
     status::draw_status(f, status, app, &t);
+    // The strip is pane chrome. Menus, modals, and toasts must paint over it.
+    let command_cursor = match (command_area, app.command_center.as_ref()) {
+        (Some(command_area), Some(center)) => {
+            draw_command_center(f, command_area, app, center, cat, &t).filter(|_| center.focused)
+        }
+        _ => None,
+    };
 
     // Read-only overflow is attachment-local geometry over server-owned bar
     // content. Draw it above chrome and panes, below modal workflows.
@@ -1272,6 +1279,12 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         f.set_cursor_anchor(x, y, visible);
     }
     app.last_cursor = cursor.map(|(x, y, _)| (x, y));
+    if app.command_center_accepts_input() {
+        if let Some((x, y)) = command_cursor {
+            f.set_cursor_anchor(x, y, true);
+            app.last_cursor = Some((x, y));
+        }
+    }
     app.pane_rects = rects;
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;
@@ -1282,15 +1295,6 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.automation_rects = automation_rects;
     app.session_rects = session_rects;
     app.new_ws_rect = new_ws_rect;
-    // This is a separate pane-style strip, never over terminal output.
-    if let (Some(command_area), Some(center)) = (command_area, app.command_center.as_ref()) {
-        if let Some((x, y)) = draw_command_center(f, command_area, app, center, cat, &t) {
-            if center.focused {
-                f.set_cursor_anchor(x, y, true);
-                app.last_cursor = Some((x, y));
-            }
-        }
-    }
 }
 
 fn draw_command_center(
@@ -2229,5 +2233,13 @@ mod command_center_tests {
             .collect();
         assert!(!passive_line.contains("private prompt"));
         assert!(app.command_center.is_some());
+
+        app.command_center.as_mut().unwrap().focused = true;
+        app.help_open = true;
+        let mut help = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut help, area), &mut app);
+        let help_line: String = (0..area.width).map(|x| help[(x, row)].symbol()).collect();
+        assert!(!help_line.contains("private prompt"));
+        assert!(app.last_cursor.is_none());
     }
 }

@@ -1,6 +1,7 @@
 //! UTF-8-safe, bounded composer state and caret editing.
 
 use crate::ids::PaneId;
+use std::path::PathBuf;
 
 const MAX_DRAFT_CHARS: usize = 16_384;
 
@@ -19,9 +20,31 @@ pub(crate) struct CommandCenter {
     /// Resolved on edits, not every paint. The renderer reads current state
     /// for these identities; dispatch independently resolves the typed tokens.
     pub preview: Vec<PaneId>,
+    /// Images staged for this draft are deleted if it is abandoned before
+    /// delivery. Delivered paths are released to the receiving terminal.
+    pub(crate) staged_images: Vec<PathBuf>,
 }
 
 impl CommandCenter {
+    pub(crate) fn track_staged_image(&mut self, path: PathBuf) {
+        self.staged_images.push(path);
+    }
+
+    pub(crate) fn release_staged_images(&mut self) {
+        self.staged_images.clear();
+    }
+
+    fn prune_staged_images(&mut self) {
+        self.staged_images.retain(|path| {
+            if self.draft.contains(&path.to_string_lossy().to_string()) {
+                true
+            } else {
+                crate::clipboard_image::discard_staged_png(path);
+                false
+            }
+        });
+    }
+
     pub(crate) fn selection(&self) -> Option<std::ops::Range<usize>> {
         let anchor = self.selection_anchor?;
         (anchor != self.cursor).then_some(anchor.min(self.cursor)..anchor.max(self.cursor))
@@ -65,6 +88,7 @@ impl CommandCenter {
         self.cursor = selected.start + clean.len();
         self.selection_anchor = None;
         self.clear_receipt();
+        self.prune_staged_images();
         true
     }
 
@@ -74,6 +98,7 @@ impl CommandCenter {
             self.cursor = selected.start;
             self.selection_anchor = None;
             self.clear_receipt();
+            self.prune_staged_images();
             return;
         }
         let start = if word {
@@ -87,6 +112,7 @@ impl CommandCenter {
         self.draft.drain(start..self.cursor);
         self.cursor = start;
         self.clear_receipt();
+        self.prune_staged_images();
     }
 
     pub(crate) fn delete(&mut self, word: bool) {
@@ -104,6 +130,7 @@ impl CommandCenter {
         };
         self.draft.drain(self.cursor..end);
         self.clear_receipt();
+        self.prune_staged_images();
     }
 
     pub(crate) fn delete_to(&mut self, end: usize) {
@@ -114,6 +141,7 @@ impl CommandCenter {
         self.cursor = range.start;
         self.selection_anchor = None;
         self.clear_receipt();
+        self.prune_staged_images();
     }
 
     pub(crate) fn clear_all(&mut self) {
@@ -121,6 +149,7 @@ impl CommandCenter {
         self.cursor = 0;
         self.selection_anchor = None;
         self.clear_receipt();
+        self.prune_staged_images();
     }
 
     pub(crate) fn copy_selection(&mut self, cut: bool) {
@@ -129,6 +158,14 @@ impl CommandCenter {
             if cut {
                 self.delete_to(range.start);
             }
+        }
+    }
+}
+
+impl Drop for CommandCenter {
+    fn drop(&mut self) {
+        for path in &self.staged_images {
+            crate::clipboard_image::discard_staged_png(path);
         }
     }
 }

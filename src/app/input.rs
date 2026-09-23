@@ -745,6 +745,9 @@ impl App {
                 if self.paste_into_modal(&s) {
                     return true; // the modal buffer changed → redraw
                 }
+                if self.command_center.is_some() && !self.command_center_accepts_input() {
+                    return true; // a non-text overlay owns input; do not paste behind it
+                }
                 // Otherwise it goes to the focused pane.
                 self.paste_into_focused_pane(&s);
                 false // goes to the pane; its echo (PtyData) renders it
@@ -1335,25 +1338,27 @@ impl App {
         let kind = m.kind;
         // The strip is persistent, not modal. Its own hitbox focuses editing;
         // clicks outside hand the event to normal tab/sidebar/pane hit testing.
-        if let Some(center) = self.command_center.as_mut() {
-            let inside = self.command_center_area.is_some_and(|rect| {
-                m.column >= rect.x
-                    && m.column < rect.right()
-                    && m.row >= rect.y
-                    && m.row < rect.bottom()
-            });
-            if inside {
-                if matches!(kind, MouseEventKind::Down(_)) {
-                    center.focused = true;
-                    self.mode = Mode::Normal;
-                    return true;
+        if self.command_center_accepts_input() {
+            if let Some(center) = self.command_center.as_mut() {
+                let inside = self.command_center_area.is_some_and(|rect| {
+                    m.column >= rect.x
+                        && m.column < rect.right()
+                        && m.row >= rect.y
+                        && m.row < rect.bottom()
+                });
+                if inside {
+                    if matches!(kind, MouseEventKind::Down(_)) {
+                        center.focused = true;
+                        self.mode = Mode::Normal;
+                        return true;
+                    }
+                    return false;
                 }
-                return false;
-            }
-            if matches!(kind, MouseEventKind::Down(_)) {
-                center.focused = false;
-                if self.mode == Mode::Prefix {
-                    self.mode = Mode::Normal;
+                if matches!(kind, MouseEventKind::Down(_)) {
+                    center.focused = false;
+                    if self.mode == Mode::Prefix {
+                        self.mode = Mode::Normal;
+                    }
                 }
             }
         }
@@ -3882,10 +3887,11 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return false; // ignored — nothing changed
         }
-        if self
-            .command_center
-            .as_ref()
-            .is_some_and(|center| center.focused)
+        if self.command_center_accepts_input()
+            && self
+                .command_center
+                .as_ref()
+                .is_some_and(|center| center.focused)
         {
             return self.command_center_key(key);
         }

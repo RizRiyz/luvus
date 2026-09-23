@@ -1,8 +1,8 @@
 //! App-owned Command Center routing and exact-pane delivery.
 
 use super::{
-    line_end, line_start, next_word, previous_word, target_lookup, target_spans, CommandCenter,
-    DeliveryPlan, ExactTarget, MAX_TARGETS,
+    line_end, line_start, next_word, previous_word, target_lookup, target_spans,
+    unescape_pane_mentions, CommandCenter, DeliveryPlan, ExactTarget, MAX_TARGETS,
 };
 use crate::app::{is_ctrl_chord, App, Mode};
 use crate::ids::PaneId;
@@ -13,6 +13,45 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 impl App {
+    /// Modal workflows take input precedence over the persistent composer.
+    pub(crate) fn command_center_accepts_input(&self) -> bool {
+        self.mode == Mode::Normal
+            && self.bar.overflow.is_none()
+            && self.cmd_inspect.is_none()
+            && !self.help_open
+            && !self.changelog_open
+            && self.module_setting_edit.is_none()
+            && self.named_session_menu.is_none()
+            && self.session_delete_confirm.is_none()
+            && self.settings.is_none()
+            && self.search.is_none()
+            && self.picker.is_none()
+            && self.worktree_prompt.is_none()
+            && self.worktree_open.is_none()
+            && self.tab_rename.is_none()
+            && self.tab_menu.is_none()
+            && self.ws_rename.is_none()
+            && self.ws_menu.is_none()
+            && self.pane_rename.is_none()
+            && self.pane_menu.is_none()
+            && self.agent_menu.is_none()
+            && self.file_prompt.is_none()
+            && self.file_delete.is_none()
+            && self.worktree_delete.is_none()
+            && self.file_menu.is_none()
+            && self.diff_menu.is_none()
+            && self.orch_menu.is_none()
+            && self.dock_menu.is_none()
+            && !self.switcher
+            && self.orch_form.is_none()
+            && self.orch_start.is_none()
+            && self.orch_detail.is_none()
+            && self.mission_detail.is_none()
+            && self.mission_answer.is_none()
+            && self.copy_mode.is_none()
+            && self.scroll_pane.is_none()
+    }
+
     pub(crate) fn open_command_center(&mut self) {
         if self.command_center.take().is_some() {
             return;
@@ -20,10 +59,8 @@ impl App {
         if self.workspaces.is_empty() {
             return;
         }
-        let mut center = CommandCenter {
-            focused: true,
-            ..CommandCenter::default()
-        };
+        let mut center = CommandCenter::default();
+        center.focused = true;
         let focused = self.layout().focus;
         if self.panes.contains_key(&focused) {
             center.draft = format!("=p{} ", focused.0);
@@ -34,6 +71,9 @@ impl App {
     }
 
     pub(crate) fn command_center_paste(&mut self, text: &str) -> bool {
+        if !self.command_center_accepts_input() {
+            return false;
+        }
         let Some(center) = self.command_center.as_mut() else {
             return false;
         };
@@ -46,6 +86,9 @@ impl App {
     }
 
     pub(crate) fn command_center_image_paste(&mut self, path: &std::path::Path) -> bool {
+        if !self.command_center_accepts_input() {
+            return false;
+        }
         let Some(center) = self.command_center.as_mut() else {
             return false;
         };
@@ -53,7 +96,9 @@ impl App {
             return false;
         }
         let accepted = center.insert(&path.to_string_lossy());
-        if !accepted {
+        if accepted {
+            center.track_staged_image(path.to_path_buf());
+        } else {
             crate::clipboard_image::discard_staged_png(path);
         }
         self.refresh_command_center_preview();
@@ -61,10 +106,11 @@ impl App {
     }
 
     pub(crate) fn command_center_key(&mut self, key: KeyEvent) -> bool {
-        if !self
-            .command_center
-            .as_ref()
-            .is_some_and(|center| center.focused)
+        if !self.command_center_accepts_input()
+            || !self
+                .command_center
+                .as_ref()
+                .is_some_and(|center| center.focused)
         {
             return false;
         }
@@ -256,8 +302,7 @@ impl App {
                 ids[next].0,
                 if trailing { " " } else { "" }
             );
-            center.insert(&mention);
-            if trailing {
+            if center.insert(&mention) && trailing {
                 center.cursor -= 1;
             }
         }
@@ -314,11 +359,14 @@ impl App {
         let mut previous_end = 0;
         for span in target_spans(draft) {
             let token = &draft[span.clone()];
-            if token.len() == 1 || targets.len() == MAX_TARGETS {
+            if token.len() == 1 {
                 return Err("Choose 1–16 exact terminal targets (=p17 or @p17)".into());
             }
             let lookup = target_lookup(token);
             let pane = self.command_center_resolve_target(lookup)?;
+            if targets.len() == MAX_TARGETS {
+                return Err("Choose 1–16 exact terminal targets (=p17 or @p17)".into());
+            }
             let is_agent = self.is_agent_pane(pane);
             let terminal_id = self
                 .panes
@@ -351,17 +399,14 @@ impl App {
         if targets.is_empty() {
             return Err("Start with an exact terminal target, for example =p17".into());
         }
-        let prompt = message.trim();
+        let prompt = unescape_pane_mentions(message.trim());
         if prompt.is_empty() {
             return Err("Enter a prompt or shell command after the target".into());
         }
         if prompt.contains('\n') && targets.iter().any(|target| !target.is_agent) {
             return Err("Shell commands must be one line".into());
         }
-        Ok(DeliveryPlan {
-            targets,
-            prompt: prompt.to_string(),
-        })
+        Ok(DeliveryPlan { targets, prompt })
     }
 
     pub(crate) fn command_center_dispatch(&mut self, plan: DeliveryPlan) {
@@ -421,6 +466,11 @@ impl App {
             }
         }
         let center = self.command_center.as_mut().unwrap();
+        if any_queued {
+            // At least one terminal now owns the path; retain it for the
+            // receiving child instead of deleting it with the cleared draft.
+            center.release_staged_images();
+        }
         center.delivery_results = results;
         center.delivery_index = 0;
         center.receipt = None;
