@@ -732,6 +732,13 @@ impl App {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
+                if self
+                    .copy_mode
+                    .is_some_and(|copy| copy.pane != self.layout().focus)
+                {
+                    self.cancel_pane_search();
+                    self.cancel_copy_mode();
+                }
                 self.cancel_orphaned_pane_search();
                 // Inline pane search owns pasted query text just like typed text;
                 // it must never reach the PTY underneath.
@@ -5065,6 +5072,39 @@ mod tests {
 
         assert!(app.copy_mode.is_none());
         assert!(app.pane_search.is_none());
+    }
+
+    #[test]
+    fn paste_cancels_copy_search_after_focus_changes() {
+        let _env = crate::persist::test_env("copy-search-paste-focus-owner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        app.run_cmd(crate::app::Cmd::SplitRight);
+        let second = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&second)
+            .expect("second pane")
+            .replace_input_sender_for_test(input_tx);
+        app.layout_mut().focus = first;
+        assert!(app.begin_copy_mode());
+        assert!(app.handle_event(AppEvent::Key(plain('/'))));
+
+        app.layout_mut().focus = second;
+        assert!(!app.handle_event(AppEvent::Paste("echo safe".into())));
+
+        assert!(app.copy_mode.is_none());
+        assert!(app.pane_search.is_none());
+        let forwarded = input_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        match forwarded {
+            crate::terminal::pty::InputAction::Bytes(bytes) => assert_eq!(bytes, b"echo safe"),
+            crate::terminal::pty::InputAction::Submit { .. } => {
+                panic!("ordinary paste must not become a submit action")
+            }
+        }
     }
 
     #[test]
