@@ -380,7 +380,7 @@ pub(super) fn draw_file_view(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let show_footer = native_footer_visible(mobile);
+    let show_footer = native_footer_visible(mobile, v.search.is_some());
     let body = Rect::new(
         area.x,
         area.y,
@@ -429,8 +429,19 @@ pub(super) fn draw_file_view(
         return;
     }
 
-    // Footer: path · lines · encoding. Search interaction lives in the
-    // application Bottom Bar so this view keeps its own metadata visible.
+    // Desktop keeps FILE metadata here while search interaction lives in the
+    // outer Bottom Bar. Compact clients have no outer bar, so an active search
+    // temporarily uses this row just like Preview and DIFF.
+    if mobile {
+        if let Some(search) = v.search.as_ref() {
+            let foot = mobile_file_search_footer(search, area.width as usize);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(foot, Style::new().fg(t.overlay0)))),
+                Rect::new(area.x, footer_y, area.width, 1),
+            );
+            return;
+        }
+    }
     let name = v
         .path
         .file_name()
@@ -460,8 +471,56 @@ pub(super) fn draw_file_view(
     }
 }
 
-fn native_footer_visible(mobile: bool) -> bool {
-    !mobile
+fn native_footer_visible(mobile: bool, searching: bool) -> bool {
+    !mobile || searching
+}
+
+fn mobile_file_search_footer<M>(
+    search: &crate::search::local::LocalSearch<M>,
+    width: usize,
+) -> String {
+    let position = if search.editing {
+        String::new()
+    } else if search.matches.is_empty() {
+        " 0/0".to_string()
+    } else {
+        format!(
+            " {}/{}{}",
+            search.current + 1,
+            search.matches.len(),
+            if search.truncated { "+" } else { "" }
+        )
+    };
+    let case = if search.case_sensitive { " Aa" } else { "" };
+    let prefix = format!(" SEARCH{position}{case} ");
+    let query_width = width.saturating_sub(crate::ui::display_width(&prefix));
+    let query = truncate_graphemes(&format!("/{}", search.query), query_width);
+    format!("{prefix}{query}")
+}
+
+fn truncate_graphemes(text: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let budget = width - 1;
+    let mut used = 0;
+    let mut output = String::new();
+    for grapheme in UnicodeSegmentation::graphemes(text, true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > budget {
+            break;
+        }
+        output.push_str(grapheme);
+        used += grapheme_width;
+    }
+    output.push('…');
+    output
 }
 
 fn file_selection_contains(sel: &crate::app::Selection, x: u16, y: u16, text_x: u16) -> bool {
@@ -765,16 +824,82 @@ pub(super) fn draw_named_delete_confirm(
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_list_stats, diff_note_count, file_selection_contains, native_footer_visible};
+    use super::{
+        diff_list_stats, diff_note_count, draw_file_view, file_selection_contains,
+        mobile_file_search_footer, native_footer_visible, truncate_graphemes,
+    };
     use crate::app::Selection;
     use crate::ids::PaneId;
     use crate::ui::{theme::Theme, RenderTarget};
     use ratatui::{buffer::Buffer, layout::Rect};
 
     #[test]
-    fn native_search_never_forces_an_inner_footer_on_mobile() {
-        assert!(native_footer_visible(false));
-        assert!(!native_footer_visible(true));
+    fn mobile_search_uses_an_inner_footer_only_while_active() {
+        assert!(native_footer_visible(false, false));
+        assert!(native_footer_visible(false, true));
+        assert!(!native_footer_visible(true, false));
+        assert!(native_footer_visible(true, true));
+
+        let mut view = crate::files::FileView::new("sample.txt".into());
+        view.apply(crate::files::FileLoad::Text(vec!["Needle".into()]));
+        view.search = Some(crate::search::local::LocalSearch {
+            query: "👩‍💻".repeat(1_024),
+            editing: false,
+            case_sensitive: true,
+            matches: vec![crate::search::local::RowMatch {
+                row: 0,
+                byte_start: 0,
+                byte_end: 6,
+                column: 0,
+                width: 6,
+            }],
+            current: 0,
+            truncated: true,
+        });
+        let area = Rect::new(0, 0, 24, 3);
+        let mut buffer = Buffer::empty(area);
+        {
+            let mut target = RenderTarget::new(&mut buffer, area);
+            draw_file_view(
+                &mut target,
+                area,
+                &view,
+                None,
+                true,
+                &Theme::quattro_rally(),
+            );
+        }
+        let footer: String = (0..area.width)
+            .map(|x| buffer[(x, area.bottom() - 1)].symbol())
+            .collect();
+        assert!(
+            footer.starts_with(" SEARCH 1/1+ Aa "),
+            "mobile status: {footer}"
+        );
+        assert!(footer.contains('/'), "mobile search query: {footer}");
+        assert!(footer.ends_with('…'), "mobile query truncation: {footer}");
+        assert_eq!(
+            mobile_file_search_footer(view.search.as_ref().unwrap(), area.width as usize),
+            " SEARCH 1/1+ Aa /👩‍💻👩‍💻👩‍💻…"
+        );
+    }
+
+    #[test]
+    fn mobile_search_footer_prioritizes_status_at_narrow_widths() {
+        let search = crate::search::local::LocalSearch {
+            query: "needle".repeat(700),
+            editing: false,
+            case_sensitive: true,
+            matches: vec![()],
+            current: 0,
+            truncated: true,
+        };
+        let footer = mobile_file_search_footer(&search, 18);
+        assert_eq!(crate::ui::display_width(&footer), 18);
+        assert!(footer.starts_with(" SEARCH 1/1+ Aa "));
+        assert!(footer.ends_with('…'));
+
+        assert_eq!(truncate_graphemes("👩‍💻abc", 3), "👩‍💻…");
     }
 
     #[test]

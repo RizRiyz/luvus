@@ -132,8 +132,11 @@ global finder's fuzzy ranking. `Enter` commits, `n` and `N` wrap through
 matches, `Ctrl-I` toggles case sensitivity, and `Ctrl-U` clears the query while
 keeping search open. `Esc` cancels search before it closes the native view.
 The active query, match count, case state, and key hints appear in Luvus's
-outer Bottom Bar; the FILE footer keeps showing file metadata. Current matches
-use the accent color; other visible matches use amber.
+outer Bottom Bar; the FILE footer keeps showing file metadata. Compact mobile
+clients show that search state in the FILE footer because their outer Bottom Bar
+is hidden. Current matches use the accent color; other visible matches use
+amber. Search retains at most 10,000 matches per view; a `+` after the count
+means more matches exist beyond the navigable set.
 
 Dragging across the text selects and copies it, the same as in any pane. Visual
 wraps rejoin into their original source line while real file line breaks remain.

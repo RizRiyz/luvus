@@ -744,7 +744,7 @@ impl App {
                 // it must never reach the PTY underneath.
                 if let Some(search) = self.pane_search.as_mut() {
                     if search.editing {
-                        search.query.extend(s.chars().filter(|ch| !ch.is_control()));
+                        search.extend_text(&s);
                     }
                     return true;
                 }
@@ -761,7 +761,7 @@ impl App {
                     };
                     if let Some(search) = search {
                         if search.editing {
-                            search.query.extend(s.chars().filter(|ch| !ch.is_control()));
+                            search.extend_text(&s);
                         }
                         return true;
                     }
@@ -3120,12 +3120,29 @@ impl App {
             return;
         };
         let mut matches = Vec::new();
-        if let Some(pane) = self.panes.get(&pane_id) {
+        let mut truncated = false;
+        if let (Some(pane), Some(matcher)) = (
+            self.panes.get(&pane_id),
+            crate::search::local::LiteralMatcher::new(&query, case_sensitive),
+        ) {
             pane.for_each_retained_row(&mut |row, _history, _row_count, line| {
-                for (col, width) in super::search::match_display_spans(line, &query, case_sensitive)
-                {
-                    matches.push(super::search::PaneSearchMatch { row, col, width });
+                if truncated {
+                    return;
                 }
+                let remaining = crate::search::local::LOCAL_MATCH_CAP.saturating_sub(matches.len());
+                if remaining == 0 {
+                    truncated = matcher.has_match(line);
+                    return;
+                }
+                let (row_matches, row_truncated) = matcher.spans(line, remaining);
+                matches.extend(row_matches.into_iter().map(|search_match| {
+                    super::search::PaneSearchMatch {
+                        row,
+                        col: search_match.column,
+                        width: search_match.width,
+                    }
+                }));
+                truncated = row_truncated;
             });
         }
         let origin = match self.pane_search.as_ref().map(|search| search.owner) {
@@ -3149,7 +3166,7 @@ impl App {
             (search_match.row, search_match.col)
         });
         if let Some(search) = self.pane_search.as_mut() {
-            search.replace_matches(matches, current);
+            search.replace_matches(matches, current, truncated);
         }
     }
 

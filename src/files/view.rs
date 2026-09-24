@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::search::local::{first_at_or_after, match_spans, LocalSearch, RowMatch};
+use crate::search::local::{
+    first_at_or_after, LiteralMatcher, LocalSearch, RowMatch, LOCAL_MATCH_CAP,
+};
 
 /// Files larger than this are not read into memory — a viewer is not an excuse
 /// to allocate hundreds of MB on a whim.
@@ -254,13 +256,29 @@ impl FileView {
             .as_ref()
             .is_some_and(|search| search.case_sensitive);
         let mut matches = Vec::new();
-        if let FileLoad::Text(lines) = &self.load {
+        let mut truncated = false;
+        if let (FileLoad::Text(lines), Some(matcher)) =
+            (&self.load, LiteralMatcher::new(query, case_sensitive))
+        {
             for (row, line) in lines.iter().enumerate() {
+                let remaining = LOCAL_MATCH_CAP.saturating_sub(matches.len());
+                if remaining == 0 {
+                    truncated = matcher.has_match(line);
+                    if truncated {
+                        break;
+                    }
+                    continue;
+                }
+                let (line_matches, line_truncated) = matcher.spans(line, remaining);
                 matches.extend(
-                    match_spans(line, query, case_sensitive)
+                    line_matches
                         .into_iter()
                         .map(|search_match| RowMatch::at(row, search_match)),
                 );
+                if line_truncated {
+                    truncated = true;
+                    break;
+                }
             }
         }
         let current = first_at_or_after(&matches, (self.scroll, 0), |search_match| {
@@ -269,7 +287,7 @@ impl FileView {
         if let Some(search) = self.search.as_mut() {
             search.query = query.to_string();
             search.editing = false;
-            search.replace_matches(matches, current);
+            search.replace_matches(matches, current, truncated);
         }
     }
 
@@ -397,7 +415,8 @@ pub fn token_rows(
     let FileLoad::Text(lines) = &v.load else {
         return None;
     };
-    let body_rows = content.height.saturating_sub(u16::from(!mobile)) as usize;
+    let show_footer = !mobile || v.search.is_some();
+    let body_rows = content.height.saturating_sub(u16::from(show_footer)) as usize;
     let gutter = gutter_width(lines.len());
     let prefix = " ".repeat((gutter + 1) as usize);
     let text_width = content.width.saturating_sub(gutter + 1) as usize;
@@ -653,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn mobile_token_rows_include_the_last_rendered_search_row() {
+    fn mobile_token_rows_reserve_the_active_search_footer() {
         let mut view = FileView::new(PathBuf::from("source.txt"));
         view.apply(FileLoad::Text(vec![
             "first".into(),
@@ -665,8 +684,8 @@ mod tests {
 
         let rows = token_rows(&view, content, true).expect("text rows");
 
-        assert_eq!(rows.len(), 3);
-        assert!(rows[2].ends_with("last-token"));
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].ends_with("second"));
     }
 
     #[test]
@@ -792,6 +811,19 @@ mod tests {
         assert_eq!(v.last_top(20, 80), 80);
         v.goto_bottom(20, 80);
         assert_eq!(v.scroll, 80);
+    }
+
+    #[test]
+    fn file_search_caps_highly_repetitive_valid_input() {
+        let mut view = FileView::new(PathBuf::from("repetitive.txt"));
+        view.apply(FileLoad::Text(vec!["a".repeat(SIZE_CAP as usize)]));
+        view.search_begin();
+        view.search_push('a');
+        view.search_commit();
+
+        let search = view.search.as_ref().expect("search");
+        assert_eq!(search.matches.len(), crate::search::local::LOCAL_MATCH_CAP);
+        assert!(search.truncated);
     }
 
     #[test]

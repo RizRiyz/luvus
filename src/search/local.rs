@@ -1,9 +1,14 @@
 //! Shared state and Unicode-safe literal matching for pane-local content search.
 //!
 //! Owners retain their own viewport, cursor, and cancellation semantics. This
-//! module only owns query editing, case mode, match selection, and text spans.
+//! module only owns bounded query editing, match selection, and text spans.
 
-use unicode_width::UnicodeWidthChar;
+use regex::Regex;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+pub const LOCAL_MATCH_CAP: usize = 10_000;
+pub const LOCAL_QUERY_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalSearch<M> {
@@ -12,6 +17,7 @@ pub struct LocalSearch<M> {
     pub case_sensitive: bool,
     pub matches: Vec<M>,
     pub current: usize,
+    pub truncated: bool,
 }
 
 impl<M> Default for LocalSearch<M> {
@@ -22,6 +28,7 @@ impl<M> Default for LocalSearch<M> {
             case_sensitive: false,
             matches: Vec::new(),
             current: 0,
+            truncated: false,
         }
     }
 }
@@ -48,11 +55,18 @@ impl<M> LocalSearch<M> {
         self.editing = true;
         self.matches.clear();
         self.current = 0;
+        self.truncated = false;
     }
 
     pub fn push(&mut self, ch: char) {
-        if self.editing {
+        if self.editing && self.query.len().saturating_add(ch.len_utf8()) <= LOCAL_QUERY_BYTES {
             self.query.push(ch);
+        }
+    }
+
+    pub fn extend_text(&mut self, text: &str) {
+        for ch in text.chars().filter(|ch| !ch.is_control()) {
+            self.push(ch);
         }
     }
 
@@ -75,16 +89,18 @@ impl<M> LocalSearch<M> {
         self.editing = true;
         self.matches.clear();
         self.current = 0;
+        self.truncated = false;
         true
     }
 
-    pub fn replace_matches(&mut self, matches: Vec<M>, current: usize) {
+    pub fn replace_matches(&mut self, matches: Vec<M>, current: usize, truncated: bool) {
         self.matches = matches;
         self.current = if self.matches.is_empty() {
             0
         } else {
             current.min(self.matches.len() - 1)
         };
+        self.truncated = truncated;
     }
 
     pub fn step(&mut self, forward: bool) -> bool {
@@ -130,47 +146,93 @@ impl RowMatch {
     }
 }
 
-/// Find non-overlapping literal matches with UTF-8 byte and display-cell spans.
-pub fn match_spans(line: &str, query: &str, case_sensitive: bool) -> Vec<TextMatch> {
-    let needle: Vec<char> = query.chars().collect();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
-    if chars.len() < needle.len() {
-        return Vec::new();
-    }
-    let mut columns = Vec::with_capacity(chars.len() + 1);
-    columns.push(0usize);
-    for (_, ch) in &chars {
-        columns.push(columns.last().copied().unwrap_or(0) + ch.width().unwrap_or(0));
-    }
-    let mut matches = Vec::new();
-    let mut start = 0usize;
-    while start + needle.len() <= chars.len() {
-        let end = start + needle.len();
-        let equal = chars[start..end]
-            .iter()
-            .map(|(_, ch)| ch)
-            .zip(&needle)
-            .all(|(hay, wanted)| {
-                hay == wanted || (!case_sensitive && hay.to_lowercase().eq(wanted.to_lowercase()))
-            });
-        if equal {
-            let byte_start = chars[start].0;
-            let byte_end = chars.get(end).map_or(line.len(), |(offset, _)| *offset);
-            matches.push(TextMatch {
-                byte_start,
-                byte_end,
-                column: columns[start],
-                width: columns[end].saturating_sub(columns[start]).max(1),
-            });
-            start = end;
-        } else {
-            start += 1;
+pub struct LiteralMatcher {
+    regex: Regex,
+}
+
+impl LiteralMatcher {
+    pub fn new(query: &str, case_sensitive: bool) -> Option<Self> {
+        if query.is_empty() || query.len() > LOCAL_QUERY_BYTES {
+            return None;
         }
+        regex::RegexBuilder::new(&regex::escape(query))
+            .case_insensitive(!case_sensitive)
+            .build()
+            .ok()
+            .map(|regex| Self { regex })
     }
-    matches
+
+    pub fn has_match(&self, line: &str) -> bool {
+        self.regex.is_match(line)
+    }
+
+    /// Find at most `limit` non-overlapping literal matches. Byte ranges stay
+    /// exact for FILE/DIFF fragment projection. Cell geometry snaps the start
+    /// and end to grapheme boundaries so terminal overlays never split a ZWJ
+    /// or combining sequence.
+    pub fn spans(&self, line: &str, limit: usize) -> (Vec<TextMatch>, bool) {
+        let raw = self
+            .regex
+            .find_iter(line)
+            .take(limit.saturating_add(1))
+            .map(|found| (found.start(), found.end()))
+            .collect::<Vec<_>>();
+        let truncated = raw.len() > limit;
+        let raw = &raw[..raw.len().min(limit)];
+        if raw.is_empty() {
+            return (Vec::new(), truncated);
+        }
+
+        let mut geometry = vec![None; raw.len()];
+        let mut match_index = 0usize;
+        let mut column = 0usize;
+        for (grapheme_start, grapheme) in UnicodeSegmentation::grapheme_indices(line, true) {
+            if match_index >= raw.len() {
+                break;
+            }
+            let grapheme_end = grapheme_start + grapheme.len();
+            let next_column = column + UnicodeWidthStr::width(grapheme);
+            let mut index = match_index;
+            while index < raw.len() && raw[index].0 < grapheme_end {
+                if raw[index].1 > grapheme_start {
+                    let (start_column, _) = geometry[index].unwrap_or((column, column));
+                    geometry[index] = Some((start_column, next_column));
+                }
+                if raw[index].1 > grapheme_end {
+                    break;
+                }
+                index += 1;
+            }
+            column = next_column;
+            while match_index < raw.len() && raw[match_index].1 <= grapheme_end {
+                match_index += 1;
+            }
+        }
+
+        let matches = raw
+            .iter()
+            .zip(geometry)
+            .filter_map(|(&(byte_start, byte_end), geometry)| {
+                let (column, end_column) = geometry?;
+                Some(TextMatch {
+                    byte_start,
+                    byte_end,
+                    column,
+                    width: end_column.saturating_sub(column).max(1),
+                })
+            })
+            .collect();
+        (matches, truncated)
+    }
+}
+
+#[cfg(test)]
+/// Convenience wrapper for focused one-line matcher tests. Multi-line owners
+/// compile one [`LiteralMatcher`] and reuse it across their bounded scan.
+pub fn match_spans(line: &str, query: &str, case_sensitive: bool) -> Vec<TextMatch> {
+    LiteralMatcher::new(query, case_sensitive)
+        .map(|matcher| matcher.spans(line, LOCAL_MATCH_CAP).0)
+        .unwrap_or_default()
 }
 
 pub fn first_at_or_after<M>(
@@ -211,6 +273,33 @@ mod tests {
     }
 
     #[test]
+    fn unicode_case_and_grapheme_cell_spans_are_preserved() {
+        assert_eq!(match_spans("ΟΣ", "ος", false).len(), 1);
+        let found = match_spans("👩‍💻foo", "foo", false)[0];
+        assert_eq!(found.column, 2);
+        let emoji = match_spans("👩‍💻foo", "👩", false)[0];
+        assert_eq!((emoji.byte_start, emoji.byte_end, emoji.width), (0, 4, 2));
+    }
+
+    #[test]
+    fn matcher_caps_results_and_reports_truncation() {
+        let matcher = LiteralMatcher::new("a", true).unwrap();
+        let (matches, truncated) = matcher.spans("aaaa", 2);
+        assert_eq!(matches.len(), 2);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn query_input_is_bounded_at_a_utf8_boundary() {
+        let mut search = LocalSearch::<()>::editing();
+        search.extend_text(&"a".repeat(LOCAL_QUERY_BYTES - 1));
+        search.push('界');
+        assert_eq!(search.query.len(), LOCAL_QUERY_BYTES - 1);
+        search.push('a');
+        assert_eq!(search.query.len(), LOCAL_QUERY_BYTES);
+    }
+
+    #[test]
     fn matching_is_non_overlapping_and_empty_queries_never_match() {
         assert_eq!(match_spans("aaaa", "aa", true).len(), 2);
         assert!(match_spans("anything", "", false).is_empty());
@@ -223,7 +312,7 @@ mod tests {
         assert!(!search.toggle_case(), "editing has no results to rebuild");
         assert!(search.case_sensitive);
         assert!(search.commit());
-        search.replace_matches(vec![10, 20, 30], 1);
+        search.replace_matches(vec![10, 20, 30], 1, false);
         assert!(search.step(true));
         assert_eq!(search.current, 2);
         assert!(search.step(true));
@@ -235,6 +324,7 @@ mod tests {
         assert!(search.editing);
         assert_eq!(search.query, "x");
         assert!(search.matches.is_empty());
+        assert!(!search.truncated);
         assert!(
             !search.invalidate_matches(),
             "editing state is already valid"

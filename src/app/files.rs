@@ -1305,21 +1305,29 @@ impl App {
         // Text column width: the scroll clamp needs it to measure how many rows a
         // soft-wrapped line really occupies.
         let text_w = rect.map(|r| view_text_w(v, r.width)).unwrap_or(0);
-        // While typing a search query, keys edit the query.
-        if v.search.as_ref().is_some_and(|s| s.editing) {
+        // Active search owns all input. Editing accepts query text; committed
+        // search accepts only navigation and search controls. Everything else
+        // is swallowed so FILE commands cannot mutate or close the view under
+        // the search footer.
+        if v.search.is_some() {
+            let editing = v.search.as_ref().is_some_and(|search| search.editing);
             match key.code {
                 KeyCode::Char('i') if super::keys::is_ctrl_chord(key.modifiers) => {
                     v.search_toggle_case()
                 }
                 KeyCode::Char('u') if super::keys::is_ctrl_chord(key.modifiers) => v.search_clear(),
-                KeyCode::Char(c) if !super::keys::is_ctrl_chord(key.modifiers) => v.search_push(c),
-                KeyCode::Backspace => v.search_backspace(),
-                KeyCode::Enter => {
+                KeyCode::Char(c) if editing && !super::keys::is_ctrl_chord(key.modifiers) => {
+                    v.search_push(c)
+                }
+                KeyCode::Backspace if editing => v.search_backspace(),
+                KeyCode::Enter if editing => {
                     v.search_commit();
                     v.reveal_current_match(viewport);
                 }
+                KeyCode::Char('n') if !editing => v.search_step(true, viewport),
+                KeyCode::Char('N') if !editing => v.search_step(false, viewport),
                 KeyCode::Esc => v.search_cancel(),
-                _ => return false,
+                _ => {}
             }
             return true;
         }
@@ -1348,8 +1356,6 @@ impl App {
             KeyCode::Char('l') | KeyCode::Right => v.scroll_right(8),
             KeyCode::Char('w') => v.wrap = !v.wrap,
             KeyCode::Char('/') => v.search_begin(),
-            KeyCode::Char('n') => v.search_step(true, viewport),
-            KeyCode::Char('N') => v.search_step(false, viewport),
             // `y` copies the whole file to the clipboard, through the same path
             // as a pane text selection (native clipboard + OSC 52 + a toast).
             KeyCode::Char('y') | KeyCode::Char('c') => {
@@ -1357,14 +1363,7 @@ impl App {
                 return true;
             }
             KeyCode::Char('q') | KeyCode::Char('x') => self.close_pane(id),
-            KeyCode::Esc => {
-                // Esc clears a committed search first, else closes the view.
-                if v.search.is_some() {
-                    v.search_cancel();
-                } else {
-                    self.close_pane(id);
-                }
-            }
+            KeyCode::Esc => self.close_pane(id),
             _ => return false,
         }
         true
@@ -1377,6 +1376,69 @@ mod tests {
     use crate::app::{DockKind, FileMenu, FileMenuItem, Side};
     use crate::layout::Axis;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn file_search_consumes_non_search_shortcuts_before_and_after_commit() {
+        let _env = crate::persist::test_env("file-search-input-ownership");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let mut view = crate::files::FileView::new("sample.txt".into());
+        view.apply(crate::files::FileLoad::Text(vec![
+            "needle".into(),
+            "middle".into(),
+            "needle".into(),
+        ]));
+        view.search_begin();
+        view.search.as_mut().unwrap().extend_text("needle");
+        app.views.insert(pane, ViewKind::File(view));
+
+        for key in ['j', 'w', 'y', 'c', 'q', 'x'] {
+            assert!(
+                app.handle_file_key(pane, KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            );
+        }
+        let ViewKind::File(view) = &app.views[&pane] else {
+            panic!("file view retained");
+        };
+        assert_eq!(view.scroll, 0);
+        assert!(view.wrap);
+        assert!(view.search.as_ref().unwrap().editing);
+        assert!(app.pending_clipboard.is_none());
+
+        app.handle_file_key(
+            pane,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        for ch in "needle".chars() {
+            app.handle_file_key(pane, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_file_key(pane, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for key in ['j', 'w', 'y', 'c', 'q', 'x'] {
+            assert!(
+                app.handle_file_key(pane, KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE))
+            );
+        }
+        let ViewKind::File(view) = &app.views[&pane] else {
+            panic!("file view retained");
+        };
+        assert_eq!(view.scroll, 0);
+        assert!(view.wrap);
+        assert!(!view.search.as_ref().unwrap().editing);
+        assert!(app.pending_clipboard.is_none());
+
+        app.handle_file_key(pane, KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let ViewKind::File(view) = &app.views[&pane] else {
+            panic!("file view retained");
+        };
+        assert_eq!(view.search.as_ref().unwrap().current, 1);
+
+        app.handle_file_key(pane, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let ViewKind::File(view) = &app.views[&pane] else {
+            panic!("file view retained");
+        };
+        assert!(view.search.is_none());
+    }
 
     #[test]
     fn files_focus_restores_last_side_across_restart() {

@@ -35,7 +35,8 @@ pub struct PaneSearchMatch {
     pub width: usize,
 }
 
-/// Terminal adapter for the shared local-search matcher.
+#[cfg(test)]
+/// Terminal adapter retained for focused matcher tests.
 pub(super) fn match_display_spans(
     line: &str,
     query: &str,

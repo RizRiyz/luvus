@@ -988,6 +988,7 @@ mod tests {
                     },
                 ],
                 current: 1,
+                truncated: false,
             },
             saved_scroll: 0,
         };
