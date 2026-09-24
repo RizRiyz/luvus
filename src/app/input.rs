@@ -732,6 +732,12 @@ impl App {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
+                // Modal input has the same precedence for paste as for keys.
+                // In particular, a global search opened over a native view must
+                // not append to that view's retained local-search query.
+                if self.paste_into_modal(&s) {
+                    return true;
+                }
                 if self
                     .copy_mode
                     .is_some_and(|copy| copy.pane != self.layout().focus)
@@ -770,11 +776,6 @@ impl App {
                 // pasted command into the pane while the user is selecting.
                 if self.copy_mode.is_some() {
                     return true;
-                }
-                // A paste while a text-input modal is open (a Settings field, a
-                // rename prompt, …) fills that field, not the pane underneath.
-                if self.paste_into_modal(&s) {
-                    return true; // the modal buffer changed → redraw
                 }
                 // Otherwise it goes to the focused pane.
                 self.paste_into_focused_pane(&s);
@@ -3125,14 +3126,18 @@ impl App {
             self.panes.get(&pane_id),
             crate::search::local::LiteralMatcher::new(&query, case_sensitive),
         ) {
-            pane.for_each_retained_row(&mut |row, _history, _row_count, line| {
+            pane.try_for_each_retained_row(&mut |row, _history, _row_count, line| {
                 if truncated {
-                    return;
+                    return std::ops::ControlFlow::Break(());
                 }
                 let remaining = crate::search::local::LOCAL_MATCH_CAP.saturating_sub(matches.len());
                 if remaining == 0 {
                     truncated = matcher.has_match(line);
-                    return;
+                    return if truncated {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    };
                 }
                 let (row_matches, row_truncated) = matcher.spans(line, remaining);
                 matches.extend(row_matches.into_iter().map(|search_match| {
@@ -3143,6 +3148,11 @@ impl App {
                     }
                 }));
                 truncated = row_truncated;
+                if truncated {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
             });
         }
         let origin = match self.pane_search.as_ref().map(|search| search.owner) {
@@ -4979,6 +4989,27 @@ mod tests {
             KeyModifiers::SHIFT,
         ))));
         assert!(app.handle_event(AppEvent::Key(plain('/'))));
+    }
+
+    #[test]
+    fn global_search_modal_owns_paste_over_native_search() {
+        let _env = crate::persist::test_env("global-search-paste-over-native");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.panes.remove(&pane);
+        let mut view = crate::files::FileView::new(std::path::PathBuf::from("sample.txt"));
+        view.search = Some(crate::search::local::LocalSearch::editing());
+        app.views.insert(pane, ViewKind::File(view));
+        app.open_search();
+
+        assert!(app.handle_event(AppEvent::Paste("global".into())));
+
+        assert_eq!(app.search.as_ref().unwrap().query, "global");
+        let ViewKind::File(view) = app.views.get(&pane).unwrap() else {
+            panic!("file view");
+        };
+        assert_eq!(view.search.as_ref().unwrap().query, "");
     }
 
     #[test]

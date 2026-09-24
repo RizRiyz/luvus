@@ -473,7 +473,19 @@ pub trait VtEngine: Send {
 
     /// Visit retained rows oldest-first using one reusable line buffer. The
     /// callback must not retain the borrowed text after it returns.
-    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str));
+    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str)) {
+        self.try_for_each_retained_row(&mut |index, line| {
+            f(index, line);
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+
+    /// Visit retained rows as above, allowing the callback to stop before the
+    /// engine formats any remaining rows.
+    fn try_for_each_retained_row(
+        &self,
+        f: &mut dyn FnMut(usize, &str) -> std::ops::ControlFlow<()>,
+    );
 
     /// Extract an inclusive linear retained-row selection using terminal cell
     /// coordinates. Implementations must preserve complete wide glyphs and
