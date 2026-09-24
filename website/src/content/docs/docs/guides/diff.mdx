@@ -80,8 +80,10 @@ Search follows the same local-content contract as FILE and document previews:
 toggles case sensitivity, `Ctrl-U` clears the query without closing search, and
 `Esc` cancels search before it closes DIFF. The current match uses the accent
 color and other visible matches use amber in Auto, Split, and Stack layouts.
-This is separate from the DIFF sidebar's `f` state filter and from the global
-fuzzy finder.
+The query, result count, case state, and search shortcuts replace the DIFF
+footer while search is active, including on mobile. Outside search, the footer
+returns to review status and note information. This is separate from the DIFF
+sidebar's `f` state filter and from the global fuzzy finder.
 
 Binary files and conflicts show an explicit summary instead of misleading
 text. Large patches and lines are bounded and visibly marked **TRUNCATED**.

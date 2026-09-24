@@ -131,7 +131,9 @@ same local-search controls. Search is an exact substring match rather than the
 global finder's fuzzy ranking. `Enter` commits, `n` and `N` wrap through
 matches, `Ctrl-I` toggles case sensitivity, and `Ctrl-U` clears the query while
 keeping search open. `Esc` cancels search before it closes the native view.
-Current matches use the accent color; other visible matches use amber.
+The active query, match count, case state, and key hints appear in Luvus's
+outer Bottom Bar; the FILE footer keeps showing file metadata. Current matches
+use the accent color; other visible matches use amber.
 
 Dragging across the text selects and copies it, the same as in any pane. Visual
 wraps rejoin into their original source line while real file line breaks remain.
@@ -204,10 +206,12 @@ bounded layout cache.
 
 Dragging copies the rendered terminal text without turning visual wraps into
 newlines. Real document line breaks remain. Double-clicking copies and
-highlights the rendered word, path, or URL under the pointer. Reopening the same
-file and preview kind focuses the existing preview in that placement rather
-than creating a duplicate. Open the file normally whenever you want its raw
-source or editor.
+highlights the rendered word, path, or URL under the pointer. Search controls
+replace the preview footer while search is active, including on mobile; after
+cancelling search, the footer identifies the document and preview kind again.
+Reopening the same file and preview kind focuses the existing preview in that
+placement rather than creating a duplicate. Open the file normally whenever you
+want its raw source or editor.
 
 ## What this is not
 
