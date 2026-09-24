@@ -51,10 +51,10 @@ pub(crate) mod session_menu;
 mod settings;
 mod switcher;
 
-pub(crate) use search::PaneSearch;
-pub use search::{GlobalSearch, SearchFlash};
 #[cfg(test)]
-pub(crate) use search::{PaneSearchMatch, PaneSearchOwner};
+pub(crate) use search::PaneSearchOwner;
+pub use search::{GlobalSearch, SearchFlash};
+pub(crate) use search::{PaneSearch, PaneSearchMatch};
 
 #[cfg(test)]
 pub(crate) use keys::build_direct_keymap;
@@ -5224,6 +5224,7 @@ impl App {
             }
             self.active_ws = workspace;
             self.workspaces[workspace].active_tab = tab;
+            self.cancel_pane_search();
             self.scroll_pane = None;
             self.zoomed = false;
         } else {
@@ -6700,6 +6701,7 @@ impl App {
         self.workspaces[wsi].active_tab = final_tab;
         self.workspaces[wsi].tabs[final_tab].layout.focus = pane;
         self.zoomed = false;
+        self.cancel_pane_search();
         self.scroll_pane = None;
         self.session_dirty = true;
         self.emit_event(

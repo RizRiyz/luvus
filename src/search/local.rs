@@ -68,6 +68,16 @@ impl<M> LocalSearch<M> {
         !self.editing && !self.query.is_empty()
     }
 
+    pub fn invalidate_matches(&mut self) -> bool {
+        if self.editing {
+            return false;
+        }
+        self.editing = true;
+        self.matches.clear();
+        self.current = 0;
+        true
+    }
+
     pub fn replace_matches(&mut self, matches: Vec<M>, current: usize) {
         self.matches = matches;
         self.current = if self.matches.is_empty() {
@@ -221,6 +231,14 @@ mod tests {
         assert!(search.step(false));
         assert_eq!(search.current, 2);
         assert!(search.toggle_case(), "committed results need rebuilding");
+        assert!(search.invalidate_matches());
+        assert!(search.editing);
+        assert_eq!(search.query, "x");
+        assert!(search.matches.is_empty());
+        assert!(
+            !search.invalidate_matches(),
+            "editing state is already valid"
+        );
         search.clear();
         assert!(search.editing);
         assert!(search.query.is_empty());

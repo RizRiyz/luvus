@@ -732,6 +732,7 @@ impl App {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
+                self.cancel_orphaned_pane_search();
                 // Inline pane search owns pasted query text just like typed text;
                 // it must never reach the PTY underneath.
                 if let Some(search) = self.pane_search.as_mut() {
@@ -808,6 +809,9 @@ impl App {
                 true
             }
             AppEvent::PtyData(id) => {
+                if let Some(search) = self.pane_search.as_mut().filter(|search| search.pane == id) {
+                    search.invalidate_matches();
+                }
                 // The reader's coalescing flag is deliberately NOT cleared here
                 // — it re-arms on the frame/detect cadence (`rearm_pty_notify`),
                 // so a saturated pane wakes the loop at the render rate, not
@@ -1353,6 +1357,7 @@ impl App {
         use ratatui::crossterm::event::MouseEventKind;
 
         let kind = m.kind;
+        self.cancel_orphaned_pane_search();
         // Pane search is keyboard-owned too. A deliberate mouse action cancels
         // it back to its saved viewport and is swallowed, so neither focus nor
         // terminal mouse reporting can escape the pane-bound search.
@@ -3067,6 +3072,23 @@ impl App {
         true
     }
 
+    fn pane_search_owner_is_active(&self) -> bool {
+        self.pane_search
+            .as_ref()
+            .is_none_or(|search| match search.owner {
+                super::search::PaneSearchOwner::Scroll => self.scroll_pane == Some(search.pane),
+                super::search::PaneSearchOwner::Copy => {
+                    self.copy_mode.is_some_and(|copy| copy.pane == search.pane)
+                }
+            })
+    }
+
+    fn cancel_orphaned_pane_search(&mut self) {
+        if !self.pane_search_owner_is_active() {
+            self.cancel_pane_search();
+        }
+    }
+
     fn begin_pane_search(&mut self, pane: PaneId, owner: super::search::PaneSearchOwner) {
         let saved_scroll = self
             .panes
@@ -4102,8 +4124,10 @@ impl App {
             .copy_mode
             .is_some_and(|copy| copy.pane != self.layout().focus)
         {
+            self.cancel_pane_search();
             self.cancel_copy_mode();
         }
+        self.cancel_orphaned_pane_search();
         // The running-command overlay: scroll it, refresh it, or dismiss.
         if self.cmd_inspect.is_some() {
             match key.code {
@@ -5025,6 +5049,25 @@ mod tests {
     }
 
     #[test]
+    fn copy_search_is_cancelled_when_focus_changes() {
+        let _env = crate::persist::test_env("copy-search-focus-owner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let first = app.layout().focus;
+        app.run_cmd(crate::app::Cmd::SplitRight);
+        let second = app.layout().focus;
+        app.layout_mut().focus = first;
+        assert!(app.begin_copy_mode());
+        assert!(app.handle_event(AppEvent::Key(plain('/'))));
+
+        app.layout_mut().focus = second;
+        assert!(!app.handle_event(AppEvent::Key(plain('x'))));
+
+        assert!(app.copy_mode.is_none());
+        assert!(app.pane_search.is_none());
+    }
+
+    #[test]
     fn pane_search_navigation_wraps_in_both_directions() {
         let _env = crate::persist::test_env("pane-search-wrap");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -5087,6 +5130,60 @@ mod tests {
         assert!(!search.case_sensitive);
         assert_eq!(search.matches.len(), 2);
         assert!(input_rx.try_recv().is_err(), "Ctrl-I reached the PTY");
+    }
+
+    #[test]
+    fn orphaned_pane_search_never_consumes_future_paste() {
+        let _env = crate::persist::test_env("pane-search-orphan-paste");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .expect("pane")
+            .replace_input_sender_for_test(input_tx);
+        app.scroll_pane = Some(pane);
+        app.handle_event(AppEvent::Key(plain('/')));
+        app.scroll_pane = None;
+
+        assert!(!app.handle_event(AppEvent::Paste("echo safe".into())));
+        assert!(app.pane_search.is_none());
+        let forwarded = input_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        match forwarded {
+            crate::terminal::pty::InputAction::Bytes(bytes) => {
+                assert_eq!(bytes, b"echo safe")
+            }
+            crate::terminal::pty::InputAction::Submit { .. } => {
+                panic!("ordinary paste must not become a submit action")
+            }
+        }
+    }
+
+    #[test]
+    fn committed_pane_search_is_invalidated_by_new_output() {
+        let _env = crate::persist::test_env("pane-search-output-invalidation");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        add_scrollback(&app, pane, &["needle"]);
+        enter_search(&mut app);
+        for character in "needle".chars() {
+            app.handle_event(AppEvent::Key(plain(character)));
+        }
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.pane_search.as_ref().unwrap().matches.is_empty());
+
+        assert!(app.handle_event(AppEvent::PtyData(pane)));
+        let search = app.pane_search.as_ref().expect("search remains open");
+        assert!(search.editing);
+        assert_eq!(search.query, "needle");
+        assert!(search.matches.is_empty());
     }
 
     #[test]

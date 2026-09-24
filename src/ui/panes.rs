@@ -669,13 +669,10 @@ fn draw_pane_search_matches(
     search: &crate::app::PaneSearch,
     t: &Theme,
 ) {
-    for (index, search_match) in search.matches.iter().enumerate() {
-        let Some(screen_row) = search_match.row.checked_sub(retained_top) else {
-            continue;
-        };
-        if screen_row >= usize::from(content.height) {
-            continue;
-        }
+    let visible = visible_pane_search_range(&search.matches, retained_top, content.height);
+    for (relative, search_match) in search.matches[visible.clone()].iter().enumerate() {
+        let index = visible.start + relative;
+        let screen_row = search_match.row - retained_top;
         let start = content
             .x
             .saturating_add(search_match.col.min(u16::MAX as usize) as u16);
@@ -695,6 +692,17 @@ fn draw_pane_search_matches(
             }
         }
     }
+}
+
+fn visible_pane_search_range(
+    matches: &[crate::app::PaneSearchMatch],
+    retained_top: usize,
+    height: u16,
+) -> std::ops::Range<usize> {
+    let start = matches.partition_point(|search_match| search_match.row < retained_top);
+    let bottom = retained_top.saturating_add(usize::from(height));
+    let end = start + matches[start..].partition_point(|search_match| search_match.row < bottom);
+    start..end
 }
 
 fn terminal_cell_style(
@@ -811,6 +819,35 @@ fn draw_codex_composer(
 mod tests {
     use super::*;
     use crate::terminal::vt::CodexComposerRegion;
+
+    #[test]
+    fn pane_search_rendering_limits_iteration_to_visible_matches() {
+        let matches = vec![
+            crate::app::PaneSearchMatch {
+                row: 1,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 5,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 6,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 8,
+                col: 0,
+                width: 1,
+            },
+        ];
+
+        assert_eq!(visible_pane_search_range(&matches, 5, 2), 1..3);
+        assert_eq!(visible_pane_search_range(&matches, 9, 3), 4..4);
+    }
 
     #[test]
     fn composer_uses_only_a_subtle_theme_fill_and_preserves_geometry() {

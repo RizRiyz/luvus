@@ -397,8 +397,7 @@ pub fn token_rows(
     let FileLoad::Text(lines) = &v.load else {
         return None;
     };
-    let show_footer = !mobile || v.search.is_some();
-    let body_rows = content.height.saturating_sub(u16::from(show_footer)) as usize;
+    let body_rows = content.height.saturating_sub(u16::from(!mobile)) as usize;
     let gutter = gutter_width(lines.len());
     let prefix = " ".repeat((gutter + 1) as usize);
     let text_width = content.width.saturating_sub(gutter + 1) as usize;
@@ -651,6 +650,23 @@ mod tests {
         // Short line and empty line each stay a single row.
         assert_eq!(wrap_ranges("hi", 10), vec![(0, 2)]);
         assert_eq!(wrap_ranges("", 10), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn mobile_token_rows_include_the_last_rendered_search_row() {
+        let mut view = FileView::new(PathBuf::from("source.txt"));
+        view.apply(FileLoad::Text(vec![
+            "first".into(),
+            "second".into(),
+            "last-token".into(),
+        ]));
+        view.search = Some(crate::search::local::LocalSearch::editing());
+        let content = ratatui::layout::Rect::new(0, 0, 20, 3);
+
+        let rows = token_rows(&view, content, true).expect("text rows");
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows[2].ends_with("last-token"));
     }
 
     #[test]
