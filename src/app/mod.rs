@@ -14594,6 +14594,50 @@ fi
     }
 
     #[test]
+    fn pane_navigation_passes_the_first_mouse_event_to_its_target() {
+        let _env = crate::persist::test_env("pane-navigation-mouse");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 100, 23);
+        app.commander_area = Some(Rect::new(0, 23, 100, 5));
+        app.workspaces_area = Rect::new(0, 0, 10, 10);
+        app.open_commander();
+        app.commander.as_mut().unwrap().focused = false;
+        let enter_preview = |app: &mut App| {
+            app.handle_event(AppEvent::Key(app.prefix.key_event()));
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )));
+            assert_eq!(app.mode, Mode::PaneNavigate);
+        };
+        let mouse = |kind, column, row| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        enter_preview(&mut app);
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 50, 25));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.commander.as_ref().unwrap().focused);
+
+        app.commander.as_mut().unwrap().focused = false;
+        enter_preview(&mut app);
+        app.handle_event(mouse(MouseEventKind::ScrollDown, 1, 1));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.workspaces_scroll, 1);
+    }
+
+    #[test]
     fn tab_rename_sets_name_persists_and_excludes_dashboards() {
         let _env = crate::persist::test_env("tab-rename");
         use crate::event::AppEvent;

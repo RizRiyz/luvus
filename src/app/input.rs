@@ -1339,7 +1339,8 @@ impl App {
         if self.mode == Mode::PaneNavigate && !matches!(kind, MouseEventKind::Moved) {
             self.pane_navigation = None;
             self.mode = Mode::Normal;
-            return true;
+            // Preview never owns the pointer. Let this same click or wheel
+            // event reach its destination after cancelling keyboard preview.
         }
         if self.commander.is_none() {
             self.commander_resize = false;
