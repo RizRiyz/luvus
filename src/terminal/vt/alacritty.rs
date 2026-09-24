@@ -847,10 +847,10 @@ impl VtEngine for AlacrittyEngine {
         selected.join("\n")
     }
 
+    #[cfg(test)]
     fn visible_rows(&self) -> Vec<String> {
         // Same offset shift as `for_each_cell` — these are the rows the user can
-        // see, so a selection made while scrolled back must copy the history
-        // text, not come back empty.
+        // see, so a scrolled viewport reports the history text it is showing.
         let grid = self.term.grid();
         let rows = grid.screen_lines();
         let offset = grid.display_offset() as i32;
@@ -867,6 +867,33 @@ impl VtEngine for AlacrittyEngine {
             lines[r as usize].push(if c == '\0' { ' ' } else { c });
         }
         lines
+    }
+
+    fn screen_rows(&self) -> Vec<String> {
+        // Index by `Line` rather than walking `display_iter`: line indexing is
+        // relative to the live screen (`Storage::compute_index` ignores
+        // `display_offset`), so this frame is what the child last painted, not
+        // wherever the user has scrolled to. Same rule as `detection_text`.
+        let grid = self.term.grid();
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        (0..rows)
+            .map(|r| {
+                let row = &grid[Line(r as i32)];
+                let mut line = String::with_capacity(cols);
+                for c in 0..cols {
+                    let cell = &row[Column(c)];
+                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        continue;
+                    }
+                    line.push(if cell.c == '\0' { ' ' } else { cell.c });
+                    if let Some(zerowidth) = cell.zerowidth() {
+                        line.extend(zerowidth);
+                    }
+                }
+                line
+            })
+            .collect()
     }
 
     fn visible_rows_aligned(&self) -> AlignedRows {
@@ -1782,6 +1809,31 @@ mod tests {
             damage.rows[0].hyperlinks[0].uri,
             "file:///repo/server/task.mjs"
         );
+    }
+
+    /// `screen_rows` reads the live frame; `visible_rows` follows the user.
+    #[test]
+    fn screen_rows_ignore_the_scrollback_viewport() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(24, 3, tx, budget_for_rows(24, 40));
+        engine.advance(b"old prompt\r\n");
+        for i in 0..10 {
+            engine.advance(format!("line {i}\r\n").as_bytes());
+        }
+        engine.advance(b"live prompt");
+
+        engine.scroll(10);
+        assert!(
+            engine.scroll_offset() > 0,
+            "precondition: the viewport is scrolled into history"
+        );
+        assert!(
+            engine.visible_rows().join("\n").contains("old prompt"),
+            "precondition: the user is looking at the old frame"
+        );
+        let screen = engine.screen_rows().join("\n");
+        assert!(screen.contains("live prompt"), "{screen}");
+        assert!(!screen.contains("old prompt"), "{screen}");
     }
 
     #[test]

@@ -7084,7 +7084,8 @@ mod link_click_tests {
     #[test]
     fn visible_selection_fallback_preserves_wide_characters() {
         let _env = crate::persist::test_env("mouse-copy-wide-visible-fallback");
-        let (mut app, _term, _) = fixture_showing("你好，hello.", 0);
+        let text = format!("{}你好，hello.", "history\r\n".repeat(80));
+        let (mut app, _term, _) = fixture_showing(&text, 0);
         let pane = app.layout().focus;
         let content = app
             .pane_content_rects
@@ -7094,7 +7095,9 @@ mod link_click_tests {
             .expect("pane content rect");
         let visible_row = {
             let pane = app.panes.get(&pane).expect("pane");
-            let engine = pane.engine.lock().expect("engine");
+            let mut engine = pane.engine.lock().expect("engine");
+            engine.scroll(1);
+            assert_eq!(engine.scroll_offset(), 1);
             engine
                 .visible_rows()
                 .iter()
