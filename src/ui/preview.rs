@@ -107,24 +107,8 @@ pub(super) fn draw(
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let footer = if let Some(search) = &view.search {
-            let case = if search.case_sensitive { " · Aa" } else { "" };
-            let position = if search.editing {
-                String::new()
-            } else if search.matches.is_empty() {
-                " · 0/0".to_string()
-            } else {
-                format!(" · {}/{}", search.current + 1, search.matches.len())
-            };
-            let navigation = if !search.editing && !search.matches.is_empty() {
-                " · n/N match"
-            } else {
-                ""
-            };
-            format!(
-                " /{}{}{}{} · Ctrl-U clear · Ctrl-I case · Esc cancel",
-                search.query, position, case, navigation
-            )
+        let footer = if let Some(search) = view.search.as_ref() {
+            super::local_search_footer(search)
         } else {
             format!(
                 " {name} · {} preview · / search · y copy source",

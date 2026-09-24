@@ -188,7 +188,8 @@ impl App {
         let Some(ViewKind::Preview(view)) = self.views.get_mut(&id) else {
             return false;
         };
-        if view.search.as_ref().is_some_and(|search| search.editing) {
+        if view.search.is_some() {
+            let editing = view.search.as_ref().is_some_and(|search| search.editing);
             match key_event.code {
                 KeyCode::Char('i') if super::keys::is_ctrl_chord(key_event.modifiers) => {
                     view.search_toggle_case(layout_key, viewport)
@@ -196,27 +197,21 @@ impl App {
                 KeyCode::Char('u') if super::keys::is_ctrl_chord(key_event.modifiers) => {
                     view.search_clear()
                 }
-                KeyCode::Char(ch) if !super::keys::is_ctrl_chord(key_event.modifiers) => {
+                KeyCode::Char(ch)
+                    if editing && !super::keys::is_ctrl_chord(key_event.modifiers) =>
+                {
                     view.search_push(ch)
                 }
-                KeyCode::Backspace => view.search_backspace(),
-                KeyCode::Enter => view.search_commit(layout_key, viewport),
+                KeyCode::Backspace if editing => view.search_backspace(),
+                KeyCode::Enter if editing => view.search_commit(layout_key, viewport),
+                KeyCode::Char('n') if !editing => view.search_step(true, viewport),
+                KeyCode::Char('N') if !editing => view.search_step(false, viewport),
                 KeyCode::Esc => view.search_cancel(),
-                _ => return false,
+                _ => {}
             }
             return true;
         }
         match key_event.code {
-            KeyCode::Char('i')
-                if super::keys::is_ctrl_chord(key_event.modifiers) && view.search.is_some() =>
-            {
-                view.search_toggle_case(layout_key, viewport)
-            }
-            KeyCode::Char('u')
-                if super::keys::is_ctrl_chord(key_event.modifiers) && view.search.is_some() =>
-            {
-                view.search_clear()
-            }
             KeyCode::Char('j') | KeyCode::Down => view.scroll_by(1, viewport, layout_key),
             KeyCode::Char('k') | KeyCode::Up => view.scroll_by(-1, viewport, layout_key),
             KeyCode::Char('d') => view.scroll_by(viewport as i32 / 2, viewport, layout_key),
@@ -228,8 +223,6 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => view.scroll = 0,
             KeyCode::Char('G') | KeyCode::End => view.goto_bottom(viewport, layout_key),
             KeyCode::Char('/') => view.search_begin(),
-            KeyCode::Char('n') => view.search_step(true, viewport),
-            KeyCode::Char('N') => view.search_step(false, viewport),
             KeyCode::Char('y') | KeyCode::Char('c') => {
                 let text = view.document().map(|document| document.source.to_string());
                 if let Some(text) = text {
@@ -241,14 +234,7 @@ impl App {
                 }
                 return true;
             }
-            KeyCode::Char('q') => self.close_pane(id),
-            KeyCode::Esc => {
-                if view.search.is_some() {
-                    view.search_cancel();
-                } else {
-                    self.close_pane(id);
-                }
-            }
+            KeyCode::Char('q') | KeyCode::Esc => self.close_pane(id),
             _ => return false,
         }
         true
@@ -673,6 +659,45 @@ mod tests {
             Arc::new(crate::files::preview::layout::build(document, key)),
         );
         view
+    }
+
+    #[test]
+    fn preview_search_consumes_non_search_shortcuts_before_and_after_commit() {
+        let _env = crate::persist::test_env("preview-search-input-owner");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let id = app.layout().focus;
+        app.panes.remove(&id);
+        app.views
+            .insert(id, ViewKind::Preview(code_preview("Needle", 80)));
+        let tab_count = app.ws().tabs.len();
+
+        assert!(app.handle_preview_key(id, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)));
+        assert!(
+            app.handle_preview_key(id, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
+        );
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Preview(view)) if view.search.as_ref().is_some_and(|search| search.query.is_empty())
+        ));
+
+        assert!(app.handle_preview_key(id, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert!(app.handle_preview_key(id, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        for shortcut in ['q', 'j', 'y', 'c'] {
+            assert!(app.handle_preview_key(
+                id,
+                KeyEvent::new(KeyCode::Char(shortcut), KeyModifiers::NONE)
+            ));
+        }
+        assert_eq!(app.ws().tabs.len(), tab_count, "q must not close Preview");
+        assert!(
+            app.pending_clipboard.is_none(),
+            "copy shortcuts must not escape search"
+        );
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Preview(view)) if view.search.is_some() && view.scroll == 0
+        ));
     }
 
     #[test]

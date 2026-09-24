@@ -68,8 +68,7 @@ pub(super) fn draw_diff_view(
         return;
     }
     let header = Rect::new(area.x, area.y, area.width, 1);
-    let search_active = view.search.is_some();
-    let show_footer = !mobile || view.note_draft.is_some() || view.note_selecting || search_active;
+    let show_footer = diff_footer_visible(mobile, view);
     let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     let body = Rect::new(
         area.x,
@@ -165,25 +164,7 @@ pub(super) fn draw_diff_view(
         " NOTE  select source · click a row or move with j/k · Enter writes · Esc cancels"
             .to_string()
     } else if let Some(search) = view.search.as_ref() {
-        let case = if search.case_sensitive { " Aa" } else { "" };
-        if search.editing {
-            format!(
-                " SEARCH  /{}{case}  ·  Ctrl-U clear  ·  Ctrl-I case  ·  Esc cancel",
-                search.query
-            )
-        } else if search.matches.is_empty() {
-            format!(
-                " SEARCH  /{}  0/0{case}  ·  Ctrl-U clear  ·  Ctrl-I case  ·  Esc cancel",
-                search.query
-            )
-        } else {
-            format!(
-                " SEARCH  /{}  {}/{}{case}  ·  n/N match  ·  Ctrl-U clear  ·  Ctrl-I case  ·  Esc cancel",
-                search.query,
-                search.current + 1,
-                search.matches.len()
-            )
-        }
+        super::local_search_footer(search)
     } else {
         format!(
             " [j/k] move  [q] close  [s] layout  [m] viewed  [/] search  [n] note  [a] send  ·  {viewed}/{total} viewed · {note_count} notes"
@@ -234,6 +215,10 @@ fn draw_diff_header(f: &mut RenderTarget, area: Rect, path: &str, metadata: Line
             Rect::new(metadata_x, area.y, metadata_width, 1),
         );
     }
+}
+
+fn diff_footer_visible(mobile: bool, view: &DiffView) -> bool {
+    !mobile || view.note_draft.is_some() || view.note_selecting || view.search.is_some()
 }
 
 fn effective_layout(preference: DiffLayoutPreference, width: u16) -> DiffLayoutPreference {
@@ -1203,6 +1188,30 @@ mod tests {
             marker_style,
             color_mode: DiffColorMode::Theme,
         }
+    }
+
+    #[test]
+    fn search_uses_the_diff_footer_including_on_mobile() {
+        let mut view = test_view(vec![changed_line(DiffLineKind::Addition, "Needle")]);
+        view.search = Some(crate::search::local::LocalSearch {
+            query: "Needle".into(),
+            editing: false,
+            case_sensitive: true,
+            matches: vec![crate::search::local::RowMatch {
+                row: 0,
+                byte_start: 0,
+                byte_end: 6,
+                column: 0,
+                width: 6,
+            }],
+            current: 0,
+        });
+
+        assert!(diff_footer_visible(true, &view));
+        assert_eq!(
+            crate::ui::local_search_footer(view.search.as_ref().expect("search")),
+            " SEARCH  /Needle · 1/1 · Aa · n/N match · Ctrl-U clear · Ctrl-I case · Esc cancel"
+        );
     }
 
     #[test]

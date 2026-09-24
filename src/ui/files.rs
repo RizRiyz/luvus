@@ -380,7 +380,7 @@ pub(super) fn draw_file_view(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let show_footer = !mobile || v.search.is_some();
+    let show_footer = native_footer_visible(mobile);
     let body = Rect::new(
         area.x,
         area.y,
@@ -429,39 +429,19 @@ pub(super) fn draw_file_view(
         return;
     }
 
-    // Footer: path · lines · encoding, or the state.
+    // Footer: path · lines · encoding. Search interaction lives in the
+    // application Bottom Bar so this view keeps its own metadata visible.
     let name = v
         .path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // A search overrides the footer with the query + hit position.
-    let foot = if let Some(s) = &v.search {
-        let case = if s.case_sensitive { " · Aa" } else { "" };
-        let position = if s.editing {
-            String::new()
-        } else if s.matches.is_empty() {
-            " · 0/0".to_string()
-        } else {
-            format!(" · {}/{}", s.current + 1, s.matches.len())
-        };
-        let navigation = if !s.editing && !s.matches.is_empty() {
-            " · n/N match"
-        } else {
-            ""
-        };
-        format!(
-            " /{}{}{}{} · Ctrl-U clear · Ctrl-I case · Esc cancel",
-            s.query, position, case, navigation
-        )
-    } else {
-        match &v.load {
-            FileLoad::Text(lines) => format!(" {name} · {} lines · UTF-8", lines.len()),
-            FileLoad::Binary(_) => format!(" {name} · binary"),
-            FileLoad::TooLarge(_) => format!(" {name} · too large"),
-            FileLoad::Loading => format!(" {name} · loading…"),
-            FileLoad::Error(_) => format!(" {name} · error"),
-        }
+    let foot = match &v.load {
+        FileLoad::Text(lines) => format!(" {name} · {} lines · UTF-8", lines.len()),
+        FileLoad::Binary(_) => format!(" {name} · binary"),
+        FileLoad::TooLarge(_) => format!(" {name} · too large"),
+        FileLoad::Loading => format!(" {name} · loading…"),
+        FileLoad::Error(_) => format!(" {name} · error"),
     };
     let wrap_hint = if v.wrap { " wrap " } else { "" };
     let foot = clip(&foot, area.width.saturating_sub(wrap_hint.len() as u16));
@@ -478,6 +458,10 @@ pub(super) fn draw_file_view(
             Rect::new(area.right().saturating_sub(6), footer_y, 6, 1),
         );
     }
+}
+
+fn native_footer_visible(mobile: bool) -> bool {
+    !mobile
 }
 
 fn file_selection_contains(sel: &crate::app::Selection, x: u16, y: u16, text_x: u16) -> bool {
@@ -781,11 +765,17 @@ pub(super) fn draw_named_delete_confirm(
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_list_stats, diff_note_count, file_selection_contains};
+    use super::{diff_list_stats, diff_note_count, file_selection_contains, native_footer_visible};
     use crate::app::Selection;
     use crate::ids::PaneId;
     use crate::ui::{theme::Theme, RenderTarget};
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn native_search_never_forces_an_inner_footer_on_mobile() {
+        assert!(native_footer_visible(false));
+        assert!(!native_footer_visible(true));
+    }
 
     #[test]
     fn diff_note_count_uses_singular_and_plural_labels() {

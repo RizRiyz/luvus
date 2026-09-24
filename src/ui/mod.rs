@@ -1370,6 +1370,26 @@ pub(crate) fn format_utc(seconds: u64) -> String {
         .unwrap_or_else(|| seconds.to_string())
 }
 
+pub(crate) fn local_search_footer<M>(search: &crate::search::local::LocalSearch<M>) -> String {
+    let case = if search.case_sensitive { " · Aa" } else { "" };
+    let position = if search.editing {
+        String::new()
+    } else if search.matches.is_empty() {
+        " · 0/0".to_string()
+    } else {
+        format!(" · {}/{}", search.current + 1, search.matches.len())
+    };
+    let navigation = if !search.editing && !search.matches.is_empty() {
+        " · n/N match"
+    } else {
+        ""
+    };
+    format!(
+        " SEARCH  /{}{}{}{} · Ctrl-U clear · Ctrl-I case · Esc cancel",
+        search.query, position, case, navigation
+    )
+}
+
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();

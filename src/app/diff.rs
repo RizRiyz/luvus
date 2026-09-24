@@ -1764,50 +1764,43 @@ impl App {
                     view.scroll = view.selected.saturating_sub(viewport.saturating_sub(1));
                 }
                 view.ensure_horizontal_visible(pane_width, marker_style, is_split);
-            } else if view.search.as_ref().is_some_and(|search| search.editing) {
+            } else if view.search.is_some() {
+                let editing = view.search.as_ref().is_some_and(|search| search.editing);
                 match key.code {
                     KeyCode::Char('i') if super::keys::is_ctrl_chord(key.modifiers) => {
-                        view.search_toggle_case()
+                        view.search_toggle_case();
+                        if !editing {
+                            view.scroll = view.selected.saturating_sub(viewport / 2);
+                        }
                     }
                     KeyCode::Char('u') if super::keys::is_ctrl_chord(key.modifiers) => {
                         view.search_clear()
                     }
-                    KeyCode::Char(c) if !super::keys::is_ctrl_chord(key.modifiers) => {
+                    KeyCode::Char(c) if editing && !super::keys::is_ctrl_chord(key.modifiers) => {
                         view.search_push(c)
                     }
-                    KeyCode::Backspace => view.search_backspace(),
-                    KeyCode::Enter => {
+                    KeyCode::Backspace if editing => view.search_backspace(),
+                    KeyCode::Enter if editing => {
                         view.search_commit();
                         view.scroll = view.selected.saturating_sub(viewport / 2);
                         view.ensure_horizontal_visible(pane_width, marker_style, is_split);
                     }
+                    KeyCode::Char('n') if !editing => {
+                        view.search_step(true);
+                        view.scroll = view.selected.saturating_sub(viewport / 2);
+                    }
+                    KeyCode::Char('N') if !editing => {
+                        view.search_step(false);
+                        view.scroll = view.selected.saturating_sub(viewport / 2);
+                    }
                     KeyCode::Esc => view.search = None,
-                    _ => return false,
+                    _ => {}
                 }
             } else {
                 let row_count = view.stack_rows.len();
                 let max = row_count.saturating_sub(1);
                 let old_selected = view.selected;
                 match key.code {
-                    KeyCode::Char('i')
-                        if super::keys::is_ctrl_chord(key.modifiers) && view.search.is_some() =>
-                    {
-                        view.search_toggle_case();
-                        view.scroll = view.selected.saturating_sub(viewport / 2);
-                    }
-                    KeyCode::Char('u')
-                        if super::keys::is_ctrl_chord(key.modifiers) && view.search.is_some() =>
-                    {
-                        view.search_clear();
-                    }
-                    KeyCode::Char('n') if view.search.is_some() => {
-                        view.search_step(true);
-                        view.scroll = view.selected.saturating_sub(viewport / 2);
-                    }
-                    KeyCode::Char('N') if view.search.is_some() => {
-                        view.search_step(false);
-                        view.scroll = view.selected.saturating_sub(viewport / 2);
-                    }
                     KeyCode::Char('j') | KeyCode::Down => {
                         view.selected = (view.selected + 1).min(max)
                     }
@@ -1905,11 +1898,7 @@ impl App {
                     KeyCode::Char('m') => deferred = Deferred::Viewed,
                     KeyCode::Char('f') => deferred = Deferred::Filter,
                     KeyCode::Char('q') => deferred = Deferred::Close,
-                    KeyCode::Esc => {
-                        if view.search.take().is_none() {
-                            deferred = Deferred::Close;
-                        }
-                    }
+                    KeyCode::Esc => deferred = Deferred::Close,
                     _ => return false,
                 }
                 if view.selected < view.scroll {
@@ -2201,6 +2190,42 @@ mod tests {
             app.prepare_diff_api(cached).is_some(),
             "a matching cached snapshot never waits on Git"
         );
+    }
+
+    #[test]
+    fn diff_search_consumes_non_search_shortcuts_before_and_after_commit() {
+        let _env = crate::persist::test_env("diff-search-input-owner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 30, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key, OpenTarget::Tab);
+        let id = app.layout().focus;
+        let tab_count = app.ws().tabs.len();
+        let preference = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.preference,
+            _ => panic!("expected DIFF view"),
+        };
+
+        assert!(app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)));
+        assert!(app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Diff(view)) if view.search.as_ref().is_some_and(|search| search.query.is_empty())
+        ));
+
+        assert!(app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert!(app.handle_diff_key(id, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        for shortcut in ['q', 's', 'm', 'a'] {
+            assert!(app.handle_diff_key(
+                id,
+                KeyEvent::new(KeyCode::Char(shortcut), KeyModifiers::NONE)
+            ));
+        }
+        assert_eq!(app.ws().tabs.len(), tab_count, "q must not close DIFF");
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Diff(view)) if view.search.is_some() && view.preference == preference
+        ));
     }
 
     #[test]

@@ -127,8 +127,11 @@ second `Esc` to close.
 Plain `/` inside a native FILE, Markdown preview, Mermaid preview, or DIFF view
 uses exact local content search instead. `Enter` commits, `n` / `N` wrap through
 matches, `Ctrl-I` toggles case sensitivity, `Ctrl-U` clears and returns to query
-editing, and `Esc` cancels search before closing the view. This does not replace
-the FILES tree's `f` path filter or the DIFF sidebar's `f` state filter.
+editing, and `Esc` cancels search before closing the view. FILE search state
+appears in the outer Bottom Bar while its metadata footer remains visible.
+Preview and DIFF keep search state in their internal footers so it stays inside
+the relevant content mode. This does not replace the FILES tree's `f` path
+filter or the DIFF sidebar's `f` state filter.
 
 For a file in the current session, `Alt+A`, `F2`, or right-click opens the
 same action menu as FILES: choose a native read-only tab or an available editor.

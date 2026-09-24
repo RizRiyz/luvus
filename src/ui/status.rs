@@ -93,34 +93,7 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
     let cat = app.catalog;
     let mut left = vec![Span::raw(" ")];
     if let Some(search) = app.pane_search.as_ref() {
-        left.push(mode_label(&cat.act_search.to_uppercase(), t));
-        left.push(Span::raw("  "));
-        let query = if search.editing {
-            format!("/{}▏", search.query)
-        } else if search.matches.is_empty() {
-            format!("/{} 0/0", search.query)
-        } else {
-            format!(
-                "/{} {}/{}",
-                search.query,
-                search.current + 1,
-                search.matches.len()
-            )
-        };
-        left.push(Span::styled(query, Style::new().fg(t.text).bold()));
-        if search.case_sensitive {
-            left.push(Span::styled("  Aa", Style::new().fg(t.overlay1)));
-        }
-        left.push(Span::raw("  "));
-        left.extend(hint("Ctrl-I", cat.act_case, t));
-        left.extend(hint("Ctrl-U", cat.act_clear, t));
-        if search.editing {
-            left.extend(hint("Enter", cat.act_select, t));
-        } else if !search.matches.is_empty() {
-            left.extend(hint("n/N", cat.act_move, t));
-        }
-        left.extend(hint("Esc", cat.act_cancel, t));
-        return (Line::from(left), false);
+        return (local_search_guidance(&search.local, cat, t), false);
     }
     if app.scroll_pane.is_some() {
         left.push(mode_label(cat.mode_scroll, t));
@@ -222,14 +195,23 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         .get(app.active_ws)
         .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
         .and_then(|tab| app.views.get(&tab.layout.focus));
-    if app.mode == Mode::Normal && matches!(focused_view, Some(crate::app::ViewKind::File(_))) {
-        left.push(mode_label("FILE", t));
-        left.push(Span::raw("  "));
-        left.extend(hint("j/k", cat.act_scroll, t));
-        left.extend(hint("/", cat.act_search, t));
-        left.extend(hint("y", cat.act_copy, t));
-        left.extend(hint("x", cat.act_close, t));
-        return (Line::from(left), false);
+    if app.mode == Mode::Normal {
+        let native_search = match focused_view {
+            Some(crate::app::ViewKind::File(view)) => view.search.as_ref(),
+            Some(crate::app::ViewKind::Preview(_) | crate::app::ViewKind::Diff(_)) | None => None,
+        };
+        if let Some(search) = native_search {
+            return (local_search_guidance(search, cat, t), false);
+        }
+        if matches!(focused_view, Some(crate::app::ViewKind::File(_))) {
+            left.push(mode_label("FILE", t));
+            left.push(Span::raw("  "));
+            left.extend(hint("j/k", cat.act_scroll, t));
+            left.extend(hint("/", cat.act_search, t));
+            left.extend(hint("y", cat.act_copy, t));
+            left.extend(hint("x", cat.act_close, t));
+            return (Line::from(left), false);
+        }
     }
     if app.mode == Mode::Resize {
         left.push(mode_label(cat.mode_resize, t));
@@ -281,6 +263,44 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
     left.push(Span::styled("  ·  ", Style::new().fg(t.overlay0)));
     left.extend(hint(&format!("{prefix} ?"), cat.all_shortcuts, t));
     (Line::from(left), true)
+}
+
+fn local_search_guidance<M>(
+    search: &crate::search::local::LocalSearch<M>,
+    cat: &'static crate::i18n::Catalog,
+    t: &Theme,
+) -> Line<'static> {
+    let mut row = vec![
+        Span::raw(" "),
+        mode_label(&cat.act_search.to_uppercase(), t),
+        Span::raw("  "),
+    ];
+    let query = if search.editing {
+        format!("/{}▏", search.query)
+    } else if search.matches.is_empty() {
+        format!("/{} 0/0", search.query)
+    } else {
+        format!(
+            "/{} {}/{}",
+            search.query,
+            search.current + 1,
+            search.matches.len()
+        )
+    };
+    row.push(Span::styled(query, Style::new().fg(t.text).bold()));
+    if search.case_sensitive {
+        row.push(Span::styled("  Aa", Style::new().fg(t.overlay1)));
+    }
+    row.push(Span::raw("  "));
+    row.extend(hint("Ctrl-I", cat.act_case, t));
+    row.extend(hint("Ctrl-U", cat.act_clear, t));
+    if search.editing {
+        row.extend(hint("Enter", cat.act_select, t));
+    } else if !search.matches.is_empty() {
+        row.extend(hint("n/N", cat.act_move, t));
+    }
+    row.extend(hint("Esc", cat.act_cancel, t));
+    Line::from(row)
 }
 
 fn mode_label(label: &str, t: &Theme) -> Span<'static> {
@@ -575,6 +595,121 @@ mod tests {
                 "{mode:?} must own the leading mode label"
             );
         }
+    }
+
+    #[test]
+    fn file_search_uses_outer_status_guidance() {
+        let _env = crate::persist::test_env("bar-status-native-search");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let theme = app.theme.clone();
+        let views = vec![crate::app::ViewKind::File(crate::files::FileView::new(
+            "sample.txt".into(),
+        ))];
+
+        for mut view in views {
+            let search = match &mut view {
+                crate::app::ViewKind::File(view) => &mut view.search,
+                crate::app::ViewKind::Preview(view) => &mut view.search,
+                crate::app::ViewKind::Diff(view) => &mut view.search,
+            };
+            *search = Some(crate::search::local::LocalSearch {
+                query: "Needle".into(),
+                editing: false,
+                case_sensitive: true,
+                matches: vec![crate::search::local::RowMatch {
+                    row: 0,
+                    byte_start: 0,
+                    byte_end: 6,
+                    column: 0,
+                    width: 6,
+                }],
+                current: 0,
+            });
+            app.views.insert(pane, view);
+
+            let line = fixed_guidance(&app, &theme, 120).0;
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            assert_eq!(line.spans[1].content.as_ref(), " SEARCH ");
+            assert!(
+                text.contains("/Needle 1/1  Aa"),
+                "native search state: {text}"
+            );
+            assert!(
+                text.contains("n/N move"),
+                "native search navigation: {text}"
+            );
+            assert!(text.contains("Ctrl-U clear"), "native search clear: {text}");
+            assert!(text.contains("Ctrl-I case"), "native search case: {text}");
+            assert!(text.contains("Esc cancel"), "native search cancel: {text}");
+        }
+
+        app.mode = Mode::Resize;
+        let line = fixed_guidance(&app, &theme, 120).0;
+        assert_eq!(
+            line.spans[1].content.as_ref(),
+            format!(" {} ", app.catalog.mode_resize),
+            "focused modes keep precedence over native search"
+        );
+    }
+
+    #[test]
+    fn preview_and_diff_search_leave_the_outer_status_bar_available() {
+        let _env = crate::persist::test_env("bar-status-diff-search-footer");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let theme = app.theme.clone();
+        let path = crate::diff::RepoPath::from_path(std::path::Path::new("sample.txt"))
+            .expect("valid relative path");
+        let key = crate::diff::DiffKey {
+            repo_id: "repo".into(),
+            worktree_id: "tree".into(),
+            layer: crate::diff::DiffLayer::Worktree,
+            old_path: Some(path.clone()),
+            new_path: Some(path),
+        };
+        let mut view = crate::diff::DiffView::new(
+            "/repo".into(),
+            key,
+            crate::diff::DiffLayoutPreference::Stack,
+            3,
+            false,
+            false,
+        );
+        view.search = Some(crate::search::local::LocalSearch::editing());
+        app.views
+            .insert(pane, crate::app::ViewKind::Diff(Box::new(view)));
+
+        let line = fixed_guidance(&app, &theme, 120).0;
+        assert_ne!(line.spans[1].content.as_ref(), " SEARCH ");
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| !span.content.contains("Ctrl-I")),
+            "DIFF search controls belong to the view footer"
+        );
+
+        let mut preview = crate::files::preview::DocumentView::new(
+            "README.md".into(),
+            crate::files::preview::PreviewKind::Markdown,
+        );
+        preview.search = Some(crate::search::local::LocalSearch::editing());
+        app.views
+            .insert(pane, crate::app::ViewKind::Preview(preview));
+        let line = fixed_guidance(&app, &theme, 120).0;
+        assert_ne!(line.spans[1].content.as_ref(), " SEARCH ");
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| !span.content.contains("Ctrl-I")),
+            "Preview search controls belong to the view footer"
+        );
     }
 
     #[test]
