@@ -64,7 +64,13 @@ impl App {
 
     pub(crate) fn open_commander(&mut self) {
         self.commander_resize = false;
-        if self.commander.take().is_some() {
+        if let Some(focused) = self.commander.as_ref().map(|commander| commander.focused) {
+            if focused {
+                self.close_commander();
+            } else {
+                self.commander.as_mut().unwrap().focused = true;
+                self.refresh_commander_preview();
+            }
             return;
         }
         if self.workspaces.is_empty() {
@@ -79,6 +85,11 @@ impl App {
         }
         self.commander = Some(commander);
         self.refresh_commander_preview();
+    }
+
+    pub(crate) fn close_commander(&mut self) {
+        self.commander_resize = false;
+        self.commander = None;
     }
 
     pub(crate) fn begin_commander_resize(&mut self, column: u16, row: u16) -> bool {
@@ -159,8 +170,8 @@ impl App {
         if self.prefix.matches(&key) {
             // Hand the next key to the normal prefix dispatcher. This keeps
             // every configured global action available while the strip stays
-            // visible, including tab/workspace navigation and hide/show.
-            self.commander.as_mut().unwrap().focused = false;
+            // visible. Retain focus until that key is known so Prefix+Enter
+            // can close a focused strip while other shortcuts defocus it.
             self.mode = Mode::Prefix;
             return true;
         }

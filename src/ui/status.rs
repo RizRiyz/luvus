@@ -204,6 +204,19 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         ));
         return (Line::from(left), false);
     }
+    if app.mode == Mode::PaneNavigate {
+        let label = match app.pane_navigation.map(|navigation| navigation.candidate) {
+            Some(PaneNavigationTarget::Pane(pane)) => format!("{} p{}", cat.pane, pane.0),
+            Some(PaneNavigationTarget::Commander) => cat.commander_title.to_string(),
+            None => cat.pane.to_string(),
+        };
+        left.push(mode_label(&label, t));
+        left.push(Span::raw("  "));
+        left.extend(hint("←↓↑→", cat.act_move, t));
+        left.extend(hint("Enter", cat.act_select, t));
+        left.extend(hint("Esc", cat.act_back, t));
+        return (Line::from(left), false);
+    }
 
     let key = |command: crate::app::Cmd| app.key_for(command);
     let prefix = app.prefix.label();

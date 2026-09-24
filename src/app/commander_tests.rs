@@ -237,6 +237,22 @@ fn slash_forms_and_docks_reuse_existing_controls() {
     app.orch_form = None;
     invoke(&mut app, "/mission");
     assert!(app.active_is_mission());
+    assert!(!app.commander.as_ref().unwrap().focused);
+    app.handle_event(AppEvent::Key(app.prefix.key_event()));
+    app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(app.active_is_mission());
+    assert!(app.commander.as_ref().unwrap().focused);
+    app.handle_event(AppEvent::Key(app.prefix.key_event()));
+    app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(app.active_is_mission());
+    assert!(app.commander.is_none());
+    app.open_commander();
     invoke(&mut app, "/diff");
     assert_eq!(app.files_mode, crate::diff::FilesMode::Diff);
     assert!(app.files_focused);
@@ -825,13 +841,19 @@ fn prefix_enter_toggles_the_composer_without_discarding_it_on_send() {
         KeyCode::Enter,
         KeyModifiers::NONE,
     )));
+    assert!(app.commander.as_ref().unwrap().focused);
+    assert_eq!(app.commander.as_ref().unwrap().draft, draft);
+    app.handle_event(AppEvent::Key(app.prefix.key_event()));
+    app.handle_event(AppEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
     assert!(app.commander.is_none());
     app.handle_event(AppEvent::Key(app.prefix.key_event()));
     app.handle_event(AppEvent::Key(KeyEvent::new(
         KeyCode::Enter,
         KeyModifiers::NONE,
     )));
-    assert!(app.commander.is_some());
     assert!(app.commander.as_ref().unwrap().focused);
     app.handle_event(AppEvent::Key(app.prefix.key_event()));
     app.handle_event(AppEvent::Key(KeyEvent::new(
@@ -1256,7 +1278,8 @@ fn clicking_the_strip_in_prefix_mode_resumes_editing() {
 
     app.handle_event(AppEvent::Key(app.prefix.key_event()));
     assert_eq!(app.mode, Mode::Prefix);
-    assert!(!app.commander.as_ref().unwrap().focused);
+    assert!(app.commander.as_ref().unwrap().focused);
+    assert!(!app.commander_accepts_input());
 
     app.handle_event(AppEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),

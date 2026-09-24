@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{App, DockKind, Mode, Side};
+use crate::app::{App, DockKind, Mode, PaneNavigationTarget, Side};
 use crate::ids::PaneId;
 use crate::ui::theme::{State, Theme};
 
@@ -944,7 +944,26 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         // Draw all pane borders in one overlay pass (manual cell-by-cell), then
         // the dot+path+close titles ON each top border row.
         if bordered {
-            borders::render_pane_borders(f, &rects, focus, app.hover_divider.as_ref(), &t);
+            let border_focus = app
+                .pane_navigation
+                .filter(|navigation| {
+                    app.mode == Mode::PaneNavigate
+                        && navigation.workspace == app.active_ws
+                        && navigation.tab == app.ws().active_tab
+                })
+                .map_or(Some(focus), |navigation| match navigation.candidate {
+                    PaneNavigationTarget::Pane(pane) if rects.iter().any(|(id, _)| *id == pane) => {
+                        Some(pane)
+                    }
+                    PaneNavigationTarget::Pane(_) => Some(focus),
+                    PaneNavigationTarget::Commander => None,
+                });
+            let hover_divider = if app.mode == Mode::PaneNavigate {
+                None
+            } else {
+                app.hover_divider.as_ref()
+            };
+            borders::render_pane_borders(f, &rects, border_focus, hover_divider, &t);
             if app.config.layout.show_titles {
                 title_rects = panes::draw_pane_titles(f, &rects, focus, app, &t);
             }
@@ -968,7 +987,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // The strip is pane chrome. Menus, modals, and toasts must paint over it.
     let commander_cursor = match (commander_area, app.commander.as_ref()) {
         (Some(commander_area), Some(commander)) => {
-            draw_commander(f, commander_area, app, commander, cat, &t).filter(|_| commander.focused)
+            draw_commander(f, commander_area, app, commander, cat, &t)
+                .filter(|_| commander.focused && app.commander_accepts_input())
         }
         _ => None,
     };
@@ -1242,7 +1262,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         draw_toast(f, area, text, &t);
     }
 
-    let cursor = if settings_hits.is_some()
+    let cursor = if app.mode == Mode::PaneNavigate
+        || settings_hits.is_some()
         || (resize_panes
             && app
                 .commander
@@ -1346,11 +1367,18 @@ fn draw_commander(
         ))
         .border_style(
             Style::new()
-                .fg(if commander.focused {
-                    t.border_focus
-                } else {
-                    t.border
-                })
+                .fg(
+                    if commander.focused
+                        || (app.mode == Mode::PaneNavigate
+                            && app.pane_navigation.is_some_and(|navigation| {
+                                matches!(navigation.candidate, PaneNavigationTarget::Commander)
+                            }))
+                    {
+                        t.border_focus
+                    } else {
+                        t.border
+                    },
+                )
                 .bg(t.mantle),
         )
         .style(Style::new().bg(t.mantle).fg(t.text));
@@ -1424,7 +1452,7 @@ fn draw_commander(
             Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
         );
     }
-    if commander.focused {
+    if commander.focused && app.commander_accepts_input() {
         draw_commander_slash_preview(f, rect, app.last_pane_area.y, commander, cat, t);
     }
     Some((
@@ -2460,6 +2488,89 @@ mod dock_projection_tests {
             "the owner-local dock remains visible outside the picker"
         );
         assert_ne!(projection.shell_overlay, Some(area));
+    }
+}
+
+#[cfg(test)]
+mod pane_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn preview_highlights_candidate_without_moving_focus_or_cursor() {
+        let _env = crate::persist::test_env("pane-navigation-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.sidebars.left.visible = false;
+        app.sidebars.right.visible = false;
+        let left = app.layout().focus;
+        app.run_cmd(crate::app::Cmd::SplitRight);
+        let right = app.layout().focus;
+        app.focus_location(0, 0, left);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut initial = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut initial, area), &mut app);
+
+        app.handle_event(crate::event::AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(crate::event::AppEvent::Key(
+            ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Right,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let mut preview = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut preview, area), &mut app);
+        let rect = |id| {
+            app.pane_rects
+                .iter()
+                .find(|(pane, _)| *pane == id)
+                .unwrap()
+                .1
+        };
+        let left_rect = rect(left);
+        let right_rect = rect(right);
+        assert_ne!(
+            preview[(left_rect.x, left_rect.y)].fg,
+            preview[(right_rect.x, right_rect.y)].fg,
+            "the candidate border is distinct from the still-active pane"
+        );
+        assert_eq!(app.layout().focus, left);
+        assert_eq!(app.last_cursor, None);
+    }
+
+    #[test]
+    fn commander_preview_highlights_strip_without_focusing_input() {
+        let _env = crate::persist::test_env("commander-navigation-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.sidebars.left.visible = false;
+        app.sidebars.right.visible = false;
+        app.open_commander();
+        app.commander.as_mut().unwrap().focused = false;
+        let area = Rect::new(0, 0, 100, 30);
+        let mut initial = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut initial, area), &mut app);
+        let strip = app.commander_area.unwrap();
+
+        app.handle_event(crate::event::AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(crate::event::AppEvent::Key(
+            ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Down,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let mut preview = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut preview, area), &mut app);
+        assert_eq!(
+            app.pane_navigation.unwrap().candidate,
+            PaneNavigationTarget::Commander
+        );
+        assert_ne!(
+            initial[(strip.x, strip.y + 1)].fg,
+            preview[(strip.x, strip.y + 1)].fg,
+            "the strip border highlights before Commander receives focus"
+        );
+        assert!(!app.commander.as_ref().unwrap().focused);
+        assert_eq!(app.last_cursor, None);
     }
 }
 

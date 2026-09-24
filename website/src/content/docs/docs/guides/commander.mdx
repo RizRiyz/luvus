@@ -9,7 +9,8 @@ does not create a layout leaf or change the selected pane, but it initially
 takes keyboard focus so you can type a message. The visible terminal area
 resizes while it is open. Drag the shared edge from either the pane above or
 Commander's top border to change its height; Commander keeps its default
-five-cell minimum. Press the same shortcut to hide it. The
+five-cell minimum. If focus is elsewhere, press the same shortcut to return to
+Commander, then press it again to hide the strip. The
 draft disappears when you hide it or another TUI client takes control.
 
 The strip is not modal: prefix shortcuts still change tabs, workspaces, panes,
@@ -17,6 +18,10 @@ and other Luvus controls while it stays visible. `Esc` returns keyboard focus
 to the selected pane without hiding the strip. Clicking a tab, workspace, or
 pane works normally and leaves the draft intact; click the strip to type into
 it again. Navigating elsewhere does not silently change its explicit targets.
+You can also press the prefix and an arrow to preview focus between panes and
+the Commander strip. `Down` from the bottom pane highlights Commander; `Up`
+returns to that pane. Press `Enter` to focus the highlighted target or `Esc`
+to keep the original focus.
 
 Mention a live agent by pane ID or Luvus alias to send a prompt. Mention a shell
 by pane ID or pane name to run a one-line command:

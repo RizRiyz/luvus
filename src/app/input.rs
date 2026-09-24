@@ -1336,6 +1336,11 @@ impl App {
         use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 
         let kind = m.kind;
+        if self.mode == Mode::PaneNavigate && !matches!(kind, MouseEventKind::Moved) {
+            self.pane_navigation = None;
+            self.mode = Mode::Normal;
+            return true;
+        }
         if self.commander.is_none() {
             self.commander_resize = false;
         }
@@ -3934,6 +3939,122 @@ impl App {
         }
     }
 
+    /// Preview visible panes and the Commander strip without changing focus.
+    /// Zoom and compact views keep their existing one-step pane behavior.
+    fn start_pane_navigation(&mut self, dir: Dir, commander_was_focused: bool) -> bool {
+        let commander_visible = self.commander.is_some() && self.commander_area.is_some();
+        if self.zoomed || self.compact || (self.layout().len() < 2 && !commander_visible) {
+            return false;
+        }
+        let origin = self.layout().focus;
+        let navigation = PaneNavigation {
+            workspace: self.active_ws,
+            tab: self.ws().active_tab,
+            origin,
+            origin_commander_focused: commander_was_focused,
+            candidate: if commander_was_focused {
+                PaneNavigationTarget::Commander
+            } else {
+                PaneNavigationTarget::Pane(origin)
+            },
+            pane_before_commander: origin,
+        };
+        self.pane_navigation = Some(self.step_pane_navigation(navigation, dir));
+        self.mode = Mode::PaneNavigate;
+        true
+    }
+
+    fn step_pane_navigation(&self, mut navigation: PaneNavigation, dir: Dir) -> PaneNavigation {
+        navigation.candidate = match navigation.candidate {
+            PaneNavigationTarget::Pane(pane) => {
+                if let Some(next) = self.layout().neighbor(self.last_pane_area, pane, dir) {
+                    PaneNavigationTarget::Pane(next)
+                } else if dir == Dir::Down
+                    && self.commander.is_some()
+                    && self.commander_area.is_some()
+                {
+                    navigation.pane_before_commander = pane;
+                    PaneNavigationTarget::Commander
+                } else {
+                    PaneNavigationTarget::Pane(pane)
+                }
+            }
+            PaneNavigationTarget::Commander if dir == Dir::Up => {
+                PaneNavigationTarget::Pane(navigation.pane_before_commander)
+            }
+            PaneNavigationTarget::Commander => PaneNavigationTarget::Commander,
+        };
+        navigation
+    }
+
+    fn pane_navigation_is_current(&self, navigation: PaneNavigation) -> bool {
+        self.active_ws == navigation.workspace
+            && self
+                .workspaces
+                .get(navigation.workspace)
+                .filter(|workspace| workspace.active_tab == navigation.tab)
+                .and_then(|workspace| workspace.tabs.get(navigation.tab))
+                .is_some_and(|tab| {
+                    tab.layout.focus == navigation.origin
+                        && tab.layout.contains(navigation.pane_before_commander)
+                        && match navigation.candidate {
+                            PaneNavigationTarget::Pane(pane) => tab.layout.contains(pane),
+                            PaneNavigationTarget::Commander => {
+                                self.commander.is_some() && self.commander_area.is_some()
+                            }
+                        }
+                })
+    }
+
+    fn handle_pane_navigation_key(&mut self, key: KeyEvent) -> bool {
+        let Some(navigation) = self
+            .pane_navigation
+            .filter(|state| self.pane_navigation_is_current(*state))
+        else {
+            self.pane_navigation = None;
+            self.mode = Mode::Normal;
+            return true;
+        };
+        let direction = match key.code {
+            KeyCode::Left => Some(Dir::Left),
+            KeyCode::Down => Some(Dir::Down),
+            KeyCode::Up => Some(Dir::Up),
+            KeyCode::Right => Some(Dir::Right),
+            KeyCode::Enter => {
+                self.pane_navigation = None;
+                self.mode = Mode::Normal;
+                match navigation.candidate {
+                    PaneNavigationTarget::Pane(pane) => {
+                        if pane != navigation.origin {
+                            self.focus_pane_global(pane);
+                        }
+                    }
+                    PaneNavigationTarget::Commander => {
+                        if let Some(commander) = self.commander.as_mut() {
+                            commander.focused = true;
+                        }
+                    }
+                }
+                return true;
+            }
+            KeyCode::Esc => {
+                self.pane_navigation = None;
+                self.mode = Mode::Normal;
+                if navigation.origin_commander_focused {
+                    if let Some(commander) = self.commander.as_mut() {
+                        commander.focused = true;
+                    }
+                }
+                return true;
+            }
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            self.pane_navigation = Some(self.step_pane_navigation(navigation, direction));
+        }
+        true // No navigation key reaches a pane before Enter commits focus.
+    }
+
     /// Returns whether this key changed the **luvus UI** (so the server should
     /// render). Plain input forwarded to a pane returns `false`: the pane's echo
     /// arrives as a separate `PtyData` event and renders then, so we don't burn a
@@ -3941,6 +4062,9 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return false; // ignored — nothing changed
+        }
+        if self.mode == Mode::PaneNavigate {
+            return self.handle_pane_navigation_key(key);
         }
         if self.commander_accepts_input()
             && self
@@ -4247,6 +4371,13 @@ impl App {
         }
         match self.mode {
             Mode::Prefix => {
+                let commander_was_focused = self
+                    .commander
+                    .as_ref()
+                    .is_some_and(|commander| commander.focused);
+                if let Some(commander) = self.commander.as_mut() {
+                    commander.focused = false;
+                }
                 self.mode = Mode::Normal;
                 // Pressing the prefix twice sends that exact key to the pane.
                 // Use the normal PTY encoder so F-keys and modifiers retain the
@@ -4304,7 +4435,22 @@ impl App {
                 // two-step and held-chord input resolve to the configured key.
                 if let Some(cmd) = keys::key_string(&key).and_then(|s| self.keymap.get(&s).copied())
                 {
-                    self.run_cmd(cmd);
+                    if cmd == Cmd::OpenCommander && commander_was_focused {
+                        self.close_commander();
+                    } else {
+                        let direction = match (key.code, cmd) {
+                            (KeyCode::Left, Cmd::FocusLeft) => Some(Dir::Left),
+                            (KeyCode::Down, Cmd::FocusDown) => Some(Dir::Down),
+                            (KeyCode::Up, Cmd::FocusUp) => Some(Dir::Up),
+                            (KeyCode::Right, Cmd::FocusRight) => Some(Dir::Right),
+                            _ => None,
+                        };
+                        if !direction.is_some_and(|dir| {
+                            self.start_pane_navigation(dir, commander_was_focused)
+                        }) {
+                            self.run_cmd(cmd);
+                        }
+                    }
                 }
                 true // a prefix command (and leaving prefix mode) changes the UI
             }
@@ -4369,6 +4515,7 @@ impl App {
                 false // plain input → the pane; its echo (PtyData) renders it
             }
             // Intercepted above (before this match); handled here too for safety.
+            Mode::PaneNavigate => self.handle_pane_navigation_key(key),
             Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
