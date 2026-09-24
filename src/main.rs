@@ -266,6 +266,15 @@ pub(crate) fn emit_clipboard_to(text: &str, completion: std::sync::Arc<clipboard
     emit_clipboard_escape(text);
 }
 
+pub(crate) fn emit_clipboard_tracked_to(
+    text: &str,
+    completion: std::sync::Arc<clipboard::Completion>,
+    on_success: impl FnOnce() + Send + 'static,
+) {
+    clipboard::copy_native_with_confirmation(text, completion, on_success);
+    emit_clipboard_escape(text);
+}
+
 fn emit_clipboard_escape(text: &str) {
     use std::io::Write;
     let b64 = base64_encode(text.as_bytes());
@@ -1632,7 +1641,10 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             crate::platform::open_url(&url);
         }
         if let Some(text) = app.pending_clipboard.take() {
-            emit_clipboard(&text);
+            let notify = tx.clone();
+            emit_clipboard_tracked_to(&text, clipboard::local_completion(), move || {
+                let _ = notify.send(AppEvent::LocalClipboardSucceeded);
+            });
         }
         if let Some(notification) = clipboard::take_notification() {
             emit_notification(notification);

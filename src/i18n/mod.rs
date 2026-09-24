@@ -57,6 +57,7 @@ pub struct Catalog {
     /// rather than widening the list.
     pub blocked_elsewhere: &'static str,
     pub menu: &'static str,
+    /// Shown only after a native clipboard helper confirms success.
     pub copied: &'static str,
     pub clipboard_failed: &'static str,
     /// Toast shown when a dock can't be placed because the target sidebar already
@@ -509,7 +510,7 @@ pub static EN: Catalog = Catalog {
     active: "Active",
     blocked_elsewhere: "{n} blocked in other workspaces",
     menu: "Menu",
-    copied: "Copied to clipboard",
+    copied: "Copied to Clipboard",
     clipboard_failed: "Native clipboard failed; terminal copy requested",
     sidebar_full: "Sidebar full; turn a dock off first",
     tab_changed_rename_cancelled: "tab changed; rename cancelled",

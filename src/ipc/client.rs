@@ -454,6 +454,19 @@ where
                     crate::emit_notification(message);
                 }
             }
+            Ok(ServerMessage::ClipboardTracked { text, receipt }) => {
+                let route = input.route.clone();
+                let generation = route.generation();
+                crate::emit_clipboard_tracked_to(&text, completion.clone(), move || {
+                    route.send_if_generation(
+                        generation,
+                        ClientMessage::ClipboardSucceeded { receipt },
+                    );
+                });
+                if let Some(message) = completion.take() {
+                    crate::emit_notification(message);
+                }
+            }
             Ok(ServerMessage::OpenUrl(url)) => crate::platform::open_url(&url),
             Ok(ServerMessage::SwitchSession { name }) => {
                 // The server retains the source for transactional clients.
@@ -507,13 +520,66 @@ struct InputRoute {
 struct RouteWriter {
     generation: u64,
     active: Option<Box<dyn Write + Send>>,
+    pending_clipboard_ack: Option<ClientMessage>,
 }
 
 impl InputRoute {
+    fn generation(&self) -> u64 {
+        self.writer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+    }
+
+    fn send_if_generation(&self, expected: u64, message: ClientMessage) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let writer = {
+            let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            if route.generation != expected {
+                return;
+            }
+            if let Some(writer) = route.active.take() {
+                writer
+            } else {
+                // Input may temporarily own the writer. It flushes the latest
+                // receipt before returning the route to the shared slot.
+                route.pending_clipboard_ack = Some(message);
+                return;
+            }
+        };
+        let mut writer = writer;
+        if protocol::write_message(&mut writer, &message).is_ok() {
+            self.finish_write(expected, writer);
+        }
+    }
+
+    fn finish_write(&self, generation: u64, mut writer: Box<dyn Write + Send>) {
+        loop {
+            let pending = {
+                let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+                if route.generation != generation || self.closed.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(pending) = route.pending_clipboard_ack.take() {
+                    pending
+                } else {
+                    route.active = Some(writer);
+                    return;
+                }
+            };
+            if protocol::write_message(&mut writer, &pending).is_err() {
+                return;
+            }
+        }
+    }
+
     fn replace(&self, writer: Option<Box<dyn Write + Send>>) {
         let retired = {
             let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
             route.generation = route.generation.wrapping_add(1);
+            route.pending_clipboard_ack = None;
             std::mem::replace(&mut route.active, writer)
         };
         drop(retired);
@@ -538,10 +604,8 @@ impl InputRoute {
             (route.generation, route.active.take())
         };
         if let Some(mut writer) = writer {
-            let sent = protocol::write_message(&mut writer, &message).is_ok();
-            let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-            if sent && route.generation == generation && !self.closed.load(Ordering::Acquire) {
-                route.active = Some(writer);
+            if protocol::write_message(&mut writer, &message).is_ok() {
+                self.finish_write(generation, writer);
             }
         }
         true
@@ -959,6 +1023,42 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn clipboard_receipt_waits_for_busy_input_writer() {
+        use super::{ClientMessage, InputRoute};
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let route = InputRoute::default();
+        let capture = Capture::default();
+        route.replace(Some(Box::new(capture.clone())));
+        let generation = route.generation();
+        let writer = route.writer.lock().unwrap().active.take().unwrap();
+        route.send_if_generation(
+            generation,
+            ClientMessage::ClipboardSucceeded { receipt: 42 },
+        );
+        assert!(capture.0.lock().unwrap().is_empty());
+        route.finish_write(generation, writer);
+        let bytes = capture.0.lock().unwrap().clone();
+        assert!(matches!(
+            crate::ipc::protocol::read_message(&mut std::io::Cursor::new(bytes)).unwrap(),
+            ClientMessage::ClipboardSucceeded { receipt: 42 }
+        ));
+    }
+
     #[test]
     fn clipboard_completion_wakes_idle_and_partial_frame_reads() {
         use std::io::{Read, Write};

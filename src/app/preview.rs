@@ -216,8 +216,6 @@ impl App {
                 let text = view.document().map(|document| document.source.to_string());
                 if let Some(text) = text {
                     self.pending_clipboard = Some(text);
-                    let message = self.catalog.copied;
-                    self.show_toast(message);
                 } else {
                     self.show_toast("nothing to copy");
                 }

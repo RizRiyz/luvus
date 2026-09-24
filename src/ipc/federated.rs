@@ -1862,6 +1862,31 @@ fn handle_surface_message(
         ServerMessage::Notify(message) if endpoint == *active => crate::emit_notification(&message),
         ServerMessage::Sound(signal) if endpoint == *active => crate::emit_sound(signal),
         ServerMessage::Clipboard(text) if endpoint == *active => crate::emit_clipboard(&text),
+        ServerMessage::ClipboardTracked { text, receipt } if endpoint == *active => {
+            let completion = crate::clipboard::local_completion();
+            match &endpoint {
+                Endpoint::Local => {
+                    let writer = local_writer.clone();
+                    crate::emit_clipboard_tracked_to(&text, completion, move || {
+                        let _ = send_local(&writer, &ClientMessage::ClipboardSucceeded { receipt });
+                    });
+                }
+                Endpoint::Remote {
+                    machine_id,
+                    session,
+                } => {
+                    let control = machines
+                        .get(machine_id)
+                        .and_then(|machine| machine.endpoint(session))
+                        .and_then(|runtime| runtime.control.clone());
+                    crate::emit_clipboard_tracked_to(&text, completion, move || {
+                        if let Some(control) = control {
+                            let _ = control.send(&ClientMessage::ClipboardSucceeded { receipt });
+                        }
+                    });
+                }
+            }
+        }
         ServerMessage::OpenUrl(url) if endpoint == *active => crate::platform::open_url(&url),
         ServerMessage::SwitchSession { name } if endpoint == *active => {
             if let Some(exit) = owner_local_session_switch(&endpoint, name) {

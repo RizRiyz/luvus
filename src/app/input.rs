@@ -484,6 +484,10 @@ impl App {
         // off-loop. Apply its completed registry before the empty-workspace guard
         // so the single writer always observes the result.
         let ev = match ev {
+            AppEvent::LocalClipboardSucceeded => {
+                self.show_toast(self.catalog.copied);
+                return true;
+            }
             AppEvent::IoCompleted(completion) => {
                 return completion.apply(self);
             }
@@ -1193,6 +1197,7 @@ impl App {
             | AppEvent::ClientOpenWorkspacePicker { .. }
             | AppEvent::ClientCellPixels { .. }
             | AppEvent::ClientInput { .. }
+            | AppEvent::ClientClipboardSucceeded { .. }
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.
             AppEvent::IoCompleted(_)
@@ -1206,6 +1211,7 @@ impl App {
             | AppEvent::SearchResults { .. }
             | AppEvent::SearchFederatedResults { .. }
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
+            AppEvent::LocalClipboardSucceeded => unreachable!(),
             AppEvent::NamedSessionsLoaded { .. }
             | AppEvent::NamedSessionPrepared { .. }
             | AppEvent::NamedSessionStopped { .. }
@@ -1802,8 +1808,6 @@ impl App {
                         .map(|(_, command)| command.clone())
                     {
                         self.pending_clipboard = Some(command);
-                        let message = self.catalog.copied;
-                        self.show_toast(message);
                         return;
                     }
                     // A click on a commit/PR reference (or the website row at the
@@ -2507,15 +2511,12 @@ impl App {
                 if let Some(selection) = self.selection.as_mut() {
                     selection.dragging = false;
                 }
-                // A real drag copies its text + flashes a toast; a plain click
-                // clears the (1-cell) selection so nothing stays highlighted.
-                // After a successful copy the highlight lingers briefly so you can
-                // see what was copied; the toast times out on the same cadence.
+                // A real drag queues its text for copying; a plain click clears
+                // the (1-cell) selection. The highlight lingers briefly, while
+                // the success toast waits for native clipboard confirmation.
                 match self.selection_text() {
                     Some(text) => {
                         self.pending_clipboard = Some(text);
-                        let msg = self.catalog.copied;
-                        self.show_toast(msg);
                         self.schedule_copy_highlight_clear();
                     }
                     None => self.clear_selection(),
@@ -3264,10 +3265,8 @@ impl App {
             .and_then(finish_selected_text);
         if let Some(text) = text {
             self.pending_clipboard = Some(text);
-            let msg = self.catalog.copied;
-            self.show_toast(msg);
         }
-        // A successful copy returns to a live terminal, so the next key is
+        // A selection copy returns to a live terminal, so the next key is
         // immediately visible where the child expects it.
         if let Some(pane) = self.panes.get(&copy.pane) {
             pane.scroll_to_bottom();
@@ -3630,8 +3629,6 @@ impl App {
             });
         }
         self.pending_clipboard = Some(text);
-        let msg = self.catalog.copied;
-        self.show_toast(msg);
         self.schedule_copy_highlight_clear();
         true
     }

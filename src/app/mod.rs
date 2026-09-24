@@ -15867,21 +15867,32 @@ fi
         let _env = crate::persist::test_env("arrow-keys");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 80, 24);
 
         // Split right (Ctrl+Space v) → focus moves to the new right pane.
         app.handle_event(key(' ', KeyModifiers::CONTROL));
         app.handle_event(key('v', KeyModifiers::NONE));
         let right = app.layout().focus;
-        // Prefix + ← arrow focuses the left pane (the headline new binding).
+        // Prefix + ← previews the left pane; Enter commits focus.
         app.handle_event(key(' ', KeyModifiers::CONTROL));
         app.handle_event(AppEvent::Key(KeyEvent::new(
             KeyCode::Left,
             KeyModifiers::NONE,
         )));
+        assert_eq!(app.mode, Mode::PaneNavigate);
+        assert_eq!(app.layout().focus, right, "preview preserves real focus");
+        let PaneNavigationTarget::Pane(left) = app.pane_navigation.unwrap().candidate else {
+            panic!("left arrow previews a pane");
+        };
+        assert_ne!(left, right);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
         assert_ne!(
             app.layout().focus,
             right,
-            "← moved focus off the right pane"
+            "Enter focused the previewed left pane"
         );
 
         // Rebind "New tab" from `c` to `t` through Settings → Keys.

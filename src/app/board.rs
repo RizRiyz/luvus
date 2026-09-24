@@ -2283,12 +2283,10 @@ impl App {
             Item::Release => self.orch_action_release(),
             Item::CopyId => {
                 self.pending_clipboard = Some(id);
-                self.show_toast(self.catalog.copied);
             }
             Item::CopyWorktree => {
                 if let Some(path) = self.orch.task(&id).and_then(|task| task.worktree.clone()) {
                     self.pending_clipboard = Some(path);
-                    self.show_toast(self.catalog.copied);
                 }
             }
             Item::Delete => self.orch_action_delete(),
