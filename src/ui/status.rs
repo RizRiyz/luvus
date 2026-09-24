@@ -294,10 +294,11 @@ fn local_search_guidance<M>(
         format!("/{} 0/0", search.query)
     } else {
         format!(
-            "/{} {}/{}",
+            "/{} {}/{}{}",
             search.query,
             search.current + 1,
-            search.matches.len()
+            search.matches.len(),
+            if search.truncated { "+" } else { "" }
         )
     };
     row.push(Span::styled(query, Style::new().fg(t.text).bold()));
@@ -639,6 +640,7 @@ mod tests {
                     width: 6,
                 }],
                 current: 0,
+                truncated: true,
             });
             app.views.insert(pane, view);
 
@@ -650,7 +652,7 @@ mod tests {
                 .collect();
             assert_eq!(line.spans[1].content.as_ref(), " SEARCH ");
             assert!(
-                text.contains("/Needle 1/1  Aa"),
+                text.contains("/Needle 1/1+  Aa"),
                 "native search state: {text}"
             );
             assert!(
@@ -762,6 +764,7 @@ mod tests {
                 case_sensitive: false,
                 matches: Vec::new(),
                 current: 0,
+                truncated: false,
             },
             saved_scroll: 0,
         });

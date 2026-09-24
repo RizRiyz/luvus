@@ -845,12 +845,28 @@ impl DiffView {
             .as_ref()
             .is_some_and(|search| search.case_sensitive);
         let mut matches = Vec::new();
-        for (row, line) in self.stack_rows.iter().enumerate() {
-            matches.extend(
-                crate::search::local::match_spans(&line.text, &query, case_sensitive)
-                    .into_iter()
-                    .map(|search_match| crate::search::local::RowMatch::at(row, search_match)),
-            );
+        let mut truncated = false;
+        if let Some(matcher) = crate::search::local::LiteralMatcher::new(&query, case_sensitive) {
+            for (row, line) in self.stack_rows.iter().enumerate() {
+                let remaining = crate::search::local::LOCAL_MATCH_CAP.saturating_sub(matches.len());
+                if remaining == 0 {
+                    if matcher.has_match(&line.text) {
+                        truncated = true;
+                        break;
+                    }
+                    continue;
+                }
+                let (row_matches, row_truncated) = matcher.spans(&line.text, remaining);
+                matches.extend(
+                    row_matches
+                        .into_iter()
+                        .map(|search_match| crate::search::local::RowMatch::at(row, search_match)),
+                );
+                if row_truncated {
+                    truncated = true;
+                    break;
+                }
+            }
         }
         let current =
             crate::search::local::first_at_or_after(&matches, (self.selected, 0), |search_match| {
@@ -859,7 +875,7 @@ impl DiffView {
         if let Some(search) = self.search.as_mut() {
             search.query = query;
             search.editing = false;
-            search.replace_matches(matches, current);
+            search.replace_matches(matches, current, truncated);
         }
     }
 

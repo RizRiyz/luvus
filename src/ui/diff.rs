@@ -1205,12 +1205,13 @@ mod tests {
                 width: 6,
             }],
             current: 0,
+            truncated: true,
         });
 
         assert!(diff_footer_visible(true, &view));
         assert_eq!(
             crate::ui::local_search_footer(view.search.as_ref().expect("search")),
-            " SEARCH  /Needle · 1/1 · Aa · n/N match · Ctrl-U clear · Ctrl-I case · Esc cancel"
+            " SEARCH  /Needle · 1/1+ · Aa · n/N match · Ctrl-U clear · Ctrl-I case · Esc cancel"
         );
     }
 

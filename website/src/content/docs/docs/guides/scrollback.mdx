@@ -62,7 +62,11 @@ accent color, and other visible hits use amber. Press
 retained rows. **Esc** while editing or after committing
 cancels the search and restores the viewport from before `/`, leaving keyboard
 scroll mode active; press **Esc** again to return to live output. A no-match
-query remains active as `0/0` until canceled.
+query remains active as `0/0` until canceled. Search retains at most 10,000
+matches; a `+` after the count means additional retained-output matches exist
+beyond the navigable set. Terminal output or a pane reflow invalidates committed
+coordinates and returns the same query to editing rather than navigating stale
+rows.
 
 This pane-local search is separate from the prefix **global fuzzy finder**. The
 configured prefix followed by `/` still searches sessions, workspaces, tabs,

@@ -18,7 +18,9 @@ pub use document::{Block, PreviewDocument};
 pub use layout::{LayoutKey, PreviewLayout, TextRole};
 
 use crate::files::SIZE_CAP;
-use crate::search::local::{first_at_or_after, match_spans, LocalSearch, RowMatch};
+use crate::search::local::{
+    first_at_or_after, LiteralMatcher, LocalSearch, RowMatch, LOCAL_MATCH_CAP,
+};
 
 const SNIFF: usize = 8192;
 const MAX_PENDING_LAYOUTS: usize = 2;
@@ -248,19 +250,34 @@ impl DocumentView {
             .search
             .as_ref()
             .is_some_and(|search| search.case_sensitive);
-        let matches = self
+        let (matches, truncated) = self
             .layout(key)
-            .map(|layout| {
-                layout
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(row, rendered)| {
-                        match_spans(&rendered.plain_text(), &query, case_sensitive)
+            .and_then(|layout| {
+                let matcher = LiteralMatcher::new(&query, case_sensitive)?;
+                let mut matches = Vec::new();
+                let mut truncated = false;
+                for (row, rendered) in layout.rows.iter().enumerate() {
+                    let text = rendered.plain_text();
+                    let remaining = LOCAL_MATCH_CAP.saturating_sub(matches.len());
+                    if remaining == 0 {
+                        if matcher.has_match(&text) {
+                            truncated = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    let (row_matches, row_truncated) = matcher.spans(&text, remaining);
+                    matches.extend(
+                        row_matches
                             .into_iter()
-                            .map(move |search_match| RowMatch::at(row, search_match))
-                    })
-                    .collect::<Vec<_>>()
+                            .map(|search_match| RowMatch::at(row, search_match)),
+                    );
+                    if row_truncated {
+                        truncated = true;
+                        break;
+                    }
+                }
+                Some((matches, truncated))
             })
             .unwrap_or_default();
         let current = first_at_or_after(&matches, (self.scroll, 0), |search_match| {
@@ -269,7 +286,7 @@ impl DocumentView {
         if let Some(search) = self.search.as_mut() {
             search.query = query;
             search.editing = false;
-            search.replace_matches(matches, current);
+            search.replace_matches(matches, current, truncated);
             self.search_layout = Some(key);
         }
     }
