@@ -929,10 +929,22 @@ impl Pane {
     /// row index, history length, total row count, and text from one consistent
     /// terminal snapshot.
     pub fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, usize, usize, &str)) {
+        self.try_for_each_retained_row(&mut |index, history, row_count, line| {
+            f(index, history, row_count, line);
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+
+    /// Visit retained rows under one engine lock and stop before formatting the
+    /// next row when the callback breaks.
+    pub fn try_for_each_retained_row(
+        &self,
+        f: &mut dyn FnMut(usize, usize, usize, &str) -> std::ops::ControlFlow<()>,
+    ) {
         if let Ok(engine) = self.engine.lock() {
             let history = engine.history_len();
             let row_count = engine.retained_row_count();
-            engine.for_each_retained_row(&mut |index, line| f(index, history, row_count, line));
+            engine.try_for_each_retained_row(&mut |index, line| f(index, history, row_count, line));
         }
     }
 

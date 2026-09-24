@@ -3,7 +3,8 @@
 //! Owners retain their own viewport, cursor, and cancellation semantics. This
 //! module only owns bounded query editing, match selection, and text spans.
 
-use regex::Regex;
+use std::collections::VecDeque;
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -147,7 +148,9 @@ impl RowMatch {
 }
 
 pub struct LiteralMatcher {
-    regex: Regex,
+    pattern: Vec<char>,
+    failure: Vec<usize>,
+    case_sensitive: bool,
 }
 
 impl LiteralMatcher {
@@ -155,15 +158,30 @@ impl LiteralMatcher {
         if query.is_empty() || query.len() > LOCAL_QUERY_BYTES {
             return None;
         }
-        regex::RegexBuilder::new(&regex::escape(query))
-            .case_insensitive(!case_sensitive)
-            .build()
-            .ok()
-            .map(|regex| Self { regex })
+        let pattern = query
+            .chars()
+            .map(|ch| fold_char(ch, case_sensitive))
+            .collect::<Vec<_>>();
+        let mut failure = vec![0; pattern.len()];
+        let mut prefix = 0usize;
+        for index in 1..pattern.len() {
+            while prefix > 0 && pattern[index] != pattern[prefix] {
+                prefix = failure[prefix - 1];
+            }
+            if pattern[index] == pattern[prefix] {
+                prefix += 1;
+                failure[index] = prefix;
+            }
+        }
+        Some(Self {
+            pattern,
+            failure,
+            case_sensitive,
+        })
     }
 
     pub fn has_match(&self, line: &str) -> bool {
-        self.regex.is_match(line)
+        self.raw_spans(line, 0).1
     }
 
     /// Find at most `limit` non-overlapping literal matches. Byte ranges stay
@@ -171,14 +189,7 @@ impl LiteralMatcher {
     /// and end to grapheme boundaries so terminal overlays never split a ZWJ
     /// or combining sequence.
     pub fn spans(&self, line: &str, limit: usize) -> (Vec<TextMatch>, bool) {
-        let raw = self
-            .regex
-            .find_iter(line)
-            .take(limit.saturating_add(1))
-            .map(|found| (found.start(), found.end()))
-            .collect::<Vec<_>>();
-        let truncated = raw.len() > limit;
-        let raw = &raw[..raw.len().min(limit)];
+        let (raw, truncated) = self.raw_spans(line, limit);
         if raw.is_empty() {
             return (Vec::new(), truncated);
         }
@@ -224,6 +235,60 @@ impl LiteralMatcher {
             .collect();
         (matches, truncated)
     }
+
+    /// Stream the haystack through KMP so an unusually long line does not need
+    /// a second line-sized allocation. The ring holds only enough source byte
+    /// ranges to recover the current match.
+    fn raw_spans(&self, line: &str, limit: usize) -> (Vec<(usize, usize)>, bool) {
+        let mut spans = Vec::with_capacity(limit.min(64));
+        let mut source = VecDeque::with_capacity(self.pattern.len());
+        let mut matched = 0usize;
+        for (byte_start, ch) in line.char_indices() {
+            let byte_end = byte_start + ch.len_utf8();
+            if source.len() == self.pattern.len() {
+                source.pop_front();
+            }
+            source.push_back((byte_start, byte_end));
+            let folded = fold_char(ch, self.case_sensitive);
+            while matched > 0 && folded != self.pattern[matched] {
+                matched = self.failure[matched - 1];
+            }
+            if folded == self.pattern[matched] {
+                matched += 1;
+            }
+            if matched == self.pattern.len() {
+                if spans.len() == limit {
+                    return (spans, true);
+                }
+                let start = source[source.len() - self.pattern.len()].0;
+                spans.push((start, byte_end));
+                matched = 0;
+                source.clear();
+            }
+        }
+        (spans, false)
+    }
+}
+
+/// Approximate Unicode simple case folding without length-changing mappings.
+/// Lowercase-uppercase-lowercase closes single-scalar equivalence classes such
+/// as Greek sigma and long s while deliberately leaving `ß` distinct from `ss`.
+fn fold_char(ch: char, case_sensitive: bool) -> char {
+    if case_sensitive {
+        return ch;
+    }
+    let Some(lower) = single_char(ch.to_lowercase()) else {
+        return ch;
+    };
+    let Some(upper) = single_char(lower.to_uppercase()) else {
+        return lower;
+    };
+    single_char(upper.to_lowercase()).unwrap_or(lower)
+}
+
+fn single_char(mut chars: impl Iterator<Item = char>) -> Option<char> {
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
 }
 
 #[cfg(test)]
@@ -275,6 +340,8 @@ mod tests {
     #[test]
     fn unicode_case_and_grapheme_cell_spans_are_preserved() {
         assert_eq!(match_spans("ΟΣ", "ος", false).len(), 1);
+        assert_eq!(match_spans("σςΣ", "σσσ", false).len(), 1);
+        assert!(match_spans("straße", "strasse", false).is_empty());
         let found = match_spans("👩‍💻foo", "foo", false)[0];
         assert_eq!(found.column, 2);
         let emoji = match_spans("👩‍💻foo", "👩", false)[0];

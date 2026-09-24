@@ -1194,11 +1194,14 @@ impl VtEngine for AlacrittyEngine {
             .then_some(output)
     }
 
-    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str)) {
+    fn try_for_each_retained_row(
+        &self,
+        f: &mut dyn FnMut(usize, &str) -> std::ops::ControlFlow<()>,
+    ) {
         let mut output = String::with_capacity(self.term.grid().columns());
         for index in 0..self.retained_row_count() {
-            if self.write_retained_row(index, &mut output) {
-                f(index, &output);
+            if self.write_retained_row(index, &mut output) && f(index, &output).is_break() {
+                break;
             }
         }
     }
@@ -2290,6 +2293,25 @@ mod tests {
             visible.contains("OLDEST"),
             "history text is selectable/copyable: {visible:?}"
         );
+    }
+
+    #[test]
+    fn retained_row_visitor_stops_when_requested() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
+        feed_lines(&mut engine, 40);
+        let mut visited = 0usize;
+
+        engine.try_for_each_retained_row(&mut |_index, _line| {
+            visited += 1;
+            if visited == 3 {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+
+        assert_eq!(visited, 3);
     }
 
     #[test]

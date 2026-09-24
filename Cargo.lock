@@ -1017,7 +1017,6 @@ dependencies = [
  "portable-pty",
  "pulldown-cmark",
  "ratatui",
- "regex",
  "semver",
  "serde",
  "serde_json",
