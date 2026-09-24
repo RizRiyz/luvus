@@ -1586,6 +1586,10 @@ impl App {
             crate::app::OrchView::Tasks => crate::app::OrchFormKind::Task,
             crate::app::OrchView::Automations => crate::app::OrchFormKind::Automation,
         };
+        self.open_orch_form_kind(kind);
+    }
+
+    pub(crate) fn open_orch_form_kind(&mut self, kind: crate::app::OrchFormKind) {
         let mut form = crate::app::OrchForm::for_kind(kind);
         form.mode = self.orch_flow_mode;
         form.active_agents = self.active_agent_automation_choices();

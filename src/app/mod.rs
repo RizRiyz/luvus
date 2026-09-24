@@ -7886,7 +7886,7 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    fn focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+    pub(crate) fn focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
         let current = self.layout().focus;
         let location_changed = self.active_ws != workspace
             || self.workspaces[workspace].active_tab != tab

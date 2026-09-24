@@ -1355,6 +1355,40 @@ impl App {
         // The strip is persistent, not modal. Its own hitbox focuses editing;
         // clicks outside hand the event to normal tab/sidebar/pane hit testing.
         if self.commander_accepts_mouse_focus() {
+            if let Some((popup, first, count)) = self.commander_slash_popup() {
+                let inside_popup = m.column >= popup.x
+                    && m.column < popup.right()
+                    && m.row >= popup.y
+                    && m.row < popup.bottom();
+                if inside_popup {
+                    match kind {
+                        MouseEventKind::ScrollUp => {
+                            self.commander_move_slash_selection(-1);
+                            return true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.commander_move_slash_selection(1);
+                            return true;
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let row = m.row.saturating_sub(popup.y + 1) as usize;
+                            if m.row > popup.y && row < popup.height.saturating_sub(3) as usize {
+                                let index = first + row;
+                                if index < count {
+                                    if let Some(commander) = self.commander.as_mut() {
+                                        commander.slash_selection = Some(index);
+                                        commander.focused = true;
+                                    }
+                                }
+                            }
+                            return true;
+                        }
+                        MouseEventKind::Down(_) => return true,
+                        MouseEventKind::Moved => return false,
+                        _ => return true,
+                    }
+                }
+            }
             if matches!(kind, MouseEventKind::Down(MouseButton::Left))
                 && self.begin_commander_resize(m.column, m.row)
             {

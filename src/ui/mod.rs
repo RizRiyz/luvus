@@ -3,7 +3,8 @@
 
 pub mod theme;
 
-use std::path::Path;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
@@ -1355,11 +1356,22 @@ fn draw_commander(
         .style(Style::new().bg(t.mantle).fg(t.text));
     f.render_widget(block, rect);
     let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2);
-    let editor_height = inner.height.saturating_sub(1).max(1);
-    let (lines, cursor_row, cursor_column) = commander_editor_lines(
+    let output_rows = if commander.read_output.is_some() {
+        inner.height.saturating_sub(2)
+    } else {
+        0
+    };
+    let editor_height = inner.height.saturating_sub(output_rows + 1).max(1);
+    let (display_draft, display_cursor, display_selection) = commander_display_draft(
         &commander.draft,
         commander.cursor,
         commander.selection(),
+        &commander.staged_images,
+    );
+    let (lines, cursor_row, cursor_column) = commander_editor_lines(
+        &display_draft,
+        display_cursor,
+        display_selection,
         inner.width.saturating_sub(2) as usize,
         editor_height as usize,
         t,
@@ -1369,6 +1381,22 @@ fn draw_commander(
             Paragraph::new(line).style(Style::new().bg(t.mantle).fg(t.text)),
             Rect::new(inner.x, inner.y + visible_row as u16, inner.width, 1),
         );
+    }
+    if let Some(output) = commander.read_output.as_ref() {
+        let end = output.len().saturating_sub(commander.read_scroll);
+        let start = end.saturating_sub(output_rows as usize);
+        for (index, line) in output[start..end].iter().enumerate() {
+            f.render_widget(
+                Paragraph::new(truncate(line, inner.width as usize))
+                    .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+                Rect::new(
+                    inner.x,
+                    inner.y + editor_height + index as u16,
+                    inner.width,
+                    1,
+                ),
+            );
+        }
     }
     let footer = if let Some(result) = commander.delivery_results.get(commander.delivery_index) {
         result
@@ -1393,13 +1421,174 @@ fn draw_commander(
                 footer.to_string()
             })
             .style(Style::new().bg(t.mantle).fg(t.overlay1)),
-            Rect::new(inner.x, inner.y + editor_height, inner.width, 1),
+            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
         );
+    }
+    if commander.focused {
+        draw_commander_slash_preview(f, rect, app.last_pane_area.y, commander, cat, t);
     }
     Some((
         inner.x + (2 + cursor_column).min(inner.width.saturating_sub(1) as usize) as u16,
         inner.y + cursor_row as u16,
     ))
+}
+
+fn draw_commander_slash_preview(
+    f: &mut RenderTarget,
+    strip: Rect,
+    pane_top: u16,
+    commander: &crate::commander::Commander,
+    cat: &crate::i18n::Catalog,
+    t: &Theme,
+) {
+    let Some((matches, selected)) = commander.slash_menu() else {
+        return;
+    };
+    let Some((popup, visible)) =
+        crate::commander::slash_popup_layout(strip, pane_top, matches.len())
+    else {
+        return;
+    };
+    f.render_widget(
+        Block::bordered()
+            .border_type(BorderType::Plain)
+            .title(Span::styled(
+                format!(" {} ", cat.commander_slash_title),
+                Style::new().fg(t.accent).bold(),
+            ))
+            .border_style(Style::new().fg(t.border_focus))
+            .style(Style::new().bg(t.mantle).fg(t.text)),
+        popup,
+    );
+    let first = crate::commander::slash_window_start(selected, matches.len(), visible);
+    for (row, spec) in matches.iter().skip(first).take(visible).enumerate() {
+        let active = first + row == selected;
+        let index = crate::commander::SLASH_ACTIONS
+            .iter()
+            .position(|action| action.name == spec.name)
+            .unwrap_or(0);
+        let line = format!(
+            "{} {:<13} {}",
+            if active { "›" } else { " " },
+            spec.name,
+            cat.commander_slash_summaries[index]
+        );
+        f.render_widget(
+            Paragraph::new(truncate(&line, popup.width.saturating_sub(4) as usize)).style(
+                Style::new()
+                    .bg(if active { t.surface0 } else { t.mantle })
+                    .fg(if active { t.accent } else { t.text }),
+            ),
+            Rect::new(popup.x + 1, popup.y + 1 + row as u16, popup.width - 2, 1),
+        );
+    }
+    if first > 0 {
+        f.render_widget(
+            Paragraph::new("↑").style(Style::new().bg(t.mantle).fg(t.accent)),
+            Rect::new(popup.right() - 2, popup.y + 1, 1, 1),
+        );
+    }
+    if first + visible < matches.len() {
+        f.render_widget(
+            Paragraph::new("↓").style(Style::new().bg(t.mantle).fg(t.accent)),
+            Rect::new(popup.right() - 2, popup.y + visible as u16, 1, 1),
+        );
+    }
+    if matches.is_empty() {
+        f.render_widget(
+            Paragraph::new(cat.commander_slash_no_match)
+                .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(popup.x + 1, popup.y + 1, popup.width - 2, 1),
+        );
+    }
+    if let Some(spec) = matches.get(selected) {
+        let usage = if spec.usage.is_empty() {
+            spec.name.to_string()
+        } else {
+            format!("{} {}", spec.name, spec.usage)
+        };
+        let position = format!("{}/{}", selected + 1, matches.len());
+        let position_width = position.len() as u16;
+        let usage_width = popup.width.saturating_sub(position_width + 4);
+        f.render_widget(
+            Paragraph::new(truncate(&usage, usage_width as usize))
+                .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(popup.x + 1, popup.bottom() - 2, usage_width, 1),
+        );
+        f.render_widget(
+            Paragraph::new(position).style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(
+                popup.right() - position_width - 1,
+                popup.bottom() - 2,
+                position_width,
+                1,
+            ),
+        );
+    }
+}
+
+/// Keep delivery/editing tied to the real staged path, but render each live
+/// clipboard image as a short token. Cursor and selection offsets follow the
+/// visible text so a long private path cannot displace the caret or wrap rows.
+fn commander_display_draft<'a>(
+    draft: &'a str,
+    cursor: usize,
+    selection: Option<std::ops::Range<usize>>,
+    staged_images: &[PathBuf],
+) -> (Cow<'a, str>, usize, Option<std::ops::Range<usize>>) {
+    let mut images = staged_images
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            let path = path.to_string_lossy();
+            draft
+                .find(path.as_ref())
+                .map(|start| (start..start + path.len(), index + 1))
+        })
+        .collect::<Vec<_>>();
+    if images.is_empty() {
+        return (Cow::Borrowed(draft), cursor, selection);
+    }
+    images.sort_by_key(|(range, _)| range.start);
+    let mut visible = String::with_capacity(draft.len());
+    let mut mappings = Vec::with_capacity(images.len());
+    let mut consumed = 0;
+    for (range, number) in images {
+        if range.start < consumed {
+            continue;
+        }
+        visible.push_str(&draft[consumed..range.start]);
+        let shown_start = visible.len();
+        visible.push_str(&format!("[Image #{number}]"));
+        mappings.push((range.clone(), shown_start..visible.len()));
+        consumed = range.end;
+    }
+    visible.push_str(&draft[consumed..]);
+
+    let map_offset = |offset: usize, end_bias: bool| {
+        let (mut raw_end, mut shown_end) = (0, 0);
+        for (raw, shown) in &mappings {
+            if offset < raw.start {
+                break;
+            }
+            if offset <= raw.end {
+                return if offset == raw.start {
+                    shown.start
+                } else if offset == raw.end || end_bias {
+                    shown.end
+                } else {
+                    shown.start
+                };
+            }
+            raw_end = raw.end;
+            shown_end = shown.end;
+        }
+        shown_end + offset - raw_end
+    };
+    let visible_cursor = map_offset(cursor, false);
+    let visible_selection =
+        selection.map(|range| map_offset(range.start, false)..map_offset(range.end, true));
+    (Cow::Owned(visible), visible_cursor, visible_selection)
 }
 
 /// Wrap the bounded draft into terminal cells while retaining byte-based
@@ -1421,11 +1610,12 @@ fn commander_editor_lines(
     rows.push_back((0, Vec::new()));
     let (mut row, mut column) = (0, 0);
     let mut caret = (0, 0);
+    let mut caret_seen = false;
     for (index, character) in draft.char_indices() {
         let shown = if character == '\t' { '⇥' } else { character };
         let character_width = UnicodeWidthChar::width(shown).unwrap_or(0);
         if character != '\n' && column + character_width > width {
-            if caret.0 == row && index > cursor {
+            if caret_seen && rows.len() >= visible_rows {
                 break;
             }
             row += 1;
@@ -1437,9 +1627,10 @@ fn commander_editor_lines(
         }
         if index == cursor {
             caret = (row, column);
+            caret_seen = true;
         }
         if character == '\n' {
-            if index >= cursor {
+            if caret_seen && rows.len() >= visible_rows {
                 break;
             }
             row += 1;
@@ -2277,6 +2468,29 @@ mod commander_tests {
     use super::*;
 
     #[test]
+    fn commander_editor_keeps_suffix_visible_after_mid_draft_caret() {
+        let theme = Theme::quattro_rally();
+        for (draft, cursor, width, expected) in [
+            ("abcdef", 2, 4, ["› abcd", "  ef"]),
+            ("ab\ncd", 1, 4, ["› ab", "  cd"]),
+        ] {
+            let (lines, caret_row, caret_column) =
+                commander_editor_lines(draft, cursor, None, width, 2, &theme);
+            let visible = lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(visible, expected, "draft: {draft:?}");
+            assert_eq!((caret_row, caret_column), (0, cursor));
+        }
+    }
+
+    #[test]
     fn composer_gets_own_bottom_strip_and_is_private_to_active_view() {
         let _env = crate::persist::test_env("commander-projection");
         let (tx, _) = std::sync::mpsc::channel();
@@ -2327,7 +2541,7 @@ mod commander_tests {
     }
 
     #[test]
-    fn commander_top_border_drag_resizes_without_covering_the_terminal() {
+    fn commander_shared_seam_drag_resizes_without_covering_the_terminal() {
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
         let _env = crate::persist::test_env("commander-drag-height");
@@ -2347,7 +2561,7 @@ mod commander_tests {
                 modifiers: KeyModifiers::NONE,
             })
         };
-        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), strip.y));
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), strip.y - 1));
         assert!(app.commander_resize);
         app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), strip.y - 3));
         let mut grown = Buffer::empty(area);
@@ -2361,9 +2575,31 @@ mod commander_tests {
         app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
         assert!(!app.commander_resize);
 
+        let grown_strip = app.commander_area.unwrap();
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            grown_strip.y,
+        ));
+        assert!(app.commander_resize, "Commander border is also draggable");
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            grown_strip.bottom() - 1,
+        ));
+        let mut shrunk = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut shrunk, area), &mut app);
+        assert_eq!(
+            app.commander_area.unwrap().height,
+            crate::app::COMMANDER_DEFAULT_HEIGHT,
+            "dragging cannot shrink the composer below its default height"
+        );
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
+
         let bottom = app.commander_area.unwrap().bottom();
         app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), bottom - 1));
-        assert!(!app.commander_resize, "only the top border starts a resize");
+        assert!(
+            !app.commander_resize,
+            "only the shared seam starts a resize"
+        );
         let resized_height = app.commander_area.unwrap().height;
         app.open_commander();
         app.open_commander();
@@ -2405,5 +2641,177 @@ mod commander_tests {
             .collect();
         assert!(final_row.contains("xxx"));
         assert_eq!(app.last_cursor.unwrap().1, strip.y + 2);
+    }
+
+    #[test]
+    fn commander_slash_picker_previews_actions_and_filters_prefixes() {
+        let _env = crate::persist::test_env("commander-slash-picker-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 32, tx).unwrap();
+        app.open_commander();
+        let area = Rect::new(0, 0, 100, 32);
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "/".into();
+        commander.cursor = 1;
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let (bounds, _) = crate::commander::slash_popup_layout(
+            strip,
+            app.last_pane_area.y,
+            crate::commander::SLASH_ACTIONS.len(),
+        )
+        .unwrap();
+        assert_eq!(bounds.x, strip.x);
+        assert_eq!(bounds.width, strip.width);
+        assert_eq!(buffer[(bounds.x, bounds.y)].symbol(), "┌");
+        assert_eq!(buffer[(bounds.right() - 1, bounds.y)].symbol(), "┐");
+        let popup: String = (app.last_pane_area.y..strip.y)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|position| buffer[position].symbol())
+            .collect();
+        for action in ["/focus", "/split", "/automation", "/files"] {
+            assert!(popup.contains(action), "missing {action} from slash picker");
+        }
+        assert!(popup.contains("Focus an exact location"));
+
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "/au".into();
+        commander.cursor = 3;
+        let mut filtered = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut filtered, area), &mut app);
+        let popup: String = (app.last_pane_area.y..strip.y)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|position| filtered[position].symbol())
+            .collect();
+        assert!(popup.contains("/automation"));
+        assert!(!popup.contains("/focus"));
+
+        app.commander.as_mut().unwrap().focused = false;
+        let mut unfocused = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut unfocused, area), &mut app);
+        let popup: String = (app.last_pane_area.y..strip.y)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|position| unfocused[position].symbol())
+            .collect();
+        assert!(!popup.contains("/automation"));
+    }
+
+    #[test]
+    fn commander_slash_picker_scrolls_the_selected_row_into_a_short_viewport() {
+        let _env = crate::persist::test_env("commander-slash-picker-scroll-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 20, tx).unwrap();
+        app.open_commander();
+        let theme = app.theme.clone();
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "/".into();
+        commander.cursor = 1;
+        commander.slash_selection = Some(8);
+        let area = Rect::new(0, 0, 80, 20);
+        let strip = Rect::new(2, 15, 76, 4);
+        let (popup, visible) = crate::commander::slash_popup_layout(strip, 10, 9).unwrap();
+        assert_eq!(visible, 2);
+        let mut buffer = Buffer::empty(area);
+        draw_commander_slash_preview(
+            &mut RenderTarget::new(&mut buffer, area),
+            strip,
+            10,
+            commander,
+            &crate::i18n::EN,
+            &theme,
+        );
+        let shown: String = (popup.y..popup.bottom())
+            .flat_map(|y| (popup.x..popup.right()).map(move |x| (x, y)))
+            .map(|position| buffer[position].symbol())
+            .collect();
+        assert!(shown.contains("/files"));
+        assert!(shown.contains("/diff"));
+        assert!(!shown.contains("/focus"));
+        assert!(shown.contains("↑"));
+        assert!(shown.contains("9/9"));
+    }
+
+    #[test]
+    fn commander_clipboard_images_render_as_markers_without_changing_delivery_text() {
+        let _env = crate::persist::test_env("commander-image-marker");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 24, tx).unwrap();
+        app.open_commander();
+        let png = crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255])
+            .expect("valid png");
+        let first = crate::clipboard_image::stage_png(&png).expect("first image");
+        let second = crate::clipboard_image::stage_png(&png).expect("second image");
+        assert!(app.handle_event(crate::event::AppEvent::PasteImage(first.clone())));
+        assert!(app.commander_paste(" then "));
+        assert!(app.handle_event(crate::event::AppEvent::PasteImage(second.clone())));
+        let commander = app.commander.as_ref().unwrap();
+        assert!(commander
+            .draft
+            .contains(&first.to_string_lossy().to_string()));
+        assert!(commander
+            .draft
+            .contains(&second.to_string_lossy().to_string()));
+        let (shown, cursor, _) = commander_display_draft(
+            &commander.draft,
+            commander.cursor,
+            None,
+            &commander.staged_images,
+        );
+        assert!(shown.contains("[Image #1] then [Image #2]"));
+        assert!(!shown.contains("luvus-image-"));
+        assert_eq!(cursor, shown.len());
+
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let editor: String = (strip.y + 1..strip.bottom() - 1)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|position| buffer[position].symbol())
+            .collect();
+        assert!(editor.contains("[Image #1] then [Image #2]"));
+        assert!(!editor.contains("luvus-image-"));
+        assert!(app
+            .last_cursor
+            .is_some_and(|(_, y)| y > strip.y && y < strip.bottom()));
+    }
+
+    #[test]
+    fn commander_image_marker_maps_selection_to_the_visible_token() {
+        let path = PathBuf::from("/private/clipboard-images/luvus-image-test.png");
+        let path_text = path.to_string_lossy();
+        let draft = format!("before {path_text} after");
+        let start = draft.find(path_text.as_ref()).unwrap();
+        let end = start + path_text.len();
+        let (shown, cursor, selection) =
+            commander_display_draft(&draft, end, Some(start + 1..end - 1), &[path]);
+        assert_eq!(shown, "before [Image #1] after");
+        assert_eq!(cursor, "before [Image #1]".len());
+        assert_eq!(selection.unwrap(), "before ".len()..cursor);
+    }
+
+    #[test]
+    fn commander_read_preview_uses_extra_rows_without_covering_the_editor_or_footer() {
+        let _env = crate::persist::test_env("commander-read-preview");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_commander();
+        app.commander_height = 12;
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "/read @p1".into();
+        commander.cursor = commander.draft.len();
+        commander.read_output = Some(vec!["first output".into(), "latest output".into()]);
+        commander.receipt = Some("p1 · 2 lines · PgUp/PgDn".into());
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let row = |y| -> String { (0..area.width).map(|x| buffer[(x, y)].symbol()).collect() };
+        assert!(row(strip.y + 1).contains("/read @p1"));
+        assert!(row(strip.y + 2).contains("first output"));
+        assert!(row(strip.y + 3).contains("latest output"));
+        assert!(row(strip.bottom() - 2).contains("PgUp/PgDn"));
     }
 }

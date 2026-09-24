@@ -17,6 +17,11 @@ pub(crate) struct Commander {
     pub receipt: Option<String>,
     pub delivery_results: Vec<String>,
     pub delivery_index: usize,
+    /// A bounded snapshot shown only to the interactive client after /read.
+    pub(crate) read_output: Option<Vec<String>>,
+    pub(crate) read_scroll: usize,
+    /// Picker selection is independent of the typed slash name while browsing.
+    pub(crate) slash_selection: Option<usize>,
     /// Resolved on edits, not every paint. The renderer reads current state
     /// for these identities; dispatch independently resolves the typed tokens.
     pub preview: Vec<PaneId>,
@@ -50,7 +55,39 @@ impl Commander {
         (anchor != self.cursor).then_some(anchor.min(self.cursor)..anchor.max(self.cursor))
     }
 
-    pub(crate) fn move_cursor(&mut self, next: usize, selecting: bool) {
+    fn image_ranges(&self) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+        self.staged_images.iter().filter_map(|path| {
+            let path = path.to_string_lossy();
+            self.draft
+                .find(path.as_ref())
+                .map(|start| start..start + path.len())
+        })
+    }
+
+    fn expand_image_edit(&self, mut range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        if range.is_empty() {
+            return range;
+        }
+        for image in self.image_ranges() {
+            if range.start < image.end && image.start < range.end {
+                range.start = range.start.min(image.start);
+                range.end = range.end.max(image.end);
+            }
+        }
+        range
+    }
+
+    pub(crate) fn move_cursor(&mut self, mut next: usize, selecting: bool) {
+        for image in self.image_ranges() {
+            if image.start < next && next < image.end {
+                next = if next < self.cursor {
+                    image.start
+                } else {
+                    image.end
+                };
+                break;
+            }
+        }
         if selecting {
             self.selection_anchor.get_or_insert(self.cursor);
         } else {
@@ -89,6 +126,9 @@ impl Commander {
     pub(crate) fn clear_receipt(&mut self) {
         self.receipt = None;
         self.delivery_results.clear();
+        self.read_output = None;
+        self.read_scroll = 0;
+        self.slash_selection = None;
     }
 
     pub(crate) fn insert(&mut self, input: &str) -> bool {
@@ -99,7 +139,7 @@ impl Commander {
         if clean.is_empty() {
             return true;
         }
-        let selected = self.selection().unwrap_or(self.cursor..self.cursor);
+        let selected = self.expand_image_edit(self.selection().unwrap_or(self.cursor..self.cursor));
         if self
             .draft
             .chars()
@@ -121,8 +161,9 @@ impl Commander {
 
     pub(crate) fn backspace(&mut self, word: bool) {
         if let Some(selected) = self.selection() {
-            self.draft.replace_range(selected.clone(), "");
-            self.cursor = selected.start;
+            let edited = self.expand_image_edit(selected);
+            self.draft.replace_range(edited.clone(), "");
+            self.cursor = edited.start;
             self.selection_anchor = None;
             self.clear_receipt();
             self.prune_staged_images();
@@ -136,8 +177,9 @@ impl Commander {
                 .next_back()
                 .map_or(0, |(index, _)| index)
         };
-        self.draft.drain(start..self.cursor);
-        self.cursor = start;
+        let edited = self.expand_image_edit(start..self.cursor);
+        self.draft.drain(edited.clone());
+        self.cursor = edited.start;
         self.selection_anchor = None;
         self.clear_receipt();
         self.prune_staged_images();
@@ -156,16 +198,19 @@ impl Commander {
                 .next()
                 .map_or(self.cursor, |c| self.cursor + c.len_utf8())
         };
-        self.draft.drain(self.cursor..end);
+        let edited = self.expand_image_edit(self.cursor..end);
+        self.draft.drain(edited.clone());
+        self.cursor = edited.start;
         self.selection_anchor = None;
         self.clear_receipt();
         self.prune_staged_images();
     }
 
     pub(crate) fn delete_to(&mut self, end: usize) {
-        let range = self
-            .selection()
-            .unwrap_or(self.cursor.min(end)..self.cursor.max(end));
+        let range = self.expand_image_edit(
+            self.selection()
+                .unwrap_or(self.cursor.min(end)..self.cursor.max(end)),
+        );
         self.draft.replace_range(range.clone(), "");
         self.cursor = range.start;
         self.selection_anchor = None;

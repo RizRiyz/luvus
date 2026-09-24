@@ -2,10 +2,10 @@
 
 use super::{
     encode_component, line_end, line_start, next_word, parse_scoped_target, previous_word,
-    target_lookup, target_spans, unescape_pane_mentions, Commander, DeliveryPlan, ExactTarget,
-    ScopedTarget, MAX_TARGETS,
+    slash_popup_layout, target_lookup, target_spans, unescape_pane_mentions, Commander,
+    DeliveryPlan, ExactTarget, ScopedTarget, MAX_TARGETS, SLASH_ACTIONS,
 };
-use crate::app::{is_ctrl_chord, App, Mode, COMMANDER_MIN_HEIGHT};
+use crate::app::{is_ctrl_chord, App, Mode, COMMANDER_DEFAULT_HEIGHT, COMMANDER_MIN_HEIGHT};
 use crate::ids::PaneId;
 use crate::layout::Axis;
 use crate::terminal::pty::Pane;
@@ -82,17 +82,17 @@ impl App {
     }
 
     pub(crate) fn begin_commander_resize(&mut self, column: u16, row: u16) -> bool {
-        let on_top_border = self.commander.is_some()
+        let on_shared_seam = self.commander.is_some()
             && self.commander_area.is_some_and(|area| {
                 area.height >= COMMANDER_MIN_HEIGHT
-                    && row == area.y
+                    && (row == area.y || row == area.y.saturating_sub(1))
                     && column >= area.x
                     && column < area.right()
             });
-        if on_top_border {
+        if on_shared_seam {
             self.commander_resize = true;
         }
-        on_top_border
+        on_shared_seam
     }
 
     pub(crate) fn update_commander_resize(&mut self, row: u16) {
@@ -102,10 +102,13 @@ impl App {
         let available = area.bottom().saturating_sub(self.last_pane_area.y);
         let max_height = available.saturating_sub(crate::layout::MIN_PANE);
         if max_height >= COMMANDER_MIN_HEIGHT {
+            // Keep the default five-cell editor as the interactive floor. A
+            // shorter viewport may still render the emergency three-cell strip.
+            let min_height = COMMANDER_DEFAULT_HEIGHT.min(max_height);
             self.commander_height = area
                 .bottom()
                 .saturating_sub(row)
-                .clamp(COMMANDER_MIN_HEIGHT, max_height);
+                .clamp(min_height, max_height);
         }
     }
 
@@ -172,7 +175,18 @@ impl App {
             {
                 self.commander.as_mut().unwrap().insert("\n");
             } else {
-                self.commander_prepare();
+                let complete_name = self.commander.as_ref().and_then(|commander| {
+                    let (matches, selected) = commander.slash_menu()?;
+                    let current = commander.draft.split_whitespace().next().unwrap_or("");
+                    let spec = matches.get(selected)?;
+                    (current != spec.name || spec.needs_target)
+                        .then_some((spec.name, current == spec.name))
+                });
+                if let Some((name, exact)) = complete_name {
+                    self.commander_accept_slash_name(name, exact);
+                } else {
+                    self.commander_prepare();
+                }
             }
             return true;
         }
@@ -181,6 +195,56 @@ impl App {
                 key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
             );
             return true;
+        }
+        if key.modifiers.is_empty() {
+            let page = self
+                .commander
+                .as_ref()
+                .and_then(|commander| commander.slash_menu())
+                .and_then(|(matches, _)| {
+                    slash_popup_layout(self.commander_area?, self.last_pane_area.y, matches.len())
+                        .map(|(_, visible)| visible as isize)
+                })
+                .unwrap_or(5);
+            let delta = match key.code {
+                KeyCode::Up => Some(-1),
+                KeyCode::Down => Some(1),
+                KeyCode::PageUp => Some(-page),
+                KeyCode::PageDown => Some(page),
+                _ => None,
+            };
+            if delta.is_some_and(|delta| self.commander_move_slash_selection(delta)) {
+                return true;
+            }
+            if key.code == KeyCode::Char(' ') {
+                let name = self.commander.as_ref().and_then(|commander| {
+                    let (matches, selected) = commander.slash_menu()?;
+                    matches.get(selected).map(|spec| spec.name)
+                });
+                if let Some(name) = name {
+                    self.commander_accept_slash_name(name, true);
+                    return true;
+                }
+            }
+        }
+        if key.code == KeyCode::Char('/')
+            && !key.modifiers.intersects(
+                KeyModifiers::CONTROL
+                    | KeyModifiers::ALT
+                    | KeyModifiers::SUPER
+                    | KeyModifiers::META,
+            )
+        {
+            let focused = self.layout().focus;
+            let commander = self.commander.as_mut().unwrap();
+            if commander.cursor == commander.draft.len()
+                && commander.draft == format!("@p{} ", focused.0)
+            {
+                commander.clear_all();
+                commander.insert("/");
+                self.refresh_commander_preview();
+                return true;
+            }
         }
         let commander = self.commander.as_mut().unwrap();
         let control = is_ctrl_chord(key.modifiers);
@@ -205,6 +269,18 @@ impl App {
             KeyCode::Down if !commander.delivery_results.is_empty() => {
                 commander.delivery_index =
                     (commander.delivery_index + 1) % commander.delivery_results.len();
+            }
+            KeyCode::PageUp if commander.read_output.is_some() => {
+                let limit = commander
+                    .read_output
+                    .as_ref()
+                    .unwrap()
+                    .len()
+                    .saturating_sub(1);
+                commander.read_scroll = commander.read_scroll.saturating_add(5).min(limit);
+            }
+            KeyCode::PageDown if commander.read_output.is_some() => {
+                commander.read_scroll = commander.read_scroll.saturating_sub(5);
             }
             KeyCode::Left => {
                 let next = if command {
@@ -290,6 +366,9 @@ impl App {
     }
 
     fn commander_cycle_target(&mut self, backward: bool) {
+        if self.commander_complete_slash_action(backward) {
+            return;
+        }
         let editing = {
             let commander = self.commander.as_ref().unwrap();
             target_spans(&commander.draft)
@@ -399,6 +478,98 @@ impl App {
         self.refresh_commander_preview();
     }
 
+    fn commander_complete_slash_action(&mut self, backward: bool) -> bool {
+        let commander = self.commander.as_ref().unwrap();
+        let Some((matches, selected)) = commander.slash_menu() else {
+            return false;
+        };
+        let end = commander
+            .draft
+            .find(char::is_whitespace)
+            .unwrap_or(commander.draft.len());
+        let typed = commander.draft[..end].to_string();
+        let exact = SLASH_ACTIONS.iter().any(|spec| spec.name == typed);
+        let next = if matches.is_empty() {
+            None
+        } else if commander.slash_selection.is_some() {
+            Some(matches[selected].name)
+        } else if exact {
+            Some(
+                matches[if backward {
+                    (selected + matches.len() - 1) % matches.len()
+                } else {
+                    (selected + 1) % matches.len()
+                }]
+                .name,
+            )
+        } else {
+            Some(matches[if backward { matches.len() - 1 } else { 0 }].name)
+        };
+        if let Some(name) = next {
+            self.commander_accept_slash_name(name, false);
+        } else {
+            self.commander.as_mut().unwrap().receipt = Some("No matching slash action".into());
+        }
+        true
+    }
+
+    fn commander_accept_slash_name(&mut self, name: &str, add_space: bool) {
+        let commander = self.commander.as_mut().unwrap();
+        let end = commander
+            .draft
+            .find(char::is_whitespace)
+            .unwrap_or(commander.draft.len());
+        commander.draft.replace_range(..end, name);
+        commander.cursor = name.len();
+        commander.selection_anchor = None;
+        commander.clear_receipt();
+        if add_space {
+            if let Some(space) = commander.draft[name.len()..]
+                .chars()
+                .next()
+                .filter(|c| c.is_whitespace())
+            {
+                commander.cursor += space.len_utf8();
+            } else {
+                commander.insert(" ");
+            }
+        }
+        self.refresh_commander_preview();
+    }
+
+    pub(crate) fn commander_move_slash_selection(&mut self, delta: isize) -> bool {
+        let Some(commander) = self.commander.as_mut() else {
+            return false;
+        };
+        let Some((matches, selected)) = commander.slash_menu() else {
+            return false;
+        };
+        if matches.is_empty() {
+            return false;
+        }
+        commander.slash_selection = Some(
+            selected
+                .saturating_add_signed(delta)
+                .min(matches.len().saturating_sub(1)),
+        );
+        true
+    }
+
+    pub(crate) fn commander_slash_popup(&self) -> Option<(ratatui::layout::Rect, usize, usize)> {
+        let commander = self
+            .commander
+            .as_ref()
+            .filter(|commander| commander.focused)?;
+        let (matches, selected) = commander.slash_menu()?;
+        let (rect, visible) =
+            slash_popup_layout(self.commander_area?, self.last_pane_area.y, matches.len())?;
+        Some((
+            rect,
+            super::slash_window_start(selected, matches.len(), visible),
+            matches.len(),
+        ))
+    }
+
     pub(crate) fn refresh_commander_preview(&mut self) {
         let Some(commander) = self.commander.as_ref() else {
             return;
@@ -421,6 +592,15 @@ impl App {
 
     pub(crate) fn commander_prepare(&mut self) {
         let draft = self.commander.as_ref().unwrap().draft.clone();
+        if let Some(action) = self.commander_parse_slash_action(&draft) {
+            let result = action.and_then(|action| self.commander_dispatch_slash_action(action));
+            if let Err(error) = result {
+                let commander = self.commander.as_mut().unwrap();
+                commander.clear_receipt();
+                commander.receipt = Some(error);
+            }
+            return;
+        }
         if let Some(action) = self.commander_parse_split_action(&draft) {
             match action {
                 Ok((target, axis)) => self.commander_split(target, axis),
@@ -466,7 +646,7 @@ impl App {
         )
     }
 
-    fn commander_split(&mut self, target: PaneId, axis: Axis) {
+    pub(crate) fn commander_split(&mut self, target: PaneId, axis: Axis) {
         let Some(new_pane) = self.split_pane(target, axis, true) else {
             let commander = self.commander.as_mut().unwrap();
             commander.receipt = Some(format!("p{} could not be split", target.0));
@@ -492,7 +672,7 @@ impl App {
         commander.focused = false;
     }
 
-    fn commander_resolve_target(&self, lookup: &str) -> Result<PaneId, String> {
+    pub(crate) fn commander_resolve_target(&self, lookup: &str) -> Result<PaneId, String> {
         if let Ok(number) = lookup.parse::<u32>() {
             let id = PaneId(number);
             return (self.panes.contains_key(&id) && self.pane_location(id).is_some())
@@ -515,7 +695,7 @@ impl App {
             .ok_or_else(|| format!("@{lookup} is not a running agent alias or kind"))
     }
 
-    fn commander_pane_mention(&self, id: PaneId) -> String {
+    pub(crate) fn commander_pane_mention(&self, id: PaneId) -> String {
         let name = self
             .agent_names
             .iter()
@@ -532,7 +712,7 @@ impl App {
         }
     }
 
-    fn commander_scope_indices(
+    pub(crate) fn commander_scope_indices(
         &self,
         scope: &ScopedTarget,
     ) -> Result<(Option<usize>, Option<usize>), String> {

@@ -4,11 +4,12 @@ description: Send prompts or shell commands to exact terminal panes without leav
 ---
 
 Press **`Ctrl+Space Enter`** (or your configured prefix, then `Enter`). Commander
-opens as a full-width, two-line composer below the terminal panes. It
+opens as a persistent composer below the terminal panes. It
 does not create a layout leaf or change the selected pane, but it initially
 takes keyboard focus so you can type a message. The visible terminal area
-resizes while it is open. Drag Commander's top border to change its height;
-the terminal keeps a minimum height. Press the same shortcut to hide it. The
+resizes while it is open. Drag the shared edge from either the pane above or
+Commander's top border to change its height; Commander keeps its default
+five-cell minimum. Press the same shortcut to hide it. The
 draft disappears when you hide it or another TUI client takes control.
 
 The strip is not modal: prefix shortcuts still change tabs, workspaces, panes,
@@ -101,11 +102,58 @@ mention, so pressing Enter again cannot repeat the split. An action cannot be
 combined with message text or other targets. Named paths also work, for
 example `@tab:tests/pane:reviewer:sv`.
 
+## Slash actions
+
+Type `/` at the start of the draft to use a Luvus action. If Commander still
+contains its initial `@pID` mention, typing `/` replaces that starter text.
+The picker matches Commander's width and lists matching commands, their
+purpose, and the selected command's usage while you edit the slash name.
+Type more letters to filter. `Up`/`Down`, `PageUp`/`PageDown`, or the mouse
+wheel browse the list; click a row to select it. On short terminals the list
+scrolls to keep the selected row visible. `Tab` and `Shift+Tab` still complete
+or cycle names. `Space` accepts the selection and starts arguments. `Enter`
+accepts a selected or partial name, starts required arguments, or runs a
+complete action. Use `@` and `Tab` to complete an exact target where required.
+
+```text
+/focus @p17
+/focus @tab:tests
+/focus @workspace:app
+/read @p17
+/fork @reviewer
+/split @p24 right
+/split @p24 below
+/task
+/automation
+/mission
+/diff
+/files
+```
+
+`/focus` switches to one exact pane, tab, or workspace without sending input.
+`/read` shows a bounded snapshot of one pane's recent output in Commander;
+use `PageUp` and `PageDown` to browse it. `/fork` uses the native agent session
+fork handler and requires a fork-capable agent with a known session. `/task`
+opens the existing task form; the task is created only when you complete that
+form. These actions take no free-form message text, and an unknown `/` action
+is rejected rather than forwarded to a pane. To send an agent's own slash
+command as text, put it after a target, such as `@p17 /status`.
+
+`/split` creates a shell beside one exact pane: `right` places it alongside,
+`below` stacks it underneath. `sv` and `sh` are accepted direction aliases.
+`/automation` opens the existing automation form; it does not schedule
+anything until you finish that form. `/mission` opens Mission Control in the
+current workspace. `/diff` and `/files` focus their respective dock views.
+These navigation actions do not send terminal input. The picker contains only
+actions available in this version of Commander.
+
 `Enter` sends to all listed targets. `Shift+Enter` adds a visible new line;
 `Alt+Enter` is a fallback for terminals that cannot report Shift+Enter.
-The composer remains open after sending. Text and clipboard-image paste edit
-the draft only while the strip has keyboard focus; otherwise they follow the
-normal active pane or modal. Arrow keys, `Home`/`End`, `Ctrl`/`Alt` word
+The composer remains open after sending. Pasted clipboard images appear as
+`[Image #1]` markers in the draft, while the receiving pane gets the staged
+image path. Text and image paste edit the draft only while the strip has
+keyboard focus; otherwise they follow the
+normal active pane or modal. Outside the slash picker, arrow keys, `Home`/`End`, `Ctrl`/`Alt` word
 navigation and deletion, `Ctrl+U`/`Ctrl+K` line deletion, and macOS Command
 editing chords work in the draft. `Up` and `Down` move between draft lines
 before cycling delivery receipts at the draft boundary. Select text with
@@ -114,6 +162,5 @@ equivalents. Paste uses the terminal's normal paste event. A **queued** receipt
 means input was submitted atomically, not that the agent task or shell command
 has finished.
 
-This first release does not approve blocked-agent dialogs, invoke `/` actions,
-or route to another named session or saved SSH machine. Use the existing
-controls for those operations.
+Commander does not yet approve blocked-agent dialogs or route to another named
+session or saved SSH machine. Use the existing controls for those operations.

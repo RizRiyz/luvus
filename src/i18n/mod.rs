@@ -81,6 +81,10 @@ pub struct Catalog {
     pub commander_title: &'static str,
     pub commander_hint: &'static str,
     pub commander_hint_compact: &'static str,
+    pub commander_slash_title: &'static str,
+    pub commander_slash_no_match: &'static str,
+    /// Summaries follow the canonical slash registry order in commander/actions.rs.
+    pub commander_slash_summaries: [&'static str; 9],
     /// Mission Control row actions: answer a blocked agent, and stop/interrupt.
     pub mc_answer: &'static str,
     pub mc_stop: &'static str,
@@ -524,6 +528,19 @@ pub static EN: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 target · Tab cycle · Enter send · Shift+Enter line · Esc pane",
     commander_hint_compact: "@p17 target · Enter send",
+    commander_slash_title: "ACTIONS · ↑↓ browse · Tab cycle · Enter select",
+    commander_slash_no_match: "No matching action",
+    commander_slash_summaries: [
+        "Focus an exact location",
+        "Preview recent terminal output",
+        "Fork a native agent session",
+        "Split beside an exact pane",
+        "Open the task form",
+        "Open the automation form",
+        "Open Mission Control",
+        "Focus the DIFF dock",
+        "Focus the FILES dock",
+    ],
     mc_answer: "answer",
     mc_stop: "stop",
     mode_normal: "NORMAL",
@@ -949,6 +966,19 @@ static ES: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 destino · Tab cambiar · Enter enviar · Shift+Enter línea · Esc panel",
     commander_hint_compact: "@p17 destino · Enter enviar",
+    commander_slash_title: "ACCIONES · ↑↓ recorrer · Tab cambiar · Enter elegir",
+    commander_slash_no_match: "No hay acciones coincidentes",
+    commander_slash_summaries: [
+        "Ir a una ubicación exacta",
+        "Ver salida reciente del terminal",
+        "Bifurcar una sesión de agente",
+        "Dividir junto a un panel exacto",
+        "Abrir formulario de tarea",
+        "Abrir formulario de automatización",
+        "Abrir Control de Misión",
+        "Enfocar el panel DIFF",
+        "Enfocar el panel FILES",
+    ],
     mc_answer: "responder",
     mc_stop: "detener",
     mode_normal: "NORMAL",
@@ -1374,6 +1404,19 @@ static PT: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 destino · Tab alternar · Enter enviar · Shift+Enter linha · Esc painel",
     commander_hint_compact: "@p17 destino · Enter enviar",
+    commander_slash_title: "AÇÕES · ↑↓ navegar · Tab alternar · Enter selecionar",
+    commander_slash_no_match: "Nenhuma ação correspondente",
+    commander_slash_summaries: [
+        "Focar um local exato",
+        "Ver saída recente do terminal",
+        "Bifurcar uma sessão de agente",
+        "Dividir ao lado de um painel exato",
+        "Abrir formulário de tarefa",
+        "Abrir formulário de automação",
+        "Abrir Controle da Missão",
+        "Focar o painel DIFF",
+        "Focar o painel FILES",
+    ],
     mc_answer: "responder",
     mc_stop: "parar",
     mode_normal: "NORMAL",
@@ -1799,6 +1842,19 @@ static FR: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 cible · Tab changer · Entrée envoyer · Maj+Entrée ligne · Échap volet",
     commander_hint_compact: "@p17 cible · Entrée envoyer",
+    commander_slash_title: "ACTIONS · ↑↓ parcourir · Tab changer · Entrée choisir",
+    commander_slash_no_match: "Aucune action correspondante",
+    commander_slash_summaries: [
+        "Accéder à un emplacement précis",
+        "Voir la sortie récente du terminal",
+        "Dupliquer une session d'agent",
+        "Scinder à côté d'un volet précis",
+        "Ouvrir le formulaire de tâche",
+        "Ouvrir le formulaire d'automatisation",
+        "Ouvrir Mission Control",
+        "Activer le volet DIFF",
+        "Activer le volet FILES",
+    ],
     mc_answer: "répondre",
     mc_stop: "arrêter",
     mode_normal: "NORMAL",
@@ -2224,6 +2280,19 @@ static DE: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 Ziel · Tab wechseln · Enter senden · Shift+Enter Zeile · Esc Fenster",
     commander_hint_compact: "@p17 Ziel · Enter senden",
+    commander_slash_title: "AKTIONEN · ↑↓ blättern · Tab wechseln · Enter wählen",
+    commander_slash_no_match: "Keine passende Aktion",
+    commander_slash_summaries: [
+        "Genauen Ort fokussieren",
+        "Letzte Terminalausgabe anzeigen",
+        "Agentensitzung verzweigen",
+        "Neben einem bestimmten Fenster teilen",
+        "Aufgabenformular öffnen",
+        "Automationsformular öffnen",
+        "Mission Control öffnen",
+        "DIFF-Bereich fokussieren",
+        "FILES-Bereich fokussieren",
+    ],
     mc_answer: "antworten",
     mc_stop: "stoppen",
     mode_normal: "NORMAL",
@@ -2649,6 +2718,19 @@ static ID: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 target · Tab ganti · Enter kirim · Shift+Enter baris · Esc panel",
     commander_hint_compact: "@p17 target · Enter kirim",
+    commander_slash_title: "AKSI · ↑↓ jelajah · Tab pilih · Enter konfirmasi",
+    commander_slash_no_match: "Tidak ada aksi yang cocok",
+    commander_slash_summaries: [
+        "Fokus ke lokasi tepat",
+        "Pratinjau keluaran terminal terbaru",
+        "Fork sesi agen native",
+        "Bagi di sebelah pane tertentu",
+        "Buka formulir tugas",
+        "Buka formulir otomasi",
+        "Buka Mission Control",
+        "Fokus ke panel DIFF",
+        "Fokus ke panel FILES",
+    ],
     mc_answer: "jawab",
     mc_stop: "hentikan",
     mode_normal: "NORMAL",
@@ -3074,6 +3156,19 @@ static ZH: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 目标 · Tab 切换 · Enter 发送 · Shift+Enter 换行 · Esc 聚焦窗格",
     commander_hint_compact: "@p17 目标 · Enter 发送",
+    commander_slash_title: "操作 · ↑↓ 浏览 · Tab 切换 · Enter 选择",
+    commander_slash_no_match: "没有匹配的操作",
+    commander_slash_summaries: [
+        "聚焦到指定位置",
+        "预览最近的终端输出",
+        "派生原生代理会话",
+        "在指定窗格旁拆分",
+        "打开任务表单",
+        "打开自动化表单",
+        "打开任务控制台",
+        "聚焦 DIFF 面板",
+        "聚焦 FILES 面板",
+    ],
     mc_answer: "回复",
     mc_stop: "停止",
     mode_normal: "常规",
@@ -3499,6 +3594,19 @@ static JA: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 宛先 · Tab 切替 · Enter 送信 · Shift+Enter 改行 · Esc ペインへ",
     commander_hint_compact: "@p17 宛先 · Enter 送信",
+    commander_slash_title: "操作 · ↑↓ 移動 · Tab 切替 · Enter 選択",
+    commander_slash_no_match: "一致する操作がありません",
+    commander_slash_summaries: [
+        "指定した場所に移動",
+        "最近の端末出力を表示",
+        "エージェントのセッションを分岐",
+        "指定ペインの横に分割",
+        "タスクフォームを開く",
+        "自動化フォームを開く",
+        "Mission Control を開く",
+        "DIFF ドックにフォーカス",
+        "FILES ドックにフォーカス",
+    ],
     mc_answer: "返信",
     mc_stop: "停止",
     mode_normal: "通常",
@@ -3924,6 +4032,19 @@ static KO: Catalog = Catalog {
     commander_title: "COMMANDER",
     commander_hint: "@p17 대상 · Tab 전환 · Enter 전송 · Shift+Enter 줄바꿈 · Esc 창으로",
     commander_hint_compact: "@p17 대상 · Enter 전송",
+    commander_slash_title: "작업 · ↑↓ 탐색 · Tab 전환 · Enter 선택",
+    commander_slash_no_match: "일치하는 작업이 없습니다",
+    commander_slash_summaries: [
+        "정확한 위치로 이동",
+        "최근 터미널 출력 미리 보기",
+        "에이전트 세션 분기",
+        "지정한 창 옆에 분할",
+        "작업 양식 열기",
+        "자동화 양식 열기",
+        "Mission Control 열기",
+        "DIFF 도크로 이동",
+        "FILES 도크로 이동",
+    ],
     mc_answer: "응답",
     mc_stop: "중지",
     mode_normal: "일반",
@@ -4344,6 +4465,25 @@ mod tests {
         // An unknown code degrades to English, never panics.
         assert_eq!(by_code("xx").workspaces, EN.workspaces);
         assert_eq!(native_name("xx"), "English");
+    }
+
+    #[test]
+    fn commander_slash_picker_is_complete_for_every_language() {
+        for &code in LANGS {
+            let catalog = by_code(code);
+            assert!(!catalog.commander_slash_title.trim().is_empty(), "{code}");
+            assert!(
+                !catalog.commander_slash_no_match.trim().is_empty(),
+                "{code}"
+            );
+            assert_eq!(
+                catalog.commander_slash_summaries.len(),
+                crate::commander::SLASH_ACTIONS.len()
+            );
+            for summary in catalog.commander_slash_summaries {
+                assert!(!summary.trim().is_empty(), "{code}");
+            }
+        }
     }
 
     #[test]

@@ -48,6 +48,373 @@ fn parser_requires_explicit_targets_and_prompt() {
 }
 
 #[test]
+fn slash_actions_are_typed_and_unknown_names_never_reach_a_pane() {
+    let _env = crate::persist::test_env("commander-slash-parser");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let id = app.layout().focus;
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&id)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+    app.open_commander();
+
+    assert!(app.commander_parse_slash_action("/task").unwrap().is_ok());
+    for action in ["/automation", "/mission", "/diff", "/files"] {
+        assert!(
+            app.commander_parse_slash_action(action).unwrap().is_ok(),
+            "{action}"
+        );
+        assert!(app
+            .commander_parse_slash_action(&format!("{action} extra"))
+            .unwrap()
+            .is_err());
+    }
+    assert!(app
+        .commander_parse_slash_action(&format!("/split @p{} right", id.0))
+        .unwrap()
+        .is_ok());
+    assert!(app
+        .commander_parse_slash_action(&format!("/split @p{} below", id.0))
+        .unwrap()
+        .is_ok());
+    assert!(app
+        .commander_parse_slash_action(&format!("/split @p{} sideways", id.0))
+        .unwrap()
+        .is_err());
+    assert!(app
+        .commander_parse_slash_action(&format!("/read @p{}", id.0))
+        .unwrap()
+        .is_ok());
+    assert!(app.commander_parse_slash_action("/focus").unwrap().is_err());
+    assert!(app
+        .commander_parse_slash_action("/task extra")
+        .unwrap()
+        .is_err());
+    assert!(app
+        .commander_parse_slash_action("/read @p1 extra")
+        .unwrap()
+        .is_err());
+    assert!(app.commander_parse_slash_action("@p1 /status").is_none());
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("/unknown @p{}", id.0);
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("Unknown action"));
+    assert!(
+        input_rx.try_recv().is_err(),
+        "unknown slash text was not submitted"
+    );
+}
+
+#[test]
+fn slash_key_and_tab_complete_the_action_before_a_target() {
+    let _env = crate::persist::test_env("commander-slash-complete");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/focus");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/read");
+    app.commander_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/focus");
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/focus ");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .starts_with("/focus @"));
+}
+
+#[test]
+fn slash_enter_accepts_a_suggestion_before_dispatching() {
+    let _env = crate::persist::test_env("commander-slash-enter");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/automation");
+    assert!(app.orch_form.is_none());
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.orch_form.as_ref().unwrap().kind,
+        OrchFormKind::Automation
+    );
+}
+
+#[test]
+fn slash_picker_arrows_pages_and_enter_select_without_editing_the_draft() {
+    let _env = crate::persist::test_env("commander-slash-browse");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    for _ in 0..8 {
+        app.commander_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let commander = app.commander.as_ref().unwrap();
+    assert_eq!(commander.draft, "/");
+    assert_eq!(commander.slash_selection, Some(8));
+    app.commander_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().slash_selection, Some(7));
+    app.commander_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().slash_selection, Some(2));
+    app.commander_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().slash_selection, Some(7));
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/diff");
+    assert_eq!(app.commander.as_ref().unwrap().slash_selection, None);
+    assert!(!app.files_focused, "selection is not action execution");
+}
+
+#[test]
+fn slash_picker_mouse_wheel_and_row_click_stay_out_of_underlying_panes() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let _env = crate::persist::test_env("commander-slash-mouse");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    app.commander_area = Some(Rect::new(3, 20, 74, 4));
+    app.last_pane_area = Rect::new(3, 11, 74, 9);
+    let (popup, _, _) = app.commander_slash_popup().unwrap();
+    let mouse = |kind, row| {
+        crate::event::AppEvent::Mouse(MouseEvent {
+            kind,
+            column: popup.x + 4,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    assert!(app.handle_event(mouse(MouseEventKind::ScrollDown, popup.y + 2)));
+    assert_eq!(app.commander.as_ref().unwrap().slash_selection, Some(1));
+    assert!(app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), popup.y + 4)));
+    assert_eq!(app.commander.as_ref().unwrap().slash_selection, Some(3));
+    assert!(app.commander.as_ref().unwrap().focused);
+    assert_eq!(app.layout().focus, pane);
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/split");
+}
+
+#[test]
+fn slash_forms_and_docks_reuse_existing_controls() {
+    let _env = crate::persist::test_env("commander-slash-controls");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    fn invoke(app: &mut App, action: &str) {
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = action.into();
+        commander.cursor = commander.draft.len();
+        commander.focused = true;
+        app.commander_prepare();
+    }
+    invoke(&mut app, "/automation");
+    assert_eq!(
+        app.orch_form.as_ref().unwrap().kind,
+        OrchFormKind::Automation
+    );
+    app.orch_form = None;
+    invoke(&mut app, "/mission");
+    assert!(app.active_is_mission());
+    invoke(&mut app, "/diff");
+    assert_eq!(app.files_mode, crate::diff::FilesMode::Diff);
+    assert!(app.files_focused);
+    invoke(&mut app, "/files");
+    assert_eq!(app.files_mode, crate::diff::FilesMode::Files);
+    assert!(app.files_focused);
+}
+
+#[test]
+fn slash_split_requires_one_exact_live_pane_and_direction() {
+    let _env = crate::persist::test_env("commander-slash-split");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let id = app.layout().focus;
+    let before = app.layout().len();
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("/split @p{} right", id.0);
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert_eq!(app.layout().len(), before + 1);
+    assert!(!app.commander.as_ref().unwrap().focused);
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("split right"));
+}
+
+#[test]
+fn slash_focus_uses_an_exact_pane_or_named_tab_without_sending_input() {
+    let _env = crate::persist::test_env("commander-slash-focus");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let first = app.layout().focus;
+    let second = app.split_pane(first, Axis::Col, true).unwrap();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&second)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+    app.focus_pane_global(first);
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("/focus @p{}", second.0);
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert_eq!(app.layout().focus, second);
+    assert!(!app.commander.as_ref().unwrap().focused);
+    assert!(input_rx.try_recv().is_err());
+
+    app.workspaces[app.active_ws].tabs[0].name = Some("review".into());
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/focus @tab:review".into();
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("Focused"));
+    app.workspaces[app.active_ws].name = "review work".into();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/focus @workspace:review%20work".into();
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("Focused"));
+    assert!(app
+        .commander_parse_slash_action("/focus @session:not-this-one/tab:review")
+        .unwrap()
+        .is_err());
+}
+
+#[test]
+fn slash_read_shows_bounded_output_and_task_opens_existing_form() {
+    let _env = crate::persist::test_env("commander-slash-read-task");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let id = app.layout().focus;
+    app.panes[&id]
+        .engine
+        .lock()
+        .unwrap()
+        .advance(b"commander read marker\r\n");
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("/read @p{}", id.0);
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    let commander = app.commander.as_ref().unwrap();
+    assert!(commander
+        .read_output
+        .as_ref()
+        .unwrap()
+        .iter()
+        .any(|line| line.contains("commander read marker")));
+    assert!(app.commander_height >= 12);
+    app.commander_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().read_scroll > 0);
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/task".into();
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert_eq!(app.orch_form.as_ref().unwrap().kind, OrchFormKind::Task);
+    assert!(app.commander.as_ref().unwrap().read_output.is_none());
+    assert!(!app.commander.as_ref().unwrap().focused);
+}
+
+#[test]
+fn slash_fork_rejects_a_shell_without_creating_a_pane() {
+    let _env = crate::persist::test_env("commander-slash-fork-shell");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let id = app.layout().focus;
+    let before = app.panes.len();
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("/fork @p{}", id.0);
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert_eq!(app.panes.len(), before);
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("does not support"));
+}
+
+#[test]
+fn slash_fork_reuses_the_native_agent_fork_handler() {
+    let _env = crate::persist::test_env("commander-slash-fork-agent");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let source = app.layout().focus;
+    let before = app.layout().len();
+    let status = app.status.get_mut(&source).unwrap();
+    status.agent = "claude".into();
+    status.agent_session = Some(AgentSession {
+        agent: "claude".into(),
+        session_id: "commander-fork-source".into(),
+    });
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("/fork @p{}", source.0);
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert_eq!(app.layout().len(), before + 1);
+    assert_ne!(app.layout().focus, source);
+    assert_eq!(app.status[&app.layout().focus].agent, "claude");
+    assert!(!app.commander.as_ref().unwrap().focused);
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("Forked"));
+}
+
+#[test]
 fn literal_arguments_and_escaped_mentions_remain_in_the_prompt() {
     let _env = crate::persist::test_env("commander-literal-arguments");
     let (tx, _) = std::sync::mpsc::channel();
@@ -567,6 +934,35 @@ fn clipboard_image_is_discarded_when_draft_is_abandoned_or_edited_away() {
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     ));
     assert!(!staged.exists());
+}
+
+#[test]
+fn clipboard_image_marker_moves_and_deletes_as_one_token() {
+    let _env = crate::persist::test_env("commander-image-atomic-edit");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    let png =
+        crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255]).expect("valid png");
+    let staged = crate::clipboard_image::stage_png(&png).expect("staged image");
+    assert!(app.handle_event(AppEvent::PasteImage(staged.clone())));
+    let image_start = app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .find(&staged.to_string_lossy().to_string())
+        .unwrap();
+    app.commander_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().cursor, image_start);
+    app.commander_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().cursor,
+        app.commander.as_ref().unwrap().draft.len()
+    );
+    app.commander_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    assert!(!staged.exists());
+    assert_eq!(app.commander.as_ref().unwrap().draft.len(), image_start);
 }
 
 #[test]

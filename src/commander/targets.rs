@@ -146,7 +146,7 @@ fn decode_component(value: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "Invalid UTF-8 in mention path".into())
 }
 
-/// A leading backslash makes an exact pane mention literal prompt text.
+/// A leading backslash makes a pane mention literal prompt text.
 pub(crate) fn unescape_pane_mentions(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut offset = 0;
@@ -161,7 +161,9 @@ pub(crate) fn unescape_pane_mentions(text: &str) -> String {
         let part = &text[start..offset];
         if !whitespace
             && part.starts_with('\\')
-            && (exact_pane_mention(&part[1..]) || is_scoped_mention(&part[1..]))
+            && (exact_pane_mention(&part[1..])
+                || is_scoped_mention(&part[1..])
+                || plain_pane_mention(&part[1..]))
         {
             result.push_str(&part[1..]);
         } else {
@@ -176,4 +178,19 @@ pub(crate) fn target_lookup(token: &str) -> &str {
     raw.strip_prefix('p')
         .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
         .unwrap_or(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escaped_pane_mentions_are_literal_without_escape_slash() {
+        let draft = r"@p7 tell \@reviewer and \@p8 about \@tab:work/pane:agent, not \@invalid!";
+        assert_eq!(target_spans(draft), vec![0..3]);
+        assert_eq!(
+            unescape_pane_mentions(draft),
+            "@p7 tell @reviewer and @p8 about @tab:work/pane:agent, not \\@invalid!"
+        );
+    }
 }
