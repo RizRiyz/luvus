@@ -2662,6 +2662,16 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                     "usage: luvus search <text...> [--case]"
                 }));
             }
+            let query_bytes = query
+                .iter()
+                .map(String::len)
+                .fold(query.len().saturating_sub(1), usize::saturating_add);
+            if !fuzzy && query_bytes > crate::search::local::LOCAL_QUERY_BYTES {
+                return Err(anyhow!(format!(
+                    "exact search query must be at most {} bytes",
+                    crate::search::local::LOCAL_QUERY_BYTES
+                )));
+            }
             if fuzzy {
                 (
                     "search.query".into(),
@@ -4885,6 +4895,16 @@ mod tests {
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }
+
+        let oversized = format!(
+            "luvus search {}",
+            "x".repeat(crate::search::local::LOCAL_QUERY_BYTES + 1)
+        );
+        let error = parse(&argv(&oversized)).expect_err("oversized exact search must fail");
+        assert_eq!(
+            error.to_string(),
+            "exact search query must be at most 4096 bytes"
+        );
     }
 
     #[test]
