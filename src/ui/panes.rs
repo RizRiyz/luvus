@@ -250,6 +250,62 @@ fn clip_rendered_hyperlinks(
     links.extend(right_halves.into_iter().take(remaining));
 }
 
+/// Give the outer terminal an authoritative target for a plain path that Luvus
+/// has already resolved during the deliberate Ctrl/Super hover scan. Without
+/// this projection, terminals such as iTerm2 can reinterpret a label beginning
+/// with `server/` as an HTTP address before Luvus receives the click.
+///
+/// This performs no IO and no grid scan on the render path. It reuses the
+/// bounded spans and validated absolute path already stored in `HoverLink`.
+fn project_hover_file_hyperlink(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    content: Rect,
+    hover: Option<&crate::app::HoverLink>,
+) {
+    let Some(hover) = hover.filter(|hover| hover.pane == pane) else {
+        return;
+    };
+    let crate::app::LinkTarget::File { path, .. } = &hover.target else {
+        return;
+    };
+    let Some(uri) = crate::links::file_path_uri(path) else {
+        return;
+    };
+
+    for &(row, start, end) in &hover.link.spans {
+        if row >= content.height {
+            continue;
+        }
+        let start = start.min(content.width);
+        let end = end.min(content.width);
+        if start >= end {
+            continue;
+        }
+        let cover = Rect::new(content.x + start, content.y + row, end - start, 1);
+        // The resolved file is authoritative for these cells. Replace any stale
+        // child projection rather than leaving overlapping OSC 8 targets whose
+        // winner would depend on terminal implementation details.
+        clip_rendered_hyperlinks(links, pane, cover);
+        if links.len() >= MAX_RENDERED_HYPERLINKS
+            && !links.last().is_some_and(|previous| {
+                previous.pane == pane
+                    && previous.y == cover.y
+                    && previous.end == cover.x
+                    && previous.uri == uri
+            })
+        {
+            // The deliberate hover is the one link the user is actively asking
+            // the host terminal to follow. Prefer it over the oldest passive
+            // child link when a link-dense frame reaches the sparse projection
+            // cap. Hover spans are appended, so removing from the front keeps
+            // any earlier wrapped span of this same target intact.
+            links.remove(0);
+        }
+        push_rendered_hyperlink(links, pane, cover.x, cover.y, cover.width, &uri);
+    }
+}
+
 pub(super) fn draw_panes(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
@@ -369,7 +425,6 @@ pub(super) fn patch_terminal_damage(
                 }
             }
         }
-
         if id == focus {
             cursor = pane_ime_cursor(content, snapshot.cursor);
         }
@@ -484,11 +539,7 @@ fn draw_one_pane(
     // The link under a `Ctrl`-held cursor (docs/58). Borrowed, not cloned: this
     // is the render path, and the spans are recomputed only when the hovered
     // cell changes anyway.
-    let hover_link = app
-        .hover_link
-        .as_ref()
-        .filter(|h| h.pane == id)
-        .map(|h| &h.link);
+    let hover_link = app.hover_link.as_ref().filter(|h| h.pane == id);
     // The line a search jump landed on (docs/63): (content row, scroll offset it
     // was jumped to). Banded only while the view is unchanged, so any scroll or
     // new output hides it.
@@ -559,7 +610,7 @@ fn draw_one_pane(
                     // Underline the `Ctrl`-hovered link, so it reads as clickable
                     // before you commit to the click. Applied after the selection
                     // so a link inside selected text keeps both.
-                    if hover_link.is_some_and(|l| l.covers(col, row)) {
+                    if hover_link.is_some_and(|hover| hover.link.covers(col, row)) {
                         style = style
                             .fg(t.accent)
                             .add_modifier(ratatui::style::Modifier::UNDERLINED);
@@ -593,6 +644,7 @@ fn draw_one_pane(
         }
         Err(_) => None,
     };
+    project_hover_file_hyperlink(context.rendered_hyperlinks, id, content, hover_link);
 
     if let Some(region) = composer_region {
         draw_codex_composer(
@@ -851,6 +903,45 @@ mod tests {
         );
         push_rendered_hyperlink(&mut links, PaneId(1), 0, 0, 4, &uri);
         assert!(links.is_empty());
+    }
+
+    #[test]
+    fn hovered_file_displaces_a_passive_link_at_capacity() {
+        let passive_uri = "https://example.com".to_string();
+        let mut links = (0..MAX_RENDERED_HYPERLINKS)
+            .map(|index| crate::app::RenderedHyperlink {
+                pane: PaneId(2),
+                y: (index % 40) as u16,
+                start: 0,
+                end: 1,
+                uri: passive_uri.clone(),
+            })
+            .collect::<Vec<_>>();
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let expected = crate::links::file_path_uri(&path).unwrap();
+        let hover = crate::app::HoverLink {
+            pane: PaneId(1),
+            link: crate::links::Link {
+                hit: crate::links::Hit::Path {
+                    raw: "Cargo.toml".into(),
+                    text: "Cargo.toml".into(),
+                    line: None,
+                },
+                spans: vec![(0, 3, 13)],
+            },
+            target: crate::app::LinkTarget::File { path, line: None },
+        };
+
+        project_hover_file_hyperlink(&mut links, PaneId(1), Rect::new(4, 5, 80, 20), Some(&hover));
+
+        assert_eq!(links.len(), MAX_RENDERED_HYPERLINKS);
+        assert!(links.iter().any(|link| {
+            link.pane == PaneId(1)
+                && link.y == 5
+                && link.start == 7
+                && link.end == 17
+                && link.uri == expected
+        }));
     }
 
     #[test]

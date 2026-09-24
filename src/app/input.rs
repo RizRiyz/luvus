@@ -794,6 +794,24 @@ impl App {
                         self.pending_clipboard = Some(text);
                     }
                 }
+                // The PTY grid has already advanced by the time this event is
+                // delivered. A path resolved under the pointer before that
+                // output is no longer authoritative, even when the replacement
+                // happens to occupy the same screen cells. Require another
+                // deliberate mouse move to resolve the new contents.
+                if self
+                    .hover_link
+                    .as_ref()
+                    .is_some_and(|hover| hover.pane == id)
+                {
+                    self.hover_link = None;
+                    self.link_scan_at = None;
+                    // Retained PTY patching only repaints the engine's damaged
+                    // rows. The hover may span other rows, so repair the whole
+                    // client projection once to remove every OSC 8 target and
+                    // underline that belonged to the old path.
+                    self.force_redraw = true;
+                }
                 self.detection_dirty.insert(id);
                 if self.panes.contains_key(&id) {
                     self.runtime_cwd_dirty_panes.insert(id);
@@ -6038,6 +6056,63 @@ mod link_click_tests {
             "leaving a link removes its underline"
         );
         assert!(app.hover_link.is_none());
+    }
+
+    /// Plain file labels do not carry OSC 8 metadata from the child. Once a
+    /// deliberate hover resolves one against the pane CWD, the rendered frame
+    /// must expose that file target to the host terminal instead of letting it
+    /// guess that a `server/...`-shaped label is an HTTP address.
+    #[test]
+    fn ctrl_hover_projects_a_plain_file_path_to_the_host_terminal() {
+        let _env = crate::persist::test_env("link-hover-file-projection");
+        let (mut app, mut term, at) = fixture_showing("edit Cargo.toml now", 7);
+        let pane = app.layout().focus;
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let uri = crate::links::file_path_uri(&path).expect("repo path has a file URI");
+
+        assert!(
+            !app.rendered_hyperlinks.iter().any(|link| link.uri == uri),
+            "plain text has no child-supplied OSC 8 target"
+        );
+        assert!(app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::CONTROL,)));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        assert!(
+            app.rendered_hyperlinks.iter().any(|link| {
+                link.pane == pane
+                    && link.y == at.1
+                    && link.start <= at.0
+                    && link.end > at.0
+                    && link.uri == uri
+            }),
+            "the host projection must carry the validated local file target"
+        );
+        assert!(
+            app.rendered_hyperlinks
+                .iter()
+                .all(|link| !link.uri.starts_with("http://server/")),
+            "the host must never receive iTerm2's guessed server URL"
+        );
+    }
+
+    #[test]
+    fn pty_output_invalidates_a_hovered_file_target() {
+        let _env = crate::persist::test_env("link-hover-pty-output");
+        let (mut app, _term, at) = fixture_showing("edit Cargo.toml now", 7);
+        let pane = app.layout().focus;
+
+        assert!(app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::CONTROL,)));
+        assert!(app.hover_link.is_some());
+        assert_eq!(app.link_scan_at, Some(at));
+
+        assert!(app.handle_event(AppEvent::PtyData(pane)));
+        assert!(app.hover_link.is_none());
+        assert!(app.link_scan_at.is_none());
+        assert!(
+            app.force_redraw,
+            "clearing a hover must repair decorations outside the damaged PTY rows"
+        );
     }
 
     #[test]
