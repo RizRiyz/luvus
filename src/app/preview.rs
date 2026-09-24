@@ -125,6 +125,8 @@ impl App {
             let Some(ViewKind::Preview(view)) = self.views.get_mut(id) else {
                 continue;
             };
+            let viewport = rect.height.saturating_sub(1) as usize;
+            view.sync_search_layout(key, viewport.max(1));
             if let Some(document) = view.begin_layout(key) {
                 requests.push((
                     *id,

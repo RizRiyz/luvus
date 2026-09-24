@@ -70,6 +70,7 @@ pub struct DocumentView {
     pub mtime: Option<std::time::SystemTime>,
     pub read_token: u64,
     pub search: Option<PreviewSearch>,
+    search_layout: Option<LayoutKey>,
     layouts: VecDeque<(LayoutKey, Arc<PreviewLayout>)>,
     pending_layouts: HashSet<LayoutKey>,
     scroll_anchor_line: Option<usize>,
@@ -85,6 +86,7 @@ impl DocumentView {
             mtime: None,
             read_token: 0,
             search: None,
+            search_layout: None,
             layouts: VecDeque::new(),
             pending_layouts: HashSet::new(),
             scroll_anchor_line: None,
@@ -97,6 +99,7 @@ impl DocumentView {
         self.load = load;
         self.layouts.clear();
         self.pending_layouts.clear();
+        self.search_layout = None;
         self.search = search.map(|mut search| {
             if !search.editing {
                 search.matches.clear();
@@ -185,6 +188,7 @@ impl DocumentView {
 
     pub fn search_begin(&mut self) {
         self.search = Some(PreviewSearch::editing());
+        self.search_layout = None;
     }
 
     pub fn search_push(&mut self, ch: char) {
@@ -201,6 +205,7 @@ impl DocumentView {
 
     pub fn search_cancel(&mut self) {
         self.search = None;
+        self.search_layout = None;
     }
 
     pub fn search_commit(&mut self, key: LayoutKey, viewport: usize) {
@@ -221,6 +226,7 @@ impl DocumentView {
     pub fn search_clear(&mut self) {
         if let Some(search) = self.search.as_mut() {
             search.clear();
+            self.search_layout = None;
         }
     }
 
@@ -264,6 +270,20 @@ impl DocumentView {
             search.query = query;
             search.editing = false;
             search.replace_matches(matches, current);
+            self.search_layout = Some(key);
+        }
+    }
+
+    pub fn sync_search_layout(&mut self, key: LayoutKey, viewport: usize) {
+        if self.search_layout == Some(key) || self.layout(key).is_none() {
+            return;
+        }
+        let committed_query = self.search.as_ref().and_then(|search| {
+            (!search.editing && !search.query.is_empty()).then(|| search.query.clone())
+        });
+        if let Some(query) = committed_query {
+            self.rebuild_search(key, query);
+            self.reveal_search(viewport);
         }
     }
 
@@ -494,13 +514,23 @@ mod tests {
 
         view.search_commit(key, 10);
         assert_eq!(view.search.as_ref().unwrap().matches.len(), 2);
+        let wide_matches = view.search.as_ref().unwrap().matches.clone();
         let narrow = LayoutKey {
             width: 8,
             ascii: false,
         };
-        view.apply_layout(narrow, Arc::new(layout::build(document, narrow)));
+        view.apply_layout(
+            narrow,
+            Arc::new(layout::build(Arc::clone(&document), narrow)),
+        );
         assert!(!view.search.as_ref().unwrap().editing);
         assert_eq!(view.search.as_ref().unwrap().matches.len(), 2);
+        assert_eq!(view.search_layout, Some(narrow));
+
+        view.sync_search_layout(key, 10);
+
+        assert_eq!(view.search_layout, Some(key));
+        assert_eq!(view.search.as_ref().unwrap().matches, wide_matches);
     }
 
     #[test]
