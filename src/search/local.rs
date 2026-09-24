@@ -270,25 +270,16 @@ impl LiteralMatcher {
     }
 }
 
-/// Approximate Unicode simple case folding without length-changing mappings.
-/// Lowercase-uppercase-lowercase closes single-scalar equivalence classes such
-/// as Greek sigma and long s while deliberately leaving `ß` distinct from `ss`.
+/// Apply Unicode's default simple case fold without length-changing mappings.
+/// This keeps one folded scalar per source scalar so byte/display spans remain
+/// exact, while excluding locale-specific Turkic and full folds such as
+/// `I` → `ı` and `ß` → `ss`.
 fn fold_char(ch: char, case_sensitive: bool) -> char {
     if case_sensitive {
-        return ch;
+        ch
+    } else {
+        casefold::simple_fold_char(ch)
     }
-    let Some(lower) = single_char(ch.to_lowercase()) else {
-        return ch;
-    };
-    let Some(upper) = single_char(lower.to_uppercase()) else {
-        return lower;
-    };
-    single_char(upper.to_lowercase()).unwrap_or(lower)
-}
-
-fn single_char(mut chars: impl Iterator<Item = char>) -> Option<char> {
-    let first = chars.next()?;
-    chars.next().is_none().then_some(first)
 }
 
 #[cfg(test)]
@@ -342,6 +333,9 @@ mod tests {
         assert_eq!(match_spans("ΟΣ", "ος", false).len(), 1);
         assert_eq!(match_spans("σςΣ", "σσσ", false).len(), 1);
         assert!(match_spans("straße", "strasse", false).is_empty());
+        assert!(match_spans("ı", "i", false).is_empty());
+        assert!(match_spans("i", "ı", false).is_empty());
+        assert_eq!(match_spans("ſ", "s", false).len(), 1);
         let found = match_spans("👩‍💻foo", "foo", false)[0];
         assert_eq!(found.column, 2);
         let emoji = match_spans("👩‍💻foo", "👩", false)[0];

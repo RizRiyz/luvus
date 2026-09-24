@@ -58,6 +58,7 @@ crossterm = { version = "0.29", features = ["serde"] }
 portable-pty = "0.9"
 bitflags = "=2.13.0"
 alacritty_terminal = { package = "luvus-alacritty-terminal", version = "0.26" }
+casefold = "=0.1.0"
 unicode-segmentation = "=1.13.3"
 unicode-width = "0.2"
 # Explicit terminal-native document previews. The parser is pure Rust and only
