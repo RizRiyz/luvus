@@ -163,9 +163,7 @@ impl LiteralMatcher {
         Self::compile(query, case_sensitive)
     }
 
-    /// Compile the same literal semantics for callers whose input bound is
-    /// owned outside the pane-local editor.
-    pub(crate) fn compile(query: &str, case_sensitive: bool) -> Option<Self> {
+    fn compile(query: &str, case_sensitive: bool) -> Option<Self> {
         if query.is_empty() {
             return None;
         }

@@ -725,8 +725,7 @@ impl App {
     /// Preserve the exact-scrollback CLI/API contract while the interactive
     /// overlay uses the fuzzy worker.
     pub fn search_all(&self, query: &str, case_sensitive: bool) -> (Vec<LegacySearchHit>, usize) {
-        let Some(matcher) = crate::search::local::LiteralMatcher::compile(query, case_sensitive)
-        else {
+        let Some(matcher) = crate::search::local::LiteralMatcher::new(query, case_sensitive) else {
             return (Vec::new(), 0);
         };
         let mut hits = Vec::new();
