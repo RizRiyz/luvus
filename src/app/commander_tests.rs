@@ -17,6 +17,26 @@ fn unicode_editing_and_word_delete_keep_valid_boundaries() {
 }
 
 #[test]
+fn deleting_without_a_selection_clears_the_anchor() {
+    let mut commander = Commander::default();
+    commander.draft = "abc".into();
+    commander.cursor = commander.draft.len();
+    commander.selection_anchor = Some(commander.cursor);
+
+    commander.backspace(false);
+    assert_eq!(commander.draft, "ab");
+    assert_eq!(commander.selection_anchor, None);
+    assert!(commander.insert("d"));
+    assert_eq!(commander.draft, "abd");
+
+    commander.cursor = 0;
+    commander.selection_anchor = Some(0);
+    commander.delete(false);
+    assert_eq!(commander.draft, "bd");
+    assert_eq!(commander.selection_anchor, None);
+}
+
+#[test]
 fn parser_requires_explicit_targets_and_prompt() {
     let _env = crate::persist::test_env("commander-parse");
     let (tx, _) = std::sync::mpsc::channel();

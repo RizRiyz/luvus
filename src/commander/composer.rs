@@ -111,6 +111,7 @@ impl Commander {
         };
         self.draft.drain(start..self.cursor);
         self.cursor = start;
+        self.selection_anchor = None;
         self.clear_receipt();
         self.prune_staged_images();
     }
@@ -129,6 +130,7 @@ impl Commander {
                 .map_or(self.cursor, |c| self.cursor + c.len_utf8())
         };
         self.draft.drain(self.cursor..end);
+        self.selection_anchor = None;
         self.clear_receipt();
         self.prune_staged_images();
     }
