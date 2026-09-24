@@ -829,9 +829,9 @@ fn valid_host_hyperlink(uri: &str, allow_local_files: bool) -> bool {
 }
 
 /// Whether file URIs from a server on this machine also name files on the
-/// machine that owns the outer terminal. An SSH client process is local to its
-/// server socket but its terminal emulator usually runs on another machine, so
-/// host-handled `file://` links must fail closed there.
+/// machine that owns the outer terminal. A local socket proves where the client
+/// process runs, not where its terminal emulator runs, so only direct terminal
+/// ownership evidence opts in. SSH and tmux remain unknown and fail closed.
 pub(super) fn host_terminal_shares_local_filesystem() -> bool {
     host_terminal_shares_local_filesystem_with(|key| std::env::var_os(key))
 }
@@ -839,9 +839,28 @@ pub(super) fn host_terminal_shares_local_filesystem() -> bool {
 fn host_terminal_shares_local_filesystem_with(
     mut read_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
 ) -> bool {
-    !["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+    let has_value =
+        |value: Option<std::ffi::OsString>| value.is_some_and(|value| !value.is_empty());
+    if ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "TMUX"]
         .into_iter()
-        .any(|key| read_env(key).is_some_and(|value| !value.is_empty()))
+        .any(|key| has_value(read_env(key)))
+    {
+        return false;
+    }
+
+    // These variables are created by the terminal emulator for a direct local
+    // child. Generic TERM/COLORTERM values are deliberately insufficient: SSH
+    // transports them too, and their absence must remain unknown rather than
+    // silently opting into a host-handled file URI.
+    [
+        "TERM_PROGRAM",
+        "WT_SESSION",
+        "KITTY_WINDOW_ID",
+        "VTE_VERSION",
+        "KONSOLE_VERSION",
+    ]
+    .into_iter()
+    .any(|key| has_value(read_env(key)))
 }
 
 fn write_osc8<W: Write>(
@@ -1760,13 +1779,27 @@ mod paint_tests {
     }
 
     #[test]
-    fn ssh_terminal_does_not_claim_the_server_filesystem() {
-        assert!(host_terminal_shares_local_filesystem_with(|_| None));
-        assert!(host_terminal_shares_local_filesystem_with(|_| {
-            Some(std::ffi::OsString::new())
+    fn file_link_locality_requires_direct_terminal_evidence() {
+        assert!(
+            !host_terminal_shares_local_filesystem_with(|_| None),
+            "missing evidence must fail closed"
+        );
+        assert!(host_terminal_shares_local_filesystem_with(|key| {
+            (key == "TERM_PROGRAM").then(|| std::ffi::OsString::from("ghostty"))
         }));
         assert!(!host_terminal_shares_local_filesystem_with(|key| {
-            (key == "SSH_TTY").then(|| std::ffi::OsString::from("/dev/pts/4"))
+            match key {
+                "TERM_PROGRAM" => Some(std::ffi::OsString::from("ghostty")),
+                "SSH_TTY" => Some(std::ffi::OsString::from("/dev/pts/4")),
+                _ => None,
+            }
+        }));
+        assert!(!host_terminal_shares_local_filesystem_with(|key| {
+            match key {
+                "TERM_PROGRAM" => Some(std::ffi::OsString::from("ghostty")),
+                "TMUX" => Some(std::ffi::OsString::from("/private/tmux/default,1,0")),
+                _ => None,
+            }
         }));
     }
 
