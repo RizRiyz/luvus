@@ -1,8 +1,8 @@
-//! App-owned Command Center routing and exact-pane delivery.
+//! App-owned Commander routing and exact-pane delivery.
 
 use super::{
     line_end, line_start, next_word, previous_word, target_lookup, target_spans,
-    unescape_pane_mentions, CommandCenter, DeliveryPlan, ExactTarget, MAX_TARGETS,
+    unescape_pane_mentions, Commander, DeliveryPlan, ExactTarget, MAX_TARGETS,
 };
 use crate::app::{is_ctrl_chord, App, Mode};
 use crate::ids::PaneId;
@@ -14,16 +14,16 @@ use std::sync::Arc;
 
 impl App {
     /// Modal workflows take input precedence over the persistent composer.
-    pub(crate) fn command_center_accepts_input(&self) -> bool {
-        self.mode == Mode::Normal && self.command_center_overlays_clear()
+    pub(crate) fn commander_accepts_input(&self) -> bool {
+        self.mode == Mode::Normal && self.commander_overlays_clear()
     }
 
     /// A strip click may reclaim focus while a prefix shortcut is pending.
-    pub(crate) fn command_center_accepts_mouse_focus(&self) -> bool {
-        matches!(self.mode, Mode::Normal | Mode::Prefix) && self.command_center_overlays_clear()
+    pub(crate) fn commander_accepts_mouse_focus(&self) -> bool {
+        matches!(self.mode, Mode::Normal | Mode::Prefix) && self.commander_overlays_clear()
     }
 
-    fn command_center_overlays_clear(&self) -> bool {
+    fn commander_overlays_clear(&self) -> bool {
         self.bar.overflow.is_none()
             && self.cmd_inspect.is_none()
             && !self.help_open
@@ -60,65 +60,65 @@ impl App {
             && self.scroll_pane.is_none()
     }
 
-    pub(crate) fn open_command_center(&mut self) {
-        if self.command_center.take().is_some() {
+    pub(crate) fn open_commander(&mut self) {
+        if self.commander.take().is_some() {
             return;
         }
         if self.workspaces.is_empty() {
             return;
         }
-        let mut center = CommandCenter::default();
-        center.focused = true;
+        let mut commander = Commander::default();
+        commander.focused = true;
         let focused = self.layout().focus;
         if self.panes.contains_key(&focused) {
-            center.draft = format!("=p{} ", focused.0);
-            center.cursor = center.draft.len();
+            commander.draft = format!("=p{} ", focused.0);
+            commander.cursor = commander.draft.len();
         }
-        self.command_center = Some(center);
-        self.refresh_command_center_preview();
+        self.commander = Some(commander);
+        self.refresh_commander_preview();
     }
 
-    pub(crate) fn command_center_paste(&mut self, text: &str) -> bool {
-        if !self.command_center_accepts_input() {
+    pub(crate) fn commander_paste(&mut self, text: &str) -> bool {
+        if !self.commander_accepts_input() {
             return false;
         }
-        let Some(center) = self.command_center.as_mut() else {
+        let Some(commander) = self.commander.as_mut() else {
             return false;
         };
-        if !center.focused {
+        if !commander.focused {
             return false;
         }
-        center.insert(text);
-        self.refresh_command_center_preview();
+        commander.insert(text);
+        self.refresh_commander_preview();
         true
     }
 
-    pub(crate) fn command_center_image_paste(&mut self, path: &std::path::Path) -> bool {
-        if !self.command_center_accepts_input() {
+    pub(crate) fn commander_image_paste(&mut self, path: &std::path::Path) -> bool {
+        if !self.commander_accepts_input() {
             return false;
         }
-        let Some(center) = self.command_center.as_mut() else {
+        let Some(commander) = self.commander.as_mut() else {
             return false;
         };
-        if !center.focused {
+        if !commander.focused {
             return false;
         }
-        let accepted = center.insert(&path.to_string_lossy());
+        let accepted = commander.insert(&path.to_string_lossy());
         if accepted {
-            center.track_staged_image(path.to_path_buf());
+            commander.track_staged_image(path.to_path_buf());
         } else {
             crate::clipboard_image::discard_staged_png(path);
         }
-        self.refresh_command_center_preview();
+        self.refresh_commander_preview();
         true
     }
 
-    pub(crate) fn command_center_key(&mut self, key: KeyEvent) -> bool {
-        if !self.command_center_accepts_input()
+    pub(crate) fn commander_key(&mut self, key: KeyEvent) -> bool {
+        if !self.commander_accepts_input()
             || !self
-                .command_center
+                .commander
                 .as_ref()
-                .is_some_and(|center| center.focused)
+                .is_some_and(|commander| commander.focused)
         {
             return false;
         }
@@ -126,29 +126,29 @@ impl App {
             // Hand the next key to the normal prefix dispatcher. This keeps
             // every configured global action available while the strip stays
             // visible, including tab/workspace navigation and hide/show.
-            self.command_center.as_mut().unwrap().focused = false;
+            self.commander.as_mut().unwrap().focused = false;
             self.mode = Mode::Prefix;
             return true;
         }
         if key.code == KeyCode::Esc {
-            self.command_center.as_mut().unwrap().focused = false;
+            self.commander.as_mut().unwrap().focused = false;
             return true;
         }
         if key.code == KeyCode::Enter {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
-                self.command_center.as_mut().unwrap().insert("\n");
+                self.commander.as_mut().unwrap().insert("\n");
             } else {
-                self.command_center_prepare();
+                self.commander_prepare();
             }
             return true;
         }
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
-            self.command_center_cycle_target(
+            self.commander_cycle_target(
                 key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
             );
             return true;
         }
-        let center = self.command_center.as_mut().unwrap();
+        let commander = self.commander.as_mut().unwrap();
         let control = is_ctrl_chord(key.modifiers);
         let alt = key.modifiers.contains(KeyModifiers::ALT)
             && !(cfg!(windows) && key.modifiers.contains(KeyModifiers::CONTROL));
@@ -157,100 +157,103 @@ impl App {
             .intersects(KeyModifiers::SUPER | KeyModifiers::META);
         let selecting = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Up if command => center.move_cursor(0, selecting),
-            KeyCode::Down if command => center.move_cursor(center.draft.len(), selecting),
-            KeyCode::Up if !center.delivery_results.is_empty() => {
-                center.delivery_index = if center.delivery_index == 0 {
-                    center.delivery_results.len() - 1
+            KeyCode::Up if command => commander.move_cursor(0, selecting),
+            KeyCode::Down if command => commander.move_cursor(commander.draft.len(), selecting),
+            KeyCode::Up if !commander.delivery_results.is_empty() => {
+                commander.delivery_index = if commander.delivery_index == 0 {
+                    commander.delivery_results.len() - 1
                 } else {
-                    center.delivery_index - 1
+                    commander.delivery_index - 1
                 };
             }
-            KeyCode::Down if !center.delivery_results.is_empty() => {
-                center.delivery_index = (center.delivery_index + 1) % center.delivery_results.len();
+            KeyCode::Down if !commander.delivery_results.is_empty() => {
+                commander.delivery_index =
+                    (commander.delivery_index + 1) % commander.delivery_results.len();
             }
             KeyCode::Left => {
                 let next = if command {
-                    line_start(&center.draft, center.cursor)
+                    line_start(&commander.draft, commander.cursor)
                 } else if control || alt {
-                    previous_word(&center.draft, center.cursor)
+                    previous_word(&commander.draft, commander.cursor)
                 } else {
-                    center.draft[..center.cursor]
+                    commander.draft[..commander.cursor]
                         .char_indices()
                         .next_back()
                         .map_or(0, |(i, _)| i)
                 };
-                center.move_cursor(next, selecting);
+                commander.move_cursor(next, selecting);
             }
             KeyCode::Right => {
                 let next = if command {
-                    line_end(&center.draft, center.cursor)
+                    line_end(&commander.draft, commander.cursor)
                 } else if control || alt {
-                    next_word(&center.draft, center.cursor)
+                    next_word(&commander.draft, commander.cursor)
                 } else {
-                    center.cursor
-                        + center.draft[center.cursor..]
+                    commander.cursor
+                        + commander.draft[commander.cursor..]
                             .chars()
                             .next()
                             .map_or(0, char::len_utf8)
                 };
-                center.move_cursor(next, selecting);
+                commander.move_cursor(next, selecting);
             }
-            KeyCode::Home => center.move_cursor(0, selecting),
-            KeyCode::End => center.move_cursor(center.draft.len(), selecting),
-            KeyCode::Backspace if control && selecting => center.clear_all(),
-            KeyCode::Delete if control && selecting => center.clear_all(),
-            KeyCode::Backspace if command && selecting => center.clear_all(),
-            KeyCode::Delete if command && selecting => center.clear_all(),
+            KeyCode::Home => commander.move_cursor(0, selecting),
+            KeyCode::End => commander.move_cursor(commander.draft.len(), selecting),
+            KeyCode::Backspace if control && selecting => commander.clear_all(),
+            KeyCode::Delete if control && selecting => commander.clear_all(),
+            KeyCode::Backspace if command && selecting => commander.clear_all(),
+            KeyCode::Delete if command && selecting => commander.clear_all(),
             KeyCode::Backspace if command => {
-                center.delete_to(line_start(&center.draft, center.cursor));
+                commander.delete_to(line_start(&commander.draft, commander.cursor));
             }
             KeyCode::Delete if command => {
-                center.delete_to(line_end(&center.draft, center.cursor));
+                commander.delete_to(line_end(&commander.draft, commander.cursor));
             }
-            KeyCode::Backspace => center.backspace(control || alt),
-            KeyCode::Delete => center.delete(control || alt),
+            KeyCode::Backspace => commander.backspace(control || alt),
+            KeyCode::Delete => commander.delete(control || alt),
             KeyCode::Char(c) if command && c.eq_ignore_ascii_case(&'a') => {
-                center.selection_anchor = Some(0);
-                center.cursor = center.draft.len();
+                commander.selection_anchor = Some(0);
+                commander.cursor = commander.draft.len();
             }
             KeyCode::Char(c) if (command || control) && c.eq_ignore_ascii_case(&'c') => {
-                center.copy_selection(false);
+                commander.copy_selection(false);
             }
             KeyCode::Char(c) if (command || control) && c.eq_ignore_ascii_case(&'x') => {
-                center.copy_selection(true);
+                commander.copy_selection(true);
             }
             KeyCode::Char(c) if control && c.eq_ignore_ascii_case(&'a') => {
-                center.move_cursor(line_start(&center.draft, center.cursor), selecting);
+                commander.move_cursor(line_start(&commander.draft, commander.cursor), selecting);
             }
             KeyCode::Char(c) if control && c.eq_ignore_ascii_case(&'e') => {
-                center.move_cursor(line_end(&center.draft, center.cursor), selecting);
+                commander.move_cursor(line_end(&commander.draft, commander.cursor), selecting);
             }
             KeyCode::Char(c) if control && c.eq_ignore_ascii_case(&'u') => {
-                center.delete_to(line_start(&center.draft, center.cursor));
+                commander.delete_to(line_start(&commander.draft, commander.cursor));
             }
             KeyCode::Char(c) if control && c.eq_ignore_ascii_case(&'k') => {
-                center.delete_to(line_end(&center.draft, center.cursor));
+                commander.delete_to(line_end(&commander.draft, commander.cursor));
             }
-            KeyCode::Char(c) if control && c.eq_ignore_ascii_case(&'w') => center.backspace(true),
-            KeyCode::Char(c) if control && c.eq_ignore_ascii_case(&'d') => center.delete(false),
+            KeyCode::Char(c) if control && c.eq_ignore_ascii_case(&'w') => {
+                commander.backspace(true)
+            }
+            KeyCode::Char(c) if control && c.eq_ignore_ascii_case(&'d') => commander.delete(false),
             KeyCode::Char(c) if alt && c.eq_ignore_ascii_case(&'b') => {
-                center.move_cursor(previous_word(&center.draft, center.cursor), selecting);
+                commander.move_cursor(previous_word(&commander.draft, commander.cursor), selecting);
             }
             KeyCode::Char(c) if alt && c.eq_ignore_ascii_case(&'f') => {
-                center.move_cursor(next_word(&center.draft, center.cursor), selecting);
+                commander.move_cursor(next_word(&commander.draft, commander.cursor), selecting);
             }
-            KeyCode::Char(c) if alt && c.eq_ignore_ascii_case(&'d') => center.delete(true),
+            KeyCode::Char(c) if alt && c.eq_ignore_ascii_case(&'d') => commander.delete(true),
             KeyCode::Char(c) if !control && !command && !(alt && !cfg!(windows)) => {
-                center.insert(&c.to_string());
+                commander.insert(&c.to_string());
             }
             _ => {}
         }
-        self.refresh_command_center_preview();
+        self.refresh_commander_preview();
         true
     }
 
-    fn command_center_cycle_target(&mut self, backward: bool) {
+    fn commander_cycle_target(&mut self, backward: bool) {
         let ids: Vec<PaneId> = self
             .workspaces
             .iter()
@@ -259,18 +262,18 @@ impl App {
             .filter(|id| self.panes.contains_key(id))
             .collect();
         if ids.is_empty() {
-            self.command_center.as_mut().unwrap().receipt = Some("No live terminal panes".into());
+            self.commander.as_mut().unwrap().receipt = Some("No live terminal panes".into());
             return;
         }
-        let center = self.command_center.as_mut().unwrap();
-        let editing = target_spans(&center.draft)
+        let commander = self.commander.as_mut().unwrap();
+        let editing = target_spans(&commander.draft)
             .into_iter()
-            .find(|span| span.start <= center.cursor && center.cursor <= span.end);
+            .find(|span| span.start <= commander.cursor && commander.cursor <= span.end);
         let current = editing.as_ref().and_then(|span| {
-            let token = &center.draft[span.clone()];
+            let token = &commander.draft[span.clone()];
             target_lookup(token).parse::<u32>().ok().map(PaneId)
         });
-        let selected = &center.preview;
+        let selected = &commander.preview;
         let index = current.and_then(|id| ids.iter().position(|pane| *pane == id));
         let next = (0..ids.len())
             .map(|step| match (index, backward) {
@@ -285,22 +288,22 @@ impl App {
                     .any(|pane| *pane == ids[*candidate] && Some(*pane) != current)
             });
         let Some(next) = next else {
-            center.receipt = Some("All live terminal panes are selected".into());
+            commander.receipt = Some("All live terminal panes are selected".into());
             return;
         };
         if let Some(span) = editing {
-            let prefix = &center.draft[span.start..span.start + 1];
+            let prefix = &commander.draft[span.start..span.start + 1];
             let replacement = format!("{prefix}p{}", ids[next].0);
-            center.draft.replace_range(span.clone(), &replacement);
-            center.cursor = span.start + replacement.len();
-            center.selection_anchor = None;
-            center.clear_receipt();
+            commander.draft.replace_range(span.clone(), &replacement);
+            commander.cursor = span.start + replacement.len();
+            commander.selection_anchor = None;
+            commander.clear_receipt();
         } else {
-            let leading = center.draft[..center.cursor]
+            let leading = commander.draft[..commander.cursor]
                 .chars()
                 .next_back()
                 .is_some_and(|c| !c.is_whitespace());
-            let trailing = center.draft[center.cursor..]
+            let trailing = commander.draft[commander.cursor..]
                 .chars()
                 .next()
                 .is_some_and(|c| !c.is_whitespace());
@@ -310,43 +313,43 @@ impl App {
                 ids[next].0,
                 if trailing { " " } else { "" }
             );
-            if center.insert(&mention) && trailing {
-                center.cursor -= 1;
+            if commander.insert(&mention) && trailing {
+                commander.cursor -= 1;
             }
         }
-        self.refresh_command_center_preview();
+        self.refresh_commander_preview();
     }
 
-    pub(crate) fn refresh_command_center_preview(&mut self) {
-        let Some(center) = self.command_center.as_ref() else {
+    pub(crate) fn refresh_commander_preview(&mut self) {
+        let Some(commander) = self.commander.as_ref() else {
             return;
         };
         let mut ids = Vec::new();
-        for span in target_spans(&center.draft).into_iter().take(MAX_TARGETS) {
-            let lookup = target_lookup(&center.draft[span]);
-            let Ok(id) = self.command_center_resolve_target(lookup) else {
+        for span in target_spans(&commander.draft).into_iter().take(MAX_TARGETS) {
+            let lookup = target_lookup(&commander.draft[span]);
+            let Ok(id) = self.commander_resolve_target(lookup) else {
                 continue;
             };
             if self.status.contains_key(&id) {
                 ids.push(id);
             }
         }
-        self.command_center.as_mut().unwrap().preview = ids;
+        self.commander.as_mut().unwrap().preview = ids;
     }
 
-    pub(crate) fn command_center_prepare(&mut self) {
-        let draft = self.command_center.as_ref().unwrap().draft.clone();
-        match self.command_center_parse(&draft) {
-            Ok(plan) => self.command_center_dispatch(plan),
+    pub(crate) fn commander_prepare(&mut self) {
+        let draft = self.commander.as_ref().unwrap().draft.clone();
+        match self.commander_parse(&draft) {
+            Ok(plan) => self.commander_dispatch(plan),
             Err(error) => {
-                let center = self.command_center.as_mut().unwrap();
-                center.receipt = Some(error);
-                center.delivery_results.clear();
+                let commander = self.commander.as_mut().unwrap();
+                commander.receipt = Some(error);
+                commander.delivery_results.clear();
             }
         }
     }
 
-    fn command_center_resolve_target(&self, lookup: &str) -> Result<PaneId, String> {
+    fn commander_resolve_target(&self, lookup: &str) -> Result<PaneId, String> {
         if let Ok(number) = lookup.parse::<u32>() {
             let id = PaneId(number);
             return (self.panes.contains_key(&id) && self.pane_location(id).is_some())
@@ -361,7 +364,7 @@ impl App {
             .ok_or_else(|| format!("={lookup} is not a running agent alias or kind"))
     }
 
-    pub(crate) fn command_center_parse(&self, draft: &str) -> Result<DeliveryPlan, String> {
+    pub(crate) fn commander_parse(&self, draft: &str) -> Result<DeliveryPlan, String> {
         let mut targets = Vec::new();
         let mut message = String::new();
         let mut previous_end = 0;
@@ -371,7 +374,7 @@ impl App {
                 return Err("Choose 1–16 exact terminal targets (=p17 or @p17)".into());
             }
             let lookup = target_lookup(token);
-            let pane = self.command_center_resolve_target(lookup)?;
+            let pane = self.commander_resolve_target(lookup)?;
             if targets.len() == MAX_TARGETS {
                 return Err("Choose 1–16 exact terminal targets (=p17 or @p17)".into());
             }
@@ -417,7 +420,7 @@ impl App {
         Ok(DeliveryPlan { targets, prompt })
     }
 
-    pub(crate) fn command_center_dispatch(&mut self, plan: DeliveryPlan) {
+    pub(crate) fn commander_dispatch(&mut self, plan: DeliveryPlan) {
         let mut results = Vec::with_capacity(plan.targets.len());
         let selected: Vec<PaneId> = plan.targets.iter().map(|target| target.pane).collect();
         let mut all_queued = true;
@@ -440,7 +443,7 @@ impl App {
             let outcome = if target.is_agent {
                 let (reply, rx) = std::sync::mpsc::channel();
                 self.start_agent_prompt(
-                    format!("command-center-p{}", id.0),
+                    format!("commander-p{}", id.0),
                     json!({"target": id.0.to_string(), "text": plan.prompt}),
                     reply,
                     Arc::new(AtomicBool::new(false)),
@@ -473,31 +476,31 @@ impl App {
                 }
             }
         }
-        let center = self.command_center.as_mut().unwrap();
+        let commander = self.commander.as_mut().unwrap();
         if any_queued {
             // At least one terminal now owns the path; retain it for the
             // receiving child instead of deleting it with the cleared draft.
-            center.release_staged_images();
+            commander.release_staged_images();
         }
-        center.delivery_results = results;
-        center.delivery_index = 0;
-        center.receipt = None;
+        commander.delivery_results = results;
+        commander.delivery_index = 0;
+        commander.receipt = None;
         // Keep successfully selected recipients for the next message, but not
         // the sent text. Partial success clears everything so a second Enter
         // can never resubmit to recipients that already accepted the input.
         if all_queued {
-            center.draft = selected
+            commander.draft = selected
                 .iter()
                 .map(|id| format!("=p{}", id.0))
                 .collect::<Vec<_>>()
                 .join(" ");
-            center.draft.push(' ');
-            center.cursor = center.draft.len();
-            center.preview = selected;
-            center.selection_anchor = None;
+            commander.draft.push(' ');
+            commander.cursor = commander.draft.len();
+            commander.preview = selected;
+            commander.selection_anchor = None;
         } else if any_queued {
-            center.clear_all();
-            center.preview.clear();
+            commander.clear_all();
+            commander.preview.clear();
         }
     }
 }

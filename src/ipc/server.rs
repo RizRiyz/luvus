@@ -820,7 +820,7 @@ fn apply(
                     activity,
                 ),
             );
-            app.command_center = None;
+            app.commander = None;
             *foreground = Some(id);
             apply_foreground_client(app, clients, *foreground);
             app.mark_runtime_scans_dirty();
@@ -838,7 +838,7 @@ fn apply(
             clients.remove(&id);
             app.client_files_visible = client_files_visible(clients);
             if was_foreground {
-                app.command_center = None;
+                app.commander = None;
                 *foreground = latest_client(clients);
                 apply_foreground_client(app, clients, *foreground);
             }
@@ -860,7 +860,7 @@ fn apply(
             client.retained_ready = false;
             client.retained_pane_content.clear();
             if *foreground == Some(id) {
-                app.command_center = None;
+                app.commander = None;
                 *foreground = latest_client(clients);
                 apply_foreground_client(app, clients, *foreground);
             }
@@ -890,12 +890,12 @@ fn apply(
                 client.last_activity = *next_activity;
                 *next_activity = next_activity.saturating_add(1);
                 if *foreground != Some(id) {
-                    app.command_center = None;
+                    app.commander = None;
                 }
                 *foreground = Some(id);
                 apply_foreground_client(app, clients, *foreground);
             } else if *foreground == Some(id) {
-                app.command_center = None;
+                app.commander = None;
                 *foreground = latest_client(clients);
                 apply_foreground_client(app, clients, *foreground);
             }
@@ -1090,7 +1090,7 @@ fn apply(
             // geometry and PTY dimensions synchronously.
             let promoted = *foreground != Some(id);
             if promoted {
-                app.command_center = None;
+                app.commander = None;
                 *foreground = Some(id);
                 apply_foreground_client(app, clients, *foreground);
             }
@@ -1126,9 +1126,9 @@ fn apply(
             if !scoped {
                 let changed = app.handle_event(event);
                 if let Some(text) = app
-                    .command_center
+                    .commander
                     .as_mut()
-                    .and_then(|center| center.pending_clipboard.take())
+                    .and_then(|commander| commander.pending_clipboard.take())
                 {
                     let _ = client.send_control(ServerMessage::Clipboard(text));
                 }
@@ -1146,9 +1146,9 @@ fn apply(
             // copy/cut effect here, before another input can take foreground,
             // rather than using the ordinary all-clients clipboard broadcast.
             if let Some(text) = app
-                .command_center
+                .commander
                 .as_mut()
-                .and_then(|center| center.pending_clipboard.take())
+                .and_then(|commander| commander.pending_clipboard.take())
             {
                 let _ = client.send_control(ServerMessage::Clipboard(text));
             }
@@ -1325,7 +1325,7 @@ fn render_clients(
         return false;
     }
     if foreground.is_none_or(|id| !clients.contains_key(&id)) {
-        app.command_center = None;
+        app.commander = None;
         *foreground = latest_client(clients);
         apply_foreground_client(app, clients, *foreground);
     }
@@ -1388,7 +1388,7 @@ fn render_clients(
         clients.remove(&id);
     }
     if foreground.is_some_and(|id| !clients.contains_key(&id)) {
-        app.command_center = None;
+        app.commander = None;
         *foreground = latest_client(clients);
         apply_foreground_client(app, clients, *foreground);
     }
@@ -2594,8 +2594,8 @@ mod tests {
     }
 
     #[test]
-    fn foreground_handoff_discards_command_center_draft() {
-        let _env = crate::persist::test_env("command-center-handoff");
+    fn foreground_handoff_discards_commander_draft() {
+        let _env = crate::persist::test_env("commander-handoff");
         let (tx, _) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let (first, _first_rx) = display_client(80, 24, 1);
@@ -2604,8 +2604,8 @@ mod tests {
         let mut foreground = Some(1);
         let mut size = (80, 24);
         let mut activity = 3;
-        app.open_command_center();
-        app.command_center.as_mut().unwrap().draft = "private".into();
+        app.open_commander();
+        app.commander.as_mut().unwrap().draft = "private".into();
 
         apply(
             AppEvent::ClientInput {
@@ -2619,12 +2619,12 @@ mod tests {
             &mut activity,
         );
         assert_eq!(foreground, Some(2));
-        assert!(app.command_center.is_none());
+        assert!(app.commander.is_none());
     }
 
     #[test]
-    fn command_center_copy_reaches_only_the_input_client() {
-        let _env = crate::persist::test_env("command-center-private-copy");
+    fn commander_copy_reaches_only_the_input_client() {
+        let _env = crate::persist::test_env("commander-private-copy");
         let (tx, _) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let (first, first_rx) = display_client(80, 24, 1);
@@ -2633,10 +2633,10 @@ mod tests {
         let mut foreground = Some(1);
         let mut size = (80, 24);
         let mut activity = 3;
-        app.open_command_center();
-        let center = app.command_center.as_mut().unwrap();
-        center.draft = "private command".into();
-        center.cursor = center.draft.len();
+        app.open_commander();
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "private command".into();
+        commander.cursor = commander.draft.len();
         for character in ['a', 'c'] {
             apply(
                 AppEvent::ClientInput {

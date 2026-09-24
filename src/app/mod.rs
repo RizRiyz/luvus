@@ -27,7 +27,7 @@ mod automation_persistence;
 mod backend;
 mod board;
 #[cfg(test)]
-mod command_center_tests;
+mod commander_tests;
 mod config_persistence;
 mod cwd;
 pub use board::{
@@ -2360,9 +2360,9 @@ pub struct App {
     pub settings: Option<SettingsUi>,
     /// Ephemeral foreground-client composer; never persisted or projected to
     /// passive clients. A foreground handoff discards it before input routing.
-    pub(crate) command_center: Option<crate::command_center::CommandCenter>,
-    /// Hitbox of the visible Command Center strip on the interactive client.
-    pub(crate) command_center_area: Option<Rect>,
+    pub(crate) commander: Option<crate::commander::Commander>,
+    /// Hitbox of the visible Commander strip on the interactive client.
+    pub(crate) commander_area: Option<Rect>,
     /// The open folder picker (workspace chooser), if any (captures input).
     pub picker: Option<FolderPicker>,
     /// Clickable targets in the open folder picker. Specific controls precede
@@ -3161,8 +3161,8 @@ impl App {
             prefix,
             agent_names: HashMap::new(),
             settings: None,
-            command_center: None,
-            command_center_area: None,
+            commander: None,
+            commander_area: None,
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
@@ -3856,8 +3856,8 @@ impl App {
             prefix,
             agent_names,
             settings: None,
-            command_center: None,
-            command_center_area: None,
+            commander: None,
+            commander_area: None,
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,

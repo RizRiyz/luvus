@@ -1,10 +1,10 @@
 ---
-title: Command Center
+title: Commander
 description: Send prompts or shell commands to exact terminal panes without leaving your current pane.
 ---
 
-Press **`Ctrl+Space Enter`** (or your configured prefix, then `Enter`). Command
-Center opens as a full-width pane-style strip below the terminal panes. It
+Press **`Ctrl+Space Enter`** (or your configured prefix, then `Enter`). Commander
+opens as a full-width pane-style strip below the terminal panes. It
 does not create a layout leaf or change the selected pane, but it initially
 takes keyboard focus so you can type a message. The visible terminal area
 resizes while it is open. Press the same shortcut to hide it. The draft
@@ -29,7 +29,7 @@ by pane ID to run a one-line command:
 In the review examples, p17 and p24 are agent panes. A shell target executes
 the text as a shell command, so use a command valid for every selected shell.
 
-The focused terminal pane's `=pID` is filled in when Command Center opens.
+The focused terminal pane's `=pID` is filled in when Commander opens.
 Add `@pID` mentions before, within, or after the message to select more panes;
 they are removed from the delivered text. `=pID` tokens also work anywhere.
 `Tab` and `Shift+Tab` add a pane mention at the cursor or cycle a mention the

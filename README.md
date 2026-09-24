@@ -34,7 +34,7 @@
 - **Agent workflows:** Start, name, message, inspect, wait for, resume, and send
   keys to agents. Fork Claude, Grok, Codex, Pi, and OMP sessions with their
   context intact.
-- **Command Center:** Send prompts to exact agent panes or commands to exact
+- **Commander:** Send prompts to exact agent panes or commands to exact
   shell panes from a bottom pane-style composer. Send to several explicit
   targets at once without changing your current pane.
 - **Files and code:** Browse a Git-aware file tree, inspect files and changes,

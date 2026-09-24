@@ -563,7 +563,7 @@ pub(crate) fn retained_pty_eligible(app: &App) -> bool {
         && app.hover_link.is_none()
         && app.search_flash.is_none()
         && app.settings.is_none()
-        && app.command_center.is_none()
+        && app.commander.is_none()
         && app.picker.is_none()
         && !app.help_open
         && !app.changelog_open
@@ -739,23 +739,23 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
         (tabbar, pane_area)
     };
-    // The interactive Command Center has its own bottom strip, rather than
+    // The interactive Commander has its own bottom strip, rather than
     // painting over terminal cells. Passive clients keep their full viewport.
-    let command_height = if resize_panes && app.command_center.is_some() {
+    let commander_height = if resize_panes && app.commander.is_some() {
         4.min(full_pane_area.height.saturating_sub(1))
     } else {
         0
     };
-    let (pane_area, command_area) = if command_height >= 3 {
-        let [panes, command] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(command_height)])
+    let (pane_area, commander_area) = if commander_height >= 3 {
+        let [panes, commander_strip] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(commander_height)])
                 .areas(full_pane_area);
-        (panes, Some(command))
+        (panes, Some(commander_strip))
     } else {
         (full_pane_area, None)
     };
     if resize_panes {
-        app.command_center_area = command_area;
+        app.commander_area = commander_area;
     }
 
     app.last_pane_area = pane_area;
@@ -961,9 +961,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         };
     status::draw_status(f, status, app, &t);
     // The strip is pane chrome. Menus, modals, and toasts must paint over it.
-    let command_cursor = match (command_area, app.command_center.as_ref()) {
-        (Some(command_area), Some(center)) => {
-            draw_command_center(f, command_area, app, center, cat, &t).filter(|_| center.focused)
+    let commander_cursor = match (commander_area, app.commander.as_ref()) {
+        (Some(commander_area), Some(commander)) => {
+            draw_commander(f, commander_area, app, commander, cat, &t).filter(|_| commander.focused)
         }
         _ => None,
     };
@@ -1240,9 +1240,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     let cursor = if settings_hits.is_some()
         || (resize_panes
             && app
-                .command_center
+                .commander
                 .as_ref()
-                .is_some_and(|center| center.focused))
+                .is_some_and(|commander| commander.focused))
         || app.search.is_some()
         || picker_open
         || app.bar.overflow.is_some()
@@ -1279,8 +1279,8 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         f.set_cursor_anchor(x, y, visible);
     }
     app.last_cursor = cursor.map(|(x, y, _)| (x, y));
-    if app.command_center_accepts_input() {
-        if let Some((x, y)) = command_cursor {
+    if app.commander_accepts_input() {
+        if let Some((x, y)) = commander_cursor {
             f.set_cursor_anchor(x, y, true);
             app.last_cursor = Some((x, y));
         }
@@ -1297,11 +1297,11 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.new_ws_rect = new_ws_rect;
 }
 
-fn draw_command_center(
+fn draw_commander(
     f: &mut RenderTarget,
     rect: Rect,
     app: &App,
-    center: &crate::command_center::CommandCenter,
+    commander: &crate::commander::Commander,
     cat: &crate::i18n::Catalog,
     t: &Theme,
 ) -> Option<(u16, u16)> {
@@ -1309,7 +1309,7 @@ fn draw_command_center(
     if rect.width < 24 || rect.height < 3 {
         return None;
     }
-    let preview = center
+    let preview = commander
         .preview
         .iter()
         .filter_map(|id| {
@@ -1325,9 +1325,9 @@ fn draw_command_center(
         .collect::<Vec<_>>()
         .join(" · ");
     let title = if preview.is_empty() {
-        cat.cc_title.to_string()
+        cat.commander_title.to_string()
     } else {
-        format!("{} · {}", cat.cc_title, preview)
+        format!("{} · {}", cat.commander_title, preview)
     };
     // Match split-pane chrome: plain border and dark terminal background.
     // Clear the whole strip first so underlying/previous frame glyphs cannot
@@ -1342,7 +1342,7 @@ fn draw_command_center(
         ))
         .border_style(
             Style::new()
-                .fg(if center.focused {
+                .fg(if commander.focused {
                     t.border_focus
                 } else {
                     t.border
@@ -1352,24 +1352,24 @@ fn draw_command_center(
         .style(Style::new().bg(t.mantle).fg(t.text));
     f.render_widget(block, rect);
     let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2);
-    let before = center.draft[..center.cursor]
+    let before = commander.draft[..commander.cursor]
         .replace('\n', "↵")
         .replace('\t', "⇥");
     let cursor_columns = 2 + UnicodeWidthStr::width(before.as_str());
     let offset = cursor_columns.saturating_sub(inner.width.saturating_sub(1) as usize);
     let display = |text: &str| text.replace('\n', "↵").replace('\t', "⇥");
-    let line = if let Some(selected) = center.selection() {
+    let line = if let Some(selected) = commander.selection() {
         Line::from(vec![
             Span::raw("› "),
-            Span::raw(display(&center.draft[..selected.start])),
+            Span::raw(display(&commander.draft[..selected.start])),
             Span::styled(
-                display(&center.draft[selected.clone()]),
+                display(&commander.draft[selected.clone()]),
                 Style::new().fg(t.text).bg(t.sel_bg),
             ),
-            Span::raw(display(&center.draft[selected.end..])),
+            Span::raw(display(&commander.draft[selected.end..])),
         ])
     } else {
-        Line::raw(format!("› {}", display(&center.draft)))
+        Line::raw(format!("› {}", display(&commander.draft)))
     };
     f.render_widget(
         Paragraph::new(line)
@@ -1377,24 +1377,24 @@ fn draw_command_center(
             .scroll((0, offset.min(u16::MAX as usize) as u16)),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
-    let footer = if let Some(result) = center.delivery_results.get(center.delivery_index) {
+    let footer = if let Some(result) = commander.delivery_results.get(commander.delivery_index) {
         result
-    } else if let Some(receipt) = center.receipt.as_deref() {
+    } else if let Some(receipt) = commander.receipt.as_deref() {
         receipt
     } else {
         if inner.width < 64 {
-            cat.cc_hint_compact
+            cat.commander_hint_compact
         } else {
-            cat.cc_hint
+            cat.commander_hint
         }
     };
     if inner.height > 1 {
         f.render_widget(
-            Paragraph::new(if center.delivery_results.len() > 1 {
+            Paragraph::new(if commander.delivery_results.len() > 1 {
                 format!(
                     "{}/{} {footer}  ↑↓",
-                    center.delivery_index + 1,
-                    center.delivery_results.len()
+                    commander.delivery_index + 1,
+                    commander.delivery_results.len()
                 )
             } else {
                 footer.to_string()
@@ -2191,12 +2191,12 @@ mod dock_projection_tests {
 }
 
 #[cfg(test)]
-mod command_center_tests {
+mod commander_tests {
     use super::*;
 
     #[test]
     fn composer_gets_own_bottom_strip_and_is_private_to_active_view() {
-        let _env = crate::persist::test_env("command-center-projection");
+        let _env = crate::persist::test_env("commander-projection");
         let (tx, _) = std::sync::mpsc::channel();
         let mut app = App::new(100, 30, tx).unwrap();
         let pane = app.layout().focus;
@@ -2206,10 +2206,10 @@ mod command_center_tests {
         let size = app.panes[&pane].size();
         let content = app.pane_content_rects.clone();
 
-        app.open_command_center();
-        let center = app.command_center.as_mut().unwrap();
-        center.draft = "private prompt".into();
-        center.cursor = center.draft.len();
+        app.open_commander();
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "private prompt".into();
+        commander.cursor = commander.draft.len();
         let mut active = Buffer::empty(area);
         render_into(&mut RenderTarget::new(&mut active, area), &mut app);
         let row = app.last_pane_area.bottom() + 1;
@@ -2218,10 +2218,10 @@ mod command_center_tests {
         assert!(app.panes[&pane].size().1 < size.1);
         assert!(app.pane_content_rects[0].1.bottom() <= app.last_pane_area.bottom());
         assert_ne!(app.pane_content_rects, content);
-        let strip = app.command_center_area.expect("interactive strip hitbox");
+        let strip = app.commander_area.expect("interactive strip hitbox");
         assert!(app.last_cursor.is_some_and(|(_, y)| y >= strip.y));
 
-        app.command_center.as_mut().unwrap().focused = false;
+        app.commander.as_mut().unwrap().focused = false;
         let mut unfocused = Buffer::empty(area);
         render_into(&mut RenderTarget::new(&mut unfocused, area), &mut app);
         assert!(app.last_cursor.is_none_or(|(_, y)| y < strip.y));
@@ -2232,9 +2232,9 @@ mod command_center_tests {
             .map(|x| passive[(x, row)].symbol())
             .collect();
         assert!(!passive_line.contains("private prompt"));
-        assert!(app.command_center.is_some());
+        assert!(app.commander.is_some());
 
-        app.command_center.as_mut().unwrap().focused = true;
+        app.commander.as_mut().unwrap().focused = true;
         app.help_open = true;
         let mut help = Buffer::empty(area);
         render_into(&mut RenderTarget::new(&mut help, area), &mut app);

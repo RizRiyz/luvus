@@ -6,7 +6,7 @@ use std::path::PathBuf;
 const MAX_DRAFT_CHARS: usize = 16_384;
 
 #[derive(Default, Debug)]
-pub(crate) struct CommandCenter {
+pub(crate) struct Commander {
     /// The strip stays visible when focus moves to a tab, pane, or other UI.
     pub(crate) focused: bool,
     pub draft: String,
@@ -25,7 +25,7 @@ pub(crate) struct CommandCenter {
     pub(crate) staged_images: Vec<PathBuf>,
 }
 
-impl CommandCenter {
+impl Commander {
     pub(crate) fn track_staged_image(&mut self, path: PathBuf) {
         self.staged_images.push(path);
     }
@@ -162,7 +162,7 @@ impl CommandCenter {
     }
 }
 
-impl Drop for CommandCenter {
+impl Drop for Commander {
     fn drop(&mut self) {
         for path in &self.staged_images {
             crate::clipboard_image::discard_staged_png(path);

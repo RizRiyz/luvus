@@ -89,7 +89,7 @@ export default defineConfig({
             { label: 'The Git Tab', slug: 'docs/guides/git' },
             { label: 'Browsing & Opening Files', slug: 'docs/guides/files' },
             { label: 'Global Fuzzy Finder', slug: 'docs/guides/search' },
-            { label: 'Command Center', slug: 'docs/guides/command-center' },
+            { label: 'Commander', slug: 'docs/guides/commander' },
             { label: 'DIFF Review', slug: 'docs/guides/diff' },
             { label: 'Worktrees', slug: 'docs/guides/worktrees' },
             { label: 'Remote Sessions', slug: 'docs/guides/remote' },

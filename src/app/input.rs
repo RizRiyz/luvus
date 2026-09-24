@@ -732,7 +732,7 @@ impl App {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
-                if self.command_center_paste(&s) {
+                if self.commander_paste(&s) {
                     return true;
                 }
                 // Copy mode owns input just like scroll mode: never leak a
@@ -745,7 +745,7 @@ impl App {
                 if self.paste_into_modal(&s) {
                     return true; // the modal buffer changed → redraw
                 }
-                if self.command_center.is_some() && !self.command_center_accepts_input() {
+                if self.commander.is_some() && !self.commander_accepts_input() {
                     return true; // a non-text overlay owns input; do not paste behind it
                 }
                 // Otherwise it goes to the focused pane.
@@ -753,7 +753,7 @@ impl App {
                 false // goes to the pane; its echo (PtyData) renders it
             }
             AppEvent::PasteImage(path) => {
-                if self.command_center_image_paste(&path) {
+                if self.commander_image_paste(&path) {
                     return true;
                 }
                 // Image paths are terminal input, never modal text. Restrict
@@ -1338,9 +1338,9 @@ impl App {
         let kind = m.kind;
         // The strip is persistent, not modal. Its own hitbox focuses editing;
         // clicks outside hand the event to normal tab/sidebar/pane hit testing.
-        if self.command_center_accepts_mouse_focus() {
-            if let Some(center) = self.command_center.as_mut() {
-                let inside = self.command_center_area.is_some_and(|rect| {
+        if self.commander_accepts_mouse_focus() {
+            if let Some(commander) = self.commander.as_mut() {
+                let inside = self.commander_area.is_some_and(|rect| {
                     m.column >= rect.x
                         && m.column < rect.right()
                         && m.row >= rect.y
@@ -1349,13 +1349,13 @@ impl App {
                 if inside {
                     if matches!(kind, MouseEventKind::Down(_)) {
                         self.mode = Mode::Normal;
-                        center.focused = true;
+                        commander.focused = true;
                         return true;
                     }
                     return false;
                 }
                 if matches!(kind, MouseEventKind::Down(_)) {
-                    center.focused = false;
+                    commander.focused = false;
                     if self.mode == Mode::Prefix {
                         self.mode = Mode::Normal;
                     }
@@ -3887,13 +3887,13 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return false; // ignored — nothing changed
         }
-        if self.command_center_accepts_input()
+        if self.commander_accepts_input()
             && self
-                .command_center
+                .commander
                 .as_ref()
-                .is_some_and(|center| center.focused)
+                .is_some_and(|commander| commander.focused)
         {
-            return self.command_center_key(key);
+            return self.commander_key(key);
         }
         if self.bar.overflow.take().is_some() {
             return true;
