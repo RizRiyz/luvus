@@ -1,4 +1,4 @@
-//! Dependency-free global fuzzy finder (docs/90).
+//! Global fuzzy finder and exact retained-output search (docs/90).
 //!
 //! Small navigation metadata is ranked immediately. Complete file-path
 //! catalogs and retained terminal output are scored on workers and merged by a
@@ -725,14 +725,10 @@ impl App {
     /// Preserve the exact-scrollback CLI/API contract while the interactive
     /// overlay uses the fuzzy worker.
     pub fn search_all(&self, query: &str, case_sensitive: bool) -> (Vec<LegacySearchHit>, usize) {
-        let needle = if case_sensitive {
-            query.to_string()
-        } else {
-            query.to_lowercase()
-        };
-        if needle.is_empty() {
+        let Some(matcher) = crate::search::local::LiteralMatcher::compile(query, case_sensitive)
+        else {
             return (Vec::new(), 0);
-        }
+        };
         let mut hits = Vec::new();
         let mut total = 0usize;
         for (wi, ws) in self.workspaces.iter().enumerate() {
@@ -743,14 +739,7 @@ impl App {
                     };
                     let mut pane_hits = 0usize;
                     pane.for_each_retained_row(&mut |row, history, _row_count, line| {
-                        let folded;
-                        let haystack = if case_sensitive {
-                            line
-                        } else {
-                            folded = line.to_lowercase();
-                            &folded
-                        };
-                        let Some(col) = haystack.find(&needle) else {
+                        let Some(col) = matcher.first_byte_start(line) else {
                             return;
                         };
                         total = total.saturating_add(1);
@@ -1595,6 +1584,27 @@ mod tests {
 
     fn key(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn legacy_exact_search_uses_shared_folding_and_original_byte_columns() {
+        let _env = crate::persist::test_env("exact-search-shared-folding");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = App::new(80, 24, tx).unwrap();
+        let pane_id = app.layout().focus;
+        let pane = app.panes.get(&pane_id).unwrap();
+        pane.engine
+            .lock()
+            .unwrap()
+            .advance("\x1b[H\x1b[2JKx needle ς ſ ı".as_bytes());
+
+        let (needle, total) = app.search_all("needle", false);
+        assert_eq!(total, 1);
+        assert_eq!(needle[0].col, "Kx ".len());
+        assert_eq!(app.search_all("σ", false).1, 1);
+        assert_eq!(app.search_all("s", false).1, 1);
+        assert_eq!(app.search_all("i", false).1, 0);
+        assert_eq!(app.search_all("ı", false).1, 1);
     }
 
     #[test]

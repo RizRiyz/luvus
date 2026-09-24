@@ -8,6 +8,8 @@ use std::collections::VecDeque;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::casefold::fold_char;
+
 pub const LOCAL_MATCH_CAP: usize = 10_000;
 pub const LOCAL_QUERY_BYTES: usize = 4 * 1024;
 
@@ -155,7 +157,16 @@ pub struct LiteralMatcher {
 
 impl LiteralMatcher {
     pub fn new(query: &str, case_sensitive: bool) -> Option<Self> {
-        if query.is_empty() || query.len() > LOCAL_QUERY_BYTES {
+        if query.len() > LOCAL_QUERY_BYTES {
+            return None;
+        }
+        Self::compile(query, case_sensitive)
+    }
+
+    /// Compile the same literal semantics for callers whose input bound is
+    /// owned outside the pane-local editor.
+    pub(crate) fn compile(query: &str, case_sensitive: bool) -> Option<Self> {
+        if query.is_empty() {
             return None;
         }
         let pattern = query
@@ -182,6 +193,15 @@ impl LiteralMatcher {
 
     pub fn has_match(&self, line: &str) -> bool {
         self.raw_spans(line, 0).1
+    }
+
+    /// Return the first source UTF-8 byte without computing display geometry.
+    pub(crate) fn first_byte_start(&self, line: &str) -> Option<usize> {
+        self.raw_spans(line, 1)
+            .0
+            .into_iter()
+            .next()
+            .map(|(start, _end)| start)
     }
 
     /// Find at most `limit` non-overlapping literal matches. Byte ranges stay
@@ -267,18 +287,6 @@ impl LiteralMatcher {
             }
         }
         (spans, false)
-    }
-}
-
-/// Apply Unicode's default simple case fold without length-changing mappings.
-/// This keeps one folded scalar per source scalar so byte/display spans remain
-/// exact, while excluding locale-specific Turkic and full folds such as
-/// `I` → `ı` and `ß` → `ss`.
-fn fold_char(ch: char, case_sensitive: bool) -> char {
-    if case_sensitive {
-        ch
-    } else {
-        casefold::simple_fold_char(ch)
     }
 }
 
