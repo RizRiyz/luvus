@@ -23,6 +23,14 @@ Output is intentionally stricter than navigation and paths: an ordered fuzzy
 subsequence must fill at least half of its matched span, preventing distant
 characters in long terminal rows from flooding the results.
 
+Case-insensitive global fuzzy matching, exact `luvus search`, and pane-local
+content search share Unicode default simple case folding. For example, Greek
+sigma variants match consistently, while dotless `ı` stays distinct from `i`.
+Search does not apply locale-specific Turkic folding, multi-character expansion
+such as `ß` to `ss`, or Unicode normalization. `Ctrl+i` still changes case
+sensitivity only for retained **Output** matching; navigation and file paths
+remain case-insensitive.
+
 The finder does not search arbitrary file contents or agent transcripts outside
 retained pane history.
 
@@ -86,7 +94,7 @@ Luvus home. Local and remote catalogs are never mixed.
 
 ## CLI
 
-The existing exact retained-output command is unchanged:
+The retained-output command remains exact rather than fuzzy:
 
 ```sh
 luvus search "build failed" --case
