@@ -132,7 +132,26 @@ impl DocumentView {
         self.document()
     }
 
+    #[cfg(test)]
     pub fn apply_layout(&mut self, key: LayoutKey, layout: Arc<PreviewLayout>) {
+        self.apply_layout_with_viewport(key, layout, None);
+    }
+
+    pub fn apply_layout_for_viewport(
+        &mut self,
+        key: LayoutKey,
+        layout: Arc<PreviewLayout>,
+        viewport: usize,
+    ) {
+        self.apply_layout_with_viewport(key, layout, Some(viewport.max(1)));
+    }
+
+    fn apply_layout_with_viewport(
+        &mut self,
+        key: LayoutKey,
+        layout: Arc<PreviewLayout>,
+        viewport: Option<usize>,
+    ) {
         self.pending_layouts.remove(&key);
         self.layouts.retain(|(candidate, _)| *candidate != key);
         self.layouts.push_front((key, layout));
@@ -154,6 +173,9 @@ impl DocumentView {
         });
         if let Some(query) = committed_query {
             self.rebuild_search(key, query);
+            if let Some(viewport) = viewport {
+                self.reveal_search(viewport);
+            }
         }
     }
 
@@ -397,6 +419,53 @@ mod tests {
             })
             .is_some());
         assert_eq!(view.layouts.len(), layout::LAYOUT_CACHE_CAP);
+    }
+
+    #[test]
+    fn committed_search_reveals_an_offscreen_match_when_layout_arrives() {
+        let source = (0..30)
+            .map(|index| {
+                if index == 25 {
+                    "Needle".to_string()
+                } else {
+                    format!("line {index}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let document = Arc::new(PreviewDocument::new(
+            Arc::<str>::from(source.as_str()),
+            vec![Block::Code {
+                language: None,
+                text: source.clone(),
+                range: 0..source.len(),
+            }],
+        ));
+        let key = LayoutKey {
+            width: 40,
+            ascii: false,
+        };
+        let mut view = DocumentView::new(PathBuf::from("README.md"), PreviewKind::Markdown);
+        view.apply(PreviewLoad::Ready(Arc::clone(&document)));
+        view.search_begin();
+        for ch in "needle".chars() {
+            view.search_push(ch);
+        }
+        view.search_commit(key, 5);
+        assert_eq!(view.scroll, 0, "no layout exists yet");
+
+        view.apply_layout_for_viewport(key, Arc::new(layout::build(document, key)), 5);
+
+        let search = view.search.as_ref().expect("committed search");
+        assert_eq!(search.matches.len(), 1);
+        assert!(
+            view.scroll > 0,
+            "the asynchronously discovered offscreen match must become visible"
+        );
+        assert!(
+            search.matches[search.current].row >= view.scroll,
+            "current match starts inside the revealed viewport"
+        );
     }
 
     #[test]

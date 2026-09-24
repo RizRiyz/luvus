@@ -161,13 +161,20 @@ impl App {
         key: LayoutKey,
         layout: Arc<PreviewLayout>,
     ) -> bool {
+        let viewport = self
+            .pane_content_rects
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .map(|(_, rect)| rect.height.saturating_sub(1) as usize)
+            .unwrap_or(20)
+            .max(1);
         let Some(ViewKind::Preview(view)) = self.views.get_mut(&id) else {
             return false;
         };
         if view.read_token != token || view.path != path || view.kind != kind {
             return false;
         }
-        view.apply_layout(key, layout);
+        view.apply_layout_for_viewport(key, layout, viewport);
         true
     }
 
@@ -659,6 +666,66 @@ mod tests {
             Arc::new(crate::files::preview::layout::build(document, key)),
         );
         view
+    }
+
+    #[test]
+    fn async_preview_layout_reveals_a_committed_offscreen_match() {
+        let _env = crate::persist::test_env("preview-search-async-layout-reveal");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let id = app.layout().focus;
+        let source = (0..30)
+            .map(|index| {
+                if index == 25 {
+                    "Needle".to_string()
+                } else {
+                    format!("line {index}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let document = Arc::new(crate::files::preview::PreviewDocument::new(
+            Arc::<str>::from(source.as_str()),
+            vec![crate::files::preview::Block::Code {
+                language: None,
+                text: source.clone(),
+                range: 0..source.len(),
+            }],
+        ));
+        let mut view = DocumentView::new(PathBuf::from("README.md"), PreviewKind::Markdown);
+        view.apply(PreviewLoad::Ready(Arc::clone(&document)));
+        view.search_begin();
+        for ch in "needle".chars() {
+            view.search_push(ch);
+        }
+        let key = LayoutKey {
+            width: 40,
+            ascii: false,
+        };
+        view.search_commit(key, 5);
+        let token = view.read_token;
+        app.panes.remove(&id);
+        app.views.insert(id, ViewKind::Preview(view));
+        app.pane_content_rects = vec![(id, Rect::new(0, 0, key.width, 6))];
+
+        assert!(app.apply_preview_layout(
+            id,
+            PathBuf::from("README.md"),
+            PreviewKind::Markdown,
+            token,
+            key,
+            Arc::new(crate::files::preview::layout::build(document, key)),
+        ));
+
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Preview(view))
+                if view.scroll > 0
+                    && view.search.as_ref().is_some_and(|search| {
+                        search.matches[search.current].row >= view.scroll
+                            && search.matches[search.current].row < view.scroll + 5
+                    })
+        ));
     }
 
     #[test]
