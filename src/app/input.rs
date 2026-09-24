@@ -1333,12 +1333,33 @@ impl App {
     /// renderer consumes, so moving across ordinary pane cells does not request
     /// frames while links, menus, FILES rows, and resize seams still repaint.
     fn handle_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) -> bool {
-        use ratatui::crossterm::event::MouseEventKind;
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 
         let kind = m.kind;
+        if self.commander.is_none() {
+            self.commander_resize = false;
+        }
+        if self.commander_resize {
+            match kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.update_commander_resize(m.row);
+                    return true;
+                }
+                MouseEventKind::Up(_) => {
+                    self.commander_resize = false;
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         // The strip is persistent, not modal. Its own hitbox focuses editing;
         // clicks outside hand the event to normal tab/sidebar/pane hit testing.
         if self.commander_accepts_mouse_focus() {
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
+                && self.begin_commander_resize(m.column, m.row)
+            {
+                return true;
+            }
             if let Some(commander) = self.commander.as_mut() {
                 let inside = self.commander_area.is_some_and(|rect| {
                     m.column >= rect.x

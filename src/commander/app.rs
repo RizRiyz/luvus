@@ -1,11 +1,13 @@
 //! App-owned Commander routing and exact-pane delivery.
 
 use super::{
-    line_end, line_start, next_word, previous_word, target_lookup, target_spans,
-    unescape_pane_mentions, Commander, DeliveryPlan, ExactTarget, MAX_TARGETS,
+    encode_component, line_end, line_start, next_word, parse_scoped_target, previous_word,
+    target_lookup, target_spans, unescape_pane_mentions, Commander, DeliveryPlan, ExactTarget,
+    ScopedTarget, MAX_TARGETS,
 };
-use crate::app::{is_ctrl_chord, App, Mode};
+use crate::app::{is_ctrl_chord, App, Mode, COMMANDER_MIN_HEIGHT};
 use crate::ids::PaneId;
+use crate::layout::Axis;
 use crate::terminal::pty::Pane;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::{json, Value};
@@ -61,6 +63,7 @@ impl App {
     }
 
     pub(crate) fn open_commander(&mut self) {
+        self.commander_resize = false;
         if self.commander.take().is_some() {
             return;
         }
@@ -71,11 +74,39 @@ impl App {
         commander.focused = true;
         let focused = self.layout().focus;
         if self.panes.contains_key(&focused) {
-            commander.draft = format!("=p{} ", focused.0);
+            commander.draft = format!("@p{} ", focused.0);
             commander.cursor = commander.draft.len();
         }
         self.commander = Some(commander);
         self.refresh_commander_preview();
+    }
+
+    pub(crate) fn begin_commander_resize(&mut self, column: u16, row: u16) -> bool {
+        let on_top_border = self.commander.is_some()
+            && self.commander_area.is_some_and(|area| {
+                area.height >= COMMANDER_MIN_HEIGHT
+                    && row == area.y
+                    && column >= area.x
+                    && column < area.right()
+            });
+        if on_top_border {
+            self.commander_resize = true;
+        }
+        on_top_border
+    }
+
+    pub(crate) fn update_commander_resize(&mut self, row: u16) {
+        let Some(area) = self.commander_area else {
+            return;
+        };
+        let available = area.bottom().saturating_sub(self.last_pane_area.y);
+        let max_height = available.saturating_sub(crate::layout::MIN_PANE);
+        if max_height >= COMMANDER_MIN_HEIGHT {
+            self.commander_height = area
+                .bottom()
+                .saturating_sub(row)
+                .clamp(COMMANDER_MIN_HEIGHT, max_height);
+        }
     }
 
     pub(crate) fn commander_paste(&mut self, text: &str) -> bool {
@@ -135,7 +166,10 @@ impl App {
             return true;
         }
         if key.code == KeyCode::Enter {
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            {
                 self.commander.as_mut().unwrap().insert("\n");
             } else {
                 self.commander_prepare();
@@ -159,6 +193,8 @@ impl App {
         match key.code {
             KeyCode::Up if command => commander.move_cursor(0, selecting),
             KeyCode::Down if command => commander.move_cursor(commander.draft.len(), selecting),
+            KeyCode::Up if commander.move_vertical(true, selecting) => {}
+            KeyCode::Down if commander.move_vertical(false, selecting) => {}
             KeyCode::Up if !commander.delivery_results.is_empty() => {
                 commander.delivery_index = if commander.delivery_index == 0 {
                     commander.delivery_results.len() - 1
@@ -254,26 +290,65 @@ impl App {
     }
 
     fn commander_cycle_target(&mut self, backward: bool) {
-        let ids: Vec<PaneId> = self
-            .workspaces
-            .iter()
-            .flat_map(|ws| ws.tabs.iter())
-            .flat_map(|tab| tab.layout.leaves())
-            .filter(|id| self.panes.contains_key(id))
-            .collect();
+        let editing = {
+            let commander = self.commander.as_ref().unwrap();
+            target_spans(&commander.draft)
+                .into_iter()
+                .find(|span| span.start <= commander.cursor && commander.cursor <= span.end)
+                .map(|span| (span.clone(), commander.draft[span].to_string()))
+        };
+        if let Some((span, token)) = editing.as_ref() {
+            if let Some(completion) = self.commander_complete_scope_name(token, backward) {
+                match completion {
+                    Ok(replacement) => {
+                        let commander = self.commander.as_mut().unwrap();
+                        commander.draft.replace_range(span.clone(), &replacement);
+                        commander.cursor = span.start + replacement.len();
+                        commander.selection_anchor = None;
+                        commander.clear_receipt();
+                        self.refresh_commander_preview();
+                    }
+                    Err(message) => self.commander.as_mut().unwrap().receipt = Some(message),
+                }
+                return;
+            }
+        }
+        let scope = match editing
+            .as_ref()
+            .map(|(_, token)| parse_scoped_target(target_lookup(token)))
+            .transpose()
+        {
+            Ok(scope) => scope.flatten(),
+            Err(message) => {
+                self.commander.as_mut().unwrap().receipt = Some(message);
+                return;
+            }
+        };
+        let ids = match scope.as_ref() {
+            Some(scope) => match self.commander_scoped_candidates(scope) {
+                Ok(ids) => ids,
+                Err(message) => {
+                    self.commander.as_mut().unwrap().receipt = Some(message);
+                    return;
+                }
+            },
+            None => self
+                .workspaces
+                .iter()
+                .flat_map(|ws| ws.tabs.iter())
+                .flat_map(|tab| tab.layout.leaves())
+                .filter(|id| self.panes.contains_key(id))
+                .collect(),
+        };
         if ids.is_empty() {
-            self.commander.as_mut().unwrap().receipt = Some("No live terminal panes".into());
+            self.commander.as_mut().unwrap().receipt =
+                Some("No live terminal panes in that scope".into());
             return;
         }
-        let commander = self.commander.as_mut().unwrap();
-        let editing = target_spans(&commander.draft)
-            .into_iter()
-            .find(|span| span.start <= commander.cursor && commander.cursor <= span.end);
-        let current = editing.as_ref().and_then(|span| {
-            let token = &commander.draft[span.clone()];
-            target_lookup(token).parse::<u32>().ok().map(PaneId)
-        });
-        let selected = &commander.preview;
+        let current = editing
+            .as_ref()
+            .and_then(|(_, token)| self.commander_resolve_target(target_lookup(token)).ok());
+        let selected = &self.commander.as_ref().unwrap().preview;
         let index = current.and_then(|id| ids.iter().position(|pane| *pane == id));
         let next = (0..ids.len())
             .map(|step| match (index, backward) {
@@ -288,12 +363,17 @@ impl App {
                     .any(|pane| *pane == ids[*candidate] && Some(*pane) != current)
             });
         let Some(next) = next else {
-            commander.receipt = Some("All live terminal panes are selected".into());
+            self.commander.as_mut().unwrap().receipt =
+                Some("All live terminal panes are selected".into());
             return;
         };
-        if let Some(span) = editing {
-            let prefix = &commander.draft[span.start..span.start + 1];
-            let replacement = format!("{prefix}p{}", ids[next].0);
+        let replacement = if let Some(scope) = scope.as_ref() {
+            self.commander_format_scoped_target(scope, ids[next])
+        } else {
+            self.commander_pane_mention(ids[next])
+        };
+        let commander = self.commander.as_mut().unwrap();
+        if let Some((span, _)) = editing {
             commander.draft.replace_range(span.clone(), &replacement);
             commander.cursor = span.start + replacement.len();
             commander.selection_anchor = None;
@@ -308,9 +388,8 @@ impl App {
                 .next()
                 .is_some_and(|c| !c.is_whitespace());
             let mention = format!(
-                "{}@p{}{}",
+                "{}{replacement}{}",
                 if leading { " " } else { "" },
-                ids[next].0,
                 if trailing { " " } else { "" }
             );
             if commander.insert(&mention) && trailing {
@@ -325,6 +404,9 @@ impl App {
             return;
         };
         let mut ids = Vec::new();
+        if let Some(Ok((id, _))) = self.commander_parse_split_action(&commander.draft) {
+            ids.push(id);
+        }
         for span in target_spans(&commander.draft).into_iter().take(MAX_TARGETS) {
             let lookup = target_lookup(&commander.draft[span]);
             let Ok(id) = self.commander_resolve_target(lookup) else {
@@ -339,6 +421,17 @@ impl App {
 
     pub(crate) fn commander_prepare(&mut self) {
         let draft = self.commander.as_ref().unwrap().draft.clone();
+        if let Some(action) = self.commander_parse_split_action(&draft) {
+            match action {
+                Ok((target, axis)) => self.commander_split(target, axis),
+                Err(error) => {
+                    let commander = self.commander.as_mut().unwrap();
+                    commander.receipt = Some(error);
+                    commander.delivery_results.clear();
+                }
+            }
+            return;
+        }
         match self.commander_parse(&draft) {
             Ok(plan) => self.commander_dispatch(plan),
             Err(error) => {
@@ -349,6 +442,56 @@ impl App {
         }
     }
 
+    /// A split is a standalone action on one exact pane, never prompt text.
+    fn commander_parse_split_action(&self, draft: &str) -> Option<Result<(PaneId, Axis), String>> {
+        let trimmed = draft.trim();
+        let token = trimmed.split_whitespace().next()?;
+        let (mention, suffix) = token.rsplit_once(':')?;
+        let axis = match suffix {
+            "sv" => Axis::Col,
+            "sh" => Axis::Row,
+            _ => return None,
+        };
+        if !mention.starts_with('@') {
+            return None;
+        }
+        if trimmed != token {
+            return Some(Err(
+                "A split action takes one exact pane and no message".into()
+            ));
+        }
+        Some(
+            self.commander_resolve_target(target_lookup(mention))
+                .map(|pane| (pane, axis)),
+        )
+    }
+
+    fn commander_split(&mut self, target: PaneId, axis: Axis) {
+        let Some(new_pane) = self.split_pane(target, axis, true) else {
+            let commander = self.commander.as_mut().unwrap();
+            commander.receipt = Some(format!("p{} could not be split", target.0));
+            commander.delivery_results.clear();
+            return;
+        };
+        let mention = self.commander_pane_mention(new_pane);
+        let direction = match axis {
+            Axis::Col => "right",
+            Axis::Row => "below",
+        };
+        let commander = self.commander.as_mut().unwrap();
+        commander.clear_all();
+        commander.draft = format!("{mention} ");
+        commander.cursor = commander.draft.len();
+        commander.selection_anchor = None;
+        commander.preview = vec![new_pane];
+        commander.delivery_results.clear();
+        commander.receipt = Some(format!(
+            "p{}: split {direction} into p{}",
+            target.0, new_pane.0
+        ));
+        commander.focused = false;
+    }
+
     fn commander_resolve_target(&self, lookup: &str) -> Result<PaneId, String> {
         if let Ok(number) = lookup.parse::<u32>() {
             let id = PaneId(number);
@@ -356,27 +499,244 @@ impl App {
                 .then_some(id)
                 .ok_or_else(|| format!("p{number} is not a live terminal pane"));
         }
+        if let Some(scope) = parse_scoped_target(lookup)? {
+            return self.commander_resolve_scoped_target(&scope);
+        }
+        if let Some(id) = self.agent_names.get(lookup).copied() {
+            return (self.panes.contains_key(&id) && self.pane_location(id).is_some())
+                .then_some(id)
+                .ok_or_else(|| format!("@{lookup} is not a live terminal pane"));
+        }
         let id = self
             .resolve_agent_target(&json!({"target": lookup}))
             .map_err(|(_, message)| message)?;
         (self.pane_location(id).is_some() && self.is_agent_pane(id))
             .then_some(id)
-            .ok_or_else(|| format!("={lookup} is not a running agent alias or kind"))
+            .ok_or_else(|| format!("@{lookup} is not a running agent alias or kind"))
+    }
+
+    fn commander_pane_mention(&self, id: PaneId) -> String {
+        let name = self
+            .agent_names
+            .iter()
+            .find_map(|(name, pane)| (*pane == id).then_some(name.as_str()));
+        match name {
+            Some(name)
+                if !name.strip_prefix('p').is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                }) =>
+            {
+                format!("@{name}")
+            }
+            _ => format!("@p{}", id.0),
+        }
+    }
+
+    fn commander_scope_indices(
+        &self,
+        scope: &ScopedTarget,
+    ) -> Result<(Option<usize>, Option<usize>), String> {
+        if let Some(session) = scope.session.as_deref() {
+            if session != crate::session::display_name() {
+                return Err("Cross-session Commander delivery is not available yet".into());
+            }
+        }
+        let workspace = if let Some(name) = scope.workspace.as_deref() {
+            let mut matches = self
+                .workspaces
+                .iter()
+                .enumerate()
+                .filter(|(_, workspace)| workspace.name == name)
+                .map(|(index, _)| index);
+            let index = matches
+                .next()
+                .ok_or_else(|| format!("Workspace {name:?} is not available"))?;
+            if matches.next().is_some() {
+                return Err(format!("Workspace name {name:?} is ambiguous"));
+            }
+            Some(index)
+        } else if scope.tab.is_some() {
+            Some(self.active_ws)
+        } else {
+            None
+        };
+        let tab = if let Some(name) = scope.tab.as_deref() {
+            let workspace_index = workspace.ok_or("Choose a workspace before a tab")?;
+            let mut matches = self.workspaces[workspace_index]
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|(index, tab)| {
+                    tab.name.as_deref() == Some(name)
+                        || (tab.name.is_none() && name == (index + 1).to_string())
+                })
+                .map(|(index, _)| index);
+            let index = matches
+                .next()
+                .ok_or_else(|| format!("Tab {name:?} is not available"))?;
+            if matches.next().is_some() {
+                return Err(format!("Tab name {name:?} is ambiguous"));
+            }
+            Some(index)
+        } else {
+            None
+        };
+        Ok((workspace, tab))
+    }
+
+    /// Tab grows a path one named scope at a time. It never expands a scope
+    /// into a send-to-all operation.
+    fn commander_complete_scope_name(
+        &self,
+        token: &str,
+        backward: bool,
+    ) -> Option<Result<String, String>> {
+        let raw = token.strip_prefix('@')?;
+        let (parent, last) = raw.rsplit_once('/').unwrap_or(("", raw));
+        let parent_scope = if parent.is_empty() {
+            Ok(ScopedTarget::default())
+        } else {
+            parse_scoped_target(parent)
+                .and_then(|scope| scope.ok_or_else(|| "Invalid mention path".to_string()))
+        };
+        let complete = |name: &str| {
+            let separator = if parent.is_empty() { "" } else { "/" };
+            format!("@{parent}{separator}{last}{}", encode_component(name))
+        };
+        match last {
+            "session:" if parent.is_empty() => Some(Ok(complete(&crate::session::display_name()))),
+            "workspace:" => Some(parent_scope.and_then(|scope| {
+                self.commander_scope_indices(&scope)?;
+                let names: Vec<&str> = self.workspaces.iter().map(|ws| ws.name.as_str()).collect();
+                let name = if backward {
+                    names.last()
+                } else {
+                    names.first()
+                }
+                .ok_or("No workspaces available")?;
+                Ok(complete(name))
+            })),
+            "tab:" => Some(parent_scope.and_then(|scope| {
+                let (workspace, _) = self.commander_scope_indices(&scope)?;
+                let workspace = workspace.unwrap_or(self.active_ws);
+                let tabs = &self.workspaces[workspace].tabs;
+                let index = if backward {
+                    tabs.len().checked_sub(1)
+                } else {
+                    Some(0)
+                }
+                .filter(|index| *index < tabs.len())
+                .ok_or("No tabs available")?;
+                let label = tabs[index]
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| (index + 1).to_string());
+                Ok(complete(&label))
+            })),
+            "pane:" => Some(parent_scope.and_then(|scope| {
+                let ids = self.commander_scoped_candidates(&scope)?;
+                let id = if backward { ids.last() } else { ids.first() }
+                    .copied()
+                    .ok_or("No live terminal panes in that scope")?;
+                Ok(self.commander_format_scoped_target(&scope, id))
+            })),
+            _ => None,
+        }
+    }
+
+    fn commander_scoped_candidates(&self, scope: &ScopedTarget) -> Result<Vec<PaneId>, String> {
+        let (workspace, tab) = self.commander_scope_indices(scope)?;
+        Ok(self
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| workspace.is_none_or(|selected| *index == selected))
+            .flat_map(|(_, workspace)| {
+                workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, tab_item)| {
+                        tab.is_none_or(|selected| index == selected)
+                            .then_some(tab_item.layout.leaves())
+                    })
+            })
+            .flatten()
+            .filter(|id| self.panes.contains_key(id))
+            .collect())
+    }
+
+    fn commander_resolve_scoped_target(&self, scope: &ScopedTarget) -> Result<PaneId, String> {
+        let (workspace, tab) = self.commander_scope_indices(scope)?;
+        let name = scope
+            .pane
+            .as_deref()
+            .ok_or("Complete the scope with Tab to choose an exact pane")?;
+        let id = name
+            .strip_prefix('p')
+            .and_then(|digits| digits.parse::<u32>().ok())
+            .map(PaneId)
+            .or_else(|| self.agent_names.get(name).copied())
+            .ok_or_else(|| format!("Pane {name:?} is not available"))?;
+        let (actual_workspace, actual_tab) = self
+            .pane_location(id)
+            .filter(|_| self.panes.contains_key(&id))
+            .ok_or_else(|| format!("Pane {name:?} is not live"))?;
+        if workspace.is_some_and(|index| index != actual_workspace)
+            || tab.is_some_and(|index| index != actual_tab)
+        {
+            return Err(format!("Pane {name:?} is outside the mentioned scope"));
+        }
+        Ok(id)
+    }
+
+    fn commander_format_scoped_target(&self, scope: &ScopedTarget, id: PaneId) -> String {
+        let (workspace, tab) = self.pane_location(id).unwrap();
+        let mut parts = Vec::new();
+        if let Some(session) = scope.session.as_deref() {
+            parts.push(format!("session:{}", encode_component(session)));
+        }
+        if scope.workspace.is_some() || scope.session.is_some() {
+            parts.push(format!(
+                "workspace:{}",
+                encode_component(&self.workspaces[workspace].name)
+            ));
+        }
+        if scope.tab.is_some() || scope.workspace.is_some() || scope.session.is_some() {
+            let label = self.workspaces[workspace].tabs[tab]
+                .name
+                .clone()
+                .unwrap_or_else(|| (tab + 1).to_string());
+            parts.push(format!("tab:{}", encode_component(&label)));
+        }
+        let pane_name = self
+            .agent_names
+            .iter()
+            .find_map(|(name, pane)| (*pane == id).then_some(name.as_str()))
+            .map_or_else(|| format!("p{}", id.0), str::to_string);
+        parts.push(format!("pane:{}", encode_component(&pane_name)));
+        format!("@{}", parts.join("/"))
     }
 
     pub(crate) fn commander_parse(&self, draft: &str) -> Result<DeliveryPlan, String> {
         let mut targets = Vec::new();
+        let mut group = Vec::new();
         let mut message = String::new();
         let mut previous_end = 0;
         for span in target_spans(draft) {
             let token = &draft[span.clone()];
             if token.len() == 1 {
-                return Err("Choose 1–16 exact terminal targets (=p17 or @p17)".into());
+                return Err("Choose 1–16 exact terminal targets (@p17)".into());
+            }
+            let between = &draft[previous_end..span.start];
+            message.push_str(between);
+            if !group.is_empty() && !between.trim().is_empty() {
+                finish_delivery_group(&mut targets, &mut group, &mut message)?;
             }
             let lookup = target_lookup(token);
             let pane = self.commander_resolve_target(lookup)?;
-            if targets.len() == MAX_TARGETS {
-                return Err("Choose 1–16 exact terminal targets (=p17 or @p17)".into());
+            if targets.len() + group.len() == MAX_TARGETS {
+                return Err("Choose 1–16 exact terminal targets (@p17)".into());
             }
             let is_agent = self.is_agent_pane(pane);
             let terminal_id = self
@@ -387,16 +747,17 @@ impl App {
                 .terminal_id;
             if targets
                 .iter()
+                .chain(group.iter())
                 .any(|target: &ExactTarget| target.pane == pane)
             {
                 return Err(format!("p{} is selected twice", pane.0));
             }
-            targets.push(ExactTarget {
+            group.push(ExactTarget {
                 pane,
                 terminal_id,
                 is_agent,
+                prompt: String::new(),
             });
-            message.push_str(&draft[previous_end..span.start]);
             previous_end = span.end;
             // Remove one following separator along with the mention. The
             // preceding separator then keeps adjacent words/lines separated.
@@ -407,22 +768,21 @@ impl App {
             }
         }
         message.push_str(&draft[previous_end..]);
-        if targets.is_empty() {
-            return Err("Start with an exact terminal target, for example =p17".into());
+        if targets.is_empty() && group.is_empty() {
+            return Err("Mention an exact terminal target, for example @p17".into());
         }
-        let prompt = unescape_pane_mentions(message.trim());
-        if prompt.is_empty() {
-            return Err("Enter a prompt or shell command after the target".into());
-        }
-        if prompt.contains('\n') && targets.iter().any(|target| !target.is_agent) {
-            return Err("Shell commands must be one line".into());
-        }
-        Ok(DeliveryPlan { targets, prompt })
+        finish_delivery_group(&mut targets, &mut group, &mut message)?;
+        Ok(DeliveryPlan { targets })
     }
 
     pub(crate) fn commander_dispatch(&mut self, plan: DeliveryPlan) {
         let mut results = Vec::with_capacity(plan.targets.len());
         let selected: Vec<PaneId> = plan.targets.iter().map(|target| target.pane).collect();
+        let shared_prompt = plan.targets.first().is_some_and(|first| {
+            plan.targets
+                .iter()
+                .all(|target| target.prompt == first.prompt)
+        });
         let mut all_queued = true;
         let mut any_queued = false;
         for target in plan.targets {
@@ -444,7 +804,7 @@ impl App {
                 let (reply, rx) = std::sync::mpsc::channel();
                 self.start_agent_prompt(
                     format!("commander-p{}", id.0),
-                    json!({"target": id.0.to_string(), "text": plan.prompt}),
+                    json!({"target": id.0.to_string(), "text": target.prompt}),
                     reply,
                     Arc::new(AtomicBool::new(false)),
                 );
@@ -463,7 +823,7 @@ impl App {
                         .to_string())
                 }
             } else {
-                self.panes[&id].try_submit_text(&plan.prompt)
+                self.panes[&id].try_submit_text(&target.prompt)
             };
             match outcome {
                 Ok(()) => {
@@ -476,24 +836,22 @@ impl App {
                 }
             }
         }
+        let retained_mentions = selected
+            .iter()
+            .map(|id| self.commander_pane_mention(*id))
+            .collect::<Vec<_>>()
+            .join(" ");
         let commander = self.commander.as_mut().unwrap();
         if any_queued {
             // At least one terminal now owns the path; retain it for the
             // receiving child instead of deleting it with the cleared draft.
             commander.release_staged_images();
         }
-        commander.delivery_results = results;
-        commander.delivery_index = 0;
-        commander.receipt = None;
         // Keep successfully selected recipients for the next message, but not
-        // the sent text. Partial success clears everything so a second Enter
-        // can never resubmit to recipients that already accepted the input.
-        if all_queued {
-            commander.draft = selected
-                .iter()
-                .map(|id| format!("=p{}", id.0))
-                .collect::<Vec<_>>()
-                .join(" ");
+        // the sent text. Different per-pane messages or partial success clear
+        // the draft so a second Enter can never send to the wrong recipients.
+        if all_queued && shared_prompt {
+            commander.draft = retained_mentions;
             commander.draft.push(' ');
             commander.cursor = commander.draft.len();
             commander.preview = selected;
@@ -502,5 +860,28 @@ impl App {
             commander.clear_all();
             commander.preview.clear();
         }
+        commander.delivery_results = results;
+        commander.delivery_index = 0;
+        commander.receipt = None;
     }
+}
+
+fn finish_delivery_group(
+    targets: &mut Vec<ExactTarget>,
+    group: &mut Vec<ExactTarget>,
+    message: &mut String,
+) -> Result<(), String> {
+    let prompt = unescape_pane_mentions(message.trim());
+    if prompt.is_empty() {
+        return Err("Enter a prompt or shell command after each target group".into());
+    }
+    if prompt.contains('\n') && group.iter().any(|target| !target.is_agent) {
+        return Err("Shell commands must be one line".into());
+    }
+    targets.extend(group.drain(..).map(|mut target| {
+        target.prompt = prompt.clone();
+        target
+    }));
+    message.clear();
+    Ok(())
 }

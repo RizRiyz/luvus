@@ -742,11 +742,15 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // The interactive Commander has its own bottom strip, rather than
     // painting over terminal cells. Passive clients keep their full viewport.
     let commander_height = if resize_panes && app.commander.is_some() {
-        4.min(full_pane_area.height.saturating_sub(1))
+        app.commander_height.min(
+            full_pane_area
+                .height
+                .saturating_sub(crate::layout::MIN_PANE),
+        )
     } else {
         0
     };
-    let (pane_area, commander_area) = if commander_height >= 3 {
+    let (pane_area, commander_area) = if commander_height >= crate::app::COMMANDER_MIN_HEIGHT {
         let [panes, commander_strip] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(commander_height)])
                 .areas(full_pane_area);
@@ -1305,7 +1309,6 @@ fn draw_commander(
     cat: &crate::i18n::Catalog,
     t: &Theme,
 ) -> Option<(u16, u16)> {
-    use unicode_width::UnicodeWidthStr;
     if rect.width < 24 || rect.height < 3 {
         return None;
     }
@@ -1352,31 +1355,21 @@ fn draw_commander(
         .style(Style::new().bg(t.mantle).fg(t.text));
     f.render_widget(block, rect);
     let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2);
-    let before = commander.draft[..commander.cursor]
-        .replace('\n', "↵")
-        .replace('\t', "⇥");
-    let cursor_columns = 2 + UnicodeWidthStr::width(before.as_str());
-    let offset = cursor_columns.saturating_sub(inner.width.saturating_sub(1) as usize);
-    let display = |text: &str| text.replace('\n', "↵").replace('\t', "⇥");
-    let line = if let Some(selected) = commander.selection() {
-        Line::from(vec![
-            Span::raw("› "),
-            Span::raw(display(&commander.draft[..selected.start])),
-            Span::styled(
-                display(&commander.draft[selected.clone()]),
-                Style::new().fg(t.text).bg(t.sel_bg),
-            ),
-            Span::raw(display(&commander.draft[selected.end..])),
-        ])
-    } else {
-        Line::raw(format!("› {}", display(&commander.draft)))
-    };
-    f.render_widget(
-        Paragraph::new(line)
-            .style(Style::new().bg(t.mantle).fg(t.text))
-            .scroll((0, offset.min(u16::MAX as usize) as u16)),
-        Rect::new(inner.x, inner.y, inner.width, 1),
+    let editor_height = inner.height.saturating_sub(1).max(1);
+    let (lines, cursor_row, cursor_column) = commander_editor_lines(
+        &commander.draft,
+        commander.cursor,
+        commander.selection(),
+        inner.width.saturating_sub(2) as usize,
+        editor_height as usize,
+        t,
     );
+    for (visible_row, line) in lines.into_iter().enumerate() {
+        f.render_widget(
+            Paragraph::new(line).style(Style::new().bg(t.mantle).fg(t.text)),
+            Rect::new(inner.x, inner.y + visible_row as u16, inner.width, 1),
+        );
+    }
     let footer = if let Some(result) = commander.delivery_results.get(commander.delivery_index) {
         result
     } else if let Some(receipt) = commander.receipt.as_deref() {
@@ -1400,16 +1393,105 @@ fn draw_commander(
                 footer.to_string()
             })
             .style(Style::new().bg(t.mantle).fg(t.overlay1)),
-            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            Rect::new(inner.x, inner.y + editor_height, inner.width, 1),
         );
     }
     Some((
-        inner.x
-            + cursor_columns
-                .saturating_sub(offset)
-                .min(inner.width.saturating_sub(1) as usize) as u16,
-        inner.y,
+        inner.x + (2 + cursor_column).min(inner.width.saturating_sub(1) as usize) as u16,
+        inner.y + cursor_row as u16,
     ))
+}
+
+/// Wrap the bounded draft into terminal cells while retaining byte-based
+/// selection and the caret's true position across pasted/newline input.
+fn commander_editor_lines(
+    draft: &str,
+    cursor: usize,
+    selection: Option<std::ops::Range<usize>>,
+    width: usize,
+    visible_rows: usize,
+    t: &Theme,
+) -> (Vec<Line<'static>>, usize, usize) {
+    use std::collections::VecDeque;
+    use unicode_width::UnicodeWidthChar;
+
+    let width = width.max(1);
+    let visible_rows = visible_rows.max(1);
+    let mut rows: VecDeque<(usize, Vec<(String, bool)>)> = VecDeque::new();
+    rows.push_back((0, Vec::new()));
+    let (mut row, mut column) = (0, 0);
+    let mut caret = (0, 0);
+    for (index, character) in draft.char_indices() {
+        let shown = if character == '\t' { '⇥' } else { character };
+        let character_width = UnicodeWidthChar::width(shown).unwrap_or(0);
+        if character != '\n' && column + character_width > width {
+            if caret.0 == row && index > cursor {
+                break;
+            }
+            row += 1;
+            column = 0;
+            rows.push_back((row, Vec::new()));
+            if rows.len() > visible_rows {
+                rows.pop_front();
+            }
+        }
+        if index == cursor {
+            caret = (row, column);
+        }
+        if character == '\n' {
+            if index >= cursor {
+                break;
+            }
+            row += 1;
+            column = 0;
+            rows.push_back((row, Vec::new()));
+            if rows.len() > visible_rows {
+                rows.pop_front();
+            }
+            continue;
+        }
+        let selected = selection
+            .as_ref()
+            .is_some_and(|range| range.contains(&index));
+        let line = &mut rows.back_mut().unwrap().1;
+        if let Some((text, state)) = line.last_mut() {
+            if *state == selected {
+                text.push(shown);
+            } else {
+                line.push((shown.to_string(), selected));
+            }
+        } else {
+            line.push((shown.to_string(), selected));
+        }
+        column += character_width;
+    }
+    if cursor == draft.len() {
+        if column >= width {
+            row += 1;
+            column = 0;
+            rows.push_back((row, Vec::new()));
+            if rows.len() > visible_rows {
+                rows.pop_front();
+            }
+        }
+        caret = (row, column);
+    }
+    let first_visible = rows.front().unwrap().0;
+    let lines = rows
+        .into_iter()
+        .map(|(index, chunks)| {
+            let mut spans = vec![Span::raw(if index == 0 { "› " } else { "  " })];
+            spans.extend(chunks.into_iter().map(|(text, selected)| {
+                if selected {
+                    Span::styled(text, Style::new().fg(t.text).bg(t.sel_bg))
+                } else {
+                    Span::raw(text)
+                }
+            }));
+            Line::from(spans)
+        })
+        .collect();
+    (lines, caret.0 - first_visible, caret.1)
 }
 
 // ── shared layout + state helpers (used across the ui submodules) ──
@@ -2219,6 +2301,7 @@ mod commander_tests {
         assert!(app.pane_content_rects[0].1.bottom() <= app.last_pane_area.bottom());
         assert_ne!(app.pane_content_rects, content);
         let strip = app.commander_area.expect("interactive strip hitbox");
+        assert_eq!(strip.height, 5);
         assert!(app.last_cursor.is_some_and(|(_, y)| y >= strip.y));
 
         app.commander.as_mut().unwrap().focused = false;
@@ -2241,5 +2324,86 @@ mod commander_tests {
         let help_line: String = (0..area.width).map(|x| help[(x, row)].symbol()).collect();
         assert!(!help_line.contains("private prompt"));
         assert!(app.last_cursor.is_none());
+    }
+
+    #[test]
+    fn commander_top_border_drag_resizes_without_covering_the_terminal() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let _env = crate::persist::test_env("commander-drag-height");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.open_commander();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut initial = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut initial, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let pane_height = app.last_pane_area.height;
+        let mouse = |kind, row| {
+            crate::event::AppEvent::Mouse(MouseEvent {
+                kind,
+                column: strip.x + 2,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), strip.y));
+        assert!(app.commander_resize);
+        app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), strip.y - 3));
+        let mut grown = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut grown, area), &mut app);
+        assert_eq!(app.commander_area.unwrap().height, strip.height + 3);
+        assert_eq!(app.last_pane_area.height, pane_height - 3);
+        app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 0));
+        let mut clamped = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut clamped, area), &mut app);
+        assert!(app.last_pane_area.height >= crate::layout::MIN_PANE);
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
+        assert!(!app.commander_resize);
+
+        let bottom = app.commander_area.unwrap().bottom();
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), bottom - 1));
+        assert!(!app.commander_resize, "only the top border starts a resize");
+        let resized_height = app.commander_area.unwrap().height;
+        app.open_commander();
+        app.open_commander();
+        let mut reopened = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut reopened, area), &mut app);
+        assert_eq!(app.commander_area.unwrap().height, resized_height);
+    }
+
+    #[test]
+    fn commander_multiline_caret_and_text_share_the_visible_editor_rows() {
+        let _env = crate::persist::test_env("commander-multiline-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(50, 20, tx).unwrap();
+        app.open_commander();
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "@p1 first line\nsecond line".into();
+        commander.cursor = commander.draft.len();
+        let area = Rect::new(0, 0, 50, 20);
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let first: String = (0..area.width)
+            .map(|x| buffer[(x, strip.y + 1)].symbol())
+            .collect();
+        let second: String = (0..area.width)
+            .map(|x| buffer[(x, strip.y + 2)].symbol())
+            .collect();
+        assert!(first.contains("first line"));
+        assert!(second.contains("second line"));
+        assert_eq!(app.last_cursor.unwrap().1, strip.y + 2);
+
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = format!("@p1 {}", "x".repeat(120));
+        commander.cursor = commander.draft.len();
+        let mut wrapped = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut wrapped, area), &mut app);
+        let final_row: String = (0..area.width)
+            .map(|x| wrapped[(x, strip.y + 2)].symbol())
+            .collect();
+        assert!(final_row.contains("xxx"));
+        assert_eq!(app.last_cursor.unwrap().1, strip.y + 2);
     }
 }

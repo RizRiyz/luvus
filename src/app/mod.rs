@@ -2055,6 +2055,8 @@ const RESIZE_GRAB_TOL: u16 = 2;
 /// header plus one line of content, so a dock can be made small but never
 /// squeezed into nothing the user then cannot grab back.
 pub(crate) const MIN_DOCK_HEIGHT: u16 = 3;
+pub(crate) const COMMANDER_MIN_HEIGHT: u16 = 3;
+pub(crate) const COMMANDER_DEFAULT_HEIGHT: u16 = 5;
 
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
@@ -2363,6 +2365,9 @@ pub struct App {
     pub(crate) commander: Option<crate::commander::Commander>,
     /// Hitbox of the visible Commander strip on the interactive client.
     pub(crate) commander_area: Option<Rect>,
+    /// Foreground-only strip height and active top-border drag; not persisted.
+    pub(crate) commander_height: u16,
+    pub(crate) commander_resize: bool,
     /// The open folder picker (workspace chooser), if any (captures input).
     pub picker: Option<FolderPicker>,
     /// Clickable targets in the open folder picker. Specific controls precede
@@ -3163,6 +3168,8 @@ impl App {
             settings: None,
             commander: None,
             commander_area: None,
+            commander_height: COMMANDER_DEFAULT_HEIGHT,
+            commander_resize: false,
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
@@ -3858,6 +3865,8 @@ impl App {
             settings: None,
             commander: None,
             commander_area: None,
+            commander_height: COMMANDER_DEFAULT_HEIGHT,
+            commander_resize: false,
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
@@ -5218,7 +5227,7 @@ impl App {
     /// Split beside a pane in the workspace and tab that actually own it.
     /// With focus disabled, the current view and the target tab's prior focus are
     /// preserved even when the target belongs to another workspace.
-    fn split_pane(&mut self, pane: PaneId, axis: Axis, focus: bool) -> Option<PaneId> {
+    pub(crate) fn split_pane(&mut self, pane: PaneId, axis: Axis, focus: bool) -> Option<PaneId> {
         let (wsi, ti) = self.pane_location(pane)?;
         // Resolve the candidate chain up front (target pane → target workspace
         // root → $HOME, existing only) and hand the primary plus its fallbacks to

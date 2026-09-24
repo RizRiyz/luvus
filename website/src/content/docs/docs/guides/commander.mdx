@@ -4,11 +4,12 @@ description: Send prompts or shell commands to exact terminal panes without leav
 ---
 
 Press **`Ctrl+Space Enter`** (or your configured prefix, then `Enter`). Commander
-opens as a full-width pane-style strip below the terminal panes. It
+opens as a full-width, two-line composer below the terminal panes. It
 does not create a layout leaf or change the selected pane, but it initially
 takes keyboard focus so you can type a message. The visible terminal area
-resizes while it is open. Press the same shortcut to hide it. The draft
-disappears when you hide it or another TUI client takes control.
+resizes while it is open. Drag Commander's top border to change its height;
+the terminal keeps a minimum height. Press the same shortcut to hide it. The
+draft disappears when you hide it or another TUI client takes control.
 
 The strip is not modal: prefix shortcuts still change tabs, workspaces, panes,
 and other Luvus controls while it stays visible. `Esc` returns keyboard focus
@@ -16,57 +17,102 @@ to the selected pane without hiding the strip. Clicking a tab, workspace, or
 pane works normally and leaves the draft intact; click the strip to type into
 it again. Navigating elsewhere does not silently change its explicit targets.
 
-Address a live agent by pane ID or Luvus alias to send a prompt. Address a shell
-by pane ID to run a one-line command:
+Mention a live agent by pane ID or Luvus alias to send a prompt. Mention a shell
+by pane ID or pane name to run a one-line command:
 
 ```text
-=p17 review the current diff
-=reviewer check the tests
-=p24 ls
-=p17 review this with @p24
+@p17 review the current diff
+@reviewer check the tests
+@p24 ls
+@p17 @reviewer review this together
 ```
 
-In the review examples, p17 and p24 are agent panes. A shell target executes
-the text as a shell command, so use a command valid for every selected shell.
+Here p17 and reviewer are agent panes, while p24 is a shell. A shell target
+executes its text as a command, so use a command valid for every selected shell.
 
-The focused terminal pane's `=pID` is filled in when Commander opens.
-Add `@pID` mentions before, within, or after the message to select more panes;
-they are removed from the delivered text. `=pID` tokens also work anywhere.
-`Tab` and `Shift+Tab` add a pane mention at the cursor or cycle a mention the
-cursor is on. A unique agent kind such as `=codex` also works as the first
-word; an ambiguous kind requires a pane ID or alias. Shells require a pane ID.
-Targets can be in another tab or workspace of the **same** named session. The title shows the
-recognized targets before you send.
-
-Only exact `@pID` and `=pID` words are pane mentions; package names such as
-`@types/node` and arguments such as `=value` remain prompt text. Prefix an
-exact mention with `\` to send it literally, for example `\@p24`.
-
-To send the same text to several panes, list each exact target:
+The focused terminal pane's `@pID` is filled in when Commander opens.
+Exact `@pID` mentions select panes anywhere in the message, including within
+the text. A named path can narrow an exact pane through its tab and workspace:
 
 ```text
-=p17 =p24 review the authentication changes
+@tab:tests/pane:reviewer check the tests
+@workspace:app/tab:tests/pane:p24 ls
 ```
 
-One `Enter` sends directly to every listed pane; no confirmation is needed.
-Each agent receives a prompt; each shell executes the text as a command. Shell
-commands must be one line, even if the composer contains a newline. Luvus
-rechecks each pane, terminal lifetime, and agent/shell identity at dispatch,
-reports each result, and does not retry successful deliveries if another
-target fails. Use `Up` and `Down` to inspect receipts. If only some panes
-received the text, the draft clears to prevent an accidental resend. A
-workspace, tab, or session name never expands into a broadcast. The limit is
-16 explicit targets per send.
+Names with spaces use percent escaping (for example, `review%20work`). Type
+`@tab:` and press `Tab` to pick a tab name, then press `Tab` again to complete
+an exact pane; further presses cycle panes in that scope. `Shift+Tab` starts
+from the last choice. Bare scopes do not broadcast.
+Adjacent mentions before any text share that text. Once text follows a
+mention, the next mention starts a separate message for its own target. The
+mentions themselves are removed from the delivered text. `=` is not a
+Commander target prefix.
+Type `@` and press `Tab` to complete it in place to a pane name (or `@pID`
+when unnamed). `Tab` and `Shift+Tab` cycle a mention under the cursor. A unique
+agent kind such as `@codex` also works; an ambiguous kind requires a pane ID
+or alias. `@pane:reviewer` also addresses a named pane. Shells without a pane
+name require a pane ID.
+Targets can be in another tab or workspace of the **same** named session.
+`@session:<current-name>/...` may make the current session explicit, but
+cross-session delivery is not supported yet. The title shows recognized exact
+panes before you send.
 
-`Enter` sends to all listed targets. `Shift+Enter` adds a newline.
+Only recognized pane IDs, aliases, and named paths add inline recipients;
+package names such as `@types/node` and arguments such as `=value` remain
+prompt text. Prefix a mention with `\` to send it literally, for example
+`\@p24`.
+
+To send the same text to several panes, list their mentions together:
+
+```text
+@p17 @p24 review the authentication changes
+```
+
+To send different text in one submission, put each message after its target:
+
+```text
+@p8 Okay, you got it. @p9 ls
+```
+
+Here p8 receives only the sentence and p9 receives only `ls`. One `Enter`
+sends every segment directly; no confirmation is needed. Each agent receives
+a prompt; each shell executes its own text as a command. Shell commands must
+be one line, even if the composer contains a newline. Luvus
+validates every segment before sending and rechecks each pane, terminal
+lifetime, and agent/shell identity at dispatch. It reports each result and
+does not retry successful deliveries if another
+target fails. Use `Up` and `Down` to inspect receipts. If messages differ or
+only some panes receive them, the draft clears to prevent an accidental
+resend. A workspace, tab, or session name never expands into a broadcast.
+The limit is 16 explicit targets per send.
+
+To split one exact pane, enter a standalone action instead of a message:
+
+```text
+@reviewer:sv
+@p24:sh
+```
+
+`:sv` splits side by side (new pane on the right); `:sh` stacks the new pane
+below. Each action opens a new shell beside its target, including a target in
+another tab or workspace, then focuses the new pane. Commander stays visible
+but gives keyboard focus to that pane. The draft changes to the new pane's
+mention, so pressing Enter again cannot repeat the split. An action cannot be
+combined with message text or other targets. Named paths also work, for
+example `@tab:tests/pane:reviewer:sv`.
+
+`Enter` sends to all listed targets. `Shift+Enter` adds a visible new line;
+`Alt+Enter` is a fallback for terminals that cannot report Shift+Enter.
 The composer remains open after sending. Text and clipboard-image paste edit
 the draft only while the strip has keyboard focus; otherwise they follow the
 normal active pane or modal. Arrow keys, `Home`/`End`, `Ctrl`/`Alt` word
 navigation and deletion, `Ctrl+U`/`Ctrl+K` line deletion, and macOS Command
-editing chords work in the draft. Select text with `Shift` plus navigation,
-then copy or cut it with `Ctrl+C`/`Ctrl+X` or Command equivalents. Paste uses
-the terminal's normal paste event. A **queued** receipt means input was
-submitted atomically, not that the agent task or shell command has finished.
+editing chords work in the draft. `Up` and `Down` move between draft lines
+before cycling delivery receipts at the draft boundary. Select text with
+`Shift` plus navigation, then copy or cut it with `Ctrl+C`/`Ctrl+X` or Command
+equivalents. Paste uses the terminal's normal paste event. A **queued** receipt
+means input was submitted atomically, not that the agent task or shell command
+has finished.
 
 This first release does not approve blocked-agent dialogs, invoke `/` actions,
 or route to another named session or saved SSH machine. Use the existing

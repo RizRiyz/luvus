@@ -6,9 +6,9 @@ use crate::commander::Commander;
 #[test]
 fn unicode_editing_and_word_delete_keep_valid_boundaries() {
     let mut commander = Commander::default();
-    commander.insert("=p17 hello 世界");
+    commander.insert("@p17 hello 世界");
     commander.backspace(true);
-    assert_eq!(commander.draft, "=p17 hello ");
+    assert_eq!(commander.draft, "@p17 hello ");
     commander.cursor = 0;
     commander.delete(true);
     assert_eq!(commander.draft, "p17 hello ");
@@ -42,8 +42,9 @@ fn parser_requires_explicit_targets_and_prompt() {
     let (tx, _) = std::sync::mpsc::channel();
     let app = App::new(80, 24, tx).unwrap();
     assert!(app.commander_parse("hello").is_err());
-    assert!(app.commander_parse("=p1 ").is_err());
-    assert!(app.commander_parse("=p1 =p1 hello").is_err());
+    assert!(app.commander_parse("=p1 hello").is_err());
+    assert!(app.commander_parse("@p1 ").is_err());
+    assert!(app.commander_parse("@p1 @p1 hello").is_err());
 }
 
 #[test]
@@ -52,13 +53,25 @@ fn literal_arguments_and_escaped_mentions_remain_in_the_prompt() {
     let (tx, _) = std::sync::mpsc::channel();
     let app = App::new(80, 24, tx).unwrap();
     let id = app.layout().focus;
-    let draft = format!("=p{} npm install @types/node =value \\@p88 \\=p99", id.0);
+    let draft = format!("@p{} npm install @types/node =value =p999999 \\@p88", id.0);
     let plan = app.commander_parse(&draft).unwrap();
     assert_eq!(plan.targets.len(), 1);
     assert_eq!(plan.targets[0].pane, id);
-    assert_eq!(plan.prompt, "npm install @types/node =value @p88 =p99");
+    assert_eq!(
+        plan.targets[0].prompt,
+        "npm install @types/node =value =p999999 @p88"
+    );
+    let inline = app
+        .commander_parse(&format!("echo hello @p{}", id.0))
+        .unwrap();
+    assert_eq!(inline.targets[0].pane, id);
+    assert_eq!(inline.targets[0].prompt, "echo hello");
+    let package_first = app
+        .commander_parse(&format!("@types/node @p{} install", id.0))
+        .unwrap();
+    assert_eq!(package_first.targets[0].prompt, "@types/node install");
     assert!(app
-        .commander_parse(&format!("=p{} echo hi @p999999", id.0))
+        .commander_parse(&format!("@p{} echo hi @p999999", id.0))
         .is_err());
 }
 
@@ -82,37 +95,332 @@ fn inline_mentions_select_multiple_exact_panes_without_entering_the_message() {
         .get_mut(&second)
         .unwrap()
         .replace_input_sender_for_test(second_tx);
-    let draft = format!("=p{} echo hello @p{} world", first.0, second.0);
+    let draft = format!("@p{} echo hello @p{} world", first.0, second.0);
     let parsed = app.commander_parse(&draft).unwrap();
     assert_eq!(parsed.targets.len(), 2);
     assert_eq!(parsed.targets[0].pane, first);
     assert_eq!(parsed.targets[1].pane, second);
-    assert_eq!(parsed.prompt, "echo hello world");
+    assert_eq!(parsed.targets[0].prompt, "echo hello");
+    assert_eq!(parsed.targets[1].prompt, "world");
 
     app.open_commander();
     let commander = app.commander.as_mut().unwrap();
-    commander.draft = format!("=p{} echo hello", first.0);
+    commander.draft = format!("@p{} echo hello @p{} ls", first.0, second.0);
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    for (rx, expected) in [(first_rx, "echo hello"), (second_rx, "ls")] {
+        let crate::terminal::pty::InputAction::Submit { paste, .. } = rx.try_recv().unwrap() else {
+            panic!("each selected pane gets one atomic submit");
+        };
+        assert_eq!(String::from_utf8_lossy(&paste), expected);
+        assert!(rx.try_recv().is_err());
+    }
+    assert!(app.commander.as_ref().unwrap().draft.is_empty());
+    assert_eq!(app.commander.as_ref().unwrap().delivery_results.len(), 2);
+}
+
+#[test]
+fn adjacent_mentions_share_only_their_following_segment() {
+    let _env = crate::persist::test_env("commander-target-groups");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let first = app.layout().focus;
+    app.new_tab();
+    let second = app.layout().focus;
+    app.new_tab();
+    let third = app.layout().focus;
+    let draft = format!("@p{} @p{} review this @p{} ls", first.0, second.0, third.0);
+    let plan = app.commander_parse(&draft).unwrap();
+    assert_eq!(plan.targets.len(), 3);
+    assert_eq!(plan.targets[0].prompt, "review this");
+    assert_eq!(plan.targets[1].prompt, "review this");
+    assert_eq!(plan.targets[2].prompt, "ls");
+    let inline = app
+        .commander_parse(&format!("please @p{} @p{} review", first.0, second.0))
+        .unwrap();
+    assert_eq!(inline.targets[0].prompt, "please review");
+    assert_eq!(inline.targets[1].prompt, "please review");
+    assert!(app
+        .commander_parse(&format!("@p{} review this @p{}", first.0, second.0))
+        .is_err());
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&first)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("@p{} review this @p{}", first.0, second.0);
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        input_rx.try_recv().is_err(),
+        "an incomplete segment sends nothing"
+    );
+}
+
+#[test]
+fn agent_prompt_and_shell_command_do_not_leak_across_segments() {
+    let _env = crate::persist::test_env("commander-agent-shell-segments");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let agent = app.layout().focus;
+    app.new_tab();
+    let shell = app.layout().focus;
+    app.status.get_mut(&agent).unwrap().agent = "claude".into();
+    let (agent_tx, agent_rx) = std::sync::mpsc::channel();
+    let (shell_tx, shell_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&agent)
+        .unwrap()
+        .replace_input_sender_for_test(agent_tx);
+    app.panes
+        .get_mut(&shell)
+        .unwrap()
+        .replace_input_sender_for_test(shell_tx);
+
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!(
+        "@p{} Okay you got it, this feature is cool. @p{} ls",
+        agent.0, shell.0
+    );
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let crate::terminal::pty::InputAction::Submit {
+        paste: agent_paste, ..
+    } = agent_rx.try_recv().unwrap()
+    else {
+        panic!("agent receives one prompt");
+    };
+    let crate::terminal::pty::InputAction::Submit {
+        paste: shell_paste, ..
+    } = shell_rx.try_recv().unwrap()
+    else {
+        panic!("shell receives one command");
+    };
+    let agent_text = String::from_utf8_lossy(&agent_paste);
+    let shell_text = String::from_utf8_lossy(&shell_paste);
+    assert!(agent_text.contains("Okay you got it, this feature is cool."));
+    assert!(!agent_text.contains(" ls"));
+    assert_eq!(shell_text, "ls");
+    assert!(agent_rx.try_recv().is_err());
+    assert!(shell_rx.try_recv().is_err());
+}
+
+#[test]
+fn partial_delivery_keeps_receipts_but_clears_mixed_draft() {
+    let _env = crate::persist::test_env("commander-partial-segments");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let first = app.layout().focus;
+    app.new_tab();
+    let second = app.layout().focus;
+    let draft = format!("@p{} echo ready @p{} ls", first.0, second.0);
+    let plan = app.commander_parse(&draft).unwrap();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&first)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+    app.status.get_mut(&second).unwrap().agent = "claude".into();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = draft;
+    app.commander_dispatch(plan);
+    assert!(input_rx.try_recv().is_ok());
+    let commander = app.commander.as_ref().unwrap();
+    assert!(commander.draft.is_empty());
+    assert_eq!(
+        commander.delivery_results[0],
+        format!("p{}: queued", first.0)
+    );
+    assert_eq!(
+        commander.delivery_results[1],
+        format!("p{}: no longer available", second.0)
+    );
+}
+
+#[test]
+fn named_scope_paths_resolve_one_pane_and_tab_completes_them() {
+    let _env = crate::persist::test_env("commander-named-scopes");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let first = app.layout().focus;
+    app.new_tab();
+    let second = app.layout().focus;
+    app.workspaces[0].name = "my project".into();
+    app.workspaces[0].tabs[1].name = Some("review work".into());
+    app.set_agent_name(second, Some("reviewer"));
+
+    let path = "@workspace:my%20project/tab:review%20work/pane:reviewer";
+    let plan = app.commander_parse(&format!("{path} ls")).unwrap();
+    assert_eq!(plan.targets.len(), 1);
+    assert_eq!(plan.targets[0].pane, second);
+    assert_eq!(plan.targets[0].prompt, "ls");
+    let current_session = crate::session::display_name();
+    let current_path = format!("@session:{current_session}/pane:reviewer ls");
+    assert_eq!(
+        app.commander_parse(&current_path).unwrap().targets[0].pane,
+        second
+    );
+    assert!(app
+        .commander_parse(&format!(
+            "@workspace:my%20project/tab:review%20work/pane:p{} ls",
+            first.0
+        ))
+        .is_err());
+    assert!(app.commander_parse("@tab:review%20work ls").is_err());
+    assert!(app
+        .commander_parse("@session:other-session/pane:reviewer ls")
+        .is_err());
+
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "@tab:review%20work".into();
     commander.cursor = commander.draft.len();
     app.refresh_commander_preview();
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        "@tab:review%20work/pane:reviewer"
+    );
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "@tab:".into();
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "@tab:review%20work");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        "@tab:review%20work/pane:reviewer"
+    );
+}
+
+#[test]
+fn tab_completes_the_typed_at_in_place_with_a_pane_name() {
+    let _env = crate::persist::test_env("commander-inline-at-completion");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let first = app.layout().focus;
+    app.new_tab();
+    let second = app.layout().focus;
+    app.set_agent_name(first, Some("build"));
+    app.set_agent_name(second, Some("shell_two"));
+    app.open_commander();
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("@p{} hello @", first.0);
+    commander.cursor = commander.draft.len();
+    app.refresh_commander_preview();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("@p{} hello @shell_two", first.0)
+    );
+    app.commander_paste(" world");
+    let plan = app
+        .commander_parse(&app.commander.as_ref().unwrap().draft)
+        .unwrap();
+    assert_eq!(plan.targets.len(), 2);
+    assert_eq!(plan.targets[1].pane, second);
+    assert_eq!(plan.targets[0].prompt, "hello");
+    assert_eq!(plan.targets[1].prompt, "world");
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "@".into();
+    commander.cursor = 1;
+    app.refresh_commander_preview();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "@build");
+}
+
+#[test]
+fn split_actions_target_exact_panes_and_cannot_repeat_on_enter() {
+    let _env = crate::persist::test_env("commander-split-actions");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let first = app.layout().focus;
+    app.new_tab();
+    let second = app.layout().focus;
+    app.workspaces[0].tabs[1].name = Some("shell".into());
+    app.set_agent_name(first, Some("build"));
+    app.open_commander();
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "@build:sv".into();
+    commander.cursor = commander.draft.len();
+    app.refresh_commander_preview();
+    assert_eq!(app.commander.as_ref().unwrap().preview, vec![first]);
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let right = app.layout().focus;
+    assert_eq!(app.active_ws, 0);
+    assert_eq!(app.workspaces[0].active_tab, 0);
+    assert_ne!(right, first);
+    assert_eq!(app.pane_location(right), Some((0, 0)));
+    assert!(matches!(
+        app.layout().to_tree(),
+        crate::layout::LayoutTree::Split { axis: 0, .. }
+    ));
+    assert!(!app.commander.as_ref().unwrap().focused);
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("@p{} ", right.0)
+    );
     assert!(app
         .commander
         .as_ref()
         .unwrap()
-        .draft
-        .contains(&format!("@p{}", second.0)));
+        .receipt
+        .as_ref()
+        .unwrap()
+        .contains("split right"));
+    app.commander.as_mut().unwrap().focused = true;
     app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    for rx in [first_rx, second_rx] {
-        let crate::terminal::pty::InputAction::Submit { paste, .. } = rx.try_recv().unwrap() else {
-            panic!("each selected pane gets one atomic submit");
-        };
-        assert!(String::from_utf8_lossy(&paste).contains("echo hello"));
-        assert!(rx.try_recv().is_err());
-    }
-    assert_eq!(
-        app.commander.as_ref().unwrap().draft,
-        format!("=p{} =p{} ", first.0, second.0)
-    );
+    assert_eq!(app.workspaces[0].tabs[0].layout.len(), 2);
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("@tab:shell/pane:p{}:sh", second.0);
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let below = app.layout().focus;
+    assert_eq!(app.workspaces[0].active_tab, 1);
+    assert_eq!(app.pane_location(below), Some((0, 1)));
+    assert!(matches!(
+        app.layout().to_tree(),
+        crate::layout::LayoutTree::Split { axis: 1, .. }
+    ));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_ref()
+        .unwrap()
+        .contains("split below"));
+}
+
+#[test]
+fn split_action_rejects_extra_text_before_mutating_layout() {
+    let _env = crate::persist::test_env("commander-split-extra-text");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("@p{}:sv hello", pane.0);
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.layout().len(), 1);
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_ref()
+        .unwrap()
+        .contains("no message"));
 }
 
 #[test]
@@ -129,7 +437,7 @@ fn prefix_enter_toggles_the_composer_without_discarding_it_on_send() {
         .replace_input_sender_for_test(input_tx);
     app.open_commander();
     let commander = app.commander.as_mut().unwrap();
-    commander.draft = format!("=p{} ls", id.0);
+    commander.draft = format!("@p{} ls", id.0);
     commander.cursor = commander.draft.len();
     app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(input_rx.try_recv().is_ok());
@@ -201,6 +509,34 @@ fn editing_chords_selection_and_clipboard_paste_stay_private() {
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     ));
     assert!(app.commander.as_ref().unwrap().draft.is_empty());
+}
+
+#[test]
+fn shift_enter_opens_a_real_line_and_arrows_edit_that_line() {
+    let _env = crate::persist::test_env("commander-multiline-editing");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    let initial = app.commander.as_ref().unwrap().draft.clone();
+    app.commander_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+    app.commander_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("{initial}a\nb")
+    );
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "alpha\nbeta".into();
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "alph!a\nbeta");
+    app.commander_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "alph!a\nbeta!");
+    // ESC-CR is the fallback where a terminal cannot report Shift+Enter.
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "alph!a\nbeta!\n");
 }
 
 #[test]
@@ -317,7 +653,7 @@ fn exact_shell_target_queues_one_atomic_command() {
 
     app.open_commander();
     let commander = app.commander.as_mut().unwrap();
-    commander.draft = format!("=p{} ls", id.0);
+    commander.draft = format!("@p{} ls", id.0);
     commander.cursor = commander.draft.len();
     app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -341,10 +677,10 @@ fn shell_target_rejects_multiline_and_agent_identity_drift() {
     let id = app.layout().focus;
     app.status.get_mut(&id).unwrap().agent = "zsh".into();
     assert!(app
-        .commander_parse(&format!("=p{} echo one\necho two", id.0))
+        .commander_parse(&format!("@p{} echo one\necho two", id.0))
         .is_err());
 
-    let plan = app.commander_parse(&format!("=p{} ls", id.0)).unwrap();
+    let plan = app.commander_parse(&format!("@p{} ls", id.0)).unwrap();
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     app.panes
         .get_mut(&id)
@@ -361,7 +697,7 @@ fn shell_target_rejects_multiline_and_agent_identity_drift() {
 }
 
 #[test]
-fn equals_targets_send_directly_without_changing_layout_or_focus() {
+fn multiple_mentions_send_directly_without_changing_layout_or_focus() {
     let _env = crate::persist::test_env("commander-direct-multiple");
     let (tx, _) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
@@ -384,12 +720,12 @@ fn equals_targets_send_directly_without_changing_layout_or_focus() {
     let tab_count = app.ws().tabs.len();
     app.open_commander();
     let commander = app.commander.as_mut().unwrap();
-    commander.draft = format!("=p{} =p{} review this", first.0, second.0);
+    commander.draft = format!("@p{} @p{} review this", first.0, second.0);
     commander.cursor = commander.draft.len();
     app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     for rx in [first_rx, second_rx] {
         let crate::terminal::pty::InputAction::Submit { paste, .. } = rx.try_recv().unwrap() else {
-            panic!("each = target must receive one submit on the first Enter");
+            panic!("each @ target must receive one submit on the first Enter");
         };
         assert!(String::from_utf8_lossy(&paste).contains("review this"));
         assert!(rx.try_recv().is_err());
@@ -400,7 +736,7 @@ fn equals_targets_send_directly_without_changing_layout_or_focus() {
     assert!(app.commander.is_some());
     assert_eq!(
         app.commander.as_ref().unwrap().draft,
-        format!("=p{} =p{} ", first.0, second.0)
+        format!("@p{} @p{} ", first.0, second.0)
     );
 }
 
@@ -414,7 +750,7 @@ fn paste_and_navigation_stay_in_composer() {
     assert!(app.handle_event(AppEvent::Paste("hello 世界".into())));
     assert_eq!(
         app.commander.as_ref().unwrap().draft,
-        format!("=p{} hello 世界", focused.0)
+        format!("@p{} hello 世界", focused.0)
     );
     assert_eq!(app.layout().focus, focused);
     assert!(app.handle_event(AppEvent::Key(KeyEvent::new(
@@ -423,7 +759,7 @@ fn paste_and_navigation_stay_in_composer() {
     ))));
     assert_eq!(
         app.commander.as_ref().unwrap().draft,
-        format!("=p{} hello ", focused.0)
+        format!("@p{} hello ", focused.0)
     );
 }
 

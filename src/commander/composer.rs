@@ -59,6 +59,33 @@ impl Commander {
         self.cursor = next;
     }
 
+    /// Move between logical draft lines, preserving the character column.
+    /// Return false at the draft boundary so receipt history can use the key.
+    pub(crate) fn move_vertical(&mut self, up: bool, selecting: bool) -> bool {
+        let start = line_start(&self.draft, self.cursor);
+        let end = line_end(&self.draft, self.cursor);
+        let column = self.draft[start..self.cursor].chars().count();
+        let (target_start, target_end) = if up {
+            if start == 0 {
+                return false;
+            }
+            let previous_end = start - 1;
+            (line_start(&self.draft, previous_end), previous_end)
+        } else {
+            if end == self.draft.len() {
+                return false;
+            }
+            let next_start = end + 1;
+            (next_start, line_end(&self.draft, next_start))
+        };
+        let next = self.draft[target_start..target_end]
+            .char_indices()
+            .nth(column)
+            .map_or(target_end, |(index, _)| target_start + index);
+        self.move_cursor(next, selecting);
+        true
+    }
+
     pub(crate) fn clear_receipt(&mut self) {
         self.receipt = None;
         self.delivery_results.clear();
