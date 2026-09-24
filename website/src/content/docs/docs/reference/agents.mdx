@@ -21,7 +21,7 @@ description: What luvus supports per agent, covering live status, session resume
 | fx | ✓ | ✓ | no | no |
 | Cursor | ✓ | resume command | no | no |
 | Kilo Code | ✓ | with exact session ID | with exact session ID | no |
-| Devin | ✓ | with exact session ID | no | no |
+| Devin | ✓ | ✓ with integration | no | session only |
 | Gemini | ✓ | no | no | no |
 | Aider | ✓ | no | no | no |
 | Amp | ✓ | no | no | no |
@@ -110,11 +110,20 @@ testnet.
 
   Devin is detected through its `devin` executable, which is also an ordinary
   given name, so only process, launch-command, or title evidence names it.
-  Luvus can resume `devin --resume <id>` when an exact session ID was reported
-  and persisted, but does not open Devin's private session database, so
-  `luvus agent resume <id>` cannot find Devin sessions and there is no native
-  fork. Automation profiles and the optional hook integration are not
-  declared yet.
+  `luvus integration install devin` adds one `SessionStart` hook to Devin's
+  user config (`~/.config/devin/config.json`, or
+  `%USERPROFILE%\AppData\Roaming\devin\config.json` on Windows) and one small
+  script beside it. Devin fires it for new, cleared, and resumed sessions, and
+  it reports only the exact session ID, which Luvus restores with
+  `devin --resume <id>`. Devin rejects a whole hook file for one unknown event,
+  so Luvus writes only that event and keeps other tools' hooks; uninstall
+  removes only Luvus's exact entry and script. A config with comments is
+  refused rather than rewritten, and a file selected with `devin --config` is
+  not managed. Without the integration, bind a pane with
+  `luvus pane report --agent devin --session <id>`. Luvus does not open Devin's
+  private session database, so `luvus agent resume <id>` cannot find Devin
+  sessions and there is no native fork. Automation profiles are not declared
+  yet.
 
   Hermes installs `~/.hermes/plugins/luvus-agent-state`, or the equivalent
   directory under `HERMES_HOME`, and enables only that plugin in

@@ -369,7 +369,7 @@ server:
   server restart [--all]     stop + start (load a newly-installed binary)
   server update-manifest     fetch the latest agent-detection rules from luvus.dev
                              (applies live if the server is up; else on next start)
-  integration install|uninstall <claude|copilot|codex|antigravity|letta|opencode|kimi|grok|hermes|omp>
+  integration install|uninstall <claude|copilot|codex|antigravity|letta|opencode|kimi|grok|hermes|omp|devin>
                              add/remove luvus's session-resume hook (uninstall
                              removes only luvus's hook, never the agent)
 ";
@@ -6212,13 +6212,16 @@ mod tests {
         // different agent with no hook integration, so neither the help text
         // nor the published CLI reference may advertise `pi` here — and both
         // must list `omp`.
-        assert!(DETAILED_USAGE.contains("|omp>"));
-        assert!(!DETAILED_USAGE.contains("|pi>"));
+        let lists = |text: &str, agent: &str| {
+            text.contains(&format!("|{agent}|")) || text.contains(&format!("|{agent}>"))
+        };
+        assert!(lists(DETAILED_USAGE, "omp"));
+        assert!(!lists(DETAILED_USAGE, "pi"));
         let page = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("website/src/content/docs/docs/reference/cli.mdx");
         if let Ok(text) = fs::read_to_string(page) {
-            assert!(text.contains("|omp>"));
-            assert!(!text.contains("|pi>"));
+            assert!(lists(&text, "omp"));
+            assert!(!lists(&text, "pi"));
         }
     }
 }

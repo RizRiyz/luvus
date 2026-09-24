@@ -153,7 +153,7 @@ not sufficient, and Luvus runs the agent's own resume command:
 | fx | its session store (`~/.fx/sessions`) |
 | Cursor | resume command (when the session id is known) |
 | Kilo Code | `kilo --session <id>` (when the exact session id is known) |
-| Devin | `devin --resume <id>` (when the exact session id is known) |
+| Devin | its exact session report from the optional integration, resumed with `devin --resume <id>` |
 
 OpenCode V2 now runs under the canonical `opencode` executable; the former
 `opencode2` preview name is accepted as an alias. The optional integration
@@ -218,8 +218,9 @@ current database or guess which session belongs to a pane.
 Devin has the same boundary, without fork. Luvus does not open Devin's private
 session database, so its sessions are never listed as resumable and
 `luvus agent resume <id>` cannot find them. A pane resumes on restore only from
-an exact binding reported to Luvus (`luvus pane report --agent devin --session
-<id>`) and persisted, which restores as `devin --resume <id>`.
+an exact binding that was reported and persisted, which restores as
+`devin --resume <id>`. The optional integration reports it automatically;
+without it, use `luvus pane report --agent devin --session <id>`.
 
 Muse Code supports native detection and resume, but not **Fork to New Pane**.
 Its `/fork` command exists only inside the active TUI, and its CLI refuses to
@@ -243,7 +244,7 @@ Screen-based detection needs no setup and works for everything. The optional
 where its hook contract supports them safely, lifecycle events into luvus:
 
 ```sh
-luvus integration install claude    # or: copilot · codex · antigravity · letta · opencode · kimi · grok · hermes · omp
+luvus integration install claude    # or: copilot · codex · antigravity · letta · opencode · kimi · grok · hermes · omp · devin
 ```
 
 or toggle it in **Settings → Integrations**. What it does per agent:
@@ -277,6 +278,15 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   directory. It reports exact session identity and authoritative
   idle/working/blocked/done transitions while preserving Luvus's native
   process/screen detection as the zero-setup fallback.
+- **devin**: adds one `SessionStart` entry to Devin's user config
+  (`~/.config/devin/config.json`, or
+  `%USERPROFILE%\AppData\Roaming\devin\config.json` on Windows) and one small
+  platform-specific hook script beside it. It reports only the exact session
+  ID for restart resume, including after `/clear` or an in-TUI `/resume`.
+  Devin rejects a whole hook file for one unknown event, so Luvus writes only
+  `SessionStart` and keeps other tools' hooks intact. A config with comments
+  is refused instead of rewritten, and files selected with `devin --config`
+  are not managed.
 
 Uninstalling (`luvus integration uninstall <agent>`, or the same Settings
 toggle) surgically removes **only luvus's hook entry**. Your other settings

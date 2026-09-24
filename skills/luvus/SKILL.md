@@ -528,9 +528,11 @@ surface:
   contract.
   `opencode2` is a compatibility alias for the canonical `opencode` agent.
   Never infer V2 session IDs from its live database.
-- Devin has native detection and exact-ID resume only. Do not infer session
-  IDs from its private database; `luvus agent resume <id>` cannot find Devin
-  sessions, so bind a pane with `luvus pane report --agent devin --session
+- For Devin, `luvus integration install devin` adds one session-start hook
+  that reports only the exact session ID for restart resume. Detection remains
+  native. Do not infer session IDs from its private database;
+  `luvus agent resume <id>` cannot find Devin sessions, so without the
+  integration bind a pane with `luvus pane report --agent devin --session
   <id>` when the exact id is known.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not

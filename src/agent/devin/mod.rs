@@ -3,19 +3,24 @@
 //! Devin keeps its session history in a private SQLite store under its config
 //! directory. Luvus does not open it, so there is no session discovery: a pane
 //! resumes on restore only from an exact binding that was reported to Luvus
-//! (`luvus pane report --agent devin --session <id>`) and persisted, and
-//! `luvus agent resume <id>` cannot find Devin sessions. A known id resumes
-//! with `devin --resume <id>`.
+//! and persisted, and `luvus agent resume <id>` cannot find Devin sessions. A
+//! known id resumes with `devin --resume <id>`.
 //!
-//! Devin also reads hook definitions from the `hooks` key of its user config
-//! (`~/.config/devin/config.json`, `%APPDATA%\devin\config.json` on Windows) in
-//! the Claude Code format. An optional `luvus integration install devin` for
-//! exact live session ownership is left to a focused follow-up.
+//! The optional `luvus integration install devin` adds one `SessionStart`
+//! command hook to Devin's user config (`~/.config/devin/config.json`, or
+//! `%USERPROFILE%\AppData\Roaming\devin\config.json` on Windows). Devin fires
+//! it for new, cleared, and resumed sessions, so each pane reports its exact
+//! session id. Without it, a binding comes only from
+//! `luvus pane report --agent devin --session <id>`.
 
 use super::types::{AgentDescriptor, IdentityDescriptor, SessionOperations};
 
+mod integration;
+
+pub(crate) const NAME: &str = "devin";
+
 pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
-    id: "devin",
+    id: NAME,
     aliases: &[],
     launch_command: "devin",
     // Devin reads every positional argument after `--` as the initial prompt.
@@ -42,5 +47,5 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         // Devin documents no external command that forks a stored session.
         fork: None,
     }),
-    integration: None,
+    integration: Some(integration::OPERATIONS),
 };

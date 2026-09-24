@@ -382,6 +382,9 @@ mod tests {
         assert!(operation("letta")
             .and_then(|operations| operations.hook)
             .is_some());
+        assert!(operation("devin")
+            .and_then(|operations| operations.hook)
+            .is_some());
         assert!(operation("agy")
             .and_then(|operations| operations.hook)
             .is_some());
