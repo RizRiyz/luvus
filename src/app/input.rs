@@ -1892,7 +1892,7 @@ impl App {
                     } else if self.orch_form.is_some() || self.orch_detail.is_some() {
                         // Match Settings and the folder picker: the modal
                         // surface is inert, while its dimmed backdrop cancels.
-                        self.orch_form = None;
+                        self.close_orch_form();
                         self.orch_detail = None;
                     }
                 }

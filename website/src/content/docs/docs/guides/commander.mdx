@@ -129,7 +129,12 @@ complete action. Use `@` and `Tab` to complete an exact target where required.
 /split @p24 right
 /split @p24 below
 /task
+/task @workspace:app
+/task form
 /automation
+/automation @workspace:app
+/automation @p17
+/automation form
 /mission
 /diff
 /files
@@ -139,15 +144,61 @@ complete action. Use `@` and `Tab` to complete an exact target where required.
 `/read` shows a bounded snapshot of one pane's recent output in Commander;
 use `PageUp` and `PageDown` to browse it. `/fork` uses the native agent session
 fork handler and requires a fork-capable agent with a known session. `/task`
-opens the existing task form; the task is created only when you complete that
-form. These actions take no free-form message text, and an unknown `/` action
-is rejected rather than forwarded to a pane. To send an agent's own slash
-command as text, put it after a target, such as `@p17 /status`.
+and `/automation` expand into guided multiline drafts **inside Commander**.
+The first Enter opens the draft; it does not create anything. Tab and
+Shift+Tab move between field values, Enter advances to the next field, and
+Enter on the final `prompt:` field (or Ctrl+Enter anywhere) validates and
+creates the item. Use Shift+Enter to add a line inside the prompt. A receipt
+shows the new task or automation ID. The `prompt:` field must be last; further
+lines belong to that prompt. Invalid or missing fields leave the draft intact
+with an error. Add `form` to use the existing modal instead, for example
+`/task @workspace:app form` or `/automation form`.
+
+The optional `@workspace:name` binds a task or new-worker automation to that
+exact workspace; without it, Commander uses the current workspace. `/task @p17`
+selects pane 17's workspace and pre-fills its agent kind, but does not
+send to that pane. `/automation @p17` instead targets that exact live agent.
+Tab can complete the names. These slash actions never forward their text to
+a terminal. To send an agent's own slash command, put it after a target, such
+as `@p17 /status`.
+
+For example, enter `/task @workspace:app`, press Enter, and fill the draft:
+
+```text
+/task @workspace:app
+title: Review login tests
+start: now
+agent: codex
+mode: workspace
+paths:
+deps:
+gate:
+prompt: Find and fix the failing login tests
+```
+
+Use `start: manual` to save without launching. `agent`, `mode`, `paths`,
+`deps`, and `gate` can be blank when not needed; `mode` accepts `worktree` or
+`workspace`.
 
 `/split` creates a shell beside one exact pane: `right` places it alongside,
 `below` stacks it underneath. `sv` and `sh` are accepted direction aliases.
-`/automation` opens the existing automation form; it does not schedule
-anything until you finish that form. `/mission` opens Mission Control in the
+For an existing live agent in pane 17, enter `/automation @p17`, press Enter,
+and fill the shorter draft:
+
+```text
+/automation @p17
+title: Daily review
+start: daily
+schedule: 09:00
+timezone: Asia/Makassar
+prompt: Review today's changes and report risks
+```
+
+Without `@p17`, the draft targets a new worker and also exposes `agent`,
+`mode`, `access`, `paths`, and `gate`. Automation starts can be `once`,
+`hourly`, `daily`, or `weekly`. Schedules use `YYYY-MM-DD HH:MM` for Once,
+a minute from `00` to `59` for Hourly, `HH:MM` for Daily, or a value such as
+`mon,fri 08:00` for Weekly. Use an IANA timezone. `/mission` opens Mission Control in the
 current workspace. `/diff` and `/files` focus their respective dock views.
 These navigation actions do not send terminal input. The picker contains only
 actions available in this version of Commander.
@@ -166,6 +217,14 @@ before cycling delivery receipts at the draft boundary. Select text with
 equivalents. Paste uses the terminal's normal paste event. A **queued** receipt
 means input was submitted atomically, not that the agent task or shell command
 has finished.
+
+In **Settings → General → Commander working-agent input**, **Auto-send** (the
+default) queues input to a prompt-ready working agent immediately. Choose
+**Ask** to require a second Enter: the first preserves the draft and names the
+agents awaiting confirmation; editing the draft or pressing Esc cancels it.
+Both modes re-check the exact pane and prompt readiness before
+delivery. Neither mode answers or approves an agent's own permission dialogs;
+blocked agents still need explicit interaction in their pane.
 
 Commander does not yet approve blocked-agent dialogs or route to another named
 session or saved SSH machine. Use the existing controls for those operations.

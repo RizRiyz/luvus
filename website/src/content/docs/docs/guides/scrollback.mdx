@@ -59,8 +59,8 @@ application-cursor pager), Luvus forwards those keys unchanged. `Shift+↑`,
 
 ## Copying
 
-Drag across a pane to select. Release requests a copy and flashes a *Copied to clipboard*
-toast. Luvus requests both your native OS clipboard (`pbcopy` / `wl-copy` /
+Drag across a pane to select. Release requests a copy; the *Copied to Clipboard*
+toast appears only after a native clipboard helper confirms success. Luvus requests both your native OS clipboard (`pbcopy` / `wl-copy` /
 `xclip` / `clip`) and OSC 52. The terminal must permit OSC 52 clipboard writes;
 that escape sequence does not acknowledge whether the clipboard changed.
 Soft-wrapped display rows copy as one logical line. Hard line breaks and any

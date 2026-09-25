@@ -1411,6 +1411,11 @@ impl OrchFormDraft {
 #[derive(Default)]
 pub struct OrchForm {
     pub kind: OrchFormKind,
+    /// A Commander form is bound to this stable workspace, even if the active
+    /// workspace changes before submission. Board forms use the active one.
+    pub(crate) workspace_id: Option<String>,
+    pub(crate) commander_origin: bool,
+    pub(crate) commander_target_label: Option<String>,
     pub title: String,
     pub prompt: String,
     pub agent: String,

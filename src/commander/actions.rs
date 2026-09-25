@@ -1,6 +1,7 @@
 //! Typed Commander slash actions. These reuse App operations directly; slash
 //! text is never passed to a terminal or interpreted as a CLI command.
 
+use super::orch;
 use super::{parse_scoped_target, target_lookup};
 use crate::app::{AgentForkError, App, OrchFormKind};
 use crate::ids::PaneId;
@@ -35,12 +36,12 @@ pub(crate) const SLASH_ACTIONS: [SlashActionSpec; 9] = [
     },
     SlashActionSpec {
         name: "/task",
-        usage: "",
+        usage: "[@target] · Enter guide · form modal",
         needs_target: false,
     },
     SlashActionSpec {
         name: "/automation",
-        usage: "",
+        usage: "[@target] · Enter guide · form modal",
         needs_target: false,
     },
     SlashActionSpec {
@@ -103,11 +104,18 @@ pub(crate) enum SlashAction {
     Read(ActionPane),
     Fork(ActionPane),
     Split(ActionPane, Axis),
-    Task,
-    Automation,
+    Task(Option<FormTarget>, OrchActionMode),
+    Automation(Option<FormTarget>, OrchActionMode),
     Mission,
     Diff,
     Files,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OrchActionMode {
+    Guided,
+    Modal,
+    Submit,
 }
 
 #[derive(Debug)]
@@ -131,6 +139,21 @@ pub(crate) struct ActionPane {
     terminal_id: String,
 }
 
+#[derive(Debug)]
+pub(crate) enum FormTarget {
+    Workspace {
+        id: String,
+        name: String,
+    },
+    Agent {
+        pane: PaneId,
+        terminal_id: String,
+        workspace_id: String,
+        workspace_name: String,
+        agent: String,
+    },
+}
+
 impl App {
     pub(crate) fn commander_parse_slash_action(
         &self,
@@ -141,9 +164,15 @@ impl App {
             return None;
         }
         Some((|| {
-            let mut words = trimmed.split_whitespace();
+            let (header, guided_fields) = trimmed
+                .split_once('\n')
+                .map_or((trimmed, false), |(header, _)| (header, true));
+            let mut words = header.split_whitespace();
             let action = words.next().unwrap();
             let target = words.next();
+            if guided_fields && !matches!(action, "/task" | "/automation") {
+                return Err(format!("{action} does not take a guided draft"));
+            }
             match action {
                 "/focus" => {
                     let pane = self.commander_focus_target(
@@ -179,13 +208,37 @@ impl App {
                     }
                     Ok(SlashAction::Split(pane, axis))
                 }
-                "/task" | "/automation" | "/mission" | "/diff" | "/files" => {
+                "/task" | "/automation" => {
+                    let modal = target == Some("form") || words.clone().next() == Some("form");
+                    let form_target = target
+                        .filter(|token| *token != "form")
+                        .map(|token| self.commander_form_target(token))
+                        .transpose()?;
+                    let extra = words.next();
+                    if extra.is_some_and(|token| token != "form")
+                        || words.next().is_some()
+                        || (guided_fields && modal)
+                    {
+                        return Err(format!("Use {action} [@target] [form]"));
+                    }
+                    let mode = if guided_fields {
+                        OrchActionMode::Submit
+                    } else if modal {
+                        OrchActionMode::Modal
+                    } else {
+                        OrchActionMode::Guided
+                    };
+                    Ok(if action == "/task" {
+                        SlashAction::Task(form_target, mode)
+                    } else {
+                        SlashAction::Automation(form_target, mode)
+                    })
+                }
+                "/mission" | "/diff" | "/files" => {
                     if target.is_some() {
                         return Err(format!("{action} takes no inline arguments"));
                     }
                     Ok(match action {
-                        "/task" => SlashAction::Task,
-                        "/automation" => SlashAction::Automation,
                         "/mission" => SlashAction::Mission,
                         "/diff" => SlashAction::Diff,
                         _ => SlashAction::Files,
@@ -210,6 +263,41 @@ impl App {
             .ok_or_else(|| format!("p{} is not ready", id.0))?
             .terminal_id;
         Ok(ActionPane { id, terminal_id })
+    }
+
+    fn commander_form_target(&self, token: &str) -> Result<FormTarget, String> {
+        if !token.starts_with('@') || token.len() == 1 {
+            return Err("Use @workspace:name or an exact @agent-pane".into());
+        }
+        let lookup = target_lookup(token);
+        if let Some(scope) = parse_scoped_target(lookup)? {
+            if scope.pane.is_none() {
+                let (workspace, _) = self.commander_scope_indices(&scope)?;
+                let workspace = workspace.ok_or("Choose an exact workspace")?;
+                let workspace = &self.workspaces[workspace];
+                return Ok(FormTarget::Workspace {
+                    id: workspace.id.clone(),
+                    name: workspace.name.clone(),
+                });
+            }
+        }
+        let target = self.commander_action_pane(token)?;
+        let (workspace, _) = self
+            .pane_location(target.id)
+            .ok_or("Agent pane is no longer in a workspace")?;
+        let status = self
+            .status
+            .get(&target.id)
+            .filter(|_| self.is_agent_pane(target.id))
+            .ok_or("Task and automation pane targets must be running agents")?;
+        let workspace = &self.workspaces[workspace];
+        Ok(FormTarget::Agent {
+            pane: target.id,
+            terminal_id: target.terminal_id,
+            workspace_id: workspace.id.clone(),
+            workspace_name: workspace.name.clone(),
+            agent: status.agent.clone(),
+        })
     }
 
     fn commander_focus_target(&self, token: &str) -> Result<FocusTarget, String> {
@@ -373,20 +461,11 @@ impl App {
                 let id = self.commander_check_action_pane(&target)?;
                 self.commander_split(id, axis);
             }
-            SlashAction::Task => {
-                self.open_orch_form_kind(OrchFormKind::Task);
-                let commander = self.commander.as_mut().unwrap();
-                commander.clear_all();
-                commander.focused = false;
-                commander.receipt = Some("Task form opened".into());
-                commander.preview.clear();
+            SlashAction::Task(target, mode) => {
+                self.commander_orch_action(OrchFormKind::Task, target, mode)?
             }
-            SlashAction::Automation => {
-                self.open_orch_form_kind(OrchFormKind::Automation);
-                let commander = self.commander.as_mut().unwrap();
-                commander.clear_all();
-                commander.focused = false;
-                commander.receipt = Some("Automation form opened".into());
+            SlashAction::Automation(target, mode) => {
+                self.commander_orch_action(OrchFormKind::Automation, target, mode)?
             }
             SlashAction::Mission | SlashAction::Diff | SlashAction::Files => {
                 let label = match action {
@@ -407,6 +486,206 @@ impl App {
                 commander.clear_all();
                 commander.focused = false;
                 commander.receipt = Some(format!("Opened {label}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn commander_orch_action(
+        &mut self,
+        kind: OrchFormKind,
+        mut target: Option<FormTarget>,
+        mode: OrchActionMode,
+    ) -> Result<(), String> {
+        if matches!(mode, OrchActionMode::Submit)
+            && self
+                .commander
+                .as_ref()
+                .and_then(|commander| commander.guided_orch)
+                .is_some_and(|draft_kind| draft_kind != kind)
+        {
+            return Err("Guided action changed; restart the draft".into());
+        }
+        let original_binding = self
+            .commander
+            .as_ref()
+            .and_then(|commander| commander.guided_binding.clone());
+        if matches!(mode, OrchActionMode::Submit) && target.is_none() {
+            if let Some(binding) = &original_binding {
+                let workspace = self
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == binding.workspace_id)
+                    .ok_or("Guided draft workspace is no longer available")?;
+                target = Some(FormTarget::Workspace {
+                    id: workspace.id.clone(),
+                    name: workspace.name.clone(),
+                });
+            }
+        }
+        let pane_binding = match &target {
+            Some(FormTarget::Agent {
+                pane, terminal_id, ..
+            }) => Some((*pane, terminal_id.clone())),
+            _ => None,
+        };
+        self.open_orch_form_kind(kind);
+        if let Err(error) = self.commander_bind_orch_form(target, kind == OrchFormKind::Automation)
+        {
+            self.orch_form = None;
+            return Err(error);
+        }
+        let binding = orch::GuidedBinding {
+            workspace_id: self
+                .orch_form
+                .as_ref()
+                .and_then(|form| form.workspace_id.clone())
+                .ok_or("Guided draft needs an exact workspace")?,
+            pane: pane_binding,
+        };
+        if matches!(mode, OrchActionMode::Submit)
+            && original_binding
+                .as_ref()
+                .is_some_and(|original| original != &binding)
+        {
+            self.orch_form = None;
+            return Err("Guided target changed; restart the draft".into());
+        }
+        match mode {
+            OrchActionMode::Guided => {
+                let header = self.commander.as_ref().unwrap().draft.trim().to_string();
+                let draft = orch::template(&header, self.orch_form.as_ref().unwrap());
+                let first_field = orch::field_positions(&draft)
+                    .first()
+                    .copied()
+                    .unwrap_or(draft.len());
+                let prior_height = self.commander_height;
+                self.commander_height =
+                    prior_height.max((draft.lines().count() as u16 + 3).min(16));
+                self.orch_form = None;
+                let commander = self.commander.as_mut().unwrap();
+                commander.clear_all();
+                commander.draft = draft;
+                commander.cursor = first_field;
+                commander.guided_orch = Some(kind);
+                commander.guided_prior_height = Some(prior_height);
+                commander.guided_binding = Some(binding);
+                commander.receipt = None;
+            }
+            OrchActionMode::Modal => {
+                let prior_height = self.commander.as_ref().unwrap().guided_prior_height;
+                let commander = self.commander.as_mut().unwrap();
+                commander.clear_all();
+                commander.focused = false;
+                commander.receipt = Some(format!(
+                    "{} form opened; creation waits for the form",
+                    if kind == OrchFormKind::Task {
+                        "Task"
+                    } else {
+                        "Automation"
+                    }
+                ));
+                commander.preview.clear();
+                if let Some(height) = prior_height {
+                    self.commander_height = height;
+                }
+            }
+            OrchActionMode::Submit => {
+                let draft = self.commander.as_ref().unwrap().draft.clone();
+                if let Err(error) = orch::parse_into(&draft, self.orch_form.as_mut().unwrap()) {
+                    self.orch_form = None;
+                    return Err(error);
+                }
+                self.submit_orch_form();
+                if let Some(form) = self.orch_form.take() {
+                    return Err(form
+                        .error
+                        .unwrap_or_else(|| "Could not create the ORCH item".into()));
+                }
+                let prior_height = self.commander.as_ref().unwrap().guided_prior_height;
+                let receipt = self.commander.as_ref().unwrap().receipt.clone();
+                let commander = self.commander.as_mut().unwrap();
+                commander.release_staged_images();
+                commander.clear_all();
+                commander.receipt = receipt;
+                commander.focused = true;
+                if let Some(height) = prior_height {
+                    self.commander_height = height;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn commander_bind_orch_form(
+        &mut self,
+        target: Option<FormTarget>,
+        automation: bool,
+    ) -> Result<(), String> {
+        let (workspace_id, label, agent_target) = match target {
+            Some(FormTarget::Workspace { id, name }) => (id, name, None),
+            Some(FormTarget::Agent {
+                pane,
+                terminal_id,
+                workspace_id,
+                workspace_name,
+                agent,
+            }) => {
+                let still_live = self
+                    .panes
+                    .get(&pane)
+                    .and_then(|pane| pane.terminal_runtime())
+                    .is_some_and(|runtime| runtime.terminal_id == terminal_id);
+                if !still_live || !self.is_agent_pane(pane) {
+                    self.orch_form = None;
+                    return Err("Agent pane changed before the form opened".into());
+                }
+                (
+                    workspace_id,
+                    workspace_name,
+                    Some((pane, terminal_id, agent)),
+                )
+            }
+            None => {
+                let workspace = self
+                    .workspaces
+                    .get(self.active_ws)
+                    .ok_or("No active workspace")?;
+                (workspace.id.clone(), workspace.name.clone(), None)
+            }
+        };
+        if !self
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == workspace_id)
+        {
+            return Err("Selected workspace is no longer available".into());
+        }
+        let form = self.orch_form.as_mut().expect("form was opened");
+        if automation {
+            form.active_agents.retain(|choice| {
+                choice.workspace_id == workspace_id
+                    && agent_target.as_ref().is_none_or(|(pane, terminal_id, _)| {
+                        choice.pane == *pane && choice.terminal_id == *terminal_id
+                    })
+            });
+            if agent_target.is_some() && form.active_agents.is_empty() {
+                return Err("Agent is no longer available for automation".into());
+            }
+        }
+        form.workspace_id = Some(workspace_id);
+        form.commander_origin = true;
+        form.commander_target_label = Some(label);
+        if let Some((pane, terminal_id, agent)) = agent_target {
+            if automation {
+                form.automation_target = crate::app::OrchAutomationTarget::ActiveAgent;
+                form.active_agent = form
+                    .active_agents
+                    .iter()
+                    .position(|choice| choice.pane == pane && choice.terminal_id == terminal_id)
+                    .ok_or("Agent is no longer available for automation")?;
+            } else {
+                form.agent = agent;
             }
         }
         Ok(())

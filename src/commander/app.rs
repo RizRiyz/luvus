@@ -1,5 +1,6 @@
 //! App-owned Commander routing and exact-pane delivery.
 
+use super::orch;
 use super::{
     encode_component, line_end, line_start, next_word, parse_scoped_target, previous_word,
     slash_popup_layout, target_lookup, target_spans, unescape_pane_mentions, Commander,
@@ -89,6 +90,13 @@ impl App {
 
     pub(crate) fn close_commander(&mut self) {
         self.commander_resize = false;
+        if let Some(height) = self
+            .commander
+            .as_ref()
+            .and_then(|commander| commander.guided_prior_height)
+        {
+            self.commander_height = height;
+        }
         self.commander = None;
     }
 
@@ -176,7 +184,9 @@ impl App {
             return true;
         }
         if key.code == KeyCode::Esc {
-            self.commander.as_mut().unwrap().focused = false;
+            let commander = self.commander.as_mut().unwrap();
+            commander.pending_working_confirmation = None;
+            commander.focused = false;
             return true;
         }
         if key.code == KeyCode::Enter {
@@ -186,6 +196,17 @@ impl App {
             {
                 self.commander.as_mut().unwrap().insert("\n");
             } else {
+                if self.commander.as_ref().unwrap().guided_orch.is_some()
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    self.commander_prepare();
+                    return true;
+                }
+                if self.commander.as_ref().unwrap().guided_orch.is_some()
+                    && self.commander_guide_move_field(false, false)
+                {
+                    return true;
+                }
                 let complete_name = self.commander.as_ref().and_then(|commander| {
                     let (matches, selected) = commander.slash_menu()?;
                     let current = commander.draft.split_whitespace().next().unwrap_or("");
@@ -202,6 +223,11 @@ impl App {
             return true;
         }
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            if self.commander.as_ref().unwrap().guided_orch.is_some()
+                && self.commander_guide_move_field(key.code == KeyCode::BackTab, true)
+            {
+                return true;
+            }
             self.commander_cycle_target(
                 key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
             );
@@ -374,6 +400,38 @@ impl App {
         }
         self.refresh_commander_preview();
         true
+    }
+
+    /// In a guided ORCH draft, Tab cycles value positions and plain Enter
+    /// advances until the final prompt field. Ctrl+Enter submits from anywhere.
+    fn commander_guide_move_field(&mut self, backward: bool, wrap: bool) -> bool {
+        let commander = self.commander.as_mut().unwrap();
+        let positions = orch::field_positions(&commander.draft);
+        let Some(first) = positions.first().copied() else {
+            return false;
+        };
+        if commander.cursor <= commander.draft.find('\n').unwrap_or(0) {
+            return false;
+        }
+        let next = if backward {
+            positions
+                .iter()
+                .rev()
+                .find(|position| **position < commander.cursor)
+                .copied()
+                .or_else(|| wrap.then(|| *positions.last().unwrap()))
+        } else {
+            positions
+                .iter()
+                .find(|position| **position > commander.cursor)
+                .copied()
+                .or_else(|| wrap.then_some(first))
+        };
+        if let Some(next) = next {
+            commander.move_cursor(next, false);
+            return true;
+        }
+        false
     }
 
     fn commander_cycle_target(&mut self, backward: bool) {
@@ -624,13 +682,86 @@ impl App {
             return;
         }
         match self.commander_parse(&draft) {
-            Ok(plan) => self.commander_dispatch(plan),
+            Ok(plan) => match self.commander_preflight_delivery(&draft, &plan) {
+                Ok(true) => self.commander_dispatch(plan),
+                Ok(false) => {}
+                Err(error) => {
+                    let commander = self.commander.as_mut().unwrap();
+                    commander.pending_working_confirmation = None;
+                    commander.receipt = Some(error);
+                    commander.delivery_results.clear();
+                }
+            },
             Err(error) => {
                 let commander = self.commander.as_mut().unwrap();
+                commander.pending_working_confirmation = None;
                 commander.receipt = Some(error);
                 commander.delivery_results.clear();
             }
         }
+    }
+
+    /// Admit the entire batch before any pane receives input. A second Enter
+    /// confirms only the unchanged draft; all terminal identities and prompt
+    /// evidence are checked again when that Enter arrives.
+    fn commander_preflight_delivery(
+        &mut self,
+        draft: &str,
+        plan: &DeliveryPlan,
+    ) -> Result<bool, String> {
+        let mut working = Vec::new();
+        for target in &plan.targets {
+            let id = target.pane;
+            let same_terminal = self
+                .panes
+                .get(&id)
+                .and_then(Pane::terminal_runtime)
+                .is_some_and(|runtime| runtime.terminal_id == target.terminal_id);
+            if !same_terminal
+                || self.pane_location(id).is_none()
+                || self.is_agent_pane(id) != target.is_agent
+            {
+                return Err(format!("p{} is no longer available", id.0));
+            }
+            if !target.is_agent {
+                continue;
+            }
+            let state = self.status.get(&id).map(|status| status.state);
+            if state == Some(crate::ui::theme::State::Blocked) {
+                return Err(format!(
+                    "p{} is blocked; answer its approval prompt in the pane",
+                    id.0
+                ));
+            }
+            if !self.agent_prompt_is_ready(id) {
+                return Err(format!("p{} has no ready agent input yet", id.0));
+            }
+            if state == Some(crate::ui::theme::State::Working) {
+                working.push(format!("p{}", id.0));
+            }
+        }
+        if working.is_empty()
+            || self.config.commander_working_policy
+                == crate::config::CommanderWorkingPolicy::AutoSend
+        {
+            self.commander
+                .as_mut()
+                .unwrap()
+                .pending_working_confirmation = None;
+            return Ok(true);
+        }
+        let commander = self.commander.as_mut().unwrap();
+        if commander.pending_working_confirmation.as_deref() == Some(draft) {
+            commander.pending_working_confirmation = None;
+            return Ok(true);
+        }
+        commander.pending_working_confirmation = Some(draft.to_string());
+        commander.receipt = Some(format!(
+            "{} working; press Enter again to send (Esc cancels)",
+            working.join(", ")
+        ));
+        commander.delivery_results.clear();
+        Ok(false)
     }
 
     /// A split is a standalone action on one exact pane, never prompt text.
@@ -747,6 +878,9 @@ impl App {
             }
             Some(index)
         } else if scope.tab.is_some() {
+            if self.workspaces.get(self.active_ws).is_none() {
+                return Err("No active workspace is available".into());
+            }
             Some(self.active_ws)
         } else {
             None
@@ -967,6 +1101,10 @@ impl App {
     }
 
     pub(crate) fn commander_dispatch(&mut self, plan: DeliveryPlan) {
+        self.commander
+            .as_mut()
+            .unwrap()
+            .pending_working_confirmation = None;
         let mut results = Vec::with_capacity(plan.targets.len());
         let selected: Vec<PaneId> = plan.targets.iter().map(|target| target.pane).collect();
         let shared_prompt = plan.targets.first().is_some_and(|first| {

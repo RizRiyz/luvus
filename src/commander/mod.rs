@@ -4,6 +4,7 @@
 mod actions;
 mod app;
 mod composer;
+mod orch;
 mod targets;
 
 pub(crate) use actions::SLASH_ACTIONS;

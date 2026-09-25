@@ -1,5 +1,6 @@
 //! UTF-8-safe, bounded composer state and caret editing.
 
+use crate::app::OrchFormKind;
 use crate::ids::PaneId;
 use std::path::PathBuf;
 
@@ -15,6 +16,13 @@ pub(crate) struct Commander {
     pub(crate) selection_anchor: Option<usize>,
     pub(crate) pending_clipboard: Option<String>,
     pub receipt: Option<String>,
+    /// Ask mode: an unchanged draft needs one more Enter before a ready,
+    /// currently working agent receives it. Revalidated on that Enter.
+    pub(crate) pending_working_confirmation: Option<String>,
+    /// A slash action expanded into an editable multiline ORCH template.
+    pub(crate) guided_orch: Option<OrchFormKind>,
+    pub(crate) guided_prior_height: Option<u16>,
+    pub(super) guided_binding: Option<super::orch::GuidedBinding>,
     pub delivery_results: Vec<String>,
     pub delivery_index: usize,
     /// A bounded snapshot shown only to the interactive client after /read.
@@ -124,6 +132,7 @@ impl Commander {
     }
 
     pub(crate) fn clear_receipt(&mut self) {
+        self.pending_working_confirmation = None;
         self.receipt = None;
         self.delivery_results.clear();
         self.read_output = None;
@@ -222,6 +231,9 @@ impl Commander {
         self.draft.clear();
         self.cursor = 0;
         self.selection_anchor = None;
+        self.guided_orch = None;
+        self.guided_prior_height = None;
+        self.guided_binding = None;
         self.clear_receipt();
         self.prune_staged_images();
     }

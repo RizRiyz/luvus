@@ -61,6 +61,10 @@ fn slash_actions_are_typed_and_unknown_names_never_reach_a_pane() {
     app.open_commander();
 
     assert!(app.commander_parse_slash_action("/task").unwrap().is_ok());
+    assert!(app
+        .commander_parse_slash_action("/task form")
+        .unwrap()
+        .is_ok());
     for action in ["/automation", "/mission", "/diff", "/files"] {
         assert!(
             app.commander_parse_slash_action(action).unwrap().is_ok(),
@@ -117,6 +121,250 @@ fn slash_actions_are_typed_and_unknown_names_never_reach_a_pane() {
 }
 
 #[test]
+fn commander_task_form_binds_workspace_and_reports_created_id() {
+    let _env = crate::persist::test_env("commander-task-bound-workspace");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let workspace = app.workspaces[app.active_ws].id.clone();
+    app.workspaces[app.active_ws].name = "commander-target".into();
+    app.new_workspace();
+    assert_ne!(app.workspaces[app.active_ws].id, workspace);
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/task @workspace:commander-target form".into();
+    app.commander_prepare();
+    let form = app.orch_form.as_ref().unwrap();
+    assert_eq!(form.workspace_id.as_deref(), Some(workspace.as_str()));
+    assert!(form.commander_origin);
+    app.orch_form.as_mut().unwrap().title = "Review changes".into();
+    app.handle_orch_form_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.orch_form.is_none());
+    assert!(app.commander.as_ref().unwrap().focused);
+    assert_eq!(
+        app.orch
+            .tasks
+            .last()
+            .unwrap()
+            .project
+            .as_ref()
+            .unwrap()
+            .workspace_id,
+        workspace
+    );
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("Task t"));
+}
+
+#[test]
+fn commander_automation_agent_target_is_exact_and_cancel_returns_focus() {
+    let _env = crate::persist::test_env("commander-automation-exact-agent");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = format!("/automation @p{} form", pane.0);
+    app.commander_prepare();
+    let form = app.orch_form.as_ref().unwrap();
+    assert_eq!(form.automation_target, OrchAutomationTarget::ActiveAgent);
+    assert_eq!(form.active_agents.len(), 1);
+    assert_eq!(form.active_agents[0].pane, pane);
+    app.handle_orch_form_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.orch_form.is_none());
+    assert!(app.commander.as_ref().unwrap().focused);
+}
+
+#[test]
+fn guided_task_stays_in_commander_then_creates_in_exact_workspace() {
+    let _env = crate::persist::test_env("commander-guided-task");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let workspace_id = app.workspaces[app.active_ws].id.clone();
+    app.workspaces[app.active_ws].name = "guided-project".into();
+    app.new_workspace();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = "/task @workspace:guided-project".into();
+    app.commander_prepare();
+    assert!(app.orch_form.is_none());
+    assert!(app.commander.as_ref().unwrap().focused);
+    assert!(app.commander.as_ref().unwrap().guided_orch.is_some());
+    assert!(app.orch.tasks.is_empty());
+    let title_cursor = app.commander.as_ref().unwrap().cursor;
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().cursor > title_cursor);
+    app.commander_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().cursor, title_cursor);
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().cursor > title_cursor);
+    assert!(app.orch.tasks.is_empty());
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/task @workspace:guided-project\ntitle: Review tests\nstart: manual\nagent: \nmode: workspace\npaths: src/**\ndeps: \ngate: \nprompt: Check test coverage\nReport gaps".into();
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert!(app.orch_form.is_none());
+    assert_eq!(app.orch.tasks.len(), 1);
+    assert_eq!(
+        app.orch.tasks[0].project.as_ref().unwrap().workspace_id,
+        workspace_id
+    );
+    assert_eq!(
+        app.orch.tasks[0].prompt.as_deref(),
+        Some("Check test coverage\nReport gaps")
+    );
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("Task t"));
+    assert!(app.commander.as_ref().unwrap().guided_orch.is_none());
+}
+
+#[test]
+fn guided_task_keeps_its_workspace_after_switching_workspaces() {
+    let _env = crate::persist::test_env("commander-guided-workspace-switch");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let workspace_id = app.workspaces[app.active_ws].id.clone();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = "/task".into();
+    app.commander_prepare();
+    app.new_workspace();
+    assert_ne!(app.workspaces[app.active_ws].id, workspace_id);
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/task\ntitle: Review tests\nstart: manual\nagent: \nmode: workspace\npaths: \ndeps: \ngate: \nprompt: Check tests".into();
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert_eq!(app.orch.tasks.len(), 1);
+    assert_eq!(
+        app.orch.tasks[0].project.as_ref().unwrap().workspace_id,
+        workspace_id
+    );
+}
+
+#[test]
+fn guided_automation_validates_before_creating() {
+    let _env = crate::persist::test_env("commander-guided-automation");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = "/automation".into();
+    app.commander_prepare();
+    assert!(app.commander.as_ref().unwrap().draft.contains("schedule: "));
+    app.commander_prepare();
+    assert!(app.automation.automations.is_empty());
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("title"));
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/automation\ntitle: Daily review\nstart: daily\nschedule: 09:00\ntimezone: Asia/Makassar\nagent: codex\nmode: workspace\naccess: workspace\npaths: \ngate: \nprompt: Review today's changes".into();
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert_eq!(app.automation.automations.len(), 1);
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("Automation a"));
+}
+
+#[test]
+fn working_agent_requires_second_enter_unless_auto_send_and_blocked_never_sends() {
+    let _env = crate::persist::test_env("commander-working-confirmation");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.config.commander_working_policy = crate::config::CommanderWorkingPolicy::Ask;
+    let pane = app.layout().focus;
+    let generation = app.panes[&pane].engine.lock().unwrap().output_generation();
+    let status = app.status.get_mut(&pane).unwrap();
+    status.agent = "claude".into();
+    status.state = crate::ui::theme::State::Working;
+    status.prompt_evidence = crate::detect::PromptEvidence::Ready;
+    status.last_detect_generation = Some(generation);
+    status.force_detect = false;
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+    app.open_commander();
+    let draft = format!("@p{} continue", pane.0);
+    app.commander.as_mut().unwrap().draft = draft.clone();
+    app.commander_prepare();
+    assert_eq!(
+        app.commander
+            .as_ref()
+            .unwrap()
+            .pending_working_confirmation
+            .as_deref(),
+        Some(draft.as_str())
+    );
+    assert!(input_rx.try_recv().is_err());
+    app.status.get_mut(&pane).unwrap().state = crate::ui::theme::State::Blocked;
+    app.commander_prepare();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("blocked"));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .pending_working_confirmation
+        .is_none());
+    assert!(input_rx.try_recv().is_err());
+    app.status.get_mut(&pane).unwrap().state = crate::ui::theme::State::Working;
+    app.commander_prepare();
+    assert!(input_rx.try_recv().is_err());
+    app.commander_prepare();
+    assert!(input_rx.try_recv().is_ok());
+
+    app.commander.as_mut().unwrap().insert("now");
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .pending_working_confirmation
+        .is_none());
+    app.config.commander_working_policy = crate::config::CommanderWorkingPolicy::AutoSend;
+    app.commander_prepare();
+    assert!(input_rx.try_recv().is_ok());
+
+    app.status.get_mut(&pane).unwrap().state = crate::ui::theme::State::Blocked;
+    app.commander.as_mut().unwrap().draft = draft;
+    app.commander_prepare();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("blocked"));
+    assert!(input_rx.try_recv().is_err());
+}
+
+#[test]
 fn slash_key_and_tab_complete_the_action_before_a_target() {
     let _env = crate::persist::test_env("commander-slash-complete");
     let (tx, _) = std::sync::mpsc::channel();
@@ -154,9 +402,10 @@ fn slash_enter_accepts_a_suggestion_before_dispatching() {
     assert_eq!(app.commander.as_ref().unwrap().draft, "/automation");
     assert!(app.orch_form.is_none());
     app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.orch_form.is_none());
     assert_eq!(
-        app.orch_form.as_ref().unwrap().kind,
-        OrchFormKind::Automation
+        app.commander.as_ref().unwrap().guided_orch,
+        Some(OrchFormKind::Automation)
     );
 }
 
@@ -229,7 +478,7 @@ fn slash_forms_and_docks_reuse_existing_controls() {
         commander.focused = true;
         app.commander_prepare();
     }
-    invoke(&mut app, "/automation");
+    invoke(&mut app, "/automation form");
     assert_eq!(
         app.orch_form.as_ref().unwrap().kind,
         OrchFormKind::Automation
@@ -367,7 +616,7 @@ fn slash_read_shows_bounded_output_and_task_opens_existing_form() {
     assert!(app.commander.as_ref().unwrap().read_scroll > 0);
 
     let commander = app.commander.as_mut().unwrap();
-    commander.draft = "/task".into();
+    commander.draft = "/task form".into();
     commander.cursor = commander.draft.len();
     app.commander_prepare();
     assert_eq!(app.orch_form.as_ref().unwrap().kind, OrchFormKind::Task);

@@ -1596,6 +1596,27 @@ impl App {
         self.orch_form = Some(form);
     }
 
+    pub(crate) fn close_orch_form(&mut self) {
+        let commander_kind = self
+            .orch_form
+            .as_ref()
+            .and_then(|form| form.commander_origin.then_some(form.kind));
+        self.orch_form = None;
+        if let Some(kind) = commander_kind {
+            if let Some(commander) = self.commander.as_mut() {
+                commander.focused = true;
+                commander.receipt = Some(format!(
+                    "{} form canceled",
+                    if kind == crate::app::OrchFormKind::Task {
+                        "Task"
+                    } else {
+                        "Automation"
+                    }
+                ));
+            }
+        }
+    }
+
     fn active_agent_automation_choices(&self) -> Vec<crate::app::OrchActiveAgent> {
         let mut choices = Vec::new();
         for workspace in &self.workspaces {
@@ -1646,7 +1667,7 @@ impl App {
         // Esc/Enter act on the whole form, so handle them before borrowing it.
         match key.code {
             KeyCode::Esc => {
-                self.orch_form = None;
+                self.close_orch_form();
                 return;
             }
             KeyCode::Enter => {
@@ -1696,7 +1717,7 @@ impl App {
 
     /// Create the task from the form (title required; paths/deps whitespace-split).
     /// On error the form stays open showing why.
-    fn submit_orch_form(&mut self) {
+    pub(crate) fn submit_orch_form(&mut self) {
         let (
             kind,
             title,
@@ -1712,6 +1733,8 @@ impl App {
             paths,
             deps,
             gate,
+            workspace_id,
+            commander_origin,
         ) = {
             let Some(f) = self.orch_form.as_ref() else {
                 return;
@@ -1740,6 +1763,8 @@ impl App {
                     let g = f.gate.trim();
                     (!g.is_empty()).then(|| g.to_string())
                 },
+                f.workspace_id.clone(),
+                f.commander_origin,
             )
         };
         let result = match kind {
@@ -1752,6 +1777,7 @@ impl App {
                 paths,
                 deps,
                 gate,
+                workspace_id.clone(),
             ),
             crate::app::OrchFormKind::Automation => self.submit_scheduled_orch_task(
                 title,
@@ -1766,12 +1792,43 @@ impl App {
                 timezone,
                 paths,
                 gate,
+                workspace_id,
             ),
         };
-        if let Err(message) = result {
-            if let Some(form) = self.orch_form.as_mut() {
-                form.error = Some(message);
+        match result {
+            Ok(()) if commander_origin => {
+                let id = match kind {
+                    crate::app::OrchFormKind::Task => self
+                        .orch
+                        .tasks
+                        .get(self.orch_cursor)
+                        .map(|task| task.id.as_str()),
+                    crate::app::OrchFormKind::Automation => self
+                        .automation
+                        .automations
+                        .get(self.orch_automation_cursor)
+                        .map(|item| item.id.as_str()),
+                };
+                if let Some(commander) = self.commander.as_mut() {
+                    commander.focused = true;
+                    commander.receipt = id.map(|id| {
+                        format!(
+                            "{} {id} created",
+                            if kind == crate::app::OrchFormKind::Task {
+                                "Task"
+                            } else {
+                                "Automation"
+                            }
+                        )
+                    });
+                }
             }
+            Err(message) => {
+                if let Some(form) = self.orch_form.as_mut() {
+                    form.error = Some(message);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1786,6 +1843,7 @@ impl App {
         paths: Vec<String>,
         deps: Vec<String>,
         gate: Option<String>,
+        workspace_id: Option<String>,
     ) -> Result<(), String> {
         let descriptor = if start_now {
             Some(
@@ -1799,8 +1857,9 @@ impl App {
         if start_now && prompt.is_empty() {
             return Err("Prompt is required when Start is Now".into());
         }
+        let workspace = self.orch_form_workspace_index(workspace_id.as_deref())?;
         let project = self
-            .task_project_at(self.active_ws)
+            .task_project_at(workspace)
             .ok_or_else(|| "No workspace is available for this task".to_string())?;
         let before = self.orch.clone();
         let task = self
@@ -1846,6 +1905,7 @@ impl App {
         timezone: String,
         paths: Vec<String>,
         gate: Option<String>,
+        bound_workspace_id: Option<String>,
     ) -> Result<(), String> {
         if prompt.is_empty() {
             return Err("Prompt is required for a scheduled agent".into());
@@ -1866,9 +1926,11 @@ impl App {
                         access.label().to_ascii_lowercase()
                     ));
                 }
+                let workspace_index =
+                    self.orch_form_workspace_index(bound_workspace_id.as_deref())?;
                 let workspace_id = self
                     .workspaces
-                    .get(self.active_ws)
+                    .get(workspace_index)
                     .map(|workspace| workspace.id.clone())
                     .ok_or_else(|| "an active workspace is required".to_string())?;
                 (
@@ -1882,6 +1944,12 @@ impl App {
             crate::app::OrchAutomationTarget::ActiveAgent => {
                 let target = active_agent
                     .ok_or_else(|| "No live agent is available for this automation".to_string())?;
+                if bound_workspace_id
+                    .as_deref()
+                    .is_some_and(|id| id != target.workspace_id)
+                {
+                    return Err("Selected agent is outside the bound workspace".into());
+                }
                 (
                     crate::automation::AutomationTarget::ActiveAgent {
                         pane_id: target.pane.0,
@@ -1950,6 +2018,21 @@ impl App {
         Ok(())
     }
 
+    fn orch_form_workspace_index(&self, id: Option<&str>) -> Result<usize, String> {
+        match id {
+            Some(id) => self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == id)
+                .ok_or_else(|| "Selected workspace is no longer available".to_string()),
+            None => self
+                .workspaces
+                .get(self.active_ws)
+                .map(|_| self.active_ws)
+                .ok_or_else(|| "No active workspace is available".to_string()),
+        }
+    }
+
     /// The task under the board cursor, if any.
     fn orch_selected_id(&self) -> Option<String> {
         self.orch.tasks.get(self.orch_cursor).map(|t| t.id.clone())
@@ -2013,7 +2096,7 @@ impl App {
                 }
             }
             crate::app::OrchHit::FormCreate => self.submit_orch_form(),
-            crate::app::OrchHit::FormCancel => self.orch_form = None,
+            crate::app::OrchHit::FormCancel => self.close_orch_form(),
             crate::app::OrchHit::FormModal => {}
             crate::app::OrchHit::StartChoice(cursor) => {
                 if let Some(start) = self.orch_start.as_mut() {
@@ -5002,6 +5085,7 @@ mod tests {
             "08:00".into(),
             "Asia/Makassar".into(),
             Vec::new(),
+            None,
             None,
         )
         .unwrap();

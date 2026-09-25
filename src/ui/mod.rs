@@ -1430,6 +1430,8 @@ fn draw_commander(
         result
     } else if let Some(receipt) = commander.receipt.as_deref() {
         receipt
+    } else if commander.guided_orch.is_some() {
+        cat.commander_guided_hint
     } else {
         if inner.width < 64 {
             cat.commander_hint_compact
