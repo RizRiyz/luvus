@@ -102,17 +102,64 @@ fn managed_group(command: &str) -> Value {
     })
 }
 
+/// Decodes one standard base64 token, or returns `None` when it is not one.
+fn decode_base64(token: &str) -> Option<Vec<u8>> {
+    if token.is_empty() || !token.len().is_multiple_of(4) {
+        return None;
+    }
+    let (mut bits, mut count) = (0u32, 0u32);
+    let mut output = Vec::with_capacity(token.len() / 4 * 3);
+    for byte in token.trim_end_matches('=').bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            output.push((bits >> count) as u8);
+            bits &= (1 << count) - 1;
+        }
+    }
+    Some(output)
+}
+
+/// Whether a hook command runs the Luvus script. The Windows command carries
+/// the script path only inside its `-EncodedCommand` text, so base64 tokens
+/// are decoded too; an edited command with extra PowerShell flags still
+/// matches.
+fn command_mentions_script(command: &str) -> bool {
+    command.contains(SCRIPT_NAME)
+        || command.split_whitespace().any(|token| {
+            decode_base64(token)
+                .filter(|bytes| bytes.len().is_multiple_of(2))
+                .and_then(|bytes| {
+                    let units: Vec<u16> = bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect();
+                    String::from_utf16(&units).ok()
+                })
+                .is_some_and(|text| text.contains(SCRIPT_NAME))
+        })
+}
+
+fn hook_mentions_script(hook: &Value) -> bool {
+    hook.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(command_mentions_script)
+}
+
 fn group_mentions_script(group: &Value) -> bool {
     group
         .get("hooks")
         .and_then(Value::as_array)
-        .is_some_and(|hooks| {
-            hooks.iter().any(|hook| {
-                hook.get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|command| command.contains(SCRIPT_NAME))
-            })
-        })
+        .is_some_and(|hooks| hooks.iter().any(hook_mentions_script))
 }
 
 fn hook_uses_command(hook: &Value, command: &str) -> bool {
@@ -245,6 +292,19 @@ fn uninstall() -> Result<()> {
     else {
         return Ok(());
     };
+    // Removing the script while another hook still runs it would leave that
+    // hook pointing at a missing file, so an edited or foreign reference to
+    // the script blocks uninstall before anything changes.
+    if groups
+        .iter()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .any(|hook| hook_mentions_script(hook) && !hook_uses_command(hook, &command))
+    {
+        return Err(anyhow!(
+            "Devin SessionStart contains an edited `{SCRIPT_NAME}` hook; remove it manually before uninstalling"
+        ));
+    }
     let mut removed = false;
     groups.retain_mut(|group| {
         let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
@@ -628,24 +688,6 @@ mod tests {
     /// unquote in a Windows profile path.
     const METACHARACTER_DIR: &str = "a $HOME b `x c'd e %PATH% f";
 
-    /// Standard base64 decoding, only to read `-EncodedCommand` back.
-    fn base64_decode(text: &str) -> Vec<u8> {
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let (mut bits, mut count, mut output) = (0u32, 0u32, Vec::new());
-        for byte in text.bytes().filter(|byte| *byte != b'=') {
-            let value = ALPHABET.iter().position(|symbol| *symbol == byte).unwrap();
-            bits = (bits << 6) | value as u32;
-            count += 6;
-            if count >= 8 {
-                count -= 8;
-                output.push((bits >> count) as u8);
-                bits &= (1 << count) - 1;
-            }
-        }
-        output
-    }
-
     #[test]
     fn windows_hook_command_keeps_the_script_path_literal() {
         let path =
@@ -660,7 +702,8 @@ mod tests {
         assert!(command
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b" .-+/=".contains(&byte)));
-        let utf16: Vec<u16> = base64_decode(encoded)
+        let utf16: Vec<u16> = decode_base64(encoded)
+            .unwrap()
             .chunks(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();
@@ -668,6 +711,53 @@ mod tests {
             String::from_utf16(&utf16).unwrap(),
             r"& 'C:\Users\a $HOME b `x c''d e %PATH% f\AppData\Roaming\devin\luvus-agent-hook.ps1'"
         );
+    }
+
+    #[test]
+    fn encoded_script_references_are_recognized_without_matching_other_tools() {
+        let ours = powershell_hook_command(&format!(
+            r"C:\Users\someone\AppData\Roaming\devin\{SCRIPT_NAME}"
+        ));
+        assert!(!ours.contains(SCRIPT_NAME));
+        assert!(command_mentions_script(&ours));
+        let edited = ours
+            .replacen(" -NoProfile", " -NoLogo -NoProfile", 1)
+            .replace("-EncodedCommand", "-enc");
+        assert!(command_mentions_script(&edited));
+
+        // Another tool's encoded hook, like the ones Orca installs, is not ours.
+        let foreign: Vec<u8> = r"& 'C:\tools\other-hook.ps1'"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(!command_mentions_script(&format!(
+            "powershell.exe -NoProfile -EncodedCommand {}",
+            crate::base64_encode(&foreign)
+        )));
+        assert!(!command_mentions_script(
+            "powershell.exe -NoProfile -Command exit 0"
+        ));
+    }
+
+    #[test]
+    fn edited_managed_hook_blocks_reinstall_and_uninstall() {
+        let (_lock, _home, root) = isolated_home("edited-command");
+        install().unwrap();
+        let config = config_path();
+        let command = hook_command(&script_path()).unwrap();
+        // The user adds a flag, such as PowerShell's `-NoLogo`, to the
+        // installed command. It still runs the Luvus script.
+        let (program, rest) = command.split_once(' ').unwrap();
+        let mut value = read_config(&config).unwrap();
+        value["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
+            json!(format!("{program} -NoLogo {rest}"));
+        integration::write_json_atomic(&config, &value).unwrap();
+
+        assert!(install().is_err());
+        assert!(uninstall().is_err());
+        assert_eq!(read_config(&config).unwrap(), value);
+        assert_eq!(fs::read(script_path()).unwrap(), SCRIPT.as_bytes());
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Runs the real hook command through each shell Devin may use on Windows,
