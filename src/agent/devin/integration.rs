@@ -72,10 +72,22 @@ fn hook_command(path: &Path) -> Result<String> {
     let path = path
         .to_str()
         .ok_or_else(|| anyhow!("Devin integration path is not valid Unicode"))?;
-    Ok(format!(
-        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
-        path.replace('"', "\"\"")
-    ))
+    Ok(powershell_hook_command(path))
+}
+
+/// Devin runs hook commands through the user's shell (Git Bash, cmd, or
+/// PowerShell), and each one rewrites a quoted path that contains `$`,
+/// backticks, `%`, or apostrophes. The script path therefore travels as a
+/// single-quoted PowerShell literal inside `-EncodedCommand`, whose base64 text
+/// no shell can alter.
+#[cfg(any(windows, test))]
+fn powershell_hook_command(path: &str) -> String {
+    let literal = format!("& '{}'", path.replace('\'', "''"));
+    let utf16: Vec<u8> = literal.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    format!(
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}",
+        crate::base64_encode(&utf16)
+    )
 }
 
 /// Devin's hook parser rejects the whole file for one unknown event, so the
@@ -121,6 +133,18 @@ fn read_config(path: &Path) -> Result<Value> {
         Ok(contents) => serde_json::from_str(&contents).map_err(Into::into),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(json!({})),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// Replacing a symlinked config would turn it into a regular file and detach a
+/// dotfiles-managed target, so Luvus refuses to write through the link.
+fn refuse_symlinked_config(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow!(
+            "refusing to modify symlinked Devin config {}; add the hook to the link target manually",
+            path.display()
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -177,6 +201,7 @@ fn restore_script(path: &Path, previous: Option<&[u8]>) {
 
 fn install() -> Result<()> {
     let config = config_path();
+    refuse_symlinked_config(&config)?;
     let script = script_path();
     let command = hook_command(&script)?;
     let mut value = read_config(&config)?;
@@ -234,6 +259,7 @@ fn uninstall() -> Result<()> {
     if !removed {
         return Ok(());
     }
+    refuse_symlinked_config(&config)?;
     integration::write_json_atomic(&config, &value)?;
     if fs::read(&script).ok().as_deref() == Some(SCRIPT.as_bytes()) {
         let _ = fs::remove_file(script);
@@ -410,10 +436,11 @@ mod tests {
         let groups = value["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0], original["hooks"]["SessionStart"][0]);
+        let command = hook_command(&script_path()).unwrap();
         assert_eq!(
             groups
                 .iter()
-                .filter(|group| group_mentions_script(group))
+                .filter(|group| group_uses_command(group, &command))
                 .count(),
             1
         );
@@ -515,6 +542,199 @@ mod tests {
             assert!(install().is_err());
             assert_eq!(read_config(&config).unwrap(), invalid);
             assert!(!script_path().exists());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Creates a file symlink, or returns false where this process may not
+    /// create one (Windows without Developer Mode or elevation).
+    fn file_symlink(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).unwrap();
+            true
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+    }
+
+    #[test]
+    fn symlinked_config_is_refused_before_any_change() {
+        let (_lock, _home, root) = isolated_home("symlink");
+        let config = config_path();
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let target = root.join("dotfiles-devin-config.json");
+        let original = user_config();
+        fs::write(&target, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        if !file_symlink(&target, &config) {
+            eprintln!("skipping: this process cannot create file symlinks");
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+        let is_link = || {
+            fs::symlink_metadata(&config)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        };
+
+        assert!(install().is_err());
+        assert!(is_link());
+        assert_eq!(read_config(&target).unwrap(), original);
+        assert!(!script_path().exists());
+
+        // A managed hook added to the target by hand is not removed through
+        // the link either.
+        let mut managed = original.clone();
+        register_managed_group(&mut managed, &hook_command(&script_path()).unwrap()).unwrap();
+        fs::write(&target, serde_json::to_vec_pretty(&managed).unwrap()).unwrap();
+        assert!(uninstall().is_err());
+        assert!(is_link());
+        assert_eq!(read_config(&target).unwrap(), managed);
+
+        // Without a managed hook there is nothing to write, so uninstall stays
+        // a no-op.
+        fs::write(&target, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        uninstall().unwrap();
+        assert!(is_link());
+        assert_eq!(read_config(&target).unwrap(), original);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_and_uninstall_keep_a_private_config_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_lock, _home, root) = isolated_home("mode");
+        let config = config_path();
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, serde_json::to_vec_pretty(&user_config()).unwrap()).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        let mode = || fs::metadata(&config).unwrap().permissions().mode() & 0o777;
+
+        install().unwrap();
+        assert!(is_installed());
+        assert_eq!(mode(), 0o600);
+        uninstall().unwrap();
+        assert!(!is_installed());
+        assert_eq!(mode(), 0o600);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A directory name with every character a shell could expand, split, or
+    /// unquote in a Windows profile path.
+    const METACHARACTER_DIR: &str = "a $HOME b `x c'd e %PATH% f";
+
+    /// Standard base64 decoding, only to read `-EncodedCommand` back.
+    fn base64_decode(text: &str) -> Vec<u8> {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let (mut bits, mut count, mut output) = (0u32, 0u32, Vec::new());
+        for byte in text.bytes().filter(|byte| *byte != b'=') {
+            let value = ALPHABET.iter().position(|symbol| *symbol == byte).unwrap();
+            bits = (bits << 6) | value as u32;
+            count += 6;
+            if count >= 8 {
+                count -= 8;
+                output.push((bits >> count) as u8);
+                bits &= (1 << count) - 1;
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn windows_hook_command_keeps_the_script_path_literal() {
+        let path =
+            format!(r"C:\Users\{METACHARACTER_DIR}\AppData\Roaming\devin\luvus-agent-hook.ps1");
+        let command = powershell_hook_command(&path);
+        let (prefix, encoded) = command.rsplit_once(' ').unwrap();
+        assert_eq!(
+            prefix,
+            "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand"
+        );
+        // Nothing a shell could expand, split, or unquote reaches the command.
+        assert!(command
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b" .-+/=".contains(&byte)));
+        let utf16: Vec<u16> = base64_decode(encoded)
+            .chunks(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(
+            String::from_utf16(&utf16).unwrap(),
+            r"& 'C:\Users\a $HOME b `x c''d e %PATH% f\AppData\Roaming\devin\luvus-agent-hook.ps1'"
+        );
+    }
+
+    /// Runs the real hook command through each shell Devin may use on Windows,
+    /// for a script under a directory named with shell metacharacters, and
+    /// checks that the script received the hook payload on stdin.
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_command_runs_scripts_under_metacharacter_paths() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/devin-integration")
+            .join(format!("quoting-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let directory = root.join(METACHARACTER_DIR);
+        fs::create_dir_all(&directory).unwrap();
+        let received = root.join("received.txt");
+        let script = directory.join(SCRIPT_NAME);
+        fs::write(
+            &script,
+            format!(
+                "[Console]::In.ReadToEnd() | Set-Content -LiteralPath '{}' -NoNewline\n",
+                received.display().to_string().replace('\'', "''")
+            ),
+        )
+        .unwrap();
+        let command = hook_command(&script).unwrap();
+        let payload =
+            r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"quote-check"}"#;
+
+        let mut shells: Vec<(PathBuf, Vec<&str>)> = vec![
+            ("cmd.exe".into(), vec!["/d", "/s", "/c"]),
+            (
+                "powershell.exe".into(),
+                vec!["-NoProfile", "-NonInteractive", "-Command"],
+            ),
+        ];
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            let bash = PathBuf::from(program_files).join(r"Git\bin\bash.exe");
+            if bash.is_file() {
+                shells.push((bash, vec!["-c"]));
+            }
+        }
+        for (shell, args) in shells {
+            let _ = fs::remove_file(&received);
+            let mut child = Command::new(&shell)
+                .args(&args)
+                .arg(&command)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            assert!(child.wait().unwrap().success(), "{}", shell.display());
+            assert_eq!(
+                fs::read_to_string(&received).unwrap(),
+                payload,
+                "{}",
+                shell.display()
+            );
         }
         let _ = fs::remove_dir_all(root);
     }

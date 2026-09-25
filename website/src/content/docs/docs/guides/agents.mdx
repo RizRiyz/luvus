@@ -284,9 +284,10 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   platform-specific hook script beside it. It reports only the exact session
   ID for restart resume, including after `/clear` or an in-TUI `/resume`.
   Devin rejects a whole hook file for one unknown event, so Luvus writes only
-  `SessionStart` and keeps other tools' hooks intact. A config with comments
-  is refused instead of rewritten, and files selected with `devin --config`
-  are not managed.
+  `SessionStart` and keeps other tools' hooks and the config's file
+  permissions intact. A config with comments, or one that is a symlink, is
+  refused instead of rewritten, and files selected with `devin --config` are
+  not managed.
 
 Uninstalling (`luvus integration uninstall <agent>`, or the same Settings
 toggle) surgically removes **only luvus's hook entry**. Your other settings

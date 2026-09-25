@@ -149,6 +149,13 @@ pub(crate) fn write_bytes_atomic(path: &Path, output: &[u8]) -> Result<()> {
         .ok_or_else(|| anyhow!("could not reserve a temporary configuration file"))?;
 
     let result = (|| -> Result<()> {
+        // The replacement must keep the existing file's mode, so a private
+        // `0600` config never becomes readable through its new inode. Apply it
+        // before writing any content.
+        #[cfg(unix)]
+        if let Ok(metadata) = fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
         file.write_all(output)?;
         file.flush()?;
         file.sync_all()?;
@@ -424,6 +431,33 @@ mod tests {
                 .to_string_lossy()
                 .contains(".blocked.json.luvus-")
         }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_replaced_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "luvus-atomic-mode-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        for mode in [0o600, 0o640, 0o644] {
+            let config = root.join(format!("config-{mode:o}.json"));
+            fs::write(&config, "{}").unwrap();
+            fs::set_permissions(&config, fs::Permissions::from_mode(mode)).unwrap();
+            write_json_atomic(&config, &json!({"luvus": true})).unwrap();
+            assert_eq!(
+                fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
 
         let _ = fs::remove_dir_all(root);
     }
