@@ -137,13 +137,14 @@ fn command_mentions_script(command: &str) -> bool {
     command.contains(SCRIPT_NAME)
         || command.split_whitespace().any(|token| {
             decode_base64(token)
-                .filter(|bytes| bytes.len().is_multiple_of(2))
                 .and_then(|bytes| {
-                    let units: Vec<u16> = bytes
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                        .collect();
-                    String::from_utf16(&units).ok()
+                    let (pairs, remainder) = bytes.as_chunks::<2>();
+                    let units: Vec<u16> =
+                        pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+                    remainder
+                        .is_empty()
+                        .then(|| String::from_utf16(&units).ok())
+                        .flatten()
                 })
                 .is_some_and(|text| text.contains(SCRIPT_NAME))
         })
@@ -702,11 +703,10 @@ mod tests {
         assert!(command
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b" .-+/=".contains(&byte)));
-        let utf16: Vec<u16> = decode_base64(encoded)
-            .unwrap()
-            .chunks(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect();
+        let bytes = decode_base64(encoded).unwrap();
+        let (pairs, remainder) = bytes.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        let utf16: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
         assert_eq!(
             String::from_utf16(&utf16).unwrap(),
             r"& 'C:\Users\a $HOME b `x c''d e %PATH% f\AppData\Roaming\devin\luvus-agent-hook.ps1'"
