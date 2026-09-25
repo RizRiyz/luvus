@@ -319,53 +319,50 @@ pub fn gutter_width(line_count: usize) -> u16 {
 }
 
 /// Character ranges `(start, end)` of each visual segment when `line` is
-/// soft-wrapped to `width` columns. Breaks on the last space inside the window
-/// when there is one (word wrap), else hard-splits at the width. Always returns
-/// at least one range, so an empty line still occupies a row. Shared by the
-/// renderer and mouse-selection so a wrapped view maps screen rows to file
-/// columns identically in both.
+/// soft-wrapped to `width` terminal cells. Breaks on the last space inside the
+/// window when there is one (word wrap), else hard-splits at a grapheme boundary.
+/// An oversized grapheme occupies a row of its own, even when wider than the
+/// viewport. Always returns at least one range, so an empty line still occupies
+/// a row. Shared by the renderer and mouse-selection so a wrapped view maps
+/// screen rows to file columns identically in both.
 pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
     use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
 
-    let chars: Vec<char> = line.chars().collect();
-    let n = chars.len();
-    if width == 0 || n <= width {
-        return vec![(0, n)];
-    }
-    let mut boundaries = vec![0];
-    for grapheme in line.graphemes(true) {
-        boundaries.push(boundaries.last().copied().unwrap_or(0) + grapheme.chars().count());
+    let mut char_end = 0;
+    let graphemes: Vec<_> = line
+        .graphemes(true)
+        .map(|grapheme| {
+            let start = char_end;
+            char_end += grapheme.chars().count();
+            (start, char_end, grapheme.width(), grapheme == " ")
+        })
+        .collect();
+    if width == 0 || graphemes.is_empty() {
+        return vec![(0, char_end)];
     }
     let mut out = Vec::new();
     let mut start = 0;
-    while start < n {
-        if n - start <= width {
-            out.push((start, n));
-            break;
+    while start < graphemes.len() {
+        let mut end = start;
+        let mut cells = 0usize;
+        while end < graphemes.len() {
+            let next = graphemes[end].2;
+            if end > start && cells.saturating_add(next) > width {
+                break;
+            }
+            cells = cells.saturating_add(next);
+            end += 1;
         }
-        let limit = start + width;
-        let boundary = boundaries.partition_point(|&position| position <= limit);
-        let hard_end = if boundaries[boundary - 1] > start {
-            boundaries[boundary - 1]
-        } else {
-            boundaries[boundary]
-        };
-        let mut brk = hard_end;
-        if let Some(pos) = chars[start..hard_end].iter().rposition(|&c| c == ' ') {
-            let abs = start + pos;
-            if abs > start {
-                brk = abs;
+        let mut break_at = end;
+        if end < graphemes.len() {
+            if let Some(space) = (start + 1..end).rev().find(|&index| graphemes[index].3) {
+                break_at = space;
+                end = space + 1;
             }
         }
-        out.push((start, brk));
-        start = if brk < n && chars[brk] == ' ' {
-            brk + 1
-        } else {
-            brk
-        };
-    }
-    if out.is_empty() {
-        out.push((0, n));
+        out.push((graphemes[start].0, graphemes[break_at - 1].1));
+        start = end;
     }
     out
 }
@@ -410,7 +407,14 @@ pub fn token_rows(
     if v.wrap {
         'lines: for line in lines.iter().skip(v.scroll) {
             for range in wrap_ranges(line, text_width) {
-                rows.push(format!("{prefix}{}", seg_text(line, range)));
+                let segment = seg_text(line, range);
+                let visible =
+                    if unicode_width::UnicodeWidthStr::width(segment.as_str()) > text_width {
+                        "…".to_string()
+                    } else {
+                        segment
+                    };
+                rows.push(format!("{prefix}{visible}"));
                 if rows.len() >= body_rows {
                     break 'lines;
                 }
@@ -486,16 +490,33 @@ pub fn selection_text(
             .get(line)
             .map(|l| l.chars().collect())
             .unwrap_or_default();
-        // Screen column → char within this segment. No-wrap adds horizontal scroll.
-        let to_col = |screen_x: u16| {
-            (screen_x.saturating_sub(text_x)) as usize + if v.wrap { 0 } else { v.hscroll as usize }
-        };
-        let start = seg_s + if ty == sy { to_col(sx) } else { 0 };
-        let end = if ty == ey {
-            seg_s + to_col(ex) + 1
-        } else {
+        // Wrapped rows are measured in terminal cells; each selected cell maps
+        // back to the whole source grapheme, including an overflow marker.
+        let segment = v
+            .wrap
+            .then(|| chars[seg_s..seg_e].iter().collect::<String>());
+        let to_char = |screen_x: u16, end_boundary: bool| {
+            let cell = screen_x.saturating_sub(text_x) as usize;
+            let Some(segment) = &segment else {
+                return (seg_s + cell + v.hscroll as usize + usize::from(end_boundary)).min(seg_e);
+            };
+            use unicode_segmentation::UnicodeSegmentation;
+            use unicode_width::UnicodeWidthStr;
+            let mut column = 0;
+            let mut char_index = seg_s;
+            for grapheme in segment.graphemes(true) {
+                let next_char = char_index + grapheme.chars().count();
+                let visible_width = grapheme.width().min(text_w).max(1);
+                if cell < column + visible_width {
+                    return if end_boundary { next_char } else { char_index };
+                }
+                column += visible_width;
+                char_index = next_char;
+            }
             seg_e
         };
+        let start = if ty == sy { to_char(sx, false) } else { seg_s };
+        let end = if ty == ey { to_char(ex, true) } else { seg_e };
         let (start, end) = (
             start.min(seg_e).min(chars.len()),
             end.min(seg_e).min(chars.len()),
@@ -715,6 +736,38 @@ mod tests {
     }
 
     #[test]
+    fn narrow_token_rows_project_the_visible_overflow_marker() {
+        let mut view = FileView::new(PathBuf::from("sample.txt"));
+        view.apply(FileLoad::Text(vec!["👩‍💻Z".into()]));
+        let content = ratatui::layout::Rect::new(0, 0, 6, 3);
+        assert_eq!(
+            token_rows(&view, content, false).unwrap(),
+            ["     …", "     Z"]
+        );
+    }
+
+    #[test]
+    fn narrow_wrapped_selection_copies_the_full_oversized_grapheme() {
+        let mut view = FileView::new(PathBuf::from("sample.txt"));
+        view.apply(FileLoad::Text(vec!["👩‍💻Z".into()]));
+        let content = ratatui::layout::Rect::new(0, 0, 6, 3);
+        let text_x = gutter_width(1) + 1;
+        assert_eq!(
+            selection_text(&view, content, ((text_x, 0), (text_x, 0))).as_deref(),
+            Some("👩‍💻")
+        );
+        assert_eq!(
+            selection_text(&view, content, ((text_x, 0), (text_x, 1))).as_deref(),
+            Some("👩‍💻Z")
+        );
+        let wide_content = ratatui::layout::Rect::new(0, 0, 7, 3);
+        assert_eq!(
+            selection_text(&view, wide_content, ((text_x + 1, 0), (text_x + 1, 0))).as_deref(),
+            Some("👩‍💻")
+        );
+    }
+
+    #[test]
     fn wrapping_never_splits_combining_or_zwj_clusters() {
         for line in ["a\u{301}bc", "a👩‍💻bc"] {
             let segments: Vec<_> = wrap_ranges(line, 2)
@@ -727,6 +780,20 @@ mod tests {
                 .iter()
                 .all(|part| !part.starts_with('\u{301}') && !part.starts_with('\u{200d}')));
         }
+        assert_eq!(
+            wrap_ranges("👩‍💻Z", 1)
+                .into_iter()
+                .map(|range| seg_text("👩‍💻Z", range))
+                .collect::<Vec<_>>(),
+            ["👩‍💻", "Z"]
+        );
+        assert_eq!(
+            wrap_ranges("a👩‍💻Z", 2)
+                .into_iter()
+                .map(|range| seg_text("a👩‍💻Z", range))
+                .collect::<Vec<_>>(),
+            ["a", "👩‍💻", "Z"]
+        );
     }
 
     /// `wrap_rows` is the scroll clamp's view of how tall a line is and

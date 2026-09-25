@@ -142,7 +142,10 @@ means more matches exist beyond the navigable set.
 
 Dragging across the text selects and copies it, the same as in any pane. Visual
 wraps rejoin into their original source line while real file line breaks remain.
-Double-click a word, path, or URL to copy and highlight that token. This works
+Wrapping measures terminal cells and keeps joined characters together. If the
+text column is narrower than a single character, `…` marks its row; selecting
+that marker still copies the complete original character. Double-click a word,
+path, or URL to copy and highlight that token. This works
 whether the read-only file viewer is opened as the reused preview, a permanent
 pane, or a tab.
 

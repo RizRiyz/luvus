@@ -583,10 +583,18 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
                     break;
                 }
                 gutter_cell(f, y, (si == 0).then_some(i + 1), i + 1);
-                f.render_widget(
-                    Paragraph::new(search_range(v, i, line, range, t)),
-                    Rect::new(text_x, y, text_w, 1),
-                );
+                let rendered = search_range(v, i, line, range, t);
+                let rendered = if rendered.width() > text_w as usize {
+                    let style = rendered
+                        .spans
+                        .first()
+                        .map(|span| span.style)
+                        .unwrap_or_default();
+                    Line::from(Span::styled("…", style))
+                } else {
+                    rendered
+                };
+                f.render_widget(Paragraph::new(rendered), Rect::new(text_x, y, text_w, 1));
                 y += 1;
             }
             i += 1;
@@ -866,6 +874,26 @@ mod tests {
     use crate::ids::PaneId;
     use crate::ui::{theme::Theme, RenderTarget};
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn narrow_wrapped_file_shows_overflow_marker_and_following_text() {
+        let mut view = crate::files::FileView::new("sample.txt".into());
+        view.apply(crate::files::FileLoad::Text(vec!["👩‍💻Z".into()]));
+        for (width, first, second) in [(6, "…", "Z"), (7, "👩‍💻", "Z"), (8, "👩‍💻", " ")]
+        {
+            let area = Rect::new(0, 0, width, 4); // five gutter cells
+            let mut buffer = Buffer::empty(area);
+            {
+                let mut target = RenderTarget::new(&mut buffer, area);
+                draw_file_view(&mut target, area, &view, None, false, &Theme::noir());
+            }
+            assert_eq!(buffer[(5, 0)].symbol(), first, "pane width {width}");
+            assert_eq!(buffer[(5, 1)].symbol(), second, "pane width {width}");
+            if width == 8 {
+                assert_eq!(buffer[(7, 0)].symbol(), "Z");
+            }
+        }
+    }
 
     #[test]
     fn file_search_styles_complete_graphemes_without_changing_match_bytes() {
