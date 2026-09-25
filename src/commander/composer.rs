@@ -32,6 +32,8 @@ pub(crate) struct Commander {
     pub(crate) slash_selection: Option<usize>,
     /// A Tab-selected target or field choice awaits Space/Enter confirmation.
     pub(crate) pending_completion: bool,
+    /// UTC identity of a Tab-suggested one-time schedule, until that value is edited.
+    pub(super) once_schedule_suggestion: Option<super::orch::OnceScheduleSuggestion>,
     /// Resolved on edits, not every paint. The renderer reads current state
     /// for these identities; dispatch independently resolves the typed tokens.
     pub preview: Vec<PaneId>,
@@ -138,6 +140,13 @@ impl Commander {
 
     pub(crate) fn clear_receipt(&mut self) {
         self.pending_completion = false;
+        if self
+            .once_schedule_suggestion
+            .as_ref()
+            .is_some_and(|suggestion| !super::orch::retains_once_schedule(&self.draft, suggestion))
+        {
+            self.once_schedule_suggestion = None;
+        }
         self.pending_working_confirmation = None;
         self.receipt = None;
         self.delivery_results.clear();
@@ -237,11 +246,35 @@ impl Commander {
         self.draft.clear();
         self.cursor = 0;
         self.selection_anchor = None;
+        self.once_schedule_suggestion = None;
         self.guided_orch = None;
         self.guided_prior_height = None;
         self.guided_binding = None;
         self.clear_receipt();
         self.prune_staged_images();
+    }
+
+    pub(crate) fn retime_suggested_once_schedule(&mut self) {
+        let Some(suggestion) = self.once_schedule_suggestion.as_mut() else {
+            return;
+        };
+        let Some((range, replacement)) = super::orch::retime_once_schedule(&self.draft, suggestion)
+        else {
+            return;
+        };
+        let local = replacement.trim();
+        if local == suggestion.text {
+            return;
+        }
+        let old_len = range.len();
+        self.draft.replace_range(range.clone(), &replacement);
+        if self.cursor >= range.end {
+            self.cursor = self.cursor - old_len + replacement.len();
+        } else if self.cursor > range.start {
+            self.cursor = range.start + replacement.len();
+        }
+        self.selection_anchor = None;
+        suggestion.text = local.to_string();
     }
 
     pub(crate) fn copy_selection(&mut self, cut: bool) {

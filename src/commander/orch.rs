@@ -27,6 +27,12 @@ pub(super) enum InlineTab {
     Noop,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct OnceScheduleSuggestion {
+    pub text: String,
+    pub at_utc: u64,
+}
+
 const TASK_FIELDS: &[&str] = &[
     "title", "start", "agent", "mode", "paths", "deps", "gate", "prompt",
 ];
@@ -94,13 +100,15 @@ fn body_start(draft: &str) -> Option<usize> {
     Some(offset)
 }
 
-/// Recognize explicit `field:` markers at word boundaries. `prompt:` consumes
-/// the remainder, so ordinary prompt prose is never reinterpreted as fields.
+/// Recognize `field:` markers at word boundaries. A single-space occurrence
+/// of a choice field inside prose is only a boundary when its value is a valid
+/// choice; two spaces or a newline explicitly starts a field even if invalid.
+/// `prompt:` consumes the remainder.
 pub(super) fn inline_fields(draft: &str) -> Vec<InlineField> {
     let Some(start) = body_start(draft) else {
         return Vec::new();
     };
-    let mut markers = Vec::new();
+    let mut candidates = Vec::new();
     for (relative, _) in draft[start..].char_indices() {
         let index = start + relative;
         if index != start
@@ -114,11 +122,46 @@ pub(super) fn inline_fields(draft: &str) -> Vec<InlineField> {
         if let Some(&name) = FIELD_NAMES.iter().find(|name| {
             draft[index..].starts_with(**name) && draft[index + name.len()..].starts_with(':')
         }) {
-            markers.push((name, index));
-            if name == "prompt" {
-                break;
-            }
+            candidates.push((name, index));
         }
+    }
+    let explicit_at = |index: usize| {
+        let before = &draft[..index];
+        index == start || before.ends_with('\n') || before.ends_with("  ") || before.ends_with('\t')
+    };
+    let mut markers: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &(name, index))| {
+            let value_start = index + name.len() + 1;
+            let value_end = candidates
+                .get(position + 1)
+                .map_or(draft.len(), |(_, next)| *next);
+            let value = draft[value_start..value_end].trim();
+            let explicit = explicit_at(index);
+            if !explicit
+                && candidates[position + 1..]
+                    .iter()
+                    .any(|(later_name, later_index)| {
+                        *later_name == name && explicit_at(*later_index)
+                    })
+            {
+                return None;
+            }
+            let valid_choice = match name {
+                "start" if draft.split_whitespace().next() == Some("/task") => {
+                    matches!(value, "" | "manual" | "now")
+                }
+                "start" => matches!(value, "" | "once" | "hourly" | "daily" | "weekly"),
+                "mode" => matches!(value, "" | "worktree" | "workspace"),
+                "access" => matches!(value, "" | "read_only" | "workspace" | "full_access"),
+                _ => true,
+            };
+            (explicit || valid_choice).then_some((name, index))
+        })
+        .collect();
+    if let Some(prompt) = markers.iter().position(|(name, _)| *name == "prompt") {
+        markers.truncate(prompt + 1);
     }
     markers
         .iter()
@@ -154,6 +197,60 @@ pub(super) fn inline_field_at(draft: &str, cursor: usize) -> Option<InlineField>
     inline_fields(draft)
         .into_iter()
         .find(|field| field.value.start <= cursor && cursor <= field.raw_end)
+}
+
+pub(super) fn once_schedule_suggestion(draft: &str) -> Option<OnceScheduleSuggestion> {
+    let fields = inline_fields(draft);
+    let value = |name| {
+        fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| draft[field.value.clone()].trim())
+    };
+    if value("start")? != "once" {
+        return None;
+    }
+    let text = value("schedule")?.to_string();
+    let timezone = value("timezone")
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(crate::automation::system_timezone_name);
+    let at_utc = crate::automation::parse_local_instant(&text, &timezone).ok()?;
+    Some(OnceScheduleSuggestion { text, at_utc })
+}
+
+pub(super) fn retime_once_schedule(
+    draft: &str,
+    suggestion: &OnceScheduleSuggestion,
+) -> Option<(Range<usize>, String)> {
+    let fields = inline_fields(draft);
+    let value = |name| {
+        fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| draft[field.value.clone()].trim())
+    };
+    if value("start")? != "once" || value("schedule")? != suggestion.text {
+        return None;
+    }
+    let timezone = value("timezone")
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(crate::automation::system_timezone_name);
+    let local = crate::automation::format_local_instant(suggestion.at_utc, &timezone).ok()?;
+    let field = fields.iter().find(|field| field.name == "schedule")?;
+    Some((field.value.clone(), format!(" {local}")))
+}
+
+pub(super) fn retains_once_schedule(draft: &str, suggestion: &OnceScheduleSuggestion) -> bool {
+    let fields = inline_fields(draft);
+    let value = |name| {
+        fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| draft[field.value.clone()].trim())
+    };
+    value("start") == Some("once") && value("schedule") == Some(suggestion.text.as_str())
 }
 
 pub(super) fn unfinished_choice(draft: &str, field: &InlineField) -> bool {

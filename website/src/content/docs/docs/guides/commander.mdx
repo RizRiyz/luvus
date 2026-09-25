@@ -180,7 +180,9 @@ For example, this creates a task directly from the input:
 
 Use `start: manual` to save without launching. `paths:`, `deps:`, and `gate:`
 are optional; `mode:` accepts `worktree` or `workspace`. Fields may also be
-separated by newlines, and Shift+Enter adds a line to the input.
+separated by newlines, and Shift+Enter adds a line to the input. Use two spaces
+or a newline to make field boundaries unambiguous when a value mentions text
+such as `start:`.
 
 `/split` creates a shell beside one exact pane: `right` places it alongside,
 `below` stacks it underneath. `sv` and `sh` are accepted direction aliases.
@@ -194,8 +196,10 @@ Without `@p17`, automation targets a new worker and also accepts `agent:`,
 `mode:`, `access:`, `paths:`, and `gate:`. Automation starts can be `once`,
 `hourly`, `daily`, or `weekly`. Schedules use `YYYY-MM-DD HH:MM` for Once,
 a minute from `00` to `59` for Hourly, `HH:MM` for Daily, or a value such as
-`mon,fri 08:00` for Weekly. Use an IANA timezone. `/mission` opens Mission Control in the
-current workspace. `/diff` and `/files` focus their respective dock views.
+`mon,fri 08:00` for Weekly. Use an IANA timezone. A Tab-suggested Once
+schedule keeps its instant if you change the timezone; a manually typed
+schedule is interpreted in the selected timezone. `/mission` opens Mission
+Control in the current workspace. `/diff` and `/files` focus their respective dock views.
 These navigation actions do not send terminal input. The picker contains only
 actions available in this version of Commander.
 

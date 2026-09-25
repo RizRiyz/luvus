@@ -200,7 +200,9 @@ impl App {
                 self.commander.as_mut().unwrap().insert("\n");
             } else {
                 if self.commander.as_ref().unwrap().pending_completion {
-                    self.commander.as_mut().unwrap().insert(" ");
+                    let commander = self.commander.as_mut().unwrap();
+                    commander.insert(" ");
+                    commander.retime_suggested_once_schedule();
                     return true;
                 }
                 if self.commander.as_ref().unwrap().guided_orch.is_some()
@@ -245,10 +247,18 @@ impl App {
                 let commander = self.commander.as_mut().unwrap();
                 match inline {
                     orch::InlineTab::Replace(range, value) => {
+                        let schedule_choice =
+                            orch::inline_fields(&commander.draft).iter().any(|field| {
+                                field.name == "schedule" && field.value.start == range.start
+                            });
                         commander.draft.replace_range(range.clone(), &value);
                         commander.cursor = range.start + value.len();
                         commander.selection_anchor = None;
                         commander.clear_receipt();
+                        if schedule_choice {
+                            commander.once_schedule_suggestion =
+                                orch::once_schedule_suggestion(&commander.draft);
+                        }
                         commander.pending_completion = true;
                     }
                     orch::InlineTab::Move(position) => commander.move_cursor(position, false),
@@ -286,7 +296,9 @@ impl App {
             }
             if key.code == KeyCode::Char(' ') {
                 if self.commander.as_ref().unwrap().pending_completion {
-                    self.commander.as_mut().unwrap().insert(" ");
+                    let commander = self.commander.as_mut().unwrap();
+                    commander.insert(" ");
+                    commander.retime_suggested_once_schedule();
                     return true;
                 }
                 let name = self.commander.as_ref().and_then(|commander| {
@@ -295,6 +307,17 @@ impl App {
                 });
                 if let Some(name) = name {
                     self.commander_accept_slash_name(name, true);
+                    return true;
+                }
+                let editing_timezone = self.commander.as_ref().is_some_and(|commander| {
+                    commander.once_schedule_suggestion.is_some()
+                        && orch::inline_field_at(&commander.draft, commander.cursor)
+                            .is_some_and(|field| field.name == "timezone")
+                });
+                if editing_timezone {
+                    let commander = self.commander.as_mut().unwrap();
+                    commander.insert(" ");
+                    commander.retime_suggested_once_schedule();
                     return true;
                 }
             }
@@ -756,6 +779,10 @@ impl App {
     }
 
     pub(crate) fn commander_prepare(&mut self) {
+        self.commander
+            .as_mut()
+            .unwrap()
+            .retime_suggested_once_schedule();
         let draft = self.commander.as_ref().unwrap().draft.clone();
         if let Some(action) = self.commander_parse_slash_action(&draft) {
             let result = action.and_then(|action| self.commander_dispatch_slash_action(action));

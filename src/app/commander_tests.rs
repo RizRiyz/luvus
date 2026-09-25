@@ -311,6 +311,51 @@ fn inline_task_fields_create_without_opening_the_modal() {
 }
 
 #[test]
+fn inline_task_title_keeps_field_like_prose() {
+    let _env = crate::persist::test_env("commander-field-like-title");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = "/task title: Review the start: behavior and mode: prose start: manual prompt: Check coverage".into();
+    app.commander_prepare();
+    assert_eq!(app.orch.tasks.len(), 1);
+    assert_eq!(
+        app.orch.tasks[0].title,
+        "Review the start: behavior and mode: prose"
+    );
+    assert_eq!(app.orch.tasks[0].prompt.as_deref(), Some("Check coverage"));
+}
+
+#[test]
+fn explicit_field_boundaries_win_over_field_words_in_title() {
+    let _env = crate::persist::test_env("commander-explicit-field-boundaries");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft =
+        "/task title: Explain start: manual prompt: context  start: manual  prompt: Do work".into();
+    app.commander_prepare();
+    assert_eq!(app.orch.tasks.len(), 1);
+    assert_eq!(
+        app.orch.tasks[0].title,
+        "Explain start: manual prompt: context"
+    );
+    assert_eq!(app.orch.tasks[0].prompt.as_deref(), Some("Do work"));
+}
+
+#[test]
+fn explicit_invalid_start_remains_a_validation_error() {
+    let _env = crate::persist::test_env("commander-invalid-inline-start");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = "/task title: Review tests  start: behavior".into();
+    app.commander_prepare();
+    assert!(app.orch.tasks.is_empty());
+    assert!(app.commander.as_ref().unwrap().receipt.is_some());
+}
+
+#[test]
 fn inline_automation_tab_cycles_start_and_timezone_then_creates() {
     let _env = crate::persist::test_env("commander-inline-automation");
     let (tx, _) = std::sync::mpsc::channel();
@@ -371,6 +416,71 @@ fn inline_automation_tab_cycles_start_and_timezone_then_creates() {
         app.commander.as_ref().unwrap().receipt
     );
     assert_eq!(app.automation.automations[0].name, "Daily review");
+}
+
+#[test]
+fn suggested_once_schedule_keeps_its_instant_after_timezone_changes() {
+    let _env = crate::persist::test_env("commander-once-timezone");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/automation title: Review  start: once  schedule: ".into();
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let original_schedule = app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .split_once("schedule:")
+        .unwrap()
+        .1
+        .trim()
+        .to_string();
+    let original_utc = crate::automation::parse_local_instant(
+        &original_schedule,
+        &crate::automation::system_timezone_name(),
+    )
+    .unwrap();
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("timezone: "));
+    app.commander.as_mut().unwrap().insert("Pacific/Honolulu");
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    let draft = &app.commander.as_ref().unwrap().draft;
+    let adjusted_schedule = draft
+        .split_once("schedule:")
+        .unwrap()
+        .1
+        .split_once("timezone:")
+        .unwrap()
+        .0
+        .trim();
+    assert_eq!(
+        crate::automation::parse_local_instant(adjusted_schedule, "Pacific/Honolulu").unwrap(),
+        original_utc
+    );
+    app.commander
+        .as_mut()
+        .unwrap()
+        .insert(" agent: codex  mode: workspace  access: workspace  prompt: Review changes");
+    app.commander_prepare();
+    assert_eq!(
+        app.automation.automations.len(),
+        1,
+        "Commander receipt: {:?}",
+        app.commander.as_ref().unwrap().receipt
+    );
+    assert!(matches!(
+        app.automation.automations[0].trigger,
+        crate::automation::Trigger::Once { at_utc } if at_utc == original_utc
+    ));
 }
 
 #[test]
