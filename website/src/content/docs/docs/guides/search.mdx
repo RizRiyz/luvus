@@ -94,7 +94,9 @@ Luvus home. Local and remote catalogs are never mixed.
 
 ## CLI
 
-The retained-output command remains exact rather than fuzzy:
+The retained-output command remains exact rather than fuzzy. Its query is
+limited to 4 KiB in UTF-8 bytes; the CLI rejects longer queries before sending
+them to the server:
 
 ```sh
 luvus search "build failed" --case

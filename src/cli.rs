@@ -2667,10 +2667,7 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 .map(String::len)
                 .fold(query.len().saturating_sub(1), usize::saturating_add);
             if !fuzzy && query_bytes > crate::search::local::LOCAL_QUERY_BYTES {
-                return Err(anyhow!(format!(
-                    "exact search query must be at most {} bytes",
-                    crate::search::local::LOCAL_QUERY_BYTES
-                )));
+                return Err(anyhow!("exact search query must be at most 4096 bytes"));
             }
             if fuzzy {
                 (
@@ -4905,6 +4902,11 @@ mod tests {
             error.to_string(),
             "exact search query must be at most 4096 bytes"
         );
+        let localized = localize_cli_error_with(
+            error,
+            crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::Zh),
+        );
+        assert_eq!(localized.to_string(), "精确搜索查询不得超过 4096 字节");
     }
 
     #[test]

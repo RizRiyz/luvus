@@ -672,28 +672,62 @@ fn search_range<'a>(
             Style::new().fg(t.text),
         ));
     }
-    let mut spans: Vec<Span> = Vec::new();
-    let mut cursor = range_start;
+    let graphemes: Vec<(usize, usize)> =
+        unicode_segmentation::UnicodeSegmentation::grapheme_indices(
+            &line[range_start..range_end],
+            true,
+        )
+        .map(|(start, cluster)| (range_start + start, range_start + start + cluster.len()))
+        .collect();
+    let mut coverage = vec![0i32; graphemes.len() + 1];
+    let mut current_range = None;
     for (match_index, search_match) in hits {
         let start = search_match.byte_start.max(range_start);
         let end = search_match.byte_end.min(range_end);
-        if start > cursor {
-            spans.push(Span::styled(&line[cursor..start], Style::new().fg(t.text)));
+        let first = graphemes.partition_point(|&(_, cluster_end)| cluster_end <= start);
+        let last = graphemes.partition_point(|&(cluster_start, _)| cluster_start < end);
+        if first >= last {
+            continue;
         }
-        let hl = if match_index == s.current {
-            Style::new().fg(t.base).bg(t.accent).bold()
+        coverage[first] += 1;
+        coverage[last] -= 1;
+        if match_index == s.current {
+            current_range = Some(first..last);
+        }
+    }
+    let mut spans = Vec::new();
+    let mut active = 0;
+    let mut run_start = range_start;
+    let mut previous_style = None;
+    for (index, &(start, _)) in graphemes.iter().enumerate() {
+        active += coverage[index];
+        let style = if current_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&index))
+        {
+            2
+        } else if active > 0 {
+            1
         } else {
-            Style::new().fg(t.base).bg(t.amber)
+            0
         };
-        spans.push(Span::styled(&line[start..end], hl));
-        cursor = end;
+        if previous_style.is_some_and(|previous| previous != style) {
+            let highlight = match previous_style.unwrap_or(0) {
+                2 => Style::new().fg(t.base).bg(t.accent).bold(),
+                1 => Style::new().fg(t.base).bg(t.amber),
+                _ => Style::new().fg(t.text),
+            };
+            spans.push(Span::styled(&line[run_start..start], highlight));
+            run_start = start;
+        }
+        previous_style = Some(style);
     }
-    if cursor < range_end {
-        spans.push(Span::styled(
-            &line[cursor..range_end],
-            Style::new().fg(t.text),
-        ));
-    }
+    let highlight = match previous_style.unwrap_or(0) {
+        2 => Style::new().fg(t.base).bg(t.accent).bold(),
+        1 => Style::new().fg(t.base).bg(t.amber),
+        _ => Style::new().fg(t.text),
+    };
+    spans.push(Span::styled(&line[run_start..range_end], highlight));
     Line::from(spans)
 }
 
@@ -826,12 +860,65 @@ pub(super) fn draw_named_delete_confirm(
 mod tests {
     use super::{
         diff_list_stats, diff_note_count, draw_file_view, file_selection_contains,
-        mobile_file_search_footer, native_footer_visible, truncate_graphemes,
+        mobile_file_search_footer, native_footer_visible, search_range, truncate_graphemes,
     };
     use crate::app::Selection;
     use crate::ids::PaneId;
     use crate::ui::{theme::Theme, RenderTarget};
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn file_search_styles_complete_graphemes_without_changing_match_bytes() {
+        let theme = Theme::noir();
+        let line = "xa\u{301}b 👩‍💻!";
+        let mut view = crate::files::FileView::new("sample.txt".into());
+        let mut search = crate::search::local::LocalSearch::editing();
+        search.query = "a".into();
+        search.commit();
+        let emoji_start = line.find('💻').unwrap();
+        search.replace_matches(
+            vec![
+                crate::search::local::RowMatch {
+                    row: 0,
+                    byte_start: 1,
+                    byte_end: 2,
+                    column: 1,
+                    width: 1,
+                },
+                crate::search::local::RowMatch {
+                    row: 0,
+                    byte_start: emoji_start,
+                    byte_end: emoji_start + '💻'.len_utf8(),
+                    column: 5,
+                    width: 2,
+                },
+            ],
+            1,
+            false,
+        );
+        assert_eq!(
+            (search.matches[0].byte_start, search.matches[0].byte_end),
+            (1, 2)
+        );
+        view.search = Some(search);
+        let rendered = search_range(&view, 0, line, (0, line.chars().count()), &theme);
+        assert!(rendered
+            .spans
+            .iter()
+            .any(|span| span.content == "a\u{301}" && span.style.bg == Some(theme.amber)));
+        assert!(rendered
+            .spans
+            .iter()
+            .any(|span| span.content == "👩‍💻" && span.style.bg == Some(theme.accent)));
+        let ranges = crate::files::wrap_ranges(line, 2);
+        assert!(ranges.iter().any(|&range| {
+            let segment = search_range(&view, 0, line, range, &theme);
+            segment
+                .spans
+                .iter()
+                .any(|span| span.content == "a\u{301}" && span.style.bg == Some(theme.amber))
+        }));
+    }
 
     #[test]
     fn mobile_search_uses_an_inner_footer_only_while_active() {
