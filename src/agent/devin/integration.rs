@@ -129,12 +129,22 @@ fn decode_base64(token: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
+/// Whether `text` names the Luvus script. Windows file names are
+/// case-insensitive, so any casing there still runs the same script.
+fn names_script(text: &str) -> bool {
+    if cfg!(windows) {
+        text.to_ascii_lowercase().contains(SCRIPT_NAME)
+    } else {
+        text.contains(SCRIPT_NAME)
+    }
+}
+
 /// Whether a hook command runs the Luvus script. The Windows command carries
 /// the script path only inside its `-EncodedCommand` text, so base64 tokens
 /// are decoded too; an edited command with extra PowerShell flags still
 /// matches.
 fn command_mentions_script(command: &str) -> bool {
-    command.contains(SCRIPT_NAME)
+    names_script(command)
         || command.split_whitespace().any(|token| {
             decode_base64(token)
                 .and_then(|bytes| {
@@ -146,7 +156,7 @@ fn command_mentions_script(command: &str) -> bool {
                         .then(|| String::from_utf16(&units).ok())
                         .flatten()
                 })
-                .is_some_and(|text| text.contains(SCRIPT_NAME))
+                .is_some_and(|text| names_script(&text))
         })
 }
 
@@ -725,6 +735,18 @@ mod tests {
             .replace("-EncodedCommand", "-enc");
         assert!(command_mentions_script(&edited));
 
+        // Windows file names ignore case, so a case-only edit still runs the
+        // script there; on Unix it names a different file.
+        let upper = SCRIPT_NAME.to_ascii_uppercase();
+        assert_eq!(
+            command_mentions_script(&powershell_hook_command(&format!(r"C:\x\{upper}"))),
+            cfg!(windows)
+        );
+        assert_eq!(
+            command_mentions_script(&format!("sh '/x/{upper}'")),
+            cfg!(windows)
+        );
+
         // Another tool's encoded hook, like the ones Orca installs, is not ours.
         let foreign: Vec<u8> = r"& 'C:\tools\other-hook.ps1'"
             .encode_utf16()
@@ -757,6 +779,29 @@ mod tests {
         assert!(uninstall().is_err());
         assert_eq!(read_config(&config).unwrap(), value);
         assert_eq!(fs::read(script_path()).unwrap(), SCRIPT.as_bytes());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn case_only_edit_of_the_windows_hook_blocks_reinstall_and_uninstall() {
+        let (_lock, _home, root) = isolated_home("case-edit");
+        install().unwrap();
+        let config = config_path();
+        let script = script_path();
+        let upper = script
+            .to_str()
+            .unwrap()
+            .replace(SCRIPT_NAME, &SCRIPT_NAME.to_ascii_uppercase());
+        let mut value = read_config(&config).unwrap();
+        value["hooks"]["SessionStart"][0]["hooks"][0]["command"] =
+            json!(powershell_hook_command(&upper));
+        integration::write_json_atomic(&config, &value).unwrap();
+
+        assert!(install().is_err());
+        assert!(uninstall().is_err());
+        assert_eq!(read_config(&config).unwrap(), value);
+        assert_eq!(fs::read(&script).unwrap(), SCRIPT.as_bytes());
         let _ = fs::remove_dir_all(root);
     }
 
