@@ -30,6 +30,8 @@ pub(crate) struct Commander {
     pub(crate) read_scroll: usize,
     /// Picker selection is independent of the typed slash name while browsing.
     pub(crate) slash_selection: Option<usize>,
+    /// A Tab-selected target or field choice awaits Space/Enter confirmation.
+    pub(crate) pending_completion: bool,
     /// Resolved on edits, not every paint. The renderer reads current state
     /// for these identities; dispatch independently resolves the typed tokens.
     pub preview: Vec<PaneId>,
@@ -86,6 +88,9 @@ impl Commander {
     }
 
     pub(crate) fn move_cursor(&mut self, mut next: usize, selecting: bool) {
+        if next != self.cursor {
+            self.pending_completion = false;
+        }
         for image in self.image_ranges() {
             if image.start < next && next < image.end {
                 next = if next < self.cursor {
@@ -132,6 +137,7 @@ impl Commander {
     }
 
     pub(crate) fn clear_receipt(&mut self) {
+        self.pending_completion = false;
         self.pending_working_confirmation = None;
         self.receipt = None;
         self.delivery_results.clear();

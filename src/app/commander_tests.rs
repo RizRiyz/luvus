@@ -422,6 +422,17 @@ fn tab_builds_active_agent_automation_fields_in_order() {
     app.commander.as_mut().unwrap().draft = format!("/automation @p{}", pane.0);
     app.commander.as_mut().unwrap().cursor = app.commander.as_ref().unwrap().draft.len();
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("/automation @p{}", pane.0)
+    );
+    assert!(app.commander.as_ref().unwrap().pending_completion);
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("/automation @p{} ", pane.0)
+    );
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.commander.as_ref().unwrap().draft.ends_with("title: "));
     app.commander.as_mut().unwrap().insert("hello");
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -439,8 +450,30 @@ fn tab_builds_active_agent_automation_fields_in_order() {
         .as_ref()
         .unwrap()
         .draft
+        .ends_with("start: hourly"));
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
         .ends_with("schedule: "));
-    app.commander.as_mut().unwrap().insert("2026-12-01 09:00");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("schedule: 00"));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("schedule: 15"));
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app
         .commander
@@ -451,6 +484,8 @@ fn tab_builds_active_agent_automation_fields_in_order() {
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let timezone = app.commander.as_ref().unwrap().draft.clone();
     assert!(timezone.contains("timezone: "));
+    assert!(app.commander.as_ref().unwrap().pending_completion);
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let draft = &app.commander.as_ref().unwrap().draft;
     assert!(draft.ends_with("prompt: "));
@@ -476,6 +511,9 @@ fn tab_completes_slash_then_builds_task_fields_with_selected_agent() {
         .unwrap()
         .insert(&format!(" @p{}", pane.0));
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().pending_completion);
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.commander.as_ref().unwrap().draft.ends_with("title: "));
     app.commander.as_mut().unwrap().insert("review");
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -493,9 +531,99 @@ fn tab_completes_slash_then_builds_task_fields_with_selected_agent() {
         .as_ref()
         .unwrap()
         .draft
+        .ends_with("start: now"));
+    app.commander_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("start: manual"));
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
         .ends_with("agent: codex"));
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.commander.as_ref().unwrap().draft.ends_with("mode: "));
+}
+
+#[test]
+fn task_target_tab_stays_in_pane_choices_until_enter_accepts_it() {
+    let _env = crate::persist::test_env("commander-task-target-choices");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let first = app.layout().focus;
+    app.new_tab();
+    let second = app.layout().focus;
+    app.status.get_mut(&first).unwrap().agent = "codex".into();
+    app.status.get_mut(&second).unwrap().agent = "codex".into();
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/task @p".into();
+    commander.cursor = commander.draft.len();
+
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("/task @p{}", first.0)
+    );
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("/task @p{}", second.0)
+    );
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("/task @p{} ", second.0)
+    );
+    assert!(app.orch_form.is_none());
+    assert!(
+        app.commander_parse_slash_action(&app.commander.as_ref().unwrap().draft)
+            .unwrap()
+            .is_ok(),
+        "{:?}",
+        app.commander_parse_slash_action(&app.commander.as_ref().unwrap().draft)
+    );
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(
+        app.commander.as_ref().unwrap().draft.ends_with("title: "),
+        "{:?}",
+        app.commander.as_ref().unwrap()
+    );
+}
+
+#[test]
+fn custom_schedule_waits_for_space_before_next_field() {
+    let _env = crate::persist::test_env("commander-custom-schedule-choice");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/automation title: Review  start: daily  schedule: 10:30".into();
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(
+        app.commander
+            .as_ref()
+            .unwrap()
+            .draft
+            .ends_with("schedule: 10:30"),
+        "Tab must not replace a custom schedule or insert a pane"
+    );
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("timezone: "));
 }
 
 #[test]

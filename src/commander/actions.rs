@@ -36,12 +36,12 @@ pub(crate) const SLASH_ACTIONS: [SlashActionSpec; 9] = [
     },
     SlashActionSpec {
         name: "/task",
-        usage: "[@target] · Enter form · Tab fields",
+        usage: "[@target] · Enter form · Tab browse",
         needs_target: false,
     },
     SlashActionSpec {
         name: "/automation",
-        usage: "[@target] · Enter form · Tab fields",
+        usage: "[@target] · Enter form · Tab browse",
         needs_target: false,
     },
     SlashActionSpec {

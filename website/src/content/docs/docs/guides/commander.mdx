@@ -48,7 +48,9 @@ the text. A named path can narrow an exact pane through its tab and workspace:
 Names with spaces use percent escaping (for example, `review%20work`). Type
 `@tab:` and press `Tab` to pick a tab name, then press `Tab` again to complete
 an exact pane; further presses cycle panes in that scope. `Shift+Tab` starts
-from the last choice. Bare scopes do not broadcast.
+from the last choice. Space or Enter accepts a Tab-selected mention and adds
+a separator; Enter does not send while a completion is pending. Bare scopes
+do not broadcast.
 Adjacent mentions before any text share that text. Once text follows a
 mention, the next mention starts a separate message for its own target. The
 mentions themselves are removed from the delivered text. `=` is not a
@@ -149,12 +151,15 @@ Alternatively, write `field: value` pairs directly after the action and target
 to create from the Commander input in one Enter. Put `prompt:` last; everything
 after it is prompt text, including text that resembles another field. Tab
 completes a partial slash action or `@target`; after an exact action and target,
-Tab inserts `title:`. Type the title and press Tab to add `start:`, then continue
-through the fields appropriate to a task, new-worker automation, or selected
-active agent. On an empty `start:`, `agent:`, `mode:`, `access:`, or `timezone:`,
-Tab fills a choice; press Tab again at the end of that value to add the next
-field. Move the caret inside a choice and use Tab or Shift+Tab to cycle it.
-Other IANA timezones can be typed directly. Missing or invalid values keep the input
+Tab cycles pane choices without advancing. Press Space or Enter to accept a
+target and add a separator, then Tab inserts `title:`. Type the title and press
+Tab to add `start:`, then continue through the fields appropriate to a task,
+new-worker automation, or selected active agent. Tab and Shift+Tab cycle
+choices inside `start:`, `schedule:`, `timezone:`, `agent:`, `mode:`, and
+`access:`; Space or Enter accepts the displayed value, and the following Tab
+adds the next field. Custom schedule values and IANA timezones can be typed
+directly; finish them with Space before advancing. `prompt:` stays free text.
+Missing or invalid values keep the input
 and show an error. A successful send shows the new task or automation ID.
 `/task guide` and `/automation guide` remain available for a guided multiline
 draft inside Commander.

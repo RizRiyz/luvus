@@ -199,6 +199,10 @@ impl App {
             {
                 self.commander.as_mut().unwrap().insert("\n");
             } else {
+                if self.commander.as_ref().unwrap().pending_completion {
+                    self.commander.as_mut().unwrap().insert(" ");
+                    return true;
+                }
                 if self.commander.as_ref().unwrap().guided_orch.is_some()
                     && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
@@ -245,6 +249,7 @@ impl App {
                         commander.cursor = range.start + value.len();
                         commander.selection_anchor = None;
                         commander.clear_receipt();
+                        commander.pending_completion = true;
                     }
                     orch::InlineTab::Move(position) => commander.move_cursor(position, false),
                     orch::InlineTab::Noop => {}
@@ -280,6 +285,10 @@ impl App {
                 return true;
             }
             if key.code == KeyCode::Char(' ') {
+                if self.commander.as_ref().unwrap().pending_completion {
+                    self.commander.as_mut().unwrap().insert(" ");
+                    return true;
+                }
                 let name = self.commander.as_ref().and_then(|commander| {
                     let (matches, selected) = commander.slash_menu()?;
                     matches.get(selected).map(|spec| spec.name)
@@ -428,8 +437,8 @@ impl App {
         true
     }
 
-    /// Complete an ORCH command field at the end of its draft. Inside a
-    /// choice value, the usual Tab cycle remains available.
+    /// Add the next ORCH field only after the current choice was accepted
+    /// with a separating space. Tab itself stays inside the current choice.
     fn commander_orch_tab(&mut self, backward: bool) -> bool {
         let Some(commander) = self.commander.as_ref() else {
             return false;
@@ -442,16 +451,34 @@ impl App {
         if draft.ends_with(" form") || draft.ends_with(" guide") {
             return false;
         }
+        if target_spans(&draft)
+            .iter()
+            .any(|span| span.start <= commander.cursor && commander.cursor <= span.end)
+        {
+            return false;
+        }
         let (kind, target) = match self.commander_parse_slash_action(&draft) {
             Some(Ok(SlashAction::Task(target, _))) => (OrchFormKind::Task, target),
             Some(Ok(SlashAction::Automation(target, _))) => (OrchFormKind::Automation, target),
+            Some(Err(error))
+                if matches!(
+                    draft.split_whitespace().next(),
+                    Some("/task" | "/automation")
+                ) =>
+            {
+                self.commander.as_mut().unwrap().receipt = Some(error);
+                return true;
+            }
             _ => return false,
         };
         let fields = orch::inline_fields(&draft);
         if let Some(last) = fields.last() {
             let value = draft[last.value.clone()].trim();
-            if orch::is_choice_field(last.name)
-                && (value.is_empty() || orch::unfinished_choice(&draft, last))
+            if (last.name == "title" && value.is_empty())
+                || (orch::is_choice_field(last.name)
+                    && (value.is_empty()
+                        || !draft.ends_with(char::is_whitespace)
+                        || orch::unfinished_choice(&draft, last)))
             {
                 return false;
             }
@@ -521,6 +548,7 @@ impl App {
                         commander.cursor = span.start + replacement.len();
                         commander.selection_anchor = None;
                         commander.clear_receipt();
+                        commander.pending_completion = true;
                         self.refresh_commander_preview();
                     }
                     Err(message) => self.commander.as_mut().unwrap().receipt = Some(message),
@@ -593,6 +621,7 @@ impl App {
             commander.cursor = span.start + replacement.len();
             commander.selection_anchor = None;
             commander.clear_receipt();
+            commander.pending_completion = true;
         } else {
             let leading = commander.draft[..commander.cursor]
                 .chars()

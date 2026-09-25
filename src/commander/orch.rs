@@ -36,7 +36,10 @@ const AUTOMATION_FIELDS: &[&str] = &[
 const ACTIVE_AUTOMATION_FIELDS: &[&str] = &["title", "start", "schedule", "timezone", "prompt"];
 
 pub(super) fn is_choice_field(name: &str) -> bool {
-    matches!(name, "start" | "timezone" | "agent" | "mode" | "access")
+    matches!(
+        name,
+        "start" | "schedule" | "timezone" | "agent" | "mode" | "access"
+    )
 }
 
 pub(super) fn next_field_text(
@@ -64,7 +67,11 @@ pub(super) fn next_field_text(
     };
     Some(format!(
         "{}{}: {}",
-        if fields.is_empty() { " " } else { "  " },
+        match (fields.is_empty(), draft.ends_with(char::is_whitespace)) {
+            (true, true) => "",
+            (true, false) | (false, true) => " ",
+            (false, false) => "  ",
+        },
         name,
         value
     ))
@@ -157,17 +164,51 @@ pub(super) fn unfinished_choice(draft: &str, field: &InlineField) -> bool {
     };
     let current = draft[field.value.clone()].trim();
     !current.is_empty()
-        && choice_values(kind, field.name)
+        && choice_values(kind, field.name, draft)
             .iter()
             .any(|choice| choice.starts_with(current) && choice != current)
 }
 
-fn choice_values(kind: OrchFormKind, name: &str) -> Vec<String> {
+fn choice_values(kind: OrchFormKind, name: &str, draft: &str) -> Vec<String> {
     match name {
         "start" if kind == OrchFormKind::Task => ["manual", "now"].map(str::to_owned).to_vec(),
         "start" => ["once", "hourly", "daily", "weekly"]
             .map(str::to_owned)
             .to_vec(),
+        "schedule" if kind == OrchFormKind::Automation => {
+            let fields = inline_fields(draft);
+            let start = fields
+                .iter()
+                .find(|field| field.name == "start")
+                .map(|field| draft[field.value.clone()].trim());
+            match start {
+                Some("once") => {
+                    let timezone = fields
+                        .iter()
+                        .find(|field| field.name == "timezone")
+                        .map(|field| draft[field.value.clone()].trim())
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(crate::automation::system_timezone_name);
+                    [3_600, 7_200, 86_400]
+                        .into_iter()
+                        .filter_map(|seconds| {
+                            crate::automation::format_local_instant(
+                                crate::automation::unix_now().saturating_add(seconds),
+                                &timezone,
+                            )
+                            .ok()
+                        })
+                        .collect()
+                }
+                Some("hourly") => ["00", "15", "30", "45"].map(str::to_owned).to_vec(),
+                Some("daily") => ["09:00", "12:00", "18:00"].map(str::to_owned).to_vec(),
+                Some("weekly") => ["mon 09:00", "wed 09:00", "fri 09:00"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                _ => Vec::new(),
+            }
+        }
         "mode" => ["worktree", "workspace"].map(str::to_owned).to_vec(),
         "access" => ["read_only", "workspace", "full_access"]
             .map(str::to_owned)
@@ -214,7 +255,7 @@ pub(super) fn inline_tab(draft: &str, cursor: usize, backward: bool) -> Option<I
         "/automation" => OrchFormKind::Automation,
         _ => return None,
     };
-    let choices = choice_values(kind, field.name);
+    let choices = choice_values(kind, field.name, draft);
     let current = draft[field.value.clone()].trim();
     if !choices.is_empty() {
         let index = choices
@@ -233,8 +274,8 @@ pub(super) fn inline_tab(draft: &str, cursor: usize, backward: bool) -> Option<I
             .position(|choice| choice.starts_with(current))
         {
             index
-        } else if field.name == "timezone" {
-            return None;
+        } else if matches!(field.name, "schedule" | "timezone") {
+            return Some(InlineTab::Noop);
         } else {
             if backward {
                 choices.len() - 1
