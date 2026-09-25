@@ -50,9 +50,10 @@ plain keys navigate without reaching the program in the pane:
 | `q`, `Esc`, `0`, or just typing | back to live |
 
 The inline `/` search is owned by Luvus, so query and navigation keys never
-reach the child process. Type a query and press **Enter** to jump to the first
-case-insensitive match at or after the current viewport (wrapping to the oldest
-match when needed). Press **`Ctrl-I`** to toggle case sensitivity; sensitive
+reach the child process. Type a query and press **Enter**; retained rows are
+scanned synchronously, and the first case-insensitive match at or after the
+current viewport is selected (wrapping to the oldest match when needed). Press
+**`Ctrl-I`** to toggle case sensitivity; sensitive
 mode adds `Aa` after the query, while the default insensitive mode stays
 unmarked. Press **`Ctrl-U`** while editing or after committing to clear the
 query and continue editing without leaving search or moving the viewport.
@@ -138,8 +139,9 @@ so `w` and `e` behave like vim's `W` and `E`:
 | `q` or Esc | cancel and restore the viewport where copy mode began |
 
 Copy mode's `/` search uses the same exact, case-insensitive matching and
-word-level highlights as SCROLL search. Press **Enter** to commit and move the
-copy cursor to the first match at or after its current position; the selection
+word-level highlights as SCROLL search. Press **Enter** to commit; the copy
+cursor moves synchronously to the first match at or after its current position.
+The selection
 anchor stays unchanged. Use **`n`** / **`N`** to move between matches and
 **`Ctrl-I`** to toggle case sensitivity. While SEARCH is active, **`Ctrl-U`**
 clears the query and returns to editing instead of moving half a page. **Esc**

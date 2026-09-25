@@ -135,7 +135,9 @@ The active query, match count, case state, and key hints appear in Luvus's
 outer Bottom Bar; the FILE footer keeps showing file metadata. Compact mobile
 clients show that search state in the FILE footer because their outer Bottom Bar
 is hidden. Current matches use the accent color; other visible matches use
-amber. Search retains at most 10,000 matches per view; a `+` after the count
+amber. In FILE views, styling covers whole displayed graphemes, including
+combining marks and joined emoji, while the match's source byte range remains
+exact. Search retains at most 10,000 matches per view; a `+` after the count
 means more matches exist beyond the navigable set.
 
 Dragging across the text selects and copies it, the same as in any pane. Visual

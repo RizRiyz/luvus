@@ -325,10 +325,16 @@ pub fn gutter_width(line_count: usize) -> u16 {
 /// renderer and mouse-selection so a wrapped view maps screen rows to file
 /// columns identically in both.
 pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
+    use unicode_segmentation::UnicodeSegmentation;
+
     let chars: Vec<char> = line.chars().collect();
     let n = chars.len();
     if width == 0 || n <= width {
         return vec![(0, n)];
+    }
+    let mut boundaries = vec![0];
+    for grapheme in line.graphemes(true) {
+        boundaries.push(boundaries.last().copied().unwrap_or(0) + grapheme.chars().count());
     }
     let mut out = Vec::new();
     let mut start = 0;
@@ -337,10 +343,14 @@ pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
             out.push((start, n));
             break;
         }
-        let hard_end = start + width;
+        let limit = start + width;
+        let boundary = boundaries.partition_point(|&position| position <= limit);
+        let hard_end = if boundaries[boundary - 1] > start {
+            boundaries[boundary - 1]
+        } else {
+            boundaries[boundary]
+        };
         let mut brk = hard_end;
-        // Prefer a word boundary: the last space in the window, if it isn't the
-        // very first column (which would make an empty segment).
         if let Some(pos) = chars[start..hard_end].iter().rposition(|&c| c == ' ') {
             let abs = start + pos;
             if abs > start {
@@ -348,7 +358,6 @@ pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
             }
         }
         out.push((start, brk));
-        // Swallow the space we broke on so it doesn't lead the next row.
         start = if brk < n && chars[brk] == ' ' {
             brk + 1
         } else {
@@ -366,36 +375,9 @@ pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
 /// Must agree exactly with `wrap_ranges(..).len()` — the renderer lays rows out
 /// with that, and the scroll clamp counts them with this, so a disagreement
 /// would let the view scroll past its own last row (or stop short of it). Pinned
-/// by `wrap_rows_matches_wrap_ranges`. Counts without allocating, because the
-/// clamp runs on every keypress and wheel tick.
+/// by `wrap_rows_matches_wrap_ranges`.
 pub fn wrap_rows(line: &str, width: usize) -> usize {
-    let n = line.chars().count();
-    if width == 0 || n <= width {
-        return 1;
-    }
-    let chars: Vec<char> = line.chars().collect();
-    let mut rows = 0usize;
-    let mut start = 0usize;
-    while start < n {
-        rows += 1;
-        if n - start <= width {
-            break;
-        }
-        let hard_end = start + width;
-        let mut brk = hard_end;
-        if let Some(pos) = chars[start..hard_end].iter().rposition(|&c| c == ' ') {
-            let abs = start + pos;
-            if abs > start {
-                brk = abs;
-            }
-        }
-        start = if brk < n && chars[brk] == ' ' {
-            brk + 1
-        } else {
-            brk
-        };
-    }
-    rows.max(1)
+    wrap_ranges(line, width).len()
 }
 
 /// Slice the `(start, end)` char range out of `line`.
@@ -730,6 +712,21 @@ mod tests {
         assert_eq!(v.scroll, 6);
         v.scroll_by(-100, 4, 0);
         assert_eq!(v.scroll, 0);
+    }
+
+    #[test]
+    fn wrapping_never_splits_combining_or_zwj_clusters() {
+        for line in ["a\u{301}bc", "a👩‍💻bc"] {
+            let segments: Vec<_> = wrap_ranges(line, 2)
+                .into_iter()
+                .map(|range| seg_text(line, range))
+                .collect();
+            assert_eq!(segments.concat(), line);
+            assert!(segments.iter().any(|part| part.contains("a")));
+            assert!(segments
+                .iter()
+                .all(|part| !part.starts_with('\u{301}') && !part.starts_with('\u{200d}')));
+        }
     }
 
     /// `wrap_rows` is the scroll clamp's view of how tall a line is and
