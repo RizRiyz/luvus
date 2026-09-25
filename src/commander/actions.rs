@@ -36,12 +36,12 @@ pub(crate) const SLASH_ACTIONS: [SlashActionSpec; 9] = [
     },
     SlashActionSpec {
         name: "/task",
-        usage: "[@target] · Enter guide · form modal",
+        usage: "[@target] · Enter form · Tab fields",
         needs_target: false,
     },
     SlashActionSpec {
         name: "/automation",
-        usage: "[@target] · Enter guide · form modal",
+        usage: "[@target] · Enter form · Tab fields",
         needs_target: false,
     },
     SlashActionSpec {
@@ -209,24 +209,22 @@ impl App {
                     Ok(SlashAction::Split(pane, axis))
                 }
                 "/task" | "/automation" => {
-                    let modal = target == Some("form") || words.clone().next() == Some("form");
-                    let form_target = target
-                        .filter(|token| *token != "form")
-                        .map(|token| self.commander_form_target(token))
-                        .transpose()?;
-                    let extra = words.next();
-                    if extra.is_some_and(|token| token != "form")
-                        || words.next().is_some()
-                        || (guided_fields && modal)
-                    {
-                        return Err(format!("Use {action} [@target] [form]"));
-                    }
-                    let mode = if guided_fields {
-                        OrchActionMode::Submit
-                    } else if modal {
-                        OrchActionMode::Modal
-                    } else {
-                        OrchActionMode::Guided
+                    let rest = trimmed[action.len()..].trim_start();
+                    let first = rest.split_whitespace().next();
+                    let (form_target, fields) =
+                        if let Some(token) = first.filter(|t| t.starts_with('@')) {
+                            (
+                                Some(self.commander_form_target(token)?),
+                                rest[token.len()..].trim_start(),
+                            )
+                        } else {
+                            (None, rest)
+                        };
+                    let mode = match fields {
+                        "" | "form" => OrchActionMode::Modal,
+                        "guide" => OrchActionMode::Guided,
+                        _ if orch::has_inline_fields(trimmed) => OrchActionMode::Submit,
+                        _ => return Err(format!("Use {action} [@target] [field: value ...]")),
                     };
                     Ok(if action == "/task" {
                         SlashAction::Task(form_target, mode)
@@ -553,7 +551,15 @@ impl App {
         }
         match mode {
             OrchActionMode::Guided => {
-                let header = self.commander.as_ref().unwrap().draft.trim().to_string();
+                let header = self
+                    .commander
+                    .as_ref()
+                    .unwrap()
+                    .draft
+                    .trim()
+                    .strip_suffix(" guide")
+                    .unwrap_or_default()
+                    .to_string();
                 let draft = orch::template(&header, self.orch_form.as_ref().unwrap());
                 let first_field = orch::field_positions(&draft)
                     .first()

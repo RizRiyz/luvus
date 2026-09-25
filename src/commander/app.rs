@@ -1,12 +1,15 @@
 //! App-owned Commander routing and exact-pane delivery.
 
+use super::actions::{FormTarget, SlashAction};
 use super::orch;
 use super::{
     encode_component, line_end, line_start, next_word, parse_scoped_target, previous_word,
     slash_popup_layout, target_lookup, target_spans, unescape_pane_mentions, Commander,
     DeliveryPlan, ExactTarget, ScopedTarget, MAX_TARGETS, SLASH_ACTIONS,
 };
-use crate::app::{is_ctrl_chord, App, Mode, COMMANDER_DEFAULT_HEIGHT, COMMANDER_MIN_HEIGHT};
+use crate::app::{
+    is_ctrl_chord, App, Mode, OrchFormKind, COMMANDER_DEFAULT_HEIGHT, COMMANDER_MIN_HEIGHT,
+};
 use crate::ids::PaneId;
 use crate::layout::Axis;
 use crate::terminal::pty::Pane;
@@ -223,14 +226,37 @@ impl App {
             return true;
         }
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            let backward =
+                key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+            if self.commander_orch_tab(backward) {
+                return true;
+            }
+            let inline = self.commander.as_ref().and_then(|commander| {
+                commander
+                    .guided_orch
+                    .is_none()
+                    .then(|| orch::inline_tab(&commander.draft, commander.cursor, backward))?
+            });
+            if let Some(inline) = inline {
+                let commander = self.commander.as_mut().unwrap();
+                match inline {
+                    orch::InlineTab::Replace(range, value) => {
+                        commander.draft.replace_range(range.clone(), &value);
+                        commander.cursor = range.start + value.len();
+                        commander.selection_anchor = None;
+                        commander.clear_receipt();
+                    }
+                    orch::InlineTab::Move(position) => commander.move_cursor(position, false),
+                    orch::InlineTab::Noop => {}
+                }
+                return true;
+            }
             if self.commander.as_ref().unwrap().guided_orch.is_some()
                 && self.commander_guide_move_field(key.code == KeyCode::BackTab, true)
             {
                 return true;
             }
-            self.commander_cycle_target(
-                key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
-            );
+            self.commander_cycle_target(backward);
             return true;
         }
         if key.modifiers.is_empty() {
@@ -400,6 +426,47 @@ impl App {
         }
         self.refresh_commander_preview();
         true
+    }
+
+    /// Complete an ORCH command field at the end of its draft. Inside a
+    /// choice value, the usual Tab cycle remains available.
+    fn commander_orch_tab(&mut self, backward: bool) -> bool {
+        let Some(commander) = self.commander.as_ref() else {
+            return false;
+        };
+        if backward || commander.guided_orch.is_some() || commander.cursor != commander.draft.len()
+        {
+            return false;
+        }
+        let draft = commander.draft.clone();
+        if draft.ends_with(" form") || draft.ends_with(" guide") {
+            return false;
+        }
+        let (kind, target) = match self.commander_parse_slash_action(&draft) {
+            Some(Ok(SlashAction::Task(target, _))) => (OrchFormKind::Task, target),
+            Some(Ok(SlashAction::Automation(target, _))) => (OrchFormKind::Automation, target),
+            _ => return false,
+        };
+        let fields = orch::inline_fields(&draft);
+        if let Some(last) = fields.last() {
+            let value = draft[last.value.clone()].trim();
+            if orch::is_choice_field(last.name)
+                && (value.is_empty() || orch::unfinished_choice(&draft, last))
+            {
+                return false;
+            }
+        }
+        let active_agent =
+            kind == OrchFormKind::Automation && matches!(&target, Some(FormTarget::Agent { .. }));
+        let selected_agent = match &target {
+            Some(FormTarget::Agent { agent, .. }) => Some(agent.as_str()),
+            _ => None,
+        };
+        if let Some(next) = orch::next_field_text(&draft, kind, active_agent, selected_agent) {
+            self.commander.as_mut().unwrap().insert(&next);
+            return true;
+        }
+        !fields.is_empty()
     }
 
     /// In a guided ORCH draft, Tab cycles value positions and plain Enter

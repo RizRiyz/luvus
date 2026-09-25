@@ -130,11 +130,11 @@ complete action. Use `@` and `Tab` to complete an exact target where required.
 /split @p24 below
 /task
 /task @workspace:app
-/task form
 /automation
 /automation @workspace:app
 /automation @p17
-/automation form
+/task @workspace:app title: Review tests  start: manual  prompt: Check coverage
+/automation @p17 title: Daily review  start: daily  schedule: 09:00  timezone: UTC  prompt: Report risks
 /mission
 /diff
 /files
@@ -143,16 +143,21 @@ complete action. Use `@` and `Tab` to complete an exact target where required.
 `/focus` switches to one exact pane, tab, or workspace without sending input.
 `/read` shows a bounded snapshot of one pane's recent output in Commander;
 use `PageUp` and `PageDown` to browse it. `/fork` uses the native agent session
-fork handler and requires a fork-capable agent with a known session. `/task`
-and `/automation` expand into guided multiline drafts **inside Commander**.
-The first Enter opens the draft; it does not create anything. Tab and
-Shift+Tab move between field values, Enter advances to the next field, and
-Enter on the final `prompt:` field (or Ctrl+Enter anywhere) validates and
-creates the item. Use Shift+Enter to add a line inside the prompt. A receipt
-shows the new task or automation ID. The `prompt:` field must be last; further
-lines belong to that prompt. Invalid or missing fields leave the draft intact
-with an error. Add `form` to use the existing modal instead, for example
-`/task @workspace:app form` or `/automation form`.
+fork handler and requires a fork-capable agent with a known session. Bare
+`/task`, `/automation`, and their `@target` forms open the existing modal.
+Alternatively, write `field: value` pairs directly after the action and target
+to create from the Commander input in one Enter. Put `prompt:` last; everything
+after it is prompt text, including text that resembles another field. Tab
+completes a partial slash action or `@target`; after an exact action and target,
+Tab inserts `title:`. Type the title and press Tab to add `start:`, then continue
+through the fields appropriate to a task, new-worker automation, or selected
+active agent. On an empty `start:`, `agent:`, `mode:`, `access:`, or `timezone:`,
+Tab fills a choice; press Tab again at the end of that value to add the next
+field. Move the caret inside a choice and use Tab or Shift+Tab to cycle it.
+Other IANA timezones can be typed directly. Missing or invalid values keep the input
+and show an error. A successful send shows the new task or automation ID.
+`/task guide` and `/automation guide` remain available for a guided multiline
+draft inside Commander.
 
 The optional `@workspace:name` binds a task or new-worker automation to that
 exact workspace; without it, Commander uses the current workspace. `/task @p17`
@@ -162,40 +167,26 @@ Tab can complete the names. These slash actions never forward their text to
 a terminal. To send an agent's own slash command, put it after a target, such
 as `@p17 /status`.
 
-For example, enter `/task @workspace:app`, press Enter, and fill the draft:
+For example, this creates a task directly from the input:
 
 ```text
-/task @workspace:app
-title: Review login tests
-start: now
-agent: codex
-mode: workspace
-paths:
-deps:
-gate:
-prompt: Find and fix the failing login tests
+/task @workspace:app title: Review login tests  start: now  agent: codex  mode: workspace  prompt: Find and fix the failing login tests
 ```
 
-Use `start: manual` to save without launching. `agent`, `mode`, `paths`,
-`deps`, and `gate` can be blank when not needed; `mode` accepts `worktree` or
-`workspace`.
+Use `start: manual` to save without launching. `paths:`, `deps:`, and `gate:`
+are optional; `mode:` accepts `worktree` or `workspace`. Fields may also be
+separated by newlines, and Shift+Enter adds a line to the input.
 
 `/split` creates a shell beside one exact pane: `right` places it alongside,
 `below` stacks it underneath. `sv` and `sh` are accepted direction aliases.
-For an existing live agent in pane 17, enter `/automation @p17`, press Enter,
-and fill the shorter draft:
+For an existing live agent in pane 17, the inline form is:
 
 ```text
-/automation @p17
-title: Daily review
-start: daily
-schedule: 09:00
-timezone: Asia/Makassar
-prompt: Review today's changes and report risks
+/automation @p17 title: Daily review  start: daily  schedule: 09:00  timezone: Asia/Makassar  prompt: Review today's changes and report risks
 ```
 
-Without `@p17`, the draft targets a new worker and also exposes `agent`,
-`mode`, `access`, `paths`, and `gate`. Automation starts can be `once`,
+Without `@p17`, automation targets a new worker and also accepts `agent:`,
+`mode:`, `access:`, `paths:`, and `gate:`. Automation starts can be `once`,
 `hourly`, `daily`, or `weekly`. Schedules use `YYYY-MM-DD HH:MM` for Once,
 a minute from `00` to `59` for Hourly, `HH:MM` for Daily, or a value such as
 `mon,fri 08:00` for Weekly. Use an IANA timezone. `/mission` opens Mission Control in the

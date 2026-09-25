@@ -1,11 +1,268 @@
-//! Guided multiline ORCH drafts inside Commander. No shell parsing or CLI
-//! subprocesses: fields are copied into the existing validated ORCH form.
+//! Inline and guided ORCH drafts inside Commander. Fields are copied into the
+//! existing validated form; no shell parsing or CLI subprocesses are involved.
 
 use crate::app::{OrchAutomationTarget, OrchForm, OrchFormKind, OrchFormStart};
 use crate::automation::AutomationAccess;
 use crate::ids::PaneId;
 use crate::orch::TaskWorkerMode;
 use std::collections::HashSet;
+use std::ops::Range;
+
+const FIELD_NAMES: &[&str] = &[
+    "title", "start", "schedule", "timezone", "agent", "mode", "access", "paths", "deps", "gate",
+    "prompt",
+];
+
+#[derive(Debug)]
+pub(super) struct InlineField {
+    pub name: &'static str,
+    pub marker: usize,
+    pub value: Range<usize>,
+    pub raw_end: usize,
+}
+
+pub(super) enum InlineTab {
+    Replace(Range<usize>, String),
+    Move(usize),
+    Noop,
+}
+
+const TASK_FIELDS: &[&str] = &[
+    "title", "start", "agent", "mode", "paths", "deps", "gate", "prompt",
+];
+const AUTOMATION_FIELDS: &[&str] = &[
+    "title", "start", "schedule", "timezone", "agent", "mode", "access", "paths", "gate", "prompt",
+];
+const ACTIVE_AUTOMATION_FIELDS: &[&str] = &["title", "start", "schedule", "timezone", "prompt"];
+
+pub(super) fn is_choice_field(name: &str) -> bool {
+    matches!(name, "start" | "timezone" | "agent" | "mode" | "access")
+}
+
+pub(super) fn next_field_text(
+    draft: &str,
+    kind: OrchFormKind,
+    active_agent: bool,
+    selected_agent: Option<&str>,
+) -> Option<String> {
+    let order = match (kind, active_agent) {
+        (OrchFormKind::Task, _) => TASK_FIELDS,
+        (OrchFormKind::Automation, true) => ACTIVE_AUTOMATION_FIELDS,
+        (OrchFormKind::Automation, false) => AUTOMATION_FIELDS,
+    };
+    let fields = inline_fields(draft);
+    let next = if let Some(last) = fields.last() {
+        order.iter().position(|name| *name == last.name)? + 1
+    } else {
+        0
+    };
+    let name = order.get(next)?;
+    let value = if *name == "agent" {
+        selected_agent.unwrap_or("")
+    } else {
+        ""
+    };
+    Some(format!(
+        "{}{}: {}",
+        if fields.is_empty() { " " } else { "  " },
+        name,
+        value
+    ))
+}
+
+fn body_start(draft: &str) -> Option<usize> {
+    let action = draft.split_whitespace().next()?;
+    if !matches!(action, "/task" | "/automation") {
+        return None;
+    }
+    let mut offset = draft.len() - draft.trim_start().len() + action.len();
+    offset += draft[offset..].len() - draft[offset..].trim_start().len();
+    if draft[offset..].starts_with('@') {
+        let end = draft[offset..]
+            .find(char::is_whitespace)
+            .map_or(draft.len(), |end| offset + end);
+        offset = end;
+        offset += draft[offset..].len() - draft[offset..].trim_start().len();
+    }
+    Some(offset)
+}
+
+/// Recognize explicit `field:` markers at word boundaries. `prompt:` consumes
+/// the remainder, so ordinary prompt prose is never reinterpreted as fields.
+pub(super) fn inline_fields(draft: &str) -> Vec<InlineField> {
+    let Some(start) = body_start(draft) else {
+        return Vec::new();
+    };
+    let mut markers = Vec::new();
+    for (relative, _) in draft[start..].char_indices() {
+        let index = start + relative;
+        if index != start
+            && !draft[..index]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            continue;
+        }
+        if let Some(&name) = FIELD_NAMES.iter().find(|name| {
+            draft[index..].starts_with(**name) && draft[index + name.len()..].starts_with(':')
+        }) {
+            markers.push((name, index));
+            if name == "prompt" {
+                break;
+            }
+        }
+    }
+    markers
+        .iter()
+        .enumerate()
+        .map(|(index, &(name, marker))| {
+            let value_start = marker + name.len() + 1;
+            let end = markers
+                .get(index + 1)
+                .map_or(draft.len(), |(_, start)| *start);
+            let mut value_end = end;
+            while value_end > value_start && draft.as_bytes()[value_end - 1].is_ascii_whitespace() {
+                value_end -= 1;
+            }
+            InlineField {
+                name,
+                marker,
+                value: value_start..value_end,
+                raw_end: end,
+            }
+        })
+        .collect()
+}
+
+pub(super) fn has_inline_fields(draft: &str) -> bool {
+    body_start(draft).is_some_and(|start| {
+        inline_fields(draft)
+            .first()
+            .is_some_and(|field| field.marker == start)
+    })
+}
+
+pub(super) fn inline_field_at(draft: &str, cursor: usize) -> Option<InlineField> {
+    inline_fields(draft)
+        .into_iter()
+        .find(|field| field.value.start <= cursor && cursor <= field.raw_end)
+}
+
+pub(super) fn unfinished_choice(draft: &str, field: &InlineField) -> bool {
+    let kind = match draft.split_whitespace().next() {
+        Some("/task") => OrchFormKind::Task,
+        Some("/automation") => OrchFormKind::Automation,
+        _ => return false,
+    };
+    let current = draft[field.value.clone()].trim();
+    !current.is_empty()
+        && choice_values(kind, field.name)
+            .iter()
+            .any(|choice| choice.starts_with(current) && choice != current)
+}
+
+fn choice_values(kind: OrchFormKind, name: &str) -> Vec<String> {
+    match name {
+        "start" if kind == OrchFormKind::Task => ["manual", "now"].map(str::to_owned).to_vec(),
+        "start" => ["once", "hourly", "daily", "weekly"]
+            .map(str::to_owned)
+            .to_vec(),
+        "mode" => ["worktree", "workspace"].map(str::to_owned).to_vec(),
+        "access" => ["read_only", "workspace", "full_access"]
+            .map(str::to_owned)
+            .to_vec(),
+        "agent" => {
+            let agents = if kind == OrchFormKind::Task {
+                crate::app::task_agent_choices()
+            } else {
+                crate::app::automation_agent_choices()
+            };
+            agents.iter().map(|agent| (*agent).to_owned()).collect()
+        }
+        "timezone" => {
+            static SYSTEM_TIMEZONE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let system = SYSTEM_TIMEZONE.get_or_init(crate::automation::system_timezone_name);
+            let mut zones = vec![system.clone()];
+            for zone in [
+                "UTC",
+                "Asia/Makassar",
+                "Asia/Jakarta",
+                "Asia/Singapore",
+                "Asia/Tokyo",
+                "Europe/London",
+                "Europe/Berlin",
+                "America/New_York",
+                "America/Los_Angeles",
+            ] {
+                if zone != system {
+                    zones.push(zone.to_owned());
+                }
+            }
+            zones
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Tab cycles bounded choices in place. Free-text fields move to the next
+/// field, while any valid IANA timezone remains editable as ordinary text.
+pub(super) fn inline_tab(draft: &str, cursor: usize, backward: bool) -> Option<InlineTab> {
+    let field = inline_field_at(draft, cursor)?;
+    let kind = match draft.split_whitespace().next()? {
+        "/task" => OrchFormKind::Task,
+        "/automation" => OrchFormKind::Automation,
+        _ => return None,
+    };
+    let choices = choice_values(kind, field.name);
+    let current = draft[field.value.clone()].trim();
+    if !choices.is_empty() {
+        let index = choices
+            .iter()
+            .position(|choice| choice.eq_ignore_ascii_case(current));
+        let chosen = if let Some(index) = index {
+            (index + if backward { choices.len() - 1 } else { 1 }) % choices.len()
+        } else if current.is_empty() {
+            if backward {
+                choices.len() - 1
+            } else {
+                0
+            }
+        } else if let Some(index) = choices
+            .iter()
+            .position(|choice| choice.starts_with(current))
+        {
+            index
+        } else if field.name == "timezone" {
+            return None;
+        } else {
+            if backward {
+                choices.len() - 1
+            } else {
+                0
+            }
+        };
+        let end = if field.raw_end == draft.len() {
+            field.raw_end
+        } else {
+            field.value.end
+        };
+        return Some(InlineTab::Replace(
+            field.value.start..end,
+            format!(" {}", choices[chosen]),
+        ));
+    }
+    let fields = inline_fields(draft);
+    let index = fields
+        .iter()
+        .position(|candidate| candidate.marker == field.marker)?;
+    let next = if backward {
+        fields.get(index.wrapping_sub(1))
+    } else {
+        fields.get(index + 1)
+    };
+    Some(next.map_or(InlineTab::Noop, |field| InlineTab::Move(field.value.start)))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct GuidedBinding {
@@ -72,21 +329,16 @@ pub(super) fn field_positions(draft: &str) -> Vec<usize> {
 }
 
 pub(super) fn parse_into(draft: &str, form: &mut OrchForm) -> Result<(), String> {
-    let (_, fields) = draft
-        .split_once('\n')
-        .ok_or("Start a guided draft before submitting")?;
+    let start = body_start(draft).ok_or("Use /task or /automation")?;
+    let fields = inline_fields(draft);
+    if fields.first().is_none_or(|field| field.marker != start) {
+        return Err("Use field: value after the action and optional @target".into());
+    }
     let mut seen = HashSet::new();
     let mut prompt: Option<String> = None;
-    for line in fields.lines() {
-        if let Some(value) = prompt.as_mut() {
-            value.push('\n');
-            value.push_str(line);
-            continue;
-        }
-        let (name, value) = line
-            .split_once(':')
-            .ok_or_else(|| format!("Expected a field: value line: {line}"))?;
-        let value = value.strip_prefix(' ').unwrap_or(value);
+    for field in fields {
+        let name = field.name;
+        let value = draft[field.value].trim();
         if !seen.insert(name) {
             return Err(format!("{name} was given more than once"));
         }

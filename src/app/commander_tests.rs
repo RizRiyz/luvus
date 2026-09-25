@@ -131,7 +131,7 @@ fn commander_task_form_binds_workspace_and_reports_created_id() {
     assert_ne!(app.workspaces[app.active_ws].id, workspace);
     app.open_commander();
     let commander = app.commander.as_mut().unwrap();
-    commander.draft = "/task @workspace:commander-target form".into();
+    commander.draft = "/task @workspace:commander-target".into();
     app.commander_prepare();
     let form = app.orch_form.as_ref().unwrap();
     assert_eq!(form.workspace_id.as_deref(), Some(workspace.as_str()));
@@ -169,7 +169,7 @@ fn commander_automation_agent_target_is_exact_and_cancel_returns_focus() {
     let pane = app.layout().focus;
     app.status.get_mut(&pane).unwrap().agent = "codex".into();
     app.open_commander();
-    app.commander.as_mut().unwrap().draft = format!("/automation @p{} form", pane.0);
+    app.commander.as_mut().unwrap().draft = format!("/automation @p{}", pane.0);
     app.commander_prepare();
     let form = app.orch_form.as_ref().unwrap();
     assert_eq!(form.automation_target, OrchAutomationTarget::ActiveAgent);
@@ -189,7 +189,7 @@ fn guided_task_stays_in_commander_then_creates_in_exact_workspace() {
     app.workspaces[app.active_ws].name = "guided-project".into();
     app.new_workspace();
     app.open_commander();
-    app.commander.as_mut().unwrap().draft = "/task @workspace:guided-project".into();
+    app.commander.as_mut().unwrap().draft = "/task @workspace:guided-project guide".into();
     app.commander_prepare();
     assert!(app.orch_form.is_none());
     assert!(app.commander.as_ref().unwrap().focused);
@@ -235,7 +235,7 @@ fn guided_task_keeps_its_workspace_after_switching_workspaces() {
     let mut app = App::new(80, 24, tx).unwrap();
     let workspace_id = app.workspaces[app.active_ws].id.clone();
     app.open_commander();
-    app.commander.as_mut().unwrap().draft = "/task".into();
+    app.commander.as_mut().unwrap().draft = "/task guide".into();
     app.commander_prepare();
     app.new_workspace();
     assert_ne!(app.workspaces[app.active_ws].id, workspace_id);
@@ -256,7 +256,7 @@ fn guided_automation_validates_before_creating() {
     let (tx, _) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     app.open_commander();
-    app.commander.as_mut().unwrap().draft = "/automation".into();
+    app.commander.as_mut().unwrap().draft = "/automation guide".into();
     app.commander_prepare();
     assert!(app.commander.as_ref().unwrap().draft.contains("schedule: "));
     app.commander_prepare();
@@ -282,6 +282,220 @@ fn guided_automation_validates_before_creating() {
         .as_deref()
         .unwrap()
         .contains("Automation a"));
+}
+
+#[test]
+fn inline_task_fields_create_without_opening_the_modal() {
+    let _env = crate::persist::test_env("commander-inline-task");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.workspaces[app.active_ws].name = "inline-project".into();
+    let workspace_id = app.workspaces[app.active_ws].id.clone();
+    app.new_workspace();
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/task @workspace:inline-project title: Review tests  start: manual  prompt: Check the start: behavior".into();
+    commander.cursor = commander.draft.len();
+    app.commander_prepare();
+    assert!(app.orch_form.is_none());
+    assert_eq!(app.orch.tasks.len(), 1);
+    assert_eq!(app.orch.tasks[0].title, "Review tests");
+    assert_eq!(
+        app.orch.tasks[0].project.as_ref().unwrap().workspace_id,
+        workspace_id
+    );
+    assert_eq!(
+        app.orch.tasks[0].prompt.as_deref(),
+        Some("Check the start: behavior")
+    );
+}
+
+#[test]
+fn inline_automation_tab_cycles_start_and_timezone_then_creates() {
+    let _env = crate::persist::test_env("commander-inline-automation");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = "/automation title: Daily review  start:  schedule: 09:00  timezone:  agent: codex  mode: workspace  access: workspace  prompt: Review changes".into();
+    commander.cursor = commander.draft.find("start:").unwrap() + "start:".len();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .contains("start: once"));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .contains("start: hourly"));
+    app.commander_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .contains("start: once"));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .contains("start: daily"));
+    let commander = app.commander.as_mut().unwrap();
+    commander.cursor = commander.draft.find("timezone:").unwrap() + "timezone:".len();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let draft = &app.commander.as_ref().unwrap().draft;
+    let timezone = draft
+        .split("timezone:")
+        .nth(1)
+        .unwrap()
+        .split("agent:")
+        .next()
+        .unwrap()
+        .trim();
+    assert!(!timezone.is_empty());
+    assert!(jiff::tz::db().get(timezone).is_ok());
+    app.commander_prepare();
+    assert!(app.orch_form.is_none());
+    assert_eq!(
+        app.automation.automations.len(),
+        1,
+        "Commander receipt: {:?}",
+        app.commander.as_ref().unwrap().receipt
+    );
+    assert_eq!(app.automation.automations[0].name, "Daily review");
+}
+
+#[test]
+fn inline_agent_automation_stays_in_commander_while_bare_target_opens_modal() {
+    let _env = crate::persist::test_env("commander-inline-agent-automation");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = format!("/automation @p{}", pane.0);
+    app.commander_prepare();
+    assert_eq!(
+        app.orch_form.as_ref().unwrap().automation_target,
+        OrchAutomationTarget::ActiveAgent
+    );
+    app.close_orch_form();
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = format!("/automation @p{} title: hello  start:", pane.0);
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("start: once"));
+    app.commander_prepare();
+    assert!(app.orch_form.is_none());
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("schedule"));
+}
+
+#[test]
+fn tab_builds_active_agent_automation_fields_in_order() {
+    let _env = crate::persist::test_env("commander-inline-agent-fields");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = format!("/automation @p{}", pane.0);
+    app.commander.as_mut().unwrap().cursor = app.commander.as_ref().unwrap().draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().draft.ends_with("title: "));
+    app.commander.as_mut().unwrap().insert("hello");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().draft.ends_with("start: "));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("start: once"));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("schedule: "));
+    app.commander.as_mut().unwrap().insert("2026-12-01 09:00");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("timezone: "));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let timezone = app.commander.as_ref().unwrap().draft.clone();
+    assert!(timezone.contains("timezone: "));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let draft = &app.commander.as_ref().unwrap().draft;
+    assert!(draft.ends_with("prompt: "));
+    assert!(!draft.contains("agent:"));
+    assert!(!draft.contains("access:"));
+    assert!(app.orch_form.is_none());
+}
+
+#[test]
+fn tab_completes_slash_then_builds_task_fields_with_selected_agent() {
+    let _env = crate::persist::test_env("commander-inline-task-fields");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "codex".into();
+    app.open_commander();
+    app.commander.as_mut().unwrap().draft = "/ta".into();
+    app.commander.as_mut().unwrap().cursor = 3;
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "/task");
+    app.commander
+        .as_mut()
+        .unwrap()
+        .insert(&format!(" @p{}", pane.0));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().draft.ends_with("title: "));
+    app.commander.as_mut().unwrap().insert("review");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().draft.ends_with("start: "));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("start: manual"));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .draft
+        .ends_with("agent: codex"));
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.commander.as_ref().unwrap().draft.ends_with("mode: "));
 }
 
 #[test]
@@ -402,11 +616,11 @@ fn slash_enter_accepts_a_suggestion_before_dispatching() {
     assert_eq!(app.commander.as_ref().unwrap().draft, "/automation");
     assert!(app.orch_form.is_none());
     app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.orch_form.is_none());
     assert_eq!(
-        app.commander.as_ref().unwrap().guided_orch,
-        Some(OrchFormKind::Automation)
+        app.orch_form.as_ref().unwrap().kind,
+        OrchFormKind::Automation
     );
+    assert!(app.commander.as_ref().unwrap().guided_orch.is_none());
 }
 
 #[test]
