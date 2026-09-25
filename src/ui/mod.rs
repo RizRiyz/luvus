@@ -562,6 +562,7 @@ pub(crate) fn retained_pty_eligible(app: &App) -> bool {
         && app.copy_mode.is_none()
         && app.hover_link.is_none()
         && app.search_flash.is_none()
+        && app.pane_search.is_none()
         && app.settings.is_none()
         && app.picker.is_none()
         && !app.help_open
@@ -769,6 +770,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             // geometry) repaints the agent; note it so detection freezes briefly
             // and a reflowed spinner can't flip the pane to "working" (docs/07).
             if resized {
+                if let Some(search) = app.pane_search.as_mut().filter(|search| search.pane == *id) {
+                    search.invalidate_matches();
+                }
                 if let Some(s) = app.status.get_mut(id) {
                     s.last_resize = Some(std::time::Instant::now());
                     s.force_detect = true;
@@ -1369,6 +1373,31 @@ pub(crate) fn format_utc(seconds: u64) -> String {
         .unwrap_or_else(|| seconds.to_string())
 }
 
+pub(crate) fn local_search_footer<M>(search: &crate::search::local::LocalSearch<M>) -> String {
+    let case = if search.case_sensitive { " · Aa" } else { "" };
+    let position = if search.editing {
+        String::new()
+    } else if search.matches.is_empty() {
+        " · 0/0".to_string()
+    } else {
+        format!(
+            " · {}/{}{}",
+            search.current + 1,
+            search.matches.len(),
+            if search.truncated { "+" } else { "" }
+        )
+    };
+    let navigation = if !search.editing && !search.matches.is_empty() {
+        " · n/N match"
+    } else {
+        ""
+    };
+    format!(
+        " SEARCH  /{}{}{}{} · Ctrl-U clear · Ctrl-I case · Esc cancel",
+        search.query, position, case, navigation
+    )
+}
+
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -1525,6 +1554,41 @@ mod retained_render_tests {
 
     use crate::terminal::appearance::PaneAppearance;
     use crate::terminal::vt::{create_engine, VtEngineKind};
+
+    #[test]
+    fn successful_terminal_resize_invalidates_committed_search_coordinates() {
+        let _env = crate::persist::test_env("pane-search-resize-invalidation");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(100, 30, app_tx).expect("app starts");
+        let focus = app.layout().focus;
+        app.pane_search = Some(crate::app::PaneSearch {
+            pane: focus,
+            owner: crate::app::PaneSearchOwner::Scroll,
+            local: crate::search::local::LocalSearch {
+                query: "needle".into(),
+                editing: false,
+                case_sensitive: false,
+                matches: vec![crate::app::PaneSearchMatch {
+                    row: 0,
+                    col: 12,
+                    width: 6,
+                }],
+                current: 0,
+                truncated: false,
+            },
+            saved_scroll: 0,
+        });
+        let area = Rect::new(0, 0, 54, 16);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+
+        render_into(&mut target, &mut app);
+
+        let search = &app.pane_search.as_ref().expect("search retained").local;
+        assert!(search.editing, "resize makes old row coordinates unsafe");
+        assert_eq!(search.query, "needle");
+        assert!(search.matches.is_empty());
+    }
 
     #[test]
     fn damaged_rows_match_a_forced_full_projection() {

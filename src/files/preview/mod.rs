@@ -18,6 +18,9 @@ pub use document::{Block, PreviewDocument};
 pub use layout::{LayoutKey, PreviewLayout, TextRole};
 
 use crate::files::SIZE_CAP;
+use crate::search::local::{
+    first_at_or_after, LiteralMatcher, LocalSearch, RowMatch, LOCAL_MATCH_CAP,
+};
 
 const SNIFF: usize = 8192;
 const MAX_PENDING_LAYOUTS: usize = 2;
@@ -59,13 +62,7 @@ pub enum PreviewLoad {
     Error(String),
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct PreviewSearch {
-    pub query: String,
-    pub editing: bool,
-    pub matches: Vec<(usize, usize)>,
-    pub current: usize,
-}
+pub type PreviewSearch = LocalSearch<RowMatch>;
 
 pub struct DocumentView {
     pub path: PathBuf,
@@ -75,6 +72,7 @@ pub struct DocumentView {
     pub mtime: Option<std::time::SystemTime>,
     pub read_token: u64,
     pub search: Option<PreviewSearch>,
+    search_layout: Option<LayoutKey>,
     layouts: VecDeque<(LayoutKey, Arc<PreviewLayout>)>,
     pending_layouts: HashSet<LayoutKey>,
     scroll_anchor_line: Option<usize>,
@@ -90,6 +88,7 @@ impl DocumentView {
             mtime: None,
             read_token: 0,
             search: None,
+            search_layout: None,
             layouts: VecDeque::new(),
             pending_layouts: HashSet::new(),
             scroll_anchor_line: None,
@@ -98,19 +97,17 @@ impl DocumentView {
 
     pub fn apply(&mut self, load: PreviewLoad) {
         self.capture_scroll_anchor();
-        let search_query = self
-            .search
-            .as_ref()
-            .map(|search| search.query.clone())
-            .filter(|query| !query.is_empty());
+        let search = self.search.take();
         self.load = load;
         self.layouts.clear();
         self.pending_layouts.clear();
-        self.search = search_query.map(|query| PreviewSearch {
-            query,
-            editing: false,
-            matches: Vec::new(),
-            current: 0,
+        self.search_layout = None;
+        self.search = search.map(|mut search| {
+            if !search.editing {
+                search.matches.clear();
+                search.current = 0;
+            }
+            search
         });
     }
 
@@ -140,7 +137,26 @@ impl DocumentView {
         self.document()
     }
 
+    #[cfg(test)]
     pub fn apply_layout(&mut self, key: LayoutKey, layout: Arc<PreviewLayout>) {
+        self.apply_layout_with_viewport(key, layout, None);
+    }
+
+    pub fn apply_layout_for_viewport(
+        &mut self,
+        key: LayoutKey,
+        layout: Arc<PreviewLayout>,
+        viewport: usize,
+    ) {
+        self.apply_layout_with_viewport(key, layout, Some(viewport.max(1)));
+    }
+
+    fn apply_layout_with_viewport(
+        &mut self,
+        key: LayoutKey,
+        layout: Arc<PreviewLayout>,
+        viewport: Option<usize>,
+    ) {
         self.pending_layouts.remove(&key);
         self.layouts.retain(|(candidate, _)| *candidate != key);
         self.layouts.push_front((key, layout));
@@ -157,8 +173,14 @@ impl DocumentView {
         if let Some(current) = self.layout(key) {
             self.scroll = self.scroll.min(current.rows.len().saturating_sub(1));
         }
-        if let Some(query) = self.search.as_ref().map(|search| search.query.clone()) {
+        let committed_query = self.search.as_ref().and_then(|search| {
+            (!search.editing && !search.query.is_empty()).then(|| search.query.clone())
+        });
+        if let Some(query) = committed_query {
             self.rebuild_search(key, query);
+            if let Some(viewport) = viewport {
+                self.reveal_search(viewport);
+            }
         }
     }
 
@@ -167,26 +189,25 @@ impl DocumentView {
     }
 
     pub fn search_begin(&mut self) {
-        self.search = Some(PreviewSearch {
-            editing: true,
-            ..PreviewSearch::default()
-        });
+        self.search = Some(PreviewSearch::editing());
+        self.search_layout = None;
     }
 
     pub fn search_push(&mut self, ch: char) {
-        if let Some(search) = self.search.as_mut().filter(|search| search.editing) {
-            search.query.push(ch);
+        if let Some(search) = self.search.as_mut() {
+            search.push(ch);
         }
     }
 
     pub fn search_backspace(&mut self) {
-        if let Some(search) = self.search.as_mut().filter(|search| search.editing) {
-            search.query.pop();
+        if let Some(search) = self.search.as_mut() {
+            search.backspace();
         }
     }
 
     pub fn search_cancel(&mut self) {
         self.search = None;
+        self.search_layout = None;
     }
 
     pub fn search_commit(&mut self, key: LayoutKey, viewport: usize) {
@@ -197,71 +218,108 @@ impl DocumentView {
             self.search = None;
             return;
         }
+        if let Some(search) = self.search.as_mut() {
+            search.commit();
+        }
         self.rebuild_search(key, query);
         self.reveal_search(viewport);
     }
 
+    pub fn search_clear(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            search.clear();
+            self.search_layout = None;
+        }
+    }
+
+    pub fn search_toggle_case(&mut self, key: LayoutKey, viewport: usize) {
+        let rebuild = self
+            .search
+            .as_mut()
+            .is_some_and(|search| search.toggle_case());
+        if rebuild {
+            if let Some(query) = self.search.as_ref().map(|search| search.query.clone()) {
+                self.rebuild_search(key, query);
+                self.reveal_search(viewport);
+            }
+        }
+    }
+
     fn rebuild_search(&mut self, key: LayoutKey, query: String) {
-        // ASCII case folding preserves byte offsets into the rendered UTF-8
-        // row; non-ASCII text remains exact and can never produce an invalid
-        // highlight boundary.
-        let needle = query.to_ascii_lowercase();
-        let matches = self
+        let case_sensitive = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.case_sensitive);
+        let (matches, truncated) = self
             .layout(key)
-            .map(|layout| {
-                layout
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(row, rendered)| {
-                        let text = rendered.plain_text().to_ascii_lowercase();
-                        let mut hits = Vec::new();
-                        let mut from = 0;
-                        while let Some(relative) = text[from..].find(&needle) {
-                            let column = from + relative;
-                            hits.push((row, column));
-                            from = column + needle.len().max(1);
+            .and_then(|layout| {
+                let matcher = LiteralMatcher::new(&query, case_sensitive)?;
+                let mut matches = Vec::new();
+                let mut truncated = false;
+                for (row, rendered) in layout.rows.iter().enumerate() {
+                    let text = rendered.plain_text();
+                    let remaining = LOCAL_MATCH_CAP.saturating_sub(matches.len());
+                    if remaining == 0 {
+                        if matcher.has_match(&text) {
+                            truncated = true;
+                            break;
                         }
-                        hits
-                    })
-                    .collect::<Vec<_>>()
+                        continue;
+                    }
+                    let (row_matches, row_truncated) = matcher.spans(&text, remaining);
+                    matches.extend(
+                        row_matches
+                            .into_iter()
+                            .map(|search_match| RowMatch::at(row, search_match)),
+                    );
+                    if row_truncated {
+                        truncated = true;
+                        break;
+                    }
+                }
+                Some((matches, truncated))
             })
             .unwrap_or_default();
-        let current = matches
-            .iter()
-            .position(|(row, _)| *row >= self.scroll)
-            .unwrap_or(0);
-        self.search = Some(PreviewSearch {
-            query,
-            editing: false,
-            matches,
-            current,
+        let current = first_at_or_after(&matches, (self.scroll, 0), |search_match| {
+            (search_match.row, search_match.column)
         });
+        if let Some(search) = self.search.as_mut() {
+            search.query = query;
+            search.editing = false;
+            search.replace_matches(matches, current, truncated);
+            self.search_layout = Some(key);
+        }
+    }
+
+    pub fn sync_search_layout(&mut self, key: LayoutKey, viewport: usize) {
+        if self.search_layout == Some(key) || self.layout(key).is_none() {
+            return;
+        }
+        let committed_query = self.search.as_ref().and_then(|search| {
+            (!search.editing && !search.query.is_empty()).then(|| search.query.clone())
+        });
+        if let Some(query) = committed_query {
+            self.rebuild_search(key, query);
+            self.reveal_search(viewport);
+        }
     }
 
     pub fn search_step(&mut self, forward: bool, viewport: usize) {
-        let Some(search) = self
+        if self
             .search
             .as_mut()
-            .filter(|search| !search.matches.is_empty())
-        else {
-            return;
-        };
-        let len = search.matches.len();
-        search.current = if forward {
-            (search.current + 1) % len
-        } else {
-            (search.current + len - 1) % len
-        };
-        self.reveal_search(viewport);
+            .is_some_and(|search| search.step(forward))
+        {
+            self.reveal_search(viewport);
+        }
     }
 
     fn reveal_search(&mut self, viewport: usize) {
-        let Some((row, _)) = self
+        let Some(row) = self
             .search
             .as_ref()
             .and_then(|search| search.matches.get(search.current))
-            .copied()
+            .map(|search_match| search_match.row)
         else {
             return;
         };
@@ -398,6 +456,98 @@ mod tests {
             })
             .is_some());
         assert_eq!(view.layouts.len(), layout::LAYOUT_CACHE_CAP);
+    }
+
+    #[test]
+    fn committed_search_reveals_an_offscreen_match_when_layout_arrives() {
+        let source = (0..30)
+            .map(|index| {
+                if index == 25 {
+                    "Needle".to_string()
+                } else {
+                    format!("line {index}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let document = Arc::new(PreviewDocument::new(
+            Arc::<str>::from(source.as_str()),
+            vec![Block::Code {
+                language: None,
+                text: source.clone(),
+                range: 0..source.len(),
+            }],
+        ));
+        let key = LayoutKey {
+            width: 40,
+            ascii: false,
+        };
+        let mut view = DocumentView::new(PathBuf::from("README.md"), PreviewKind::Markdown);
+        view.apply(PreviewLoad::Ready(Arc::clone(&document)));
+        view.search_begin();
+        for ch in "needle".chars() {
+            view.search_push(ch);
+        }
+        view.search_commit(key, 5);
+        assert_eq!(view.scroll, 0, "no layout exists yet");
+
+        view.apply_layout_for_viewport(key, Arc::new(layout::build(document, key)), 5);
+
+        let search = view.search.as_ref().expect("committed search");
+        assert_eq!(search.matches.len(), 1);
+        assert!(
+            view.scroll > 0,
+            "the asynchronously discovered offscreen match must become visible"
+        );
+        assert!(
+            search.matches[search.current].row >= view.scroll,
+            "current match starts inside the revealed viewport"
+        );
+    }
+
+    #[test]
+    fn preview_layout_refresh_preserves_editing_and_rebuilds_committed_search() {
+        let source = Arc::<str>::from("Needle needle");
+        let document = Arc::new(PreviewDocument::new(
+            Arc::clone(&source),
+            vec![Block::Paragraph {
+                content: vec![document::Inline::plain(source.as_ref())],
+                range: 0..source.len(),
+            }],
+        ));
+        let key = LayoutKey {
+            width: 40,
+            ascii: false,
+        };
+        let mut view = DocumentView::new(PathBuf::from("README.md"), PreviewKind::Markdown);
+        view.apply(PreviewLoad::Ready(Arc::clone(&document)));
+        view.search_begin();
+        for ch in "needle".chars() {
+            view.search_push(ch);
+        }
+        view.apply_layout(key, Arc::new(layout::build(Arc::clone(&document), key)));
+        assert!(view.search.as_ref().unwrap().editing);
+        assert!(view.search.as_ref().unwrap().matches.is_empty());
+
+        view.search_commit(key, 10);
+        assert_eq!(view.search.as_ref().unwrap().matches.len(), 2);
+        let wide_matches = view.search.as_ref().unwrap().matches.clone();
+        let narrow = LayoutKey {
+            width: 8,
+            ascii: false,
+        };
+        view.apply_layout(
+            narrow,
+            Arc::new(layout::build(Arc::clone(&document), narrow)),
+        );
+        assert!(!view.search.as_ref().unwrap().editing);
+        assert_eq!(view.search.as_ref().unwrap().matches.len(), 2);
+        assert_eq!(view.search_layout, Some(narrow));
+
+        view.sync_search_layout(key, 10);
+
+        assert_eq!(view.search_layout, Some(key));
+        assert_eq!(view.search.as_ref().unwrap().matches, wide_matches);
     }
 
     #[test]

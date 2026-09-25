@@ -2845,6 +2845,17 @@ static HELP: &[Translation] = &[
 /// labels such as `name` can never be mistaken for a help-row description.
 static TEXT: &[Translation] = &[
     tr!(
+        "exact search query must be at most 4096 bytes",
+        "la búsqueda exacta no puede superar los 4096 bytes",
+        "a busca exata não pode exceder 4096 bytes",
+        "la recherche exacte ne doit pas dépasser 4096 octets",
+        "die exakte Suchanfrage darf höchstens 4096 Bytes lang sein",
+        "kueri pencarian persis maksimal 4096 byte",
+        "精确搜索查询不得超过 4096 字节",
+        "完全一致検索のクエリは 4096 バイト以下にしてください",
+        "정확 검색어는 4096바이트를 초과할 수 없습니다"
+    ),
+    tr!(
         "Could not authorize UHP access.",
         "No se pudo autorizar el acceso UHP.",
         "Não foi possível autorizar o acesso UHP.",
@@ -3236,6 +3247,18 @@ mod tests {
             assert_eq!(Language::from_code(code).code(), *code);
         }
         assert_eq!(Language::from_code("unknown"), Language::En);
+    }
+
+    #[test]
+    fn exact_search_limit_diagnostic_is_localized() {
+        let source = "exact search query must be at most 4096 bytes";
+        for code in crate::i18n::LANGS {
+            let language = Language::from_code(code);
+            assert_eq!(diagnostic(source, language), text(source, language));
+            if language != Language::En {
+                assert_ne!(diagnostic(source, language), source);
+            }
+        }
     }
 
     #[test]

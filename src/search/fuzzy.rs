@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use super::casefold::{chars_with_source, fold_text};
+
 #[derive(Clone, Debug)]
 pub struct PreparedText {
     original: Arc<str>,
@@ -25,7 +27,7 @@ impl PreparedText {
                 .map(|byte| byte.to_ascii_lowercase())
                 .collect()
         } else {
-            original.to_lowercase().into_bytes()
+            fold_text(&original).into_bytes()
         };
         let mut boundaries = vec![0u8; original.len().div_ceil(8)];
         if ascii {
@@ -106,7 +108,7 @@ impl FuzzyQuery {
             .split_whitespace()
             .filter(|token| !token.is_empty())
             .map(|token| Token {
-                folded: token.to_lowercase(),
+                folded: fold_text(token),
                 exact: token.to_string(),
             })
             .collect();
@@ -275,23 +277,15 @@ fn unicode_chars(text: &str, case_sensitive: bool) -> (Vec<char>, Vec<usize>, Ve
     let mut bytes = Vec::new();
     let mut boundaries = Vec::new();
     let mut previous = None;
-    for (byte, ch) in text.char_indices() {
-        let boundary = previous.is_none_or(|p: char| {
-            matches!(p, '/' | '\\' | '-' | '_' | '.' | ' ' | '\t')
-                || (p.is_lowercase() && ch.is_uppercase())
+    for projected in chars_with_source(text, case_sensitive) {
+        let boundary = previous.is_none_or(|previous: char| {
+            matches!(previous, '/' | '\\' | '-' | '_' | '.' | ' ' | '\t')
+                || (previous.is_lowercase() && projected.source.is_uppercase())
         });
-        if case_sensitive {
-            chars.push(ch);
-            bytes.push(byte);
-            boundaries.push(boundary);
-        } else {
-            for lower in ch.to_lowercase() {
-                chars.push(lower);
-                bytes.push(byte);
-                boundaries.push(boundary);
-            }
-        }
-        previous = Some(ch);
+        chars.push(projected.folded);
+        bytes.push(projected.source_byte);
+        boundaries.push(boundary);
+        previous = Some(projected.source);
     }
     (chars, bytes, boundaries)
 }
@@ -374,6 +368,31 @@ mod tests {
     }
 
     #[test]
+    fn unicode_case_semantics_match_local_search() {
+        assert!(score("σσσ", "σςΣ").is_some());
+        assert!(score("s", "ſ").is_some());
+        assert!(score("i", "ı").is_none());
+        assert!(score("ı", "i").is_none());
+        assert!(score("ss", "ß").is_none());
+    }
+
+    #[test]
+    fn utf8_length_changing_fold_keeps_original_highlight_offsets() {
+        let text = PreparedText::new("aKz");
+        let got = FuzzyQuery::new("kz", false)
+            .score(&[FuzzyField {
+                text: &text,
+                weight: 0,
+            }])
+            .unwrap();
+        assert_eq!(got.byte_positions, vec![1, 4]);
+        assert!(got
+            .byte_positions
+            .iter()
+            .all(|byte| text.original().is_char_boundary(*byte)));
+    }
+
+    #[test]
     fn case_sensitive_matching_is_strict() {
         let text = PreparedText::new("ReadMe");
         assert!(FuzzyQuery::new("RM", true)
@@ -386,6 +405,20 @@ mod tests {
             .score(&[FuzzyField {
                 text: &text,
                 weight: 0
+            }])
+            .is_none());
+
+        let sigma = PreparedText::new("Σ");
+        assert!(FuzzyQuery::new("Σ", true)
+            .score(&[FuzzyField {
+                text: &sigma,
+                weight: 0,
+            }])
+            .is_some());
+        assert!(FuzzyQuery::new("σ", true)
+            .score(&[FuzzyField {
+                text: &sigma,
+                weight: 0,
             }])
             .is_none());
     }

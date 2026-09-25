@@ -106,12 +106,34 @@ direct workspace jumps are therefore unbound under that preset until reassigned.
 
 ## The global fuzzy finder
 
-`/` opens one finder across the selected Luvus home. It ranks named sessions,
+The configured prefix followed by `/` opens one finder across the selected
+Luvus home. A plain `/` while [keyboard scroll mode](/docs/guides/scrollback/)
+is active instead searches retained output only in that exact PTY pane. This
+pane-local binding does not replace or remap the global finder. `Ctrl-I`
+toggles case sensitivity; sensitive mode adds `Aa` after the query, while the
+default insensitive mode stays unmarked. While entering or after committing the
+pane-local query, `Ctrl-U` clears it and returns to editing without leaving
+search or moving the viewport. COPY mode also accepts `/`: matches move the copy
+cursor while preserving its selection anchor, and `Esc` returns to COPY before
+a second `Esc` exits it.
+
+The global finder ranks named sessions,
 workspaces, tabs, panes, agents, file paths, and retained pane output. Use
 `Tab` or `Shift+Tab` to move through **All**, **Navigate**, **Files**, and
 **Output**. `Ctrl+i` toggles case-sensitive retained-output matching. `Enter`
 opens the selected target. A non-empty query needs one `Esc` to clear and a
 second `Esc` to close.
+
+Plain `/` inside a native FILE, Markdown preview, Mermaid preview, or DIFF view
+uses exact local content search instead. `Enter` commits, `n` / `N` wrap through
+matches, `Ctrl-I` toggles case sensitivity, `Ctrl-U` clears and returns to query
+editing, and `Esc` cancels search before closing the view. FILE search state
+appears in the outer Bottom Bar while its metadata footer remains visible; on
+compact mobile clients it appears in the FILE footer because the outer bar is
+hidden. Preview and DIFF keep search state in their internal footers so it stays
+inside the relevant content mode. A `+` after a 10,000-match count indicates
+additional matches beyond the bounded navigable set. This does not replace the
+FILES tree's `f` path filter or the DIFF sidebar's `f` state filter.
 
 For a file in the current session, `Alt+A`, `F2`, or right-click opens the
 same action menu as FILES: choose a native read-only tab or an available editor.
@@ -136,7 +158,10 @@ click.
 
 ## Focused modes and menus
 
-`Shift+↑` enters [scroll mode](/docs/guides/scrollback/). The built-in sidebar
+`Shift+↑` enters [scroll mode](/docs/guides/scrollback/). While it is active,
+plain `/` opens a case-insensitive retained-output search for the bound PTY;
+`Enter` commits, `n` / `N` wrap through matches, and `Esc` cancels back to the
+pre-search viewport. The built-in sidebar
 lists have matching focus commands: `Ctrl+Space w` for WORKSPACES,
 `Ctrl+Space a` for AGENTS, `Ctrl+Space e` for FILES, and `Ctrl+Space i` for
 DIFF. The Sessions selector at `Ctrl+Space t` follows the same keyboard model.

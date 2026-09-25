@@ -548,6 +548,11 @@ fn draw_one_pane(
         .as_ref()
         .filter(|fl| fl.pane == id)
         .map(|fl| (fl.row, fl.scroll));
+    let pane_search = app
+        .pane_search
+        .as_ref()
+        .filter(|search| search.pane == id && !search.editing && !search.query.is_empty());
+    let mut retained_top = 0usize;
     let mut scrolled = 0usize;
     let agent = app.status.get(&id).map(|s| s.agent.as_str()).unwrap_or("");
     let is_codex = agent == "codex";
@@ -628,6 +633,7 @@ fn draw_one_pane(
                     }
                 });
             }
+            retained_top = engine.history_len().saturating_sub(engine.scroll_offset());
             scrolled = engine.scroll_offset();
             if is_codex {
                 composer_region = engine.codex_composer_region();
@@ -656,11 +662,12 @@ fn draw_one_pane(
         );
     }
 
-    // The search-jump flash band (docs/63): recolor the landed row's background
-    // full width, keeping the text, so it reads as a highlighted line. Only while
-    // the pane is still at the offset we jumped to, so a scroll or new output
-    // (which changes `scrolled`) hides it instead of banding the wrong line.
-    if let Some((fr, fscroll)) = flash {
+    // Pane-local search uses retained-row and display-cell coordinates captured
+    // by the committed scan. The current hit uses accent; other visible hits use
+    // amber. Global finder jumps keep their existing transient row band.
+    if let Some(search) = pane_search {
+        draw_pane_search_matches(f.buffer_mut(), content, retained_top, search, t);
+    } else if let Some((fr, fscroll)) = flash {
         if fr < content.height && scrolled == fscroll {
             let y = content.y + fr;
             let buf = f.buffer_mut();
@@ -705,6 +712,49 @@ fn pane_ime_cursor(content: Rect, cur: crate::terminal::vt::Cursor) -> Option<(u
         return None;
     }
     Some((content.x + cur.x, content.y + cur.y, cur.visible))
+}
+
+fn draw_pane_search_matches(
+    buf: &mut ratatui::buffer::Buffer,
+    content: Rect,
+    retained_top: usize,
+    search: &crate::app::PaneSearch,
+    t: &Theme,
+) {
+    let visible = visible_pane_search_range(&search.matches, retained_top, content.height);
+    for (relative, search_match) in search.matches[visible.clone()].iter().enumerate() {
+        let index = visible.start + relative;
+        let screen_row = search_match.row - retained_top;
+        let start = content
+            .x
+            .saturating_add(search_match.col.min(u16::MAX as usize) as u16);
+        let end = start
+            .saturating_add(search_match.width.min(u16::MAX as usize) as u16)
+            .min(content.right());
+        let background = if index == search.current {
+            t.accent
+        } else {
+            t.amber
+        };
+        let y = content.y + screen_row as u16;
+        for x in start..end {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_bg(background);
+                cell.set_fg(t.base);
+            }
+        }
+    }
+}
+
+fn visible_pane_search_range(
+    matches: &[crate::app::PaneSearchMatch],
+    retained_top: usize,
+    height: u16,
+) -> std::ops::Range<usize> {
+    let start = matches.partition_point(|search_match| search_match.row < retained_top);
+    let bottom = retained_top.saturating_add(usize::from(height));
+    let end = start + matches[start..].partition_point(|search_match| search_match.row < bottom);
+    start..end
 }
 
 fn terminal_cell_style(
@@ -821,6 +871,35 @@ fn draw_codex_composer(
 mod tests {
     use super::*;
     use crate::terminal::vt::CodexComposerRegion;
+
+    #[test]
+    fn pane_search_rendering_limits_iteration_to_visible_matches() {
+        let matches = vec![
+            crate::app::PaneSearchMatch {
+                row: 1,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 5,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 6,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 8,
+                col: 0,
+                width: 1,
+            },
+        ];
+
+        assert_eq!(visible_pane_search_range(&matches, 5, 2), 1..3);
+        assert_eq!(visible_pane_search_range(&matches, 9, 3), 4..4);
+    }
 
     #[test]
     fn composer_uses_only_a_subtle_theme_fill_and_preserves_geometry() {
@@ -965,9 +1044,7 @@ mod tests {
                 uri,
             },
         ];
-
         clip_rendered_hyperlinks(&mut links, pane, Rect::new(12, 3, 6, 1));
-
         assert_eq!(links.len(), 2);
         let clipped = links.iter().find(|link| link.pane == pane).unwrap();
         assert_eq!((clipped.start, clipped.end), (4, 12));
@@ -975,5 +1052,44 @@ mod tests {
             links.iter().find(|link| link.pane == other).unwrap().end,
             18
         );
+    }
+
+    #[test]
+    fn pane_search_highlights_words_by_retained_row() {
+        let t = Theme::noir();
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let search = crate::app::PaneSearch {
+            pane: PaneId(1),
+            owner: crate::app::PaneSearchOwner::Scroll,
+            local: crate::search::local::LocalSearch {
+                query: "needle".into(),
+                editing: false,
+                case_sensitive: false,
+                matches: vec![
+                    crate::app::PaneSearchMatch {
+                        row: 10,
+                        col: 1,
+                        width: 3,
+                    },
+                    crate::app::PaneSearchMatch {
+                        row: 11,
+                        col: 6,
+                        width: 6,
+                    },
+                ],
+                current: 1,
+                truncated: false,
+            },
+            saved_scroll: 0,
+        };
+        draw_pane_search_matches(&mut buf, area, 10, &search, &t);
+        assert_eq!(buf[(0, 0)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(1, 0)].bg, t.amber);
+        assert_eq!(buf[(3, 0)].bg, t.amber);
+        assert_eq!(buf[(6, 1)].bg, t.accent);
+        assert_eq!(buf[(11, 1)].bg, t.accent);
+        assert_eq!(buf[(12, 1)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(6, 1)].fg, t.base);
     }
 }

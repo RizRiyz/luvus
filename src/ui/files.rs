@@ -380,7 +380,7 @@ pub(super) fn draw_file_view(
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let show_footer = !mobile || v.search.is_some();
+    let show_footer = native_footer_visible(mobile, v.search.is_some());
     let body = Rect::new(
         area.x,
         area.y,
@@ -429,29 +429,30 @@ pub(super) fn draw_file_view(
         return;
     }
 
-    // Footer: path · lines · encoding, or the state.
+    // Desktop keeps FILE metadata here while search interaction lives in the
+    // outer Bottom Bar. Compact clients have no outer bar, so an active search
+    // temporarily uses this row just like Preview and DIFF.
+    if mobile {
+        if let Some(search) = v.search.as_ref() {
+            let foot = mobile_file_search_footer(search, area.width as usize);
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(foot, Style::new().fg(t.overlay0)))),
+                Rect::new(area.x, footer_y, area.width, 1),
+            );
+            return;
+        }
+    }
     let name = v
         .path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    // A search overrides the footer with the query + hit position.
-    let foot = if let Some(s) = &v.search {
-        if s.editing {
-            format!(" /{}", s.query)
-        } else if s.matches.is_empty() {
-            format!(" /{} · no matches", s.query)
-        } else {
-            format!(" /{} · {}/{}", s.query, s.current + 1, s.matches.len())
-        }
-    } else {
-        match &v.load {
-            FileLoad::Text(lines) => format!(" {name} · {} lines · UTF-8", lines.len()),
-            FileLoad::Binary(_) => format!(" {name} · binary"),
-            FileLoad::TooLarge(_) => format!(" {name} · too large"),
-            FileLoad::Loading => format!(" {name} · loading…"),
-            FileLoad::Error(_) => format!(" {name} · error"),
-        }
+    let foot = match &v.load {
+        FileLoad::Text(lines) => format!(" {name} · {} lines · UTF-8", lines.len()),
+        FileLoad::Binary(_) => format!(" {name} · binary"),
+        FileLoad::TooLarge(_) => format!(" {name} · too large"),
+        FileLoad::Loading => format!(" {name} · loading…"),
+        FileLoad::Error(_) => format!(" {name} · error"),
     };
     let wrap_hint = if v.wrap { " wrap " } else { "" };
     let foot = clip(&foot, area.width.saturating_sub(wrap_hint.len() as u16));
@@ -468,6 +469,58 @@ pub(super) fn draw_file_view(
             Rect::new(area.right().saturating_sub(6), footer_y, 6, 1),
         );
     }
+}
+
+fn native_footer_visible(mobile: bool, searching: bool) -> bool {
+    !mobile || searching
+}
+
+fn mobile_file_search_footer<M>(
+    search: &crate::search::local::LocalSearch<M>,
+    width: usize,
+) -> String {
+    let position = if search.editing {
+        String::new()
+    } else if search.matches.is_empty() {
+        " 0/0".to_string()
+    } else {
+        format!(
+            " {}/{}{}",
+            search.current + 1,
+            search.matches.len(),
+            if search.truncated { "+" } else { "" }
+        )
+    };
+    let case = if search.case_sensitive { " Aa" } else { "" };
+    let prefix = format!(" SEARCH{position}{case} ");
+    let query_width = width.saturating_sub(crate::ui::display_width(&prefix));
+    let query = truncate_graphemes(&format!("/{}", search.query), query_width);
+    format!("{prefix}{query}")
+}
+
+fn truncate_graphemes(text: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let budget = width - 1;
+    let mut used = 0;
+    let mut output = String::new();
+    for grapheme in UnicodeSegmentation::graphemes(text, true) {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used + grapheme_width > budget {
+            break;
+        }
+        output.push_str(grapheme);
+        used += grapheme_width;
+    }
+    output.push('…');
+    output
 }
 
 fn file_selection_contains(sel: &crate::app::Selection, x: u16, y: u16, text_x: u16) -> bool {
@@ -530,13 +583,18 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
                     break;
                 }
                 gutter_cell(f, y, (si == 0).then_some(i + 1), i + 1);
-                f.render_widget(
-                    Paragraph::new(Span::styled(
-                        crate::files::seg_text(line, range),
-                        Style::new().fg(t.text),
-                    )),
-                    Rect::new(text_x, y, text_w, 1),
-                );
+                let rendered = search_range(v, i, line, range, t);
+                let rendered = if rendered.width() > text_w as usize {
+                    let style = rendered
+                        .spans
+                        .first()
+                        .map(|span| span.style)
+                        .unwrap_or_default();
+                    Line::from(Span::styled("…", style))
+                } else {
+                    rendered
+                };
+                f.render_widget(Paragraph::new(rendered), Rect::new(text_x, y, text_w, 1));
                 y += 1;
             }
             i += 1;
@@ -548,7 +606,7 @@ fn draw_text(f: &mut RenderTarget, body: Rect, v: &FileView, lines: &[String], t
     for (i, line) in lines.iter().enumerate().skip(v.scroll).take(rows) {
         let y = body.y + (i - v.scroll) as u16;
         gutter_cell(f, y, Some(i + 1), i + 1);
-        let line_ui = search_line(v, i, line, t);
+        let line_ui = search_range(v, i, line, (0, line.chars().count()), t);
         f.render_widget(
             Paragraph::new(line_ui).scroll((0, v.hscroll)),
             Rect::new(text_x, y, text_w, 1),
@@ -586,43 +644,98 @@ fn human(n: u64) -> String {
 
 /// Build a line's spans, highlighting any search matches on it (the current
 /// match brighter). No match → one plain span.
-fn search_line<'a>(v: &FileView, line_idx: usize, line: &'a str, t: &Theme) -> Line<'a> {
-    let Some(s) = &v.search else {
-        return Line::from(Span::styled(line, Style::new().fg(t.text)));
+fn search_range<'a>(
+    v: &FileView,
+    line_idx: usize,
+    line: &'a str,
+    char_range: (usize, usize),
+    t: &Theme,
+) -> Line<'a> {
+    let byte_at = |char_index: usize| {
+        line.char_indices()
+            .nth(char_index)
+            .map_or(line.len(), |(byte, _)| byte)
     };
-    let hits: Vec<(usize, usize)> = s
+    let range_start = byte_at(char_range.0);
+    let range_end = byte_at(char_range.1);
+    let Some(s) = &v.search else {
+        return Line::from(Span::styled(
+            &line[range_start..range_end],
+            Style::new().fg(t.text),
+        ));
+    };
+    let hits: Vec<(usize, &crate::search::local::RowMatch)> = s
         .matches
         .iter()
         .enumerate()
-        .filter(|(_, (l, _))| *l == line_idx)
-        .map(|(i, (_, c))| (i, *c))
+        .filter(|(_, search_match)| {
+            search_match.row == line_idx
+                && search_match.byte_start < range_end
+                && search_match.byte_end > range_start
+        })
         .collect();
     if hits.is_empty() || s.query.is_empty() {
-        return Line::from(Span::styled(line, Style::new().fg(t.text)));
+        return Line::from(Span::styled(
+            &line[range_start..range_end],
+            Style::new().fg(t.text),
+        ));
     }
-    let qlen = s.query.chars().count();
-    let mut spans: Vec<Span> = Vec::new();
-    let mut cursor = 0usize; // char index
-    let chars: Vec<char> = line.chars().collect();
-    for (mi, col) in hits {
-        if col > cursor {
-            let seg: String = chars[cursor..col.min(chars.len())].iter().collect();
-            spans.push(Span::styled(seg, Style::new().fg(t.text)));
+    let graphemes: Vec<(usize, usize)> =
+        unicode_segmentation::UnicodeSegmentation::grapheme_indices(
+            &line[range_start..range_end],
+            true,
+        )
+        .map(|(start, cluster)| (range_start + start, range_start + start + cluster.len()))
+        .collect();
+    let mut coverage = vec![0i32; graphemes.len() + 1];
+    let mut current_range = None;
+    for (match_index, search_match) in hits {
+        let start = search_match.byte_start.max(range_start);
+        let end = search_match.byte_end.min(range_end);
+        let first = graphemes.partition_point(|&(_, cluster_end)| cluster_end <= start);
+        let last = graphemes.partition_point(|&(cluster_start, _)| cluster_start < end);
+        if first >= last {
+            continue;
         }
-        let end = (col + qlen).min(chars.len());
-        let seg: String = chars[col..end].iter().collect();
-        let hl = if mi == s.current {
-            Style::new().fg(t.base).bg(t.accent).bold()
+        coverage[first] += 1;
+        coverage[last] -= 1;
+        if match_index == s.current {
+            current_range = Some(first..last);
+        }
+    }
+    let mut spans = Vec::new();
+    let mut active = 0;
+    let mut run_start = range_start;
+    let mut previous_style = None;
+    for (index, &(start, _)) in graphemes.iter().enumerate() {
+        active += coverage[index];
+        let style = if current_range
+            .as_ref()
+            .is_some_and(|range| range.contains(&index))
+        {
+            2
+        } else if active > 0 {
+            1
         } else {
-            Style::new().fg(t.base).bg(t.amber)
+            0
         };
-        spans.push(Span::styled(seg, hl));
-        cursor = end;
+        if previous_style.is_some_and(|previous| previous != style) {
+            let highlight = match previous_style.unwrap_or(0) {
+                2 => Style::new().fg(t.base).bg(t.accent).bold(),
+                1 => Style::new().fg(t.base).bg(t.amber),
+                _ => Style::new().fg(t.text),
+            };
+            spans.push(Span::styled(&line[run_start..start], highlight));
+            run_start = start;
+        }
+        previous_style = Some(style);
     }
-    if cursor < chars.len() {
-        let seg: String = chars[cursor..].iter().collect();
-        spans.push(Span::styled(seg, Style::new().fg(t.text)));
-    }
+    let highlight = match previous_style.unwrap_or(0) {
+        2 => Style::new().fg(t.base).bg(t.accent).bold(),
+        1 => Style::new().fg(t.base).bg(t.amber),
+        _ => Style::new().fg(t.text),
+    };
+    spans.push(Span::styled(&line[run_start..range_end], highlight));
     Line::from(spans)
 }
 
@@ -753,11 +866,156 @@ pub(super) fn draw_named_delete_confirm(
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_list_stats, diff_note_count, file_selection_contains};
+    use super::{
+        diff_list_stats, diff_note_count, draw_file_view, file_selection_contains,
+        mobile_file_search_footer, native_footer_visible, search_range, truncate_graphemes,
+    };
     use crate::app::Selection;
     use crate::ids::PaneId;
     use crate::ui::{theme::Theme, RenderTarget};
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn narrow_wrapped_file_shows_overflow_marker_and_following_text() {
+        let mut view = crate::files::FileView::new("sample.txt".into());
+        view.apply(crate::files::FileLoad::Text(vec!["👩‍💻Z".into()]));
+        for (width, first, second) in [(6, "…", "Z"), (7, "👩‍💻", "Z"), (8, "👩‍💻", " ")]
+        {
+            let area = Rect::new(0, 0, width, 4); // five gutter cells
+            let mut buffer = Buffer::empty(area);
+            {
+                let mut target = RenderTarget::new(&mut buffer, area);
+                draw_file_view(&mut target, area, &view, None, false, &Theme::noir());
+            }
+            assert_eq!(buffer[(5, 0)].symbol(), first, "pane width {width}");
+            assert_eq!(buffer[(5, 1)].symbol(), second, "pane width {width}");
+            if width == 8 {
+                assert_eq!(buffer[(7, 0)].symbol(), "Z");
+            }
+        }
+    }
+
+    #[test]
+    fn file_search_styles_complete_graphemes_without_changing_match_bytes() {
+        let theme = Theme::noir();
+        let line = "xa\u{301}b 👩‍💻!";
+        let mut view = crate::files::FileView::new("sample.txt".into());
+        let mut search = crate::search::local::LocalSearch::editing();
+        search.query = "a".into();
+        search.commit();
+        let emoji_start = line.find('💻').unwrap();
+        search.replace_matches(
+            vec![
+                crate::search::local::RowMatch {
+                    row: 0,
+                    byte_start: 1,
+                    byte_end: 2,
+                    column: 1,
+                    width: 1,
+                },
+                crate::search::local::RowMatch {
+                    row: 0,
+                    byte_start: emoji_start,
+                    byte_end: emoji_start + '💻'.len_utf8(),
+                    column: 5,
+                    width: 2,
+                },
+            ],
+            1,
+            false,
+        );
+        assert_eq!(
+            (search.matches[0].byte_start, search.matches[0].byte_end),
+            (1, 2)
+        );
+        view.search = Some(search);
+        let rendered = search_range(&view, 0, line, (0, line.chars().count()), &theme);
+        assert!(rendered
+            .spans
+            .iter()
+            .any(|span| span.content == "a\u{301}" && span.style.bg == Some(theme.amber)));
+        assert!(rendered
+            .spans
+            .iter()
+            .any(|span| span.content == "👩‍💻" && span.style.bg == Some(theme.accent)));
+        let ranges = crate::files::wrap_ranges(line, 2);
+        assert!(ranges.iter().any(|&range| {
+            let segment = search_range(&view, 0, line, range, &theme);
+            segment
+                .spans
+                .iter()
+                .any(|span| span.content == "a\u{301}" && span.style.bg == Some(theme.amber))
+        }));
+    }
+
+    #[test]
+    fn mobile_search_uses_an_inner_footer_only_while_active() {
+        assert!(native_footer_visible(false, false));
+        assert!(native_footer_visible(false, true));
+        assert!(!native_footer_visible(true, false));
+        assert!(native_footer_visible(true, true));
+
+        let mut view = crate::files::FileView::new("sample.txt".into());
+        view.apply(crate::files::FileLoad::Text(vec!["Needle".into()]));
+        view.search = Some(crate::search::local::LocalSearch {
+            query: "👩‍💻".repeat(1_024),
+            editing: false,
+            case_sensitive: true,
+            matches: vec![crate::search::local::RowMatch {
+                row: 0,
+                byte_start: 0,
+                byte_end: 6,
+                column: 0,
+                width: 6,
+            }],
+            current: 0,
+            truncated: true,
+        });
+        let area = Rect::new(0, 0, 24, 3);
+        let mut buffer = Buffer::empty(area);
+        {
+            let mut target = RenderTarget::new(&mut buffer, area);
+            draw_file_view(
+                &mut target,
+                area,
+                &view,
+                None,
+                true,
+                &Theme::quattro_rally(),
+            );
+        }
+        let footer: String = (0..area.width)
+            .map(|x| buffer[(x, area.bottom() - 1)].symbol())
+            .collect();
+        assert!(
+            footer.starts_with(" SEARCH 1/1+ Aa "),
+            "mobile status: {footer}"
+        );
+        assert!(footer.contains('/'), "mobile search query: {footer}");
+        assert!(footer.ends_with('…'), "mobile query truncation: {footer}");
+        assert_eq!(
+            mobile_file_search_footer(view.search.as_ref().unwrap(), area.width as usize),
+            " SEARCH 1/1+ Aa /👩‍💻👩‍💻👩‍💻…"
+        );
+    }
+
+    #[test]
+    fn mobile_search_footer_prioritizes_status_at_narrow_widths() {
+        let search = crate::search::local::LocalSearch {
+            query: "needle".repeat(700),
+            editing: false,
+            case_sensitive: true,
+            matches: vec![()],
+            current: 0,
+            truncated: true,
+        };
+        let footer = mobile_file_search_footer(&search, 18);
+        assert_eq!(crate::ui::display_width(&footer), 18);
+        assert!(footer.starts_with(" SEARCH 1/1+ Aa "));
+        assert!(footer.ends_with('…'));
+
+        assert_eq!(truncate_graphemes("👩‍💻abc", 3), "👩‍💻…");
+    }
 
     #[test]
     fn diff_note_count_uses_singular_and_plural_labels() {

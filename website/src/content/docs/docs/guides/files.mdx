@@ -119,13 +119,33 @@ file an agent is editing stays current in front of you.
 | `g` / `G` | top / bottom |
 | `h` / `l` | scroll sideways when wrapping is off |
 | `w` | toggle soft wrap |
-| `/`, then `n` / `N` | search, next / previous match |
+| `/`, then `Enter` | search exact text in this file (case-insensitive by default) |
+| `n` / `N` | next / previous match, wrapping at the ends |
+| `Ctrl-I` | toggle case sensitivity (`Aa` marks sensitive mode) |
+| `Ctrl-U` | clear the active query and return to editing |
 | `y` or `c` | copy the whole file |
 | `x` / `q` / `Esc` | close |
 
+Read-only FILE views, Markdown previews, Mermaid previews, and DIFF use the
+same local-search controls. Search is an exact substring match rather than the
+global finder's fuzzy ranking. `Enter` commits, `n` and `N` wrap through
+matches, `Ctrl-I` toggles case sensitivity, and `Ctrl-U` clears the query while
+keeping search open. `Esc` cancels search before it closes the native view.
+The active query, match count, case state, and key hints appear in Luvus's
+outer Bottom Bar; the FILE footer keeps showing file metadata. Compact mobile
+clients show that search state in the FILE footer because their outer Bottom Bar
+is hidden. Current matches use the accent color; other visible matches use
+amber. In FILE views, styling covers whole displayed graphemes, including
+combining marks and joined emoji, while the match's source byte range remains
+exact. Search retains at most 10,000 matches per view; a `+` after the count
+means more matches exist beyond the navigable set.
+
 Dragging across the text selects and copies it, the same as in any pane. Visual
 wraps rejoin into their original source line while real file line breaks remain.
-Double-click a word, path, or URL to copy and highlight that token. This works
+Wrapping measures terminal cells and keeps joined characters together. If the
+text column is narrower than a single character, `…` marks its row; selecting
+that marker still copies the complete original character. Double-click a word,
+path, or URL to copy and highlight that token. This works
 whether the read-only file viewer is opened as the reused preview, a permanent
 pane, or a tab.
 
@@ -184,17 +204,22 @@ bounded layout cache.
 | `j` / `k`, `↓` / `↑` | rendered row down / up |
 | `d` / `u`, Space / PageUp | half page or page navigation |
 | `g` / `G` | top / bottom |
-| `/`, then `n` / `N` | search rendered text |
+| `/`, then `Enter` | search exact rendered text (case-insensitive by default) |
+| `n` / `N` | next / previous match, wrapping at the ends |
+| `Ctrl-I` | toggle case sensitivity (`Aa` marks sensitive mode) |
+| `Ctrl-U` | clear the active query and return to editing |
 | `y` or `c` | copy the canonical raw source |
 | Ctrl/Cmd+click a link | open an HTTP(S) URL or an existing linked file |
 | `q` / `Esc` | close (or clear an active search first) |
 
 Dragging copies the rendered terminal text without turning visual wraps into
 newlines. Real document line breaks remain. Double-clicking copies and
-highlights the rendered word, path, or URL under the pointer. Reopening the same
-file and preview kind focuses the existing preview in that placement rather
-than creating a duplicate. Open the file normally whenever you want its raw
-source or editor.
+highlights the rendered word, path, or URL under the pointer. Search controls
+replace the preview footer while search is active, including on mobile; after
+cancelling search, the footer identifies the document and preview kind again.
+Reopening the same file and preview kind focuses the existing preview in that
+placement rather than creating a duplicate. Open the file normally whenever you
+want its raw source or editor.
 
 ## What this is not
 

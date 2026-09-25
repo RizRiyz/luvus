@@ -1194,11 +1194,14 @@ impl VtEngine for AlacrittyEngine {
             .then_some(output)
     }
 
-    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str)) {
+    fn try_for_each_retained_row(
+        &self,
+        f: &mut dyn FnMut(usize, &str) -> std::ops::ControlFlow<()>,
+    ) {
         let mut output = String::with_capacity(self.term.grid().columns());
         for index in 0..self.retained_row_count() {
-            if self.write_retained_row(index, &mut output) {
-                f(index, &output);
+            if self.write_retained_row(index, &mut output) && f(index, &output).is_break() {
+                break;
             }
         }
     }
@@ -1528,6 +1531,59 @@ mod tests {
         // Compare against a forced fresh computation, not another cache hit.
         engine.history_metrics_cache.set(None);
         assert_eq!(engine.history_metrics(), small);
+    }
+
+    /// Opt-in measurement of the synchronous pane-search scan before deciding
+    /// whether it needs a worker. No server or production session is involved.
+    #[test]
+    #[ignore]
+    fn pane_search_scan_benchmark() {
+        use std::{hint::black_box, time::Instant};
+
+        let max_rows = history_rows_for_budget(crate::config::SCROLLBACK_BYTES_MAX, 80);
+        for rows in [1_000, 3_413, 10_000, 50_000, max_rows] {
+            let (tx, _rx) = channel();
+            let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, rows));
+            let padding = "x".repeat(64);
+            for row in 0..rows + 24 {
+                engine.advance(format!("line{row:05} {padding}\r\n").as_bytes());
+            }
+            engine.finish_output_batch();
+            let long_query = "q".repeat(crate::search::local::LOCAL_QUERY_BYTES);
+            for needle in ["absent-token", "line", long_query.as_str()] {
+                let matcher = crate::search::local::LiteralMatcher::new(needle, true).unwrap();
+                let mut samples = Vec::new();
+                for trial in 0..6 {
+                    let start = Instant::now();
+                    let mut hits = 0;
+                    let mut truncated = false;
+                    engine.try_for_each_retained_row(&mut |_row, line| {
+                        let remaining = crate::search::local::LOCAL_MATCH_CAP.saturating_sub(hits);
+                        if remaining == 0 {
+                            truncated = matcher.has_match(line);
+                        } else {
+                            let (found, more) = matcher.spans(line, remaining);
+                            hits += found.len();
+                            truncated = more;
+                        }
+                        if truncated {
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    });
+                    black_box((hits, truncated));
+                    if trial > 0 {
+                        samples.push(start.elapsed().as_secs_f64() * 1_000.0);
+                    }
+                }
+                samples.sort_by(f64::total_cmp);
+                eprintln!(
+                    "pane_search_scan rows={rows} query_bytes={} retained={} median_ms={:.3} max_ms={:.3}",
+                    needle.len(), engine.retained_row_count(), samples[samples.len() / 2], samples[samples.len() - 1],
+                );
+            }
+        }
     }
 
     /// Opt-in inspection benchmark. No child processes or production sessions.
@@ -2290,6 +2346,25 @@ mod tests {
             visible.contains("OLDEST"),
             "history text is selectable/copyable: {visible:?}"
         );
+    }
+
+    #[test]
+    fn retained_row_visitor_stops_when_requested() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
+        feed_lines(&mut engine, 40);
+        let mut visited = 0usize;
+
+        engine.try_for_each_retained_row(&mut |_index, _line| {
+            visited += 1;
+            if visited == 3 {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+
+        assert_eq!(visited, 3);
     }
 
     #[test]

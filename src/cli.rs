@@ -2662,6 +2662,13 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                     "usage: luvus search <text...> [--case]"
                 }));
             }
+            let query_bytes = query
+                .iter()
+                .map(String::len)
+                .fold(query.len().saturating_sub(1), usize::saturating_add);
+            if !fuzzy && query_bytes > crate::search::local::LOCAL_QUERY_BYTES {
+                return Err(anyhow!("exact search query must be at most 4096 bytes"));
+            }
             if fuzzy {
                 (
                     "search.query".into(),
@@ -4885,6 +4892,21 @@ mod tests {
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }
+
+        let oversized = format!(
+            "luvus search {}",
+            "x".repeat(crate::search::local::LOCAL_QUERY_BYTES + 1)
+        );
+        let error = parse(&argv(&oversized)).expect_err("oversized exact search must fail");
+        assert_eq!(
+            error.to_string(),
+            "exact search query must be at most 4096 bytes"
+        );
+        let localized = localize_cli_error_with(
+            error,
+            crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::Zh),
+        );
+        assert_eq!(localized.to_string(), "精确搜索查询不得超过 4096 字节");
     }
 
     #[test]
