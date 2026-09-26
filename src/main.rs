@@ -11,6 +11,7 @@ mod changelog;
 mod cli;
 mod clipboard;
 mod clipboard_image;
+mod commander;
 mod config;
 mod detect;
 mod diff;
@@ -262,6 +263,15 @@ pub(crate) fn emit_clipboard(text: &str) {
 
 pub(crate) fn emit_clipboard_to(text: &str, completion: std::sync::Arc<clipboard::Completion>) {
     clipboard::copy_native_to(text, completion);
+    emit_clipboard_escape(text);
+}
+
+pub(crate) fn emit_clipboard_tracked_to(
+    text: &str,
+    completion: std::sync::Arc<clipboard::Completion>,
+    on_success: impl FnOnce() + Send + 'static,
+) {
+    clipboard::copy_native_with_confirmation(text, completion, on_success);
     emit_clipboard_escape(text);
 }
 
@@ -1583,6 +1593,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(ev) => {
                 app.handle_event(ev); // --local redraws every loop, so ignore the dirty bool
+                flush_local_commander_clipboard(&mut app);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -1590,6 +1601,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         // Coalesce any queued events before drawing.
         while let Ok(ev) = rx.try_recv() {
             app.handle_event(ev);
+            flush_local_commander_clipboard(&mut app);
         }
         // Parked `wait.output` deadlines lapse on the tick (docs/81).
         app.tick_output_waits(Instant::now());
@@ -1629,7 +1641,10 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             crate::platform::open_url(&url);
         }
         if let Some(text) = app.pending_clipboard.take() {
-            emit_clipboard(&text);
+            let notify = tx.clone();
+            emit_clipboard_tracked_to(&text, clipboard::local_completion(), move || {
+                let _ = notify.send(AppEvent::LocalClipboardSucceeded);
+            });
         }
         if let Some(notification) = clipboard::take_notification() {
             emit_notification(notification);
@@ -1655,6 +1670,16 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     let detached = app.detach_requested;
     app.finish_session_persistence();
     Ok(detached)
+}
+
+fn flush_local_commander_clipboard(app: &mut App) {
+    if let Some(text) = app
+        .commander
+        .as_mut()
+        .and_then(|commander| commander.pending_clipboard.take())
+    {
+        emit_clipboard(&text);
+    }
 }
 
 /// Clean up a just-bound Unix socket before a local startup aborts. The caller

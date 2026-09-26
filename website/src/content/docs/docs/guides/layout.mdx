@@ -5,7 +5,8 @@ description: Arrange and navigate luvus by splitting, resizing, and zooming pane
 
 luvus is **mouse-native**: everything here works by click and drag, and every
 action also has a key behind the [`Ctrl+Space` prefix](/docs/getting-started/concepts/#3-the-prefix-key).
-Nothing is modal, so what you type always goes to the focused pane.
+Most shortcuts act immediately; pane-navigation and keyboard-resize modes
+temporarily capture keys until you leave them.
 
 ## Panes
 
@@ -16,13 +17,19 @@ like, and luvus tiles them automatically.
 |---|---|---|
 | Split side by side | right-click a pane → **Split** | `Ctrl+Space v` |
 | Split top / bottom | right-click a pane → **Split down** | `Ctrl+Space s` |
-| Focus a pane | click it | arrows or `hjkl` |
+| Focus a pane | click it | `Ctrl+Space` then an arrow to preview; more arrows move, `Enter` focuses, `Esc` cancels; `hjkl` focuses immediately |
 | Move a pane to another tab | right-click → **Move to Tab** | n/a |
 | Zoom (fullscreen) a pane | n/a | `Ctrl+Space z` |
 | Close a pane | the `×` on its title, or right-click → **Close** | `Ctrl+Space x` |
 
 Each split pane shows a title bar with a **status dot** and its working
 directory. The focused pane's frame is brighter.
+
+In a tiled tab, arrow navigation highlights a candidate without changing the
+active pane or sending it input. When Commander is open, `Down` from the bottom
+pane can highlight its input; `Up` returns to that pane. `Enter` commits the
+highlighted focus; `Esc` keeps the original focus. Compact and zoomed layouts
+retain one-step pane focus.
 
 ### Resizing
 

@@ -34,6 +34,9 @@
 - **Agent workflows:** Start, name, message, inspect, wait for, resume, and send
   keys to agents. Fork Claude, Grok, Codex, Pi, and OMP sessions with their
   context intact.
+- **Commander:** Send prompts to exact agent panes or commands to exact
+  shell panes from a bottom pane-style composer. Send to several explicit
+  targets at once without changing your current pane.
 - **Files and code:** Browse a Git-aware file tree, inspect files and changes,
   fuzzy-find files, create or rename them from the FILES dock, reveal paths,
   and open files in a pane, tab, preview, or external editor.

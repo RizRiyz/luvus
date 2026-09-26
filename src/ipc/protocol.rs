@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 /// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
 /// variant one. Its mismatch reply must use that released position.
 const V0141_PROTOCOL_VERSION: u32 = 17;
@@ -92,6 +92,10 @@ pub enum ClientMessage {
     /// Lightweight liveness check for a quiet persistent machine endpoint.
     HealthCheck {
         nonce: u64,
+    },
+    /// Native clipboard success for the exact copy sent to this attachment.
+    ClipboardSucceeded {
+        receipt: u64,
     },
 }
 
@@ -246,6 +250,11 @@ pub enum ServerMessage {
     /// while ordinary and remote endpoint clients never receive the message.
     MachineCatalogChanged {
         revision: u64,
+    },
+    /// A foreground copy whose native completion may show a success toast.
+    ClipboardTracked {
+        text: String,
+        receipt: u64,
     },
 }
 

@@ -136,6 +136,13 @@ pub enum AppEvent {
         id: u64,
         input: ClientInput,
     },
+    /// Native clipboard helper confirmed an exact foreground copy.
+    ClientClipboardSucceeded {
+        id: u64,
+        receipt: u64,
+    },
+    /// Native clipboard helper confirmed a monolithic `--local` copy.
+    LocalClipboardSucceeded,
     /// A module subprocess finished; fill in its log entry.
     ModuleCommandFinished {
         log_id: u64,

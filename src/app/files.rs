@@ -1280,8 +1280,6 @@ impl App {
         match text {
             Some(t) => {
                 self.pending_clipboard = Some(t);
-                let msg = self.catalog.copied;
-                self.show_toast(msg);
             }
             None => self.show_toast("nothing to copy"),
         }
@@ -3117,7 +3115,15 @@ mod tests {
             Some("line one\nline two"),
             "the file content is queued to the clipboard"
         );
-        assert!(app.toast.is_some(), "a copy toast is shown");
+        assert!(
+            app.toast.is_none(),
+            "queueing a copy is not clipboard success"
+        );
+        app.handle_event(crate::event::AppEvent::LocalClipboardSucceeded);
+        assert_eq!(
+            app.toast.as_ref().map(|(text, _)| text.as_str()),
+            Some("Copied to Clipboard")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

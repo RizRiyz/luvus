@@ -847,7 +847,12 @@ mod tests {
             app.toast = None;
             click(&mut app, rect.x + 1, rect.y);
             assert_eq!(app.pending_clipboard.as_deref(), Some(command.as_str()));
-            assert!(app.toast.is_some(), "copy reports success");
+            assert!(app.toast.is_none(), "queued copy does not report success");
+            app.handle_event(crate::event::AppEvent::LocalClipboardSucceeded);
+            assert_eq!(
+                app.toast.as_ref().map(|(text, _)| text.as_str()),
+                Some("Copied to Clipboard")
+            );
             assert!(app.changelog_open, "copy leaves the modal open");
         }
     }
