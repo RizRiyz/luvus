@@ -56,6 +56,9 @@ deletes send:
 {"version":1,"operation":"remove","repository":"/absolute/repo","path":"/absolute/worktree","branch":"feature/example","force":false}
 ```
 
+`force` is `true` for a confirmed sidebar deletion and `false` for the CLI/API
+command unless requested otherwise.
+
 Removal must write nothing to stdout, exit successfully, and
 both unregister the worktree and remove its directory. If a provider violates
 the exit or stdout contract after the irreversible deletion already completed,
@@ -64,9 +67,9 @@ workspace; stdout is still not a supported result channel. If `remove_command`
 is omitted, explicit removal falls back to built-in Git. Human diagnostics
 belong on stderr. A non-zero exit preserves stderr in the user-facing error when
 the target still exists, so approval or non-interactive failures from the
-underlying tool remain actionable. The provider is synchronous and must not call back into
-the Luvus CLI/API while the server is waiting; module settings and config/state
-directories remain available.
+underlying tool remain actionable. The provider handles one request at a time
+and must not call back into the Luvus CLI/API while that request is running;
+module settings and config/state directories remain available.
 
 Before opening the returned path, Luvus verifies that it exists, is registered
 as a Git worktree, shares the source repository's Git common directory, and has
@@ -103,6 +106,16 @@ workspace.
 
 Bare entries and worktrees whose folder is already gone (`git worktree prune`
 would remove them) are left out, since there is nothing to open.
+
+## Delete one
+
+Right-click a linked worktree in the sidebar, choose **Delete Worktree**, then
+confirm. Luvus validates that the target is a linked checkout (never the main
+checkout), closes its workspace, and removes it in bounded background work.
+The dialog closes immediately; a toast reports completion or failure. The Git
+branch is kept. If the background queue is full or validation fails, the
+workspace remains open. If removal fails after it starts, the directory may
+still exist and can be reopened from the main checkout.
 
 ## Why it's great with agents
 
