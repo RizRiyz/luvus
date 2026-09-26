@@ -1,3 +1,11 @@
 {"id":"input-1","action":"type_literal","params":{"text":"cargo test"}}
+{"id":"paste-1","action":"paste_text","params":{"text":"first\nsecond"}}
+{"id":"image-1","action":"paste_image","params":{"png_base64":"iVBORw0KGgo="}}
+{"id":"upload-1","action":"upload_start","params":{"name":"notes.txt","size":5}}
+{"id":"upload-2","action":"upload_chunk","params":{"upload_id":"11111111111111111111111111111111","offset":0,"data_base64":"aGVsbG8="}}
+{"id":"upload-3","action":"upload_finish","params":{"upload_id":"11111111111111111111111111111111"}}
+{"id":"upload-4","action":"upload_cancel","params":{"upload_id":"11111111111111111111111111111111"}}
 {"id":"input-2","action":"submit_text","params":{"text":"summarize this change"}}
 {"id":"input-3","action":"send_key","params":{"key":"escape"}}
+{"id":"input-4","action":"send_key","params":{"key":"ctrl-k"}}
+{"id":"input-5","action":"send_key","params":{"key":"alt-d"}}

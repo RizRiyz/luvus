@@ -136,6 +136,13 @@ pub enum AppEvent {
         id: u64,
         input: ClientInput,
     },
+    /// Native clipboard helper confirmed an exact foreground copy.
+    ClientClipboardSucceeded {
+        id: u64,
+        receipt: u64,
+    },
+    /// Native clipboard helper confirmed a monolithic `--local` copy.
+    LocalClipboardSucceeded,
     /// A module subprocess finished; fill in its log entry.
     ModuleCommandFinished {
         log_id: u64,
@@ -147,6 +154,13 @@ pub enum AppEvent {
     /// thread — the scan walks agent session stores and must never block the
     /// event loop).
     SessionsScanned(Vec<crate::agent::SessionInfo>),
+    /// Bounded FILES fuzzy results, fenced by filter instance and query generation.
+    FileFilterResults {
+        instance: u64,
+        generation: u64,
+        rows: Vec<crate::files::VisibleRow>,
+        partial: bool,
+    },
     /// A FILES-dock directory read finished (docs/38): its sorted entries, run
     /// on a worker thread so the tree never blocks a frame on `read_dir`.
     DirRead {
@@ -288,13 +302,12 @@ pub enum AppEvent {
     /// (Windows) or `ps` failed — detection then falls back to text heuristics
     /// rather than concluding that no agent is running.
     ProcScanned(Option<std::collections::HashMap<u32, Vec<String>>>),
-    /// One process-table snapshot resolved every pane cwd, plus workspace
-    /// branches and complete git-workspace candidates. Process and git probes
+    /// One process-table snapshot resolved every requested pane cwd, plus
+    /// branches for the affected stable workspace roots. Process and Git probes
     /// run off-loop; the app loop only validates and mutates.
     CwdScanned {
         panes: Vec<(crate::ids::PaneId, crate::platform::PaneCwdEvidence)>,
         branches: Vec<(String, Option<String>)>,
-        workspace_candidates: Vec<crate::git::GitRootInfo>,
     },
     /// A Mission Control usage scan finished (docs/54, MC-2/MC-4): best-effort
     /// tokens/context/cost keyed by agent + session id, read off-loop from native

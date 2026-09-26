@@ -20,6 +20,7 @@ use crate::event::AppEvent;
 use crate::ipc::transport::{self, Conn};
 
 /// A request handed to the app loop, with a channel to send the reply back.
+#[derive(Clone)]
 pub struct ApiRequest {
     pub id: String,
     pub method: String,
@@ -1249,21 +1250,30 @@ fn terminal_stream_frame(
     );
     let content_revision = target.content_revision.load(Ordering::Acquire);
     let bytes = capture.text.len();
+    let mut data = json!({
+        "server_generation":target.server_generation,
+        "terminal_id":target.terminal_id,
+        "pane_id":target.pane_id,
+        "content_revision":content_revision,
+        "mode":target.mode.as_str(),
+        "ansi":target.ansi,
+        "text":capture.text,
+        "lines":capture.lines,
+        "bytes":bytes,
+        "truncated":capture.truncated,
+    });
+    if target.cursor {
+        data["cursor"] = capture.cursor_offset.map_or(Value::Null, |offset| {
+            json!({
+                "offset":offset,
+                "padding_cells":capture.cursor_padding_cells,
+            })
+        });
+    }
     let frame = json!({
         "event":"terminal.frame",
         "sequence":sequence,
-        "data":{
-            "server_generation":target.server_generation,
-            "terminal_id":target.terminal_id,
-            "pane_id":target.pane_id,
-            "content_revision":content_revision,
-            "mode":target.mode.as_str(),
-            "ansi":target.ansi,
-            "text":capture.text,
-            "lines":capture.lines,
-            "bytes":bytes,
-            "truncated":capture.truncated,
-        }
+        "data":data,
     })
     .to_string();
     (frame.len().saturating_add(1) <= crate::terminal::backend::MAX_FRAME_BYTES)
@@ -1300,6 +1310,7 @@ fn control_action_response(
     frame: &[u8],
     target: &crate::terminal::backend::ObserveTarget,
     event_tx: &Sender<AppEvent>,
+    uploads: &mut crate::terminal::upload::UploadState,
 ) -> String {
     if reject_duplicate_keys(frame).is_err() {
         return json!({"id":"0","error":{"code":"invalid_request","message":"bad json"}})
@@ -1328,22 +1339,154 @@ fn control_action_response(
         .to_string();
     }
     let action = value["action"].as_str().unwrap_or_default();
+    let mut params = value["params"].as_object().cloned().unwrap_or_default();
+    if action == "upload_start" {
+        if params.len() != 2 || !params.contains_key("name") || !params.contains_key("size") {
+            return json!({"id":id,"error":{"code":"invalid_params",
+                "message":"upload_start requires only name and size"}})
+            .to_string();
+        }
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return json!({"id":id,"error":{"code":"invalid_params",
+                "message":"upload name must be a string"}})
+            .to_string();
+        };
+        let Some(size) = params
+            .get("size")
+            .and_then(Value::as_u64)
+            .and_then(|size| usize::try_from(size).ok())
+        else {
+            return json!({"id":id,"error":{"code":"invalid_params",
+                "message":"upload size must be an integer"}})
+            .to_string();
+        };
+        return match uploads.start(name, size) {
+            Ok(upload_id) => json!({"id":id,"result":{
+                "type":"terminal_upload",
+                "upload_id":upload_id,
+                "max_chunk_bytes":crate::terminal::upload::MAX_CHUNK_BYTES,
+            }})
+            .to_string(),
+            Err(_) => json!({"id":id,"error":{"code":"upload_failed",
+                "message":"terminal upload could not be started"}})
+            .to_string(),
+        };
+    }
+    if action == "upload_chunk" {
+        if params.len() != 3
+            || !params.contains_key("upload_id")
+            || !params.contains_key("offset")
+            || !params.contains_key("data_base64")
+        {
+            return json!({"id":id,"error":{"code":"invalid_params",
+                "message":"upload_chunk requires only upload_id, offset, and data_base64"}})
+            .to_string();
+        }
+        let upload_id = params
+            .get("upload_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let offset = params
+            .get("offset")
+            .and_then(Value::as_u64)
+            .and_then(|offset| usize::try_from(offset).ok());
+        let encoded = params
+            .get("data_base64")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return match offset.and_then(|offset| uploads.append(upload_id, offset, encoded).ok()) {
+            Some(received) => json!({"id":id,"result":{
+                "type":"terminal_upload_chunk","received":received,
+            }})
+            .to_string(),
+            None => json!({"id":id,"error":{"code":"invalid_params",
+                "message":"terminal upload chunk was rejected"}})
+            .to_string(),
+        };
+    }
+    if action == "upload_cancel" {
+        let upload_id = params
+            .get("upload_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if params.len() != 1 || upload_id.is_empty() || !uploads.cancel(upload_id) {
+            return json!({"id":id,"error":{"code":"invalid_params",
+                "message":"terminal upload is not active"}})
+            .to_string();
+        }
+        return json!({"id":id,"result":{"type":"terminal_upload_cancelled"}}).to_string();
+    }
+    let staged_upload = if action == "upload_finish" {
+        let upload_id = params
+            .get("upload_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if params.len() != 1 || upload_id.is_empty() {
+            return json!({"id":id,"error":{"code":"invalid_params",
+                "message":"upload_finish requires only upload_id"}})
+            .to_string();
+        }
+        let path = match uploads.finish(upload_id) {
+            Ok(path) => path,
+            Err(_) => {
+                return json!({"id":id,"error":{"code":"upload_failed",
+                    "message":"terminal upload could not be completed"}})
+                .to_string()
+            }
+        };
+        params.clear();
+        params.insert(
+            "text".into(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        Some(path)
+    } else {
+        None
+    };
     let (method, allowed): (&str, &[&str]) = match action {
         "type_literal" => ("terminal.backend.type_literal", &["text"]),
+        "paste_text" => ("terminal.backend.paste_text", &["text"]),
+        "paste_image" => ("terminal.backend.paste_text", &["png_base64"]),
+        "upload_finish" => ("terminal.backend.paste_text", &["text"]),
         "submit_text" => ("terminal.backend.submit_text", &["text"]),
         "send_key" => ("terminal.backend.send_key", &["key"]),
         _ => {
             return json!({"id":id,"error":{"code":"invalid_params",
-                "message":"action must be type_literal, submit_text, or send_key"}})
+                "message":"unknown terminal control action"}})
             .to_string()
         }
     };
-    let mut params = value["params"].as_object().cloned().unwrap_or_default();
     if params.keys().any(|key| !allowed.contains(&key.as_str())) {
+        if let Some(path) = staged_upload.as_deref() {
+            crate::terminal::upload::discard_completed(path);
+        }
         return json!({"id":id,"error":{"code":"invalid_params",
             "message":"control action contains an unknown parameter"}})
         .to_string();
     }
+    let staged_image = if action == "paste_image" {
+        let Some(encoded) = params.get("png_base64").and_then(Value::as_str) else {
+            return json!({"id":id,"error":{"code":"invalid_params",
+                "message":"png_base64 must be a bounded PNG encoding"}})
+            .to_string();
+        };
+        let path = match crate::clipboard_image::stage_web_png(encoded) {
+            Ok(path) => path,
+            Err(_) => {
+                return json!({"id":id,"error":{"code":"invalid_params",
+                    "message":"png_base64 must be a valid bounded PNG"}})
+                .to_string()
+            }
+        };
+        params.clear();
+        params.insert(
+            "text".into(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        Some(path)
+    } else {
+        None
+    };
     params.insert(
         "server_generation".into(),
         Value::String(target.server_generation.clone()),
@@ -1363,15 +1506,40 @@ fn control_action_response(
         }))
         .is_err()
     {
+        if let Some(path) = staged_image.as_deref() {
+            crate::clipboard_image::discard_staged_png(path);
+        }
+        if let Some(path) = staged_upload.as_deref() {
+            crate::terminal::upload::discard_completed(path);
+        }
         return json!({"id":id,"error":{"code":"unavailable","message":"app loop unavailable"}})
             .to_string();
     }
-    receiver
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .unwrap_or_else(|_| {
-            json!({"id":id,"error":{"code":"timeout","message":"control action timed out"}})
-                .to_string()
-        })
+    let response = match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(response) => response,
+        Err(_) => {
+            // The app may still consume an already-admitted request. Preserve
+            // the staged image for its bounded stale-file cleanup rather than
+            // racing that possible paste by deleting it here.
+            return json!({"id":id,"error":{"code":"timeout","message":"control action timed out"}})
+                .to_string();
+        }
+    };
+    if staged_image.is_some()
+        && serde_json::from_str::<Value>(&response)
+            .ok()
+            .is_some_and(|value| value.get("error").is_some())
+    {
+        crate::clipboard_image::discard_staged_png(staged_image.as_deref().unwrap());
+    }
+    if staged_upload.is_some()
+        && serde_json::from_str::<Value>(&response)
+            .ok()
+            .is_some_and(|value| value.get("error").is_some())
+    {
+        crate::terminal::upload::discard_completed(staged_upload.as_deref().unwrap());
+    }
+    response
 }
 
 /// Own a bounded observe/control subscription until disconnect or cancellation.
@@ -1550,6 +1718,7 @@ fn handle_terminal_stream(
         .ok();
     let mut chunk = [0_u8; 4096];
     let mut control_buffer = Vec::new();
+    let mut uploads = crate::terminal::upload::UploadState::new();
     while active.load(Ordering::Acquire) {
         match reader.read(&mut chunk) {
             Ok(0)
@@ -1571,6 +1740,7 @@ fn handle_terminal_stream(
                         &frame[..frame.len().saturating_sub(1)],
                         &target,
                         event_tx,
+                        &mut uploads,
                     );
                     if let Ok(mut locked) = shared_writer.lock() {
                         if write_response(&mut *locked, "0", &response).is_err() {
@@ -2862,6 +3032,7 @@ mod tests {
             mode: crate::terminal::backend::CaptureMode::Visible,
             lines: 4,
             ansi: true,
+            cursor: false,
         }
     }
 
@@ -2877,10 +3048,21 @@ mod tests {
         assert_eq!(frame["data"]["terminal_id"], "terminal");
         assert_eq!(frame["data"]["content_revision"], 3);
         assert!(frame["data"]["text"].as_str().unwrap().contains("hello"));
+        assert!(frame["data"].get("cursor").is_none());
         assert!(
             frame["data"]["bytes"].as_u64().unwrap()
                 <= crate::terminal::backend::MAX_OBSERVE_BYTES as u64
         );
+    }
+
+    #[test]
+    fn terminal_stream_cursor_is_explicitly_negotiated() {
+        let mut target = observe_target();
+        target.cursor = true;
+        let frame = terminal_stream_frame(&target, 12).unwrap();
+        let frame: Value = serde_json::from_str(&frame.serialized).unwrap();
+        assert!(frame["data"].get("cursor").is_some());
+        assert_eq!(frame["data"]["cursor"]["padding_cells"], 0);
     }
 
     #[test]
@@ -2909,7 +3091,9 @@ mod tests {
 
     #[test]
     fn terminal_control_frames_reuse_strict_uhp_actions() {
+        let _env = crate::persist::test_env("terminal-control-actions");
         let target = observe_target();
+        let mut uploads = crate::terminal::upload::UploadState::new();
         let (event_tx, event_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
             let AppEvent::Api(request) = event_rx.recv().unwrap() else {
@@ -2929,6 +3113,7 @@ mod tests {
             br#"{"id":"action-1","action":"type_literal","params":{"text":"safe text"}}"#,
             &target,
             &event_tx,
+            &mut uploads,
         );
         worker.join().unwrap();
         assert_eq!(
@@ -2936,10 +3121,119 @@ mod tests {
             "ok"
         );
 
+        let (paste_tx, paste_rx) = mpsc::channel();
+        let paste_worker = thread::spawn(move || {
+            let AppEvent::Api(request) = paste_rx.recv().unwrap() else {
+                panic!("paste frame must use the normal API handoff");
+            };
+            assert_eq!(request.id, "paste-1");
+            assert_eq!(request.method, "terminal.backend.paste_text");
+            assert_eq!(request.params["text"], "first\nsecond");
+            request
+                .reply
+                .send(json!({"id":"paste-1","result":{"type":"ok"}}).to_string())
+                .unwrap();
+        });
+        let paste_response = control_action_response(
+            br#"{"id":"paste-1","action":"paste_text","params":{"text":"first\nsecond"}}"#,
+            &target,
+            &paste_tx,
+            &mut uploads,
+        );
+        paste_worker.join().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&paste_response).unwrap()["result"]["type"],
+            "ok"
+        );
+
+        let png = crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255]).unwrap();
+        let encoded = crate::base64_encode(&png);
+        let (image_tx, image_rx) = mpsc::channel();
+        let image_worker = thread::spawn(move || {
+            let AppEvent::Api(request) = image_rx.recv().unwrap() else {
+                panic!("image frame must use the normal API handoff");
+            };
+            assert_eq!(request.id, "image-1");
+            assert_eq!(request.method, "terminal.backend.paste_text");
+            let path = std::path::Path::new(request.params["text"].as_str().unwrap());
+            assert!(path.exists());
+            assert_eq!(std::fs::read(path).unwrap(), png);
+            request
+                .reply
+                .send(json!({"id":"image-1","result":{"type":"ok"}}).to_string())
+                .unwrap();
+        });
+        let image_response = control_action_response(
+            format!(
+                r#"{{"id":"image-1","action":"paste_image","params":{{"png_base64":"{encoded}"}}}}"#
+            )
+            .as_bytes(),
+            &target,
+            &image_tx,
+            &mut uploads,
+        );
+        image_worker.join().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&image_response).unwrap()["result"]["type"],
+            "ok"
+        );
+
+        let start = control_action_response(
+            br#"{"id":"upload-1","action":"upload_start","params":{"name":"notes.txt","size":5}}"#,
+            &target,
+            &event_tx,
+            &mut uploads,
+        );
+        let upload_id = serde_json::from_str::<Value>(&start).unwrap()["result"]["upload_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let chunk = control_action_response(
+            format!(
+                r#"{{"id":"upload-2","action":"upload_chunk","params":{{"upload_id":"{upload_id}","offset":0,"data_base64":"aGVsbG8="}}}}"#
+            )
+            .as_bytes(),
+            &target,
+            &event_tx,
+            &mut uploads,
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&chunk).unwrap()["result"]["received"],
+            5
+        );
+        let (upload_tx, upload_rx) = mpsc::channel();
+        let upload_worker = thread::spawn(move || {
+            let AppEvent::Api(request) = upload_rx.recv().unwrap() else {
+                panic!("completed upload must use bracketed-paste handoff");
+            };
+            assert_eq!(request.method, "terminal.backend.paste_text");
+            let path = std::path::Path::new(request.params["text"].as_str().unwrap());
+            assert_eq!(std::fs::read(path).unwrap(), b"hello");
+            request
+                .reply
+                .send(json!({"id":"upload-3","result":{"type":"ok"}}).to_string())
+                .unwrap();
+        });
+        let finish = control_action_response(
+            format!(
+                r#"{{"id":"upload-3","action":"upload_finish","params":{{"upload_id":"{upload_id}"}}}}"#
+            )
+            .as_bytes(),
+            &target,
+            &upload_tx,
+            &mut uploads,
+        );
+        upload_worker.join().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&finish).unwrap()["result"]["type"],
+            "ok"
+        );
+
         let rejected = control_action_response(
             br#"{"id":"bad","action":"type_literal","params":{"text":"x","extra":true}}"#,
             &target,
             &event_tx,
+            &mut uploads,
         );
         assert_eq!(
             serde_json::from_str::<Value>(&rejected).unwrap()["error"]["code"],

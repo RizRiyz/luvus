@@ -169,12 +169,16 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
         let diff = app.files_mode == crate::diff::FilesMode::Diff;
         left.push(mode_label(if diff { "DIFF" } else { "FILES" }, t));
         left.push(Span::raw("  "));
+        if !diff && app.file_tree.filter.is_some() {
+            left.extend(hint("↑/↓", cat.act_move, t));
+            left.extend(hint("Enter", cat.act_right_click, t));
+            left.extend(hint("Esc", cat.act_back, t));
+            return (Line::from(left), false);
+        }
         left.extend(hint(if diff { "j/k" } else { "hjkl" }, cat.act_move, t));
         left.extend(hint("Enter", cat.act_open_menu, t));
         left.extend(hint("a", cat.act_right_click, t));
-        if diff {
-            left.extend(hint("f", cat.act_filter, t));
-        }
+        left.extend(hint("f", cat.act_filter, t));
         left.extend(hint("Esc", cat.act_back, t));
         return (Line::from(left), false);
     }
@@ -198,6 +202,19 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
             format!("  {}", cat.mode_resize_hint),
             Style::new().fg(t.subtext0),
         ));
+        return (Line::from(left), false);
+    }
+    if app.mode == Mode::PaneNavigate {
+        let label = match app.pane_navigation.map(|navigation| navigation.candidate) {
+            Some(PaneNavigationTarget::Pane(pane)) => format!("{} p{}", cat.pane, pane.0),
+            Some(PaneNavigationTarget::Commander) => cat.commander_title.to_string(),
+            None => cat.pane.to_string(),
+        };
+        left.push(mode_label(&label, t));
+        left.push(Span::raw("  "));
+        left.extend(hint("←↓↑→", cat.act_move, t));
+        left.extend(hint("Enter", cat.act_select, t));
+        left.extend(hint("Esc", cat.act_back, t));
         return (Line::from(left), false);
     }
 

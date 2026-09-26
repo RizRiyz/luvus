@@ -62,6 +62,10 @@ enum Endpoint {
     Remote { machine_id: String, session: String },
 }
 
+fn allow_host_file_links(endpoint: &Endpoint, host_terminal_shares_local_filesystem: bool) -> bool {
+    host_terminal_shares_local_filesystem && matches!(endpoint, Endpoint::Local)
+}
+
 enum MachineState {
     Disabled,
     Connecting { deadline: Instant },
@@ -529,6 +533,8 @@ fn run_inner(
     terminal: &mut DefaultTerminal,
 ) -> Result<super::client::ClientExit> {
     let truecolor = protocol::truecolor_supported();
+    let host_terminal_shares_local_filesystem =
+        super::client::host_terminal_shares_local_filesystem();
     let size = terminal.size()?;
     let local_generation = 0u64;
     let LocalNegotiation {
@@ -810,6 +816,7 @@ fn run_inner(
                     &writer,
                     terminal,
                     truecolor,
+                    host_terminal_shares_local_filesystem,
                     &mut dock,
                     &mut last_cursor,
                     &mut cursor_visible,
@@ -828,6 +835,7 @@ fn run_inner(
                     &writer,
                     terminal,
                     truecolor,
+                    host_terminal_shares_local_filesystem,
                     &mut dock,
                     &mut last_cursor,
                     &mut cursor_visible,
@@ -1283,6 +1291,7 @@ fn handle_link_event(
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
     terminal: &mut DefaultTerminal,
     truecolor: bool,
+    host_terminal_shares_local_filesystem: bool,
     dock: &mut DockState,
     last_cursor: &mut Option<(u16, u16)>,
     cursor_visible: &mut bool,
@@ -1325,6 +1334,7 @@ fn handle_link_event(
                 local_writer,
                 terminal,
                 truecolor,
+                host_terminal_shares_local_filesystem,
                 dock,
                 last_cursor,
                 cursor_visible,
@@ -1428,6 +1438,7 @@ fn handle_surface_message(
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
     terminal: &mut DefaultTerminal,
     truecolor: bool,
+    host_terminal_shares_local_filesystem: bool,
     dock: &mut DockState,
     last_cursor: &mut Option<(u16, u16)>,
     cursor_visible: &mut bool,
@@ -1778,6 +1789,15 @@ fn handle_surface_message(
                     true,
                     last_cursor,
                 )?;
+                super::client::paint_hyperlink_runs(
+                    terminal,
+                    &frame,
+                    frame.cursor,
+                    frame.cursor_visible,
+                    last_cursor,
+                    truecolor,
+                    allow_host_file_links(&endpoint, host_terminal_shares_local_filesystem),
+                )?;
                 super::client::sync_end();
                 *cursor_visible = frame.cursor_visible;
                 dock.machine_form_backdrop_pending = false;
@@ -1854,6 +1874,31 @@ fn handle_surface_message(
         ServerMessage::Notify(message) if endpoint == *active => crate::emit_notification(&message),
         ServerMessage::Sound(signal) if endpoint == *active => crate::emit_sound(signal),
         ServerMessage::Clipboard(text) if endpoint == *active => crate::emit_clipboard(&text),
+        ServerMessage::ClipboardTracked { text, receipt } if endpoint == *active => {
+            let completion = crate::clipboard::local_completion();
+            match &endpoint {
+                Endpoint::Local => {
+                    let writer = local_writer.clone();
+                    crate::emit_clipboard_tracked_to(&text, completion, move || {
+                        let _ = send_local(&writer, &ClientMessage::ClipboardSucceeded { receipt });
+                    });
+                }
+                Endpoint::Remote {
+                    machine_id,
+                    session,
+                } => {
+                    let control = machines
+                        .get(machine_id)
+                        .and_then(|machine| machine.endpoint(session))
+                        .and_then(|runtime| runtime.control.clone());
+                    crate::emit_clipboard_tracked_to(&text, completion, move || {
+                        if let Some(control) = control {
+                            let _ = control.send(&ClientMessage::ClipboardSucceeded { receipt });
+                        }
+                    });
+                }
+            }
+        }
         ServerMessage::OpenUrl(url) if endpoint == *active => crate::platform::open_url(&url),
         ServerMessage::SwitchSession { name } if endpoint == *active => {
             if let Some(exit) = owner_local_session_switch(&endpoint, name) {
@@ -6494,6 +6539,17 @@ mod tests {
         };
         assert!(same_selection(&review, &same));
         assert!(!same_selection(&review, &other));
+    }
+
+    #[test]
+    fn file_links_require_both_local_endpoint_and_terminal_filesystem() {
+        let remote = Endpoint::Remote {
+            machine_id: "box".into(),
+            session: "default".into(),
+        };
+        assert!(allow_host_file_links(&Endpoint::Local, true));
+        assert!(!allow_host_file_links(&Endpoint::Local, false));
+        assert!(!allow_host_file_links(&remote, true));
     }
 
     #[test]

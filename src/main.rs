@@ -11,6 +11,7 @@ mod changelog;
 mod cli;
 mod clipboard;
 mod clipboard_image;
+mod commander;
 mod config;
 mod detect;
 mod diff;
@@ -39,6 +40,8 @@ mod theme;
 mod uhp;
 mod ui;
 mod update;
+mod web;
+mod worktree;
 
 use std::io::{self, Write};
 use std::path::Path;
@@ -126,22 +129,40 @@ fn main() -> Result<()> {
     let _ = skill::migrate_legacy_installation();
     match args.get(1).map(String::as_str) {
         Some("server") => return server_cmd(&args),
-        Some("client") => return ipc::client::run(&persist::client_socket_path()),
+        Some("web") => std::process::exit(web::run_cli(&args[2..])?),
+        Some("client") => {
+            ensure_interactive_launch_allowed()?;
+            return ipc::client::run(&persist::client_socket_path());
+        }
         // Remote attach (docs/18 RA): the bridge runs on the remote host (via
         // ssh); `--remote <host>` launches it from the local side.
         Some("remote-client-bridge") => return remote_client_bridge(&args[2..]),
-        Some("--remote") => return remote_attach(&args),
+        Some("--remote") => {
+            ensure_interactive_launch_allowed()?;
+            return remote_attach(&args);
+        }
         // `attach <id>` (docs/18 WA-2): focus + zoom the pane, then open the TUI
         // straight into that fullscreen terminal.
-        Some("attach") => return attach_cmd(&args),
+        Some("attach") => {
+            ensure_interactive_launch_allowed()?;
+            return attach_cmd(&args);
+        }
         Some("integration") => {
             std::process::exit(integration::run(&args, i18n::cli::Context::configured())?)
         }
-        Some("machine") => std::process::exit(machine::run_cli(
-            &args[2.min(args.len())..],
-            i18n::cli::Context::configured(),
-        )?),
-        Some("--local") => return run_local(),
+        Some("machine") => {
+            if args.get(2).map(String::as_str) == Some("open") {
+                ensure_interactive_launch_allowed()?;
+            }
+            std::process::exit(machine::run_cli(
+                &args[2.min(args.len())..],
+                i18n::cli::Context::configured(),
+            )?);
+        }
+        Some("--local") => {
+            ensure_interactive_launch_allowed()?;
+            return run_local();
+        }
         Some(_) if cli::is_cli(&args) => {
             let code = cli::run(&args)?;
             std::process::exit(code);
@@ -149,7 +170,18 @@ fn main() -> Result<()> {
         _ => {}
     }
     // Default: attach to the session server, spawning it if needed.
+    ensure_interactive_launch_allowed()?;
     autodetect_and_attach()
+}
+
+fn ensure_interactive_launch_allowed() -> Result<()> {
+    let inside_luvus = std::env::var_os("LUVUS_ENV").as_deref() == Some(std::ffi::OsStr::new("1"));
+    if inside_luvus && !config::load().allow_nested {
+        return Err(anyhow!(
+            "cannot open luvus inside a luvus pane; set `allow_nested` to `true` in config.json to allow nested clients"
+        ));
+    }
+    Ok(())
 }
 
 fn is_backend_discovery_request(args: &[String]) -> bool {
@@ -231,6 +263,15 @@ pub(crate) fn emit_clipboard(text: &str) {
 
 pub(crate) fn emit_clipboard_to(text: &str, completion: std::sync::Arc<clipboard::Completion>) {
     clipboard::copy_native_to(text, completion);
+    emit_clipboard_escape(text);
+}
+
+pub(crate) fn emit_clipboard_tracked_to(
+    text: &str,
+    completion: std::sync::Arc<clipboard::Completion>,
+    on_success: impl FnOnce() + Send + 'static,
+) {
+    clipboard::copy_native_with_confirmation(text, completion, on_success);
     emit_clipboard_escape(text);
 }
 
@@ -1552,6 +1593,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(ev) => {
                 app.handle_event(ev); // --local redraws every loop, so ignore the dirty bool
+                flush_local_commander_clipboard(&mut app);
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -1559,6 +1601,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         // Coalesce any queued events before drawing.
         while let Ok(ev) = rx.try_recv() {
             app.handle_event(ev);
+            flush_local_commander_clipboard(&mut app);
         }
         // Parked `wait.output` deadlines lapse on the tick (docs/81).
         app.tick_output_waits(Instant::now());
@@ -1598,7 +1641,10 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
             crate::platform::open_url(&url);
         }
         if let Some(text) = app.pending_clipboard.take() {
-            emit_clipboard(&text);
+            let notify = tx.clone();
+            emit_clipboard_tracked_to(&text, clipboard::local_completion(), move || {
+                let _ = notify.send(AppEvent::LocalClipboardSucceeded);
+            });
         }
         if let Some(notification) = clipboard::take_notification() {
             emit_notification(notification);
@@ -1624,6 +1670,16 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     let detached = app.detach_requested;
     app.finish_session_persistence();
     Ok(detached)
+}
+
+fn flush_local_commander_clipboard(app: &mut App) {
+    if let Some(text) = app
+        .commander
+        .as_mut()
+        .and_then(|commander| commander.pending_clipboard.take())
+    {
+        emit_clipboard(&text);
+    }
 }
 
 /// Clean up a just-bound Unix socket before a local startup aborts. The caller
@@ -1712,6 +1768,20 @@ mod tests {
     #[test]
     fn matching_server_version_allows_binary_attach() {
         report_server_version(env!("CARGO_PKG_VERSION").to_string()).unwrap();
+    }
+    #[test]
+    fn nested_interactive_launch_requires_opt_in() {
+        let _env = crate::persist::test_env("nested-launch");
+        std::env::set_var("LUVUS_ENV", "1");
+
+        let error = ensure_interactive_launch_allowed().unwrap_err();
+        assert!(error.to_string().contains("allow_nested"));
+
+        crate::config::save(&crate::config::Config {
+            allow_nested: true,
+            ..Default::default()
+        });
+        assert!(ensure_interactive_launch_allowed().is_ok());
     }
 
     #[test]

@@ -28,7 +28,7 @@ fn divider_touches(rect: Rect, d: &crate::layout::Divider) -> bool {
 pub(super) fn render_pane_borders(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
-    focus: PaneId,
+    focus: Option<PaneId>,
     hover: Option<&crate::layout::Divider>,
     t: &Theme,
 ) {
@@ -39,7 +39,7 @@ pub(super) fn render_pane_borders(
         if rect.width < 2 || rect.height < 2 {
             continue;
         }
-        let focused = *id == focus || hover.is_some_and(|d| divider_touches(*rect, d));
+        let focused = focus == Some(*id) || hover.is_some_and(|d| divider_touches(*rect, d));
         let color = if focused { t.border_focus } else { t.border };
         let block = Block::default()
             .borders(Borders::ALL)

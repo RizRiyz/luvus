@@ -53,5 +53,9 @@ cycle tabs, and every prefix command is remappable, including the vim aliases.
 The **Prefix** row captures a safe function key or `Ctrl`/`Alt` chord and asks
 you to press it again before saving. The **Preset** row provides **luvus
 (default)**, **no-Ctrl (F12)**, and **tmux** bundles. Press the configured prefix
-and then `?` to show the current map. See
-[Keybindings](/docs/reference/keybindings/) for the full list.
+and then `?` to show the current map. The Keyboard Shortcuts panel clearly
+separates **Prefix commands** from opt-in **Direct shortcuts**. Direct shortcuts
+are read from `direct_keybindings`; their labels are normalized for display,
+and the panel lists only the effective winner when multiple commands configure
+the same chord. See [Keybindings](/docs/reference/keybindings/) for the full
+list and direct-shortcut configuration format.

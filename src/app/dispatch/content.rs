@@ -588,7 +588,7 @@ impl App {
             self.prepare_file_tree_api(false);
             let rows: Vec<Value> = self
                 .file_tree
-                .visible_rows()
+                .tree_rows()
                 .iter()
                 .map(|r| {
                     json!({

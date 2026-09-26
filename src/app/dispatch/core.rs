@@ -170,6 +170,7 @@ impl App {
                         if let Some(pane) = self.panes.get(&pane_id) {
                             let runtime = pane.terminal_runtime();
                             let status = self.status.get(&pane_id);
+                            let agent_session_title = self.web_agent_session_title(pane_id);
                             json!({
                                 "pane_id":pane_id.0.to_string(),
                                 "kind":"terminal",
@@ -186,6 +187,7 @@ impl App {
                                 "agent_name":agent_names.get(&pane_id).copied(),
                                 "agent":status.map(|status| status.agent.clone()),
                                 "agent_status":status.map(|status| state_str(status.state)),
+                                "agent_session_title":agent_session_title,
                                 "agent_authority":status.map(|status| status.identity_source),
                                 "agent_session":status.and_then(|status| status.agent_session.as_ref().map(|session| session.session_id.clone())),
                             })
@@ -244,6 +246,9 @@ impl App {
             )
         })?;
         keys::validate_direct_keybindings(&next.direct_keybindings)
+            .map_err(|message| ("invalid_request".to_string(), message))?;
+        let provider_changed = next.worktree != self.config.worktree;
+        crate::worktree::validate_config(&next.worktree, provider_changed.then_some(&self.modules))
             .map_err(|message| ("invalid_request".to_string(), message))?;
         if self.theme_registry.get(&next.theme).is_none() && next.theme != "terminal" {
             return Err((

@@ -5,7 +5,8 @@ description: Arrange and navigate luvus by splitting, resizing, and zooming pane
 
 luvus is **mouse-native**: everything here works by click and drag, and every
 action also has a key behind the [`Ctrl+Space` prefix](/docs/getting-started/concepts/#3-the-prefix-key).
-Nothing is modal, so what you type always goes to the focused pane.
+Most shortcuts act immediately; pane-navigation and keyboard-resize modes
+temporarily capture keys until you leave them.
 
 ## Panes
 
@@ -16,13 +17,19 @@ like, and luvus tiles them automatically.
 |---|---|---|
 | Split side by side | right-click a pane → **Split** | `Ctrl+Space v` |
 | Split top / bottom | right-click a pane → **Split down** | `Ctrl+Space s` |
-| Focus a pane | click it | arrows or `hjkl` |
+| Focus a pane | click it | `Ctrl+Space` then an arrow to preview; more arrows move, `Enter` focuses, `Esc` cancels; `hjkl` focuses immediately |
 | Move a pane to another tab | right-click → **Move to Tab** | n/a |
 | Zoom (fullscreen) a pane | n/a | `Ctrl+Space z` |
 | Close a pane | the `×` on its title, or right-click → **Close** | `Ctrl+Space x` |
 
 Each split pane shows a title bar with a **status dot** and its working
 directory. The focused pane's frame is brighter.
+
+In a tiled tab, arrow navigation highlights a candidate without changing the
+active pane or sending it input. When Commander is open, `Down` from the bottom
+pane can highlight its input; `Up` returns to that pane. `Enter` commits the
+highlighted focus; `Esc` keeps the original focus. Compact and zoomed layouts
+retain one-step pane focus.
 
 ### Resizing
 
@@ -82,8 +89,8 @@ Closing the final workspace leaves the client attached with the normal Luvus
 chrome instead of closing the app or showing a separate landing screen. Luvus
 immediately replaces it with a neutral workspace and real terminal rooted at
 your home directory. You can type, change directory, create tabs or splits, and
-open the folder picker normally. The sidebar path follows the focused pane, so
-split terminals with different working directories remain unambiguous.
+open the folder picker normally. The sidebar path remains the workspace root;
+pane titles show each terminal's live working directory.
 
 - **Open one:** the `+` button above the list, or `Ctrl+Space N`, opens a
   **folder picker**. Browse with the arrows / wheel, use the **Home** row to jump
@@ -101,14 +108,14 @@ split terminals with different working directories remain unambiguous.
 - **Jump to its git tab:** right-click the workspace and choose **Open Git
   Tab**, or focus it and press `Ctrl+Space g`.
 
-### Following a pane into another repository
+### Changing directory inside a pane
 
-When a terminal or agent changes its working directory into another Git
-repository or linked worktree, luvus confirms the new root across two scans and
-then moves the complete normal tab to that workspace. If the workspace is not
-open yet, luvus creates it without starting another shell. Split tabs move only
-when every pane agrees on the same destination; mixed-workspace splits and
-dashboard tabs stay where they are.
+Running `cd` changes that pane's live working directory without reorganizing
+the workspace. The tab stays where you placed it, the workspace keeps its
+project root, and an empty source workspace is never created by a directory
+change. Open another repository or linked worktree explicitly when you want it
+to become a workspace. You can still move panes and tabs with their existing
+UI, CLI, and UHP controls.
 
 ### Right-click a workspace
 
@@ -232,20 +239,28 @@ Unicode character counts; wide glyphs such as CJK and many emoji consume two.
 Drag across any pane to select, and releasing **auto-copies** to your clipboard. Full
 details, plus scrollback, are in [Scrollback & Copy](/docs/guides/scrollback/).
 
-## Pasting images on Windows
+## Pasting clipboard images
 
-Copy a screenshot or image, focus an agent pane, then press `Ctrl+V` or
-`Ctrl+Shift+V` if that is the paste chord your terminal sends. Luvus reads the
-clipboard only for that explicit gesture. A supported PNG or bitmap is staged
-as a private PNG and its path is pasted into the focused pane without submitting
-the prompt. Agents that accept image paths can then attach or inspect it.
+Copy a screenshot or image, focus an agent pane, then use the paste chord your
+terminal sends: `Ctrl+V` or `Ctrl+Shift+V`, plus `Command+V` or
+`Command+Shift+V` on macOS. Luvus reads the clipboard only for that explicit
+gesture. A supported image is staged as a private PNG and its path is pasted
+into the focused pane without submitting the prompt. Agents that accept image
+paths can then attach or inspect it.
+
+Windows reads registered PNG and bitmap clipboard formats directly. macOS reads
+PNG or TIFF from the system pasteboard and normalizes it to PNG. Wayland clients
+use `wl-paste`; X11 clients on Linux or FreeBSD use `xclip`. These Unix helpers
+run in the display client and inherit its `WAYLAND_DISPLAY`, `DISPLAY`, and
+`XDG_RUNTIME_DIR`; install `wl-clipboard` or `xclip` when your desktop does not
+already provide the applicable command.
 
 If the clipboard has text, is unavailable, or contains an unsupported image,
 Luvus forwards the original key unchanged. Image paste is ignored while a Luvus
 modal, native file view, dashboard, copy mode, or navigation mode owns input, so
-the private path cannot leak into a pane behind it. This dedicated reader is
-currently available in Windows display clients. Text paste and the existing
-terminal-native behavior on macOS and Linux are unchanged.
+the private path cannot leak into a pane behind it. The host terminal must pass
+the chord through to Luvus; a terminal-reserved paste binding can still consume
+it before Luvus sees it.
 
 ## Opening links and files
 
@@ -266,9 +281,9 @@ follows it. If you would rather not hold a modifier, **right-click** and pick
 
 ### Files
 
-A file path opens **in luvus**, not in some other app, and it lands where a
-click on that file's FILES row would — your **Settings → General → File click
-behavior** choice:
+When the terminal forwards the click, a file path opens **in luvus** and lands
+where a click on that file's FILES row would — your **Settings → General → File
+click behavior** choice:
 
 - **Preview** (the default): the workspace's reused preview pane, beside the
   pane you clicked in. The agent that printed the path stays on screen.
@@ -285,6 +300,21 @@ top, because line-jump arguments differ between editors.
 When an agent such as Claude prints a terminal file hyperlink, luvus uses its
 validated local file target rather than guessing from the visible label. It
 then follows the same **File click behavior** and **Open files with** settings.
+
+If the agent prints a plain path instead, holding `Ctrl` lets luvus project the
+validated path as a local file link for the outer terminal too. This prevents a
+label such as `server/scripts/task.mjs` from being mistaken for a web address.
+The placement behavior above applies when the terminal forwards the click to
+luvus. A terminal that claims OSC 8 clicks itself opens the validated path with
+its own file handler, so luvus cannot apply **File click behavior** to that
+gesture.
+
+Remote attachments do not project server file paths as host-local links. Those
+paths may not exist on the client machine; let the click reach luvus so its
+server-aware native file view handles the target instead. Luvus also suppresses
+these projections for SSH and tmux clients, where the outer terminal may belong
+to a different filesystem. A direct local terminal must identify itself before
+Luvus exposes server file paths to its file handler.
 
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell

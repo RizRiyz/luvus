@@ -98,6 +98,7 @@ with `module log`.
 | `min_luvus_version` | ✓ | Install is refused if newer than the host. Use `0.8.3` if you use right-click menus, settings, startup hooks, or dock row values. |
 | `description` |  | One-line summary. |
 | `platforms` |  | e.g. `["macos", "linux"]`. Omit for all. `[]` is an error. |
+| `worktree_provider` |  | A single `[worktree_provider]` table declares a fixed synchronous worktree creation command. |
 
 The manifest filename is `luvus-module.toml`.
 
@@ -105,6 +106,72 @@ Every entry below (`build`, `startup`, `actions`, `events`, `panes`) also
 accepts its own `platforms` list, which overrides the top-level one. That's how
 one manifest ships a `pbcopy` action on macOS and a `clip.exe` action on
 Windows without either showing up on the wrong machine.
+
+### `[worktree_provider]`: create and remove worktrees for Luvus
+
+A module may expose one synchronous creation command and an optional explicit
+removal command:
+
+```toml
+[worktree_provider]
+command = ["./create-worktree"]
+remove_command = ["./remove-worktree"] # optional
+platforms = ["macos", "linux"] # optional
+```
+
+The user selects the module by canonical id in
+`config.json` as `worktree.provider`; configuration cannot replace this fixed
+argv. Luvus runs the command in the module root with normal module identity and
+settings variables, and writes exactly one versioned JSON request to stdin.
+Creation receives:
+
+```json
+{
+  "version": 1,
+  "operation": "create",
+  "repository": "/absolute/source/repository",
+  "branch": "feature/example",
+  "branch_exists": false
+}
+```
+
+Removal receives:
+
+```json
+{
+  "version": 1,
+  "operation": "remove",
+  "repository": "/absolute/source/repository",
+  "path": "/absolute/path/to/worktree",
+  "branch": "feature/example",
+  "force": false
+}
+```
+
+Creation returns exactly one JSON object on stdout:
+
+```json
+{"path":"/absolute/path/to/worktree"}
+```
+
+Removal must write nothing to stdout and exit successfully. It succeeds only
+after the target has been unregistered from Git and its directory no longer
+exists. If a provider violates the exit or stdout contract after the irreversible
+deletion already completed, Luvus reconciles the proven filesystem and Git state
+instead of leaving a stale workspace; this recovery does not make stdout a
+supported result channel. Luvus validates that the removal target is a linked
+worktree of the source repository before running the command and verifies the
+result afterwards. If `remove_command` is omitted, explicit removal uses
+built-in Git.
+
+Write human logs to stderr. A non-zero exit preserves stderr for the user.
+The provider command is synchronous: do not call the Luvus CLI or API from it,
+because the server is waiting for the provider result. It may use its own module
+settings, config, and state directories normally. Luvus opens no workspace until it verifies that the returned path exists, is a
+registered worktree of the source repository, shares its Git common directory,
+and checks out the requested branch. Internal rollback and ORCH merge stay
+Git-backed. Both fixed provider commands are shown in the module install
+confirmation alongside all other executable commands.
 
 ### `[[actions]]`: on-demand commands
 

@@ -73,7 +73,7 @@
   ],
   "$defs": {
     "snapshotAliases": {
-      "description": "Operator aliases only; backend titles do not override them. Other snapshot fields remain extensible.",
+      "description": "Operator aliases and bounded live agent session titles are separate fields. Other snapshot fields remain extensible.",
       "type": "object",
       "required": ["protocol", "session", "server_generation", "event_sequence", "workspaces"],
       "properties": {
@@ -109,7 +109,10 @@
         {
           "if": { "properties": { "kind": { "const": "terminal" } }, "required": ["kind"] },
           "then": {
-            "properties": { "agent_name": { "anyOf": [
+            "properties": { "agent_session_title": { "anyOf": [
+              { "type": "null" },
+              { "type": "string", "minLength": 1, "maxLength": 160 }
+            ] }, "agent_name": { "anyOf": [
               { "type": "null" },
               { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z]", "not": { "pattern": "[^a-z0-9_-]" } }
             ] } }
@@ -117,7 +120,7 @@
         },
         {
           "if": { "properties": { "kind": { "const": "view" } }, "required": ["kind"] },
-          "then": { "not": { "required": ["agent_name"] } }
+          "then": { "not": { "anyOf": [ { "required": ["agent_name"] }, { "required": ["agent_session_title"] } ] } }
         }
       ]
     },

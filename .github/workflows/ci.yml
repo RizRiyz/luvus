@@ -22,16 +22,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --prefix web
+      - name: Verify embedded web assets
+        run: |
+          npm --prefix web run build:native
+          git diff --exit-code -- src/web/assets
       # Path dependencies retain their upstream formatting; check Luvus itself.
       - run: cargo fmt --package luvus --check
       # `-D warnings` is scoped to clippy on our own crate — NOT a global
       # RUSTFLAGS, which would also fail on harmless dependency warnings.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Validate web client and bridge
+        run: |
+          cargo build --locked
+          npm --prefix web run check
+          npm --prefix web test
+          npm --prefix web run test:integration
+          LUVUS_BIN="$PWD/target/debug/luvus" npm --prefix web run test:native
       - name: Validate terminal backend contract
         run: |
           python3 examples/uhp/terminal/consumer.py --fixtures
@@ -108,6 +127,7 @@ jobs:
             cargo test --locked machine::catalog::
             cargo test --locked machine::api::
             cargo test --locked layout::
+            cargo test --locked platform::unix_clipboard::tests
             cargo build --release --locked
             ./target/release/luvus --version
             python3 examples/uhp/terminal/consumer.py --fixtures
@@ -202,6 +222,8 @@ jobs:
         shell: pwsh
         run: |
           cargo test --locked platform::windows::tests
+          cargo test --locked clipboard_image
+          cargo test --locked image_paste
           cargo test --locked app::cwd::tests
           cargo test --locked platform::tests::no_window_keeps_the_command_working
           cargo test --locked ipc::transport::windows_

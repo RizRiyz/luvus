@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "dist/test",
+    "rootDir": "src",
+    "lib": ["ES2022", "DOM"],
+    "declaration": false
+  },
+  "include": ["src/native-keymap.ts", "src/pairing-qr.ts", "src/terminal-capabilities.ts", "src/terminal-target.ts"]
+}

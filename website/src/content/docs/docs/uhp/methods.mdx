@@ -95,7 +95,7 @@ Luvus release number.
 | git | `git.status` · `git.branches` · `git.log` · `git.open` |
 | mission control | `mission.snapshot` · `mission.refresh` · `mission.open` |
 | diff | `diff.refresh` · `diff.list` · `diff.open` · `diff.get` · `diff.navigate` · `diff.note.add` · `diff.note.apply` · `diff.note.list` · `diff.note.edit` · `diff.note.resolve` · `diff.note.reopen` · `diff.note.remove` · `diff.note.send` |
-| terminal | `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.observe` · `terminal.backend.control` · `terminal.backend.type_literal` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
+| terminal | `terminal.backend.inventory` · `terminal.backend.snapshot` · `terminal.backend.validate` · `terminal.backend.processes` · `terminal.backend.capture` · `terminal.backend.observe` · `terminal.backend.control` · `terminal.backend.type_literal` · `terminal.backend.paste_text` · `terminal.backend.submit_text` · `terminal.backend.send_key` · `terminal.backend.set_title` · `terminal.backend.notify` · `terminal.backend.create` · `terminal.backend.close` · `terminal.backend.wait_change` · `terminal.backend.wait_output` · `terminal.backend.events.subscribe` |
 | worktrees | `worktree.list` · `worktree.create` · `worktree.open` · `worktree.remove` |
 | orchestration | `task.add` · `task.list` · `task.get` · `task.claim` · `task.next` · `task.start` · `task.heartbeat` · `task.update` · `task.done` · `task.retry` · `task.merge` · `task.release` · `lease.acquire` · `lease.list` · `lease.release` |
 | agent automation | `automation.create` · `automation.list` · `automation.get` · `automation.update` · `automation.enable` · `automation.disable` · `automation.rebind` · `automation.delete` · `automation.run` · `automation.history` · `automation.preview` · `automation.health` |
@@ -196,8 +196,15 @@ also published by `workspace.list` and `workspace.get`. Filter or correlate on
 `task.start` and `task.next` with `start: true` accept `mode: "worktree"` or
 `mode: "workspace"`; omitted mode means worktree. Either mode may include a
 stable `workspace_id`; worktree mode creates its branch from that workspace's
-repository, while workspace mode creates a dedicated branchless task tab there.
-The workspace must belong to the task's recorded project. `branch` is valid
+repository using the configured `worktree.provider`, while workspace mode
+creates a dedicated branchless task tab there. The same provider is used by
+`worktree.create`, TUI creation, and explicit `worktree.remove`. A non-`git`
+value is the canonical id of an enabled module declaring `[worktree_provider]`;
+creation always uses its fixed `command`, while explicit removal uses its
+optional `remove_command` and otherwise falls back to Git. Provider selection is
+host configuration, not a per-request executable or command parameter. Internal
+rollback and task merge remain Git-backed. The workspace must belong to
+the task's recorded project. `branch` is valid
 only in worktree mode, and `task.merge` returns
 `merge_unavailable` for a workspace worker. `task.start` also accepts
 `focus: false` to create and start the worker without changing the operator's
@@ -460,6 +467,14 @@ reconcile later events without a snapshot race. Neither method reads terminal
 text or starts a process.
 
 Every snapshot terminal row includes `pane_id` and nullable `agent_name`.
+It also includes nullable `agent_session_title`: the bounded, single-line title
+used by the AGENTS sidebar for a live agent pane (OSC title first, then a
+module-provided pane or session title). It is `null` when no title is available
+or the pane is not an agent. Native `kind:"view"` rows omit it.
+OSC and module title changes emit `agent.title_changed`. OSC events carry
+`pane` and nullable `title` so clients can update that row directly; module
+title events have no per-pane payload and require a snapshot refresh. Neither
+requires polling terminal output.
 `agent_name` is the operator alias set by `agent.name` or `pane.rename`; a terminal-backend title
 does not mask it. This differs from the presentation name in `agent.get` and
 `agent.list`, which prefer a backend title. Clearing an alias returns JSON

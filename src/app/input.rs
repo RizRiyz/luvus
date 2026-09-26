@@ -340,6 +340,67 @@ impl App {
             return true;
         };
         let response = self.handle_api(&req);
+        let pending = serde_json::from_str::<serde_json::Value>(&response)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/message")
+                    .and_then(|message| message.as_str())
+                    .map(str::to_string)
+            });
+        if pending.as_deref() == Some(WORKTREE_REMOVE_PENDING) {
+            let mut retry = req.clone();
+            if let Some(params) = retry.params.as_object_mut() {
+                // Removal is irreversible once the provider starts. The
+                // optimistic precondition was checked before launch, which is
+                // this mutation's linearization point; replay only applies the
+                // already-completed result to server-owned state.
+                params.remove("if_revision");
+            }
+            let parked = req.clone();
+            let scheduled = self.schedule_pending_worktree_remove(move |app, result| {
+                let response = match result {
+                    Ok(()) => app.handle_api(&retry),
+                    Err(message) => json!({"id":parked.id,"error":{
+                        "code":"git_error", "message":message
+                    }})
+                    .to_string(),
+                };
+                app.reply_after_automation_save(parked, response);
+                true
+            });
+            if let Err(message) = scheduled {
+                let _ = req.reply.send(
+                    json!({"id":req.id,"error":{"code":"busy","message":message}}).to_string(),
+                );
+            }
+            return true;
+        }
+        if pending.as_deref() == Some(WORKTREE_CREATE_PENDING) {
+            let retry = req.clone();
+            let parked = req.clone();
+            let scheduled = self.schedule_pending_worktree(move |app, result| {
+                let response = match result {
+                    Ok(()) => {
+                        let response = app.handle_api(&retry);
+                        app.discard_ready_worktree();
+                        response
+                    }
+                    Err(message) => json!({"id":parked.id,"error":{
+                        "code":"git_error", "message":message
+                    }})
+                    .to_string(),
+                };
+                app.reply_after_automation_save(parked, response);
+                true
+            });
+            if let Err(message) = scheduled {
+                let _ = req.reply.send(
+                    json!({"id":req.id,"error":{"code":"busy","message":message}}).to_string(),
+                );
+            }
+            return true;
+        }
         self.reply_after_automation_save(req, response);
         true
     }
@@ -423,6 +484,10 @@ impl App {
         // off-loop. Apply its completed registry before the empty-workspace guard
         // so the single writer always observes the result.
         let ev = match ev {
+            AppEvent::LocalClipboardSucceeded => {
+                self.show_toast(self.catalog.copied);
+                return true;
+            }
             AppEvent::IoCompleted(completion) => {
                 return completion.apply(self);
             }
@@ -671,6 +736,9 @@ impl App {
             AppEvent::Key(k) => self.handle_key(k),
             AppEvent::Mouse(m) => self.handle_mouse(m),
             AppEvent::Paste(s) => {
+                if self.commander_paste(&s) {
+                    return true;
+                }
                 // Copy mode owns input just like scroll mode: never leak a
                 // pasted command into the pane while the user is selecting.
                 if self.copy_mode.is_some() {
@@ -681,11 +749,17 @@ impl App {
                 if self.paste_into_modal(&s) {
                     return true; // the modal buffer changed → redraw
                 }
+                if self.commander.is_some() && !self.commander_accepts_input() {
+                    return true; // a non-text overlay owns input; do not paste behind it
+                }
                 // Otherwise it goes to the focused pane.
                 self.paste_into_focused_pane(&s);
                 false // goes to the pane; its echo (PtyData) renders it
             }
             AppEvent::PasteImage(path) => {
+                if self.commander_image_paste(&path) {
+                    return true;
+                }
                 // Image paths are terminal input, never modal text. Restrict
                 // delivery to the same normal focused-pane state that accepts
                 // ordinary typing so an image cannot leak through an overlay,
@@ -732,6 +806,24 @@ impl App {
                     if let Some(text) = pane.take_pending_clipboard() {
                         self.pending_clipboard = Some(text);
                     }
+                }
+                // The PTY grid has already advanced by the time this event is
+                // delivered. A path resolved under the pointer before that
+                // output is no longer authoritative, even when the replacement
+                // happens to occupy the same screen cells. Require another
+                // deliberate mouse move to resolve the new contents.
+                if self
+                    .hover_link
+                    .as_ref()
+                    .is_some_and(|hover| hover.pane == id)
+                {
+                    self.hover_link = None;
+                    self.link_scan_at = None;
+                    // Retained PTY patching only repaints the engine's damaged
+                    // rows. The hover may span other rows, so repair the whole
+                    // client projection once to remove every OSC 8 target and
+                    // underline that belonged to the old path.
+                    self.force_redraw = true;
                 }
                 self.detection_dirty.insert(id);
                 if self.panes.contains_key(&id) {
@@ -889,11 +981,7 @@ impl App {
                     changed
                 }
             }
-            AppEvent::CwdScanned {
-                panes,
-                branches,
-                workspace_candidates,
-            } => self.apply_cwd_scan(panes, branches, workspace_candidates),
+            AppEvent::CwdScanned { panes, branches } => self.apply_cwd_scan(panes, branches),
             // Mission Control usage (docs/54, MC-2): replace a fleet scan or
             // merge only the keys covered by a workspace scan. Repaint so a
             // visible mission tab updates.
@@ -946,6 +1034,26 @@ impl App {
                 }
                 self.mission_last_cost = Some((total, now));
                 self.active_is_mission()
+            }
+            AppEvent::FileFilterResults {
+                instance,
+                generation,
+                rows,
+                partial,
+            } => {
+                if let Some(filter) = self
+                    .file_tree
+                    .filter
+                    .as_mut()
+                    .filter(|f| f.instance == instance && f.generation == generation)
+                {
+                    filter.rows = rows;
+                    filter.partial = partial;
+                    filter.loading = false;
+                    true
+                } else {
+                    false
+                }
             }
             AppEvent::DirRead { path, entries } => {
                 self.file_tree.apply_dir(path.clone(), entries);
@@ -1107,6 +1215,7 @@ impl App {
             | AppEvent::ClientOpenWorkspacePicker { .. }
             | AppEvent::ClientCellPixels { .. }
             | AppEvent::ClientInput { .. }
+            | AppEvent::ClientClipboardSucceeded { .. }
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.
             AppEvent::IoCompleted(_)
@@ -1120,6 +1229,7 @@ impl App {
             | AppEvent::SearchResults { .. }
             | AppEvent::SearchFederatedResults { .. }
             | AppEvent::SearchHandoffReady { .. } => unreachable!(),
+            AppEvent::LocalClipboardSucceeded => unreachable!(),
             AppEvent::NamedSessionsLoaded { .. }
             | AppEvent::NamedSessionPrepared { .. }
             | AppEvent::NamedSessionStopped { .. }
@@ -1176,7 +1286,9 @@ impl App {
         // Search can rank a large catalog, so append the whole paste and launch
         // one recomputation instead of replaying one query per character.
         if self.search.is_some() {
-            self.search_paste(s);
+            if self.file_menu.is_none() {
+                self.search_paste(s);
+            }
             return true;
         }
         // The picker owns both text sub-modes and direct path navigation.
@@ -1219,6 +1331,16 @@ impl App {
         } else if self.pane_rename.is_some() {
             Self::handle_pane_rename_key
         } else {
+            if self.files_focused && self.files_mode == crate::diff::FilesMode::Files {
+                if let Some(filter) = self.file_tree.filter.as_mut() {
+                    if self.file_menu.is_none() {
+                        filter.append(s);
+                        self.file_tree.cursor = 0;
+                        self.file_tree.scroll = 0;
+                    }
+                    return true;
+                }
+            }
             return false;
         };
         for c in s.chars().filter(|c| !c.is_control()) {
@@ -1235,9 +1357,96 @@ impl App {
     /// renderer consumes, so moving across ordinary pane cells does not request
     /// frames while links, menus, FILES rows, and resize seams still repaint.
     fn handle_mouse(&mut self, m: ratatui::crossterm::event::MouseEvent) -> bool {
-        use ratatui::crossterm::event::MouseEventKind;
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
 
         let kind = m.kind;
+        if self.mode == Mode::PaneNavigate && !matches!(kind, MouseEventKind::Moved) {
+            self.pane_navigation = None;
+            self.mode = Mode::Normal;
+            // Preview never owns the pointer. Let this same click or wheel
+            // event reach its destination after cancelling keyboard preview.
+        }
+        if self.commander.is_none() {
+            self.commander_resize = false;
+        }
+        if self.commander_resize {
+            match kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.update_commander_resize(m.row);
+                    return true;
+                }
+                MouseEventKind::Up(_) => {
+                    self.commander_resize = false;
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+        // The strip is persistent, not modal. Its own hitbox focuses editing;
+        // clicks outside hand the event to normal tab/sidebar/pane hit testing.
+        if self.commander_accepts_mouse_focus() {
+            if let Some((popup, first, count)) = self.commander_slash_popup() {
+                let inside_popup = m.column >= popup.x
+                    && m.column < popup.right()
+                    && m.row >= popup.y
+                    && m.row < popup.bottom();
+                if inside_popup {
+                    match kind {
+                        MouseEventKind::ScrollUp => {
+                            self.commander_move_slash_selection(-1);
+                            return true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.commander_move_slash_selection(1);
+                            return true;
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let row = m.row.saturating_sub(popup.y + 1) as usize;
+                            if m.row > popup.y && row < popup.height.saturating_sub(3) as usize {
+                                let index = first + row;
+                                if index < count {
+                                    if let Some(commander) = self.commander.as_mut() {
+                                        commander.slash_selection = Some(index);
+                                        commander.focused = true;
+                                    }
+                                }
+                            }
+                            return true;
+                        }
+                        MouseEventKind::Down(_) => return true,
+                        MouseEventKind::Moved => return false,
+                        _ => return true,
+                    }
+                }
+            }
+            if matches!(kind, MouseEventKind::Down(MouseButton::Left))
+                && self.begin_commander_resize(m.column, m.row)
+            {
+                return true;
+            }
+            if let Some(commander) = self.commander.as_mut() {
+                let inside = self.commander_area.is_some_and(|rect| {
+                    m.column >= rect.x
+                        && m.column < rect.right()
+                        && m.row >= rect.y
+                        && m.row < rect.bottom()
+                });
+                if inside {
+                    if matches!(kind, MouseEventKind::Down(_)) {
+                        self.mode = Mode::Normal;
+                        commander.focused = true;
+                        return true;
+                    }
+                    return false;
+                }
+                if matches!(kind, MouseEventKind::Down(_)) {
+                    commander.focused = false;
+                    if self.mode == Mode::Prefix {
+                        self.mode = Mode::Normal;
+                    }
+                }
+            }
+        }
         // Copy mode is keyboard-owned. Any deliberate mouse action cancels it
         // and restores its saved viewport rather than forwarding a click/wheel
         // into the child while a selection is active.
@@ -1617,8 +1826,6 @@ impl App {
                         .map(|(_, command)| command.clone())
                     {
                         self.pending_clipboard = Some(command);
-                        let message = self.catalog.copied;
-                        self.show_toast(message);
                         return;
                     }
                     // A click on a commit/PR reference (or the website row at the
@@ -1703,7 +1910,7 @@ impl App {
                     } else if self.orch_form.is_some() || self.orch_detail.is_some() {
                         // Match Settings and the folder picker: the modal
                         // surface is inert, while its dimmed backdrop cancels.
-                        self.orch_form = None;
+                        self.close_orch_form();
                         self.orch_detail = None;
                     }
                 }
@@ -1720,9 +1927,12 @@ impl App {
         // The global-search overlay (docs/63) owns the mouse while open: a click
         // on a result jumps to it, a click outside dismisses, the wheel moves the
         // result cursor.
-        if self.search.is_some() {
+        if self.search.is_some() && self.file_menu.is_none() {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => self.search_click(m.column, m.row),
+                MouseEventKind::Down(MouseButton::Right) => {
+                    self.search_context_click(m.column, m.row)
+                }
                 MouseEventKind::ScrollUp => self.search_move(-1),
                 MouseEventKind::ScrollDown => self.search_move(1),
                 _ => {}
@@ -2157,7 +2367,9 @@ impl App {
                     self.press_diff_source(pane, row, side);
                     return;
                 }
-                if m.modifiers.contains(KeyModifiers::CONTROL) {
+                if m.modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                {
                     // A link under the cursor claims the press, but only
                     // provisionally: `Ctrl`+drag is the RESIZE-5 divider grab, so
                     // which gesture this was is decided by whether it moves (see
@@ -2317,15 +2529,12 @@ impl App {
                 if let Some(selection) = self.selection.as_mut() {
                     selection.dragging = false;
                 }
-                // A real drag copies its text + flashes a toast; a plain click
-                // clears the (1-cell) selection so nothing stays highlighted.
-                // After a successful copy the highlight lingers briefly so you can
-                // see what was copied; the toast times out on the same cadence.
+                // A real drag queues its text for copying; a plain click clears
+                // the (1-cell) selection. The highlight lingers briefly, while
+                // the success toast waits for native clipboard confirmation.
                 match self.selection_text() {
                     Some(text) => {
                         self.pending_clipboard = Some(text);
-                        let msg = self.catalog.copied;
-                        self.show_toast(msg);
                         self.schedule_copy_highlight_clear();
                     }
                     None => self.clear_selection(),
@@ -2337,7 +2546,9 @@ impl App {
                 // gesture's own affordance and what keeps this off the hot path:
                 // ordinary mouse motion never scans a grid and never takes the
                 // engine lock (the PTY reader holds that during output bursts).
-                if m.modifiers.contains(KeyModifiers::CONTROL) {
+                if m.modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER)
+                {
                     // Guarded on the cell *this* resolved for, not on `hover`:
                     // pointing at a link and only then pressing `Ctrl` is the
                     // natural gesture, and it never moves the mouse.
@@ -3072,10 +3283,8 @@ impl App {
             .and_then(finish_selected_text);
         if let Some(text) = text {
             self.pending_clipboard = Some(text);
-            let msg = self.catalog.copied;
-            self.show_toast(msg);
         }
-        // A successful copy returns to a live terminal, so the next key is
+        // A selection copy returns to a live terminal, so the next key is
         // immediately visible where the child expects it.
         if let Some(pane) = self.panes.get(&copy.pane) {
             pane.scroll_to_bottom();
@@ -3438,8 +3647,6 @@ impl App {
             });
         }
         self.pending_clipboard = Some(text);
-        let msg = self.catalog.copied;
-        self.show_toast(msg);
         self.schedule_copy_highlight_clear();
         true
     }
@@ -3748,6 +3955,122 @@ impl App {
         }
     }
 
+    /// Preview visible panes and the Commander strip without changing focus.
+    /// Zoom and compact views keep their existing one-step pane behavior.
+    fn start_pane_navigation(&mut self, dir: Dir, commander_was_focused: bool) -> bool {
+        let commander_visible = self.commander.is_some() && self.commander_area.is_some();
+        if self.zoomed || self.compact || (self.layout().len() < 2 && !commander_visible) {
+            return false;
+        }
+        let origin = self.layout().focus;
+        let navigation = PaneNavigation {
+            workspace: self.active_ws,
+            tab: self.ws().active_tab,
+            origin,
+            origin_commander_focused: commander_was_focused,
+            candidate: if commander_was_focused {
+                PaneNavigationTarget::Commander
+            } else {
+                PaneNavigationTarget::Pane(origin)
+            },
+            pane_before_commander: origin,
+        };
+        self.pane_navigation = Some(self.step_pane_navigation(navigation, dir));
+        self.mode = Mode::PaneNavigate;
+        true
+    }
+
+    fn step_pane_navigation(&self, mut navigation: PaneNavigation, dir: Dir) -> PaneNavigation {
+        navigation.candidate = match navigation.candidate {
+            PaneNavigationTarget::Pane(pane) => {
+                if let Some(next) = self.layout().neighbor(self.last_pane_area, pane, dir) {
+                    PaneNavigationTarget::Pane(next)
+                } else if dir == Dir::Down
+                    && self.commander.is_some()
+                    && self.commander_area.is_some()
+                {
+                    navigation.pane_before_commander = pane;
+                    PaneNavigationTarget::Commander
+                } else {
+                    PaneNavigationTarget::Pane(pane)
+                }
+            }
+            PaneNavigationTarget::Commander if dir == Dir::Up => {
+                PaneNavigationTarget::Pane(navigation.pane_before_commander)
+            }
+            PaneNavigationTarget::Commander => PaneNavigationTarget::Commander,
+        };
+        navigation
+    }
+
+    fn pane_navigation_is_current(&self, navigation: PaneNavigation) -> bool {
+        self.active_ws == navigation.workspace
+            && self
+                .workspaces
+                .get(navigation.workspace)
+                .filter(|workspace| workspace.active_tab == navigation.tab)
+                .and_then(|workspace| workspace.tabs.get(navigation.tab))
+                .is_some_and(|tab| {
+                    tab.layout.focus == navigation.origin
+                        && tab.layout.contains(navigation.pane_before_commander)
+                        && match navigation.candidate {
+                            PaneNavigationTarget::Pane(pane) => tab.layout.contains(pane),
+                            PaneNavigationTarget::Commander => {
+                                self.commander.is_some() && self.commander_area.is_some()
+                            }
+                        }
+                })
+    }
+
+    fn handle_pane_navigation_key(&mut self, key: KeyEvent) -> bool {
+        let Some(navigation) = self
+            .pane_navigation
+            .filter(|state| self.pane_navigation_is_current(*state))
+        else {
+            self.pane_navigation = None;
+            self.mode = Mode::Normal;
+            return true;
+        };
+        let direction = match key.code {
+            KeyCode::Left => Some(Dir::Left),
+            KeyCode::Down => Some(Dir::Down),
+            KeyCode::Up => Some(Dir::Up),
+            KeyCode::Right => Some(Dir::Right),
+            KeyCode::Enter => {
+                self.pane_navigation = None;
+                self.mode = Mode::Normal;
+                match navigation.candidate {
+                    PaneNavigationTarget::Pane(pane) => {
+                        if pane != navigation.origin {
+                            self.focus_pane_global(pane);
+                        }
+                    }
+                    PaneNavigationTarget::Commander => {
+                        if let Some(commander) = self.commander.as_mut() {
+                            commander.focused = true;
+                        }
+                    }
+                }
+                return true;
+            }
+            KeyCode::Esc => {
+                self.pane_navigation = None;
+                self.mode = Mode::Normal;
+                if navigation.origin_commander_focused {
+                    if let Some(commander) = self.commander.as_mut() {
+                        commander.focused = true;
+                    }
+                }
+                return true;
+            }
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            self.pane_navigation = Some(self.step_pane_navigation(navigation, direction));
+        }
+        true // No navigation key reaches a pane before Enter commits focus.
+    }
+
     /// Returns whether this key changed the **luvus UI** (so the server should
     /// render). Plain input forwarded to a pane returns `false`: the pane's echo
     /// arrives as a separate `PtyData` event and renders then, so we don't burn a
@@ -3755,6 +4078,17 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) -> bool {
         if key.kind == KeyEventKind::Release {
             return false; // ignored — nothing changed
+        }
+        if self.mode == Mode::PaneNavigate {
+            return self.handle_pane_navigation_key(key);
+        }
+        if self.commander_accepts_input()
+            && self
+                .commander
+                .as_ref()
+                .is_some_and(|commander| commander.focused)
+        {
+            return self.commander_key(key);
         }
         if self.bar.overflow.take().is_some() {
             return true;
@@ -3990,6 +4324,14 @@ impl App {
         if self.mode == Mode::Resize {
             return self.handle_resize_mode_key(key);
         }
+        // Editing a FILES query has the same precedence as other text inputs.
+        if self.files_focused
+            && self.files_mode == crate::diff::FilesMode::Files
+            && self.file_tree.filter.is_some()
+            && !self.prefix.matches(&key)
+        {
+            return self.handle_file_tree_key(key);
+        }
         // Explicit direct shortcuts are the only normal-mode keys Luvus takes
         // before pane/dashboard dispatch. The configured prefix retains
         // precedence, and an empty direct map makes this a cheap no-op.
@@ -4045,6 +4387,13 @@ impl App {
         }
         match self.mode {
             Mode::Prefix => {
+                let commander_was_focused = self
+                    .commander
+                    .as_ref()
+                    .is_some_and(|commander| commander.focused);
+                if let Some(commander) = self.commander.as_mut() {
+                    commander.focused = false;
+                }
                 self.mode = Mode::Normal;
                 // Pressing the prefix twice sends that exact key to the pane.
                 // Use the normal PTY encoder so F-keys and modifiers retain the
@@ -4102,7 +4451,22 @@ impl App {
                 // two-step and held-chord input resolve to the configured key.
                 if let Some(cmd) = keys::key_string(&key).and_then(|s| self.keymap.get(&s).copied())
                 {
-                    self.run_cmd(cmd);
+                    if cmd == Cmd::OpenCommander && commander_was_focused {
+                        self.close_commander();
+                    } else {
+                        let direction = match (key.code, cmd) {
+                            (KeyCode::Left, Cmd::FocusLeft) => Some(Dir::Left),
+                            (KeyCode::Down, Cmd::FocusDown) => Some(Dir::Down),
+                            (KeyCode::Up, Cmd::FocusUp) => Some(Dir::Up),
+                            (KeyCode::Right, Cmd::FocusRight) => Some(Dir::Right),
+                            _ => None,
+                        };
+                        if !direction.is_some_and(|dir| {
+                            self.start_pane_navigation(dir, commander_was_focused)
+                        }) {
+                            self.run_cmd(cmd);
+                        }
+                    }
                 }
                 true // a prefix command (and leaving prefix mode) changes the UI
             }
@@ -4167,6 +4531,7 @@ impl App {
                 false // plain input → the pane; its echo (PtyData) renders it
             }
             // Intercepted above (before this match); handled here too for safety.
+            Mode::PaneNavigate => self.handle_pane_navigation_key(key),
             Mode::Resize => self.handle_resize_mode_key(key),
         }
     }
@@ -4861,7 +5226,6 @@ mod tests {
         let dirty = app.handle_event(AppEvent::CwdScanned {
             panes: Vec::new(),
             branches: Vec::new(),
-            workspace_candidates: Vec::new(),
         });
 
         assert!(!dirty, "an empty scan needs no repaint");
@@ -5937,6 +6301,63 @@ mod link_click_tests {
         assert!(app.hover_link.is_none());
     }
 
+    /// Plain file labels do not carry OSC 8 metadata from the child. Once a
+    /// deliberate hover resolves one against the pane CWD, the rendered frame
+    /// must expose that file target to the host terminal instead of letting it
+    /// guess that a `server/...`-shaped label is an HTTP address.
+    #[test]
+    fn ctrl_hover_projects_a_plain_file_path_to_the_host_terminal() {
+        let _env = crate::persist::test_env("link-hover-file-projection");
+        let (mut app, mut term, at) = fixture_showing("edit Cargo.toml now", 7);
+        let pane = app.layout().focus;
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let uri = crate::links::file_path_uri(&path).expect("repo path has a file URI");
+
+        assert!(
+            !app.rendered_hyperlinks.iter().any(|link| link.uri == uri),
+            "plain text has no child-supplied OSC 8 target"
+        );
+        assert!(app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::CONTROL,)));
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        assert!(
+            app.rendered_hyperlinks.iter().any(|link| {
+                link.pane == pane
+                    && link.y == at.1
+                    && link.start <= at.0
+                    && link.end > at.0
+                    && link.uri == uri
+            }),
+            "the host projection must carry the validated local file target"
+        );
+        assert!(
+            app.rendered_hyperlinks
+                .iter()
+                .all(|link| !link.uri.starts_with("http://server/")),
+            "the host must never receive iTerm2's guessed server URL"
+        );
+    }
+
+    #[test]
+    fn pty_output_invalidates_a_hovered_file_target() {
+        let _env = crate::persist::test_env("link-hover-pty-output");
+        let (mut app, _term, at) = fixture_showing("edit Cargo.toml now", 7);
+        let pane = app.layout().focus;
+
+        assert!(app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::CONTROL,)));
+        assert!(app.hover_link.is_some());
+        assert_eq!(app.link_scan_at, Some(at));
+
+        assert!(app.handle_event(AppEvent::PtyData(pane)));
+        assert!(app.hover_link.is_none());
+        assert!(app.link_scan_at.is_none());
+        assert!(
+            app.force_redraw,
+            "clearing a hover must repair decorations outside the damaged PTY rows"
+        );
+    }
+
     #[test]
     fn any_motion_forwarding_does_not_mark_luvus_dirty() {
         let _env = crate::persist::test_env("mouse-any-motion-dirty");
@@ -6540,6 +6961,14 @@ mod link_click_tests {
     }
 
     #[test]
+    fn super_click_on_a_file_path_uses_the_same_native_preview() {
+        let _env = crate::persist::test_env("link-file-super");
+        let (app, id, tabs) = click_cargo_toml(KeyModifiers::SUPER);
+        assert_eq!(app.ws().tabs.len(), tabs, "no new tab");
+        assert!(app.preview_views.contains(&id), "it is the preview pane");
+    }
+
+    #[test]
     fn osc8_file_target_overrides_a_domain_shaped_label() {
         let _env = crate::persist::test_env("link-osc8-file");
         let path = std::env::current_dir().unwrap().join("Cargo.toml");
@@ -6554,6 +6983,27 @@ mod link_click_tests {
             other => panic!("OSC 8 file target must win over its label, got {other:?}"),
         }
         assert!(app.pending_open_url.is_none());
+    }
+
+    #[test]
+    fn osc8_file_target_overrides_server_prefixed_mjs_label() {
+        let _env = crate::persist::test_env("link-osc8-mjs");
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let uri = format!("file://{}", path.display());
+        let (app, _term, at) = fixture_showing_osc8(
+            "server/scripts/reconcile-communication-deliveries.mjs",
+            &uri,
+            8,
+        );
+
+        assert!(
+            app.rendered_hyperlinks.iter().any(|link| link.uri == uri),
+            "the thin-client projection retains the authoritative OSC 8 target"
+        );
+        assert!(matches!(
+            app.link_at_screen(at.0, at.1).map(|hover| hover.target),
+            Some(LinkTarget::File { path: target, line: None }) if target == path
+        ));
     }
 
     #[test]

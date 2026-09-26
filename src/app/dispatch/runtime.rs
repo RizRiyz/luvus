@@ -5,6 +5,19 @@ use super::*;
 use std::sync::Arc;
 
 impl App {
+    /// Retain cached processes for lifecycle recovery, but never let an
+    /// unavailable scan's stale snapshot veto current PTY screen evidence.
+    pub(crate) fn running_for_detection(&self, id: PaneId) -> &[String] {
+        if self.proc_scan_unavailable {
+            &[]
+        } else {
+            self.proc_commands
+                .get(&id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        }
+    }
+
     /// Recover a stale persisted selection before any periodic work indexes it.
     ///
     /// Workspace and tab mutations normally keep these indices valid. A restored
@@ -291,8 +304,9 @@ impl App {
             }
             return;
         }
-        // CWD/git follow the user after PTY activity, throttled to 1s. Quiet
-        // panes do not spawn a worker or walk process trees.
+        // CWD and the owning workspace's branch follow pane activity,
+        // throttled to 1s. Quiet panes do not spawn a worker or walk process
+        // trees.
         if (self.runtime_cwd_dirty || !self.runtime_cwd_dirty_panes.is_empty())
             && !self.cwd_scan_inflight
             && now.duration_since(self.last_cwd_at) >= CWD_SCAN_INTERVAL
@@ -327,8 +341,6 @@ impl App {
                 .filter(|ws| workspace_scope.contains(&ws.id))
                 .map(|ws| (ws.id.clone(), ws.cwd.clone()))
                 .collect();
-            let homes = self.workspace_homes();
-            let tabs = self.renameable_tab_leaves();
             // Process identity demand remains fleet-wide. It shares this one
             // OS snapshot without forcing unrelated CWD/Git resolution.
             let process_roots: Vec<u32> = if include_processes {
@@ -352,8 +364,6 @@ impl App {
                     .zip(evidence)
                     .map(|((id, _), ev)| (id, ev))
                     .collect();
-                let workspace_candidates =
-                    super::cwd::workspace_candidates_from_scan(&pane_results, &tabs, &homes);
                 let branches = workspaces
                     .into_iter()
                     .map(|(id, cwd)| (id, super::git_branch(&cwd)))
@@ -361,7 +371,6 @@ impl App {
                 let _ = tx.send(AppEvent::CwdScanned {
                     panes: pane_results,
                     branches,
-                    workspace_candidates,
                 });
                 if include_processes {
                     let _ = tx.send(AppEvent::ProcScanned(processes));
@@ -401,6 +410,7 @@ impl App {
     }
 
     pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
+        self.runtime_clients_attached = clients_attached;
         let repaired_location = self.repair_active_location();
         self.schedule_config_save(now);
         self.schedule_automation_save(now);
@@ -576,11 +586,7 @@ impl App {
                     }
                 })
                 .unwrap_or_default();
-            let running_for_detection = self
-                .proc_commands
-                .get(&id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let running_for_detection = self.running_for_detection(id);
             let detection_rows =
                 detect::screen_rows(&known_agent, running_for_detection, &self.manifests);
             let non_empty_rows = detect::screen_uses_non_empty_rows(
@@ -588,6 +594,7 @@ impl App {
                 running_for_detection,
                 &self.manifests,
             );
+            let probe_arc_studio = running_for_detection.is_empty();
             let inspect_codex_composer = known_agent.eq_ignore_ascii_case("codex")
                 || self
                     .manifests
@@ -606,11 +613,12 @@ impl App {
                     Ok(engine) => {
                         let generation = engine.output_generation();
                         if force_detect || last_generation != Some(generation) {
-                            let text = if non_empty_rows {
-                                engine.detection_text_non_empty(detection_rows)
-                            } else {
-                                engine.detection_text(detection_rows)
-                            };
+                            let text = detect::screen_text_for_detection(
+                                &*engine,
+                                detection_rows,
+                                non_empty_rows,
+                                probe_arc_studio,
+                            );
                             let codex_composer_ready = inspect_codex_composer
                                 .then(|| engine.codex_composer_region().is_some());
                             Some((
@@ -668,11 +676,7 @@ impl App {
             // across frames where the agent's UI doesn't show its own name.
             let known = known_agent;
             // Ground truth for identity, when the last scan could see this pane.
-            let running = self
-                .proc_commands
-                .get(&id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let running = self.running_for_detection(id);
             let det = match report.as_ref() {
                 Some(report) => detect::Detection {
                     state: report.state,
