@@ -599,6 +599,10 @@ fn tab_builds_active_agent_automation_fields_in_order() {
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let draft = &app.commander.as_ref().unwrap().draft;
     assert!(draft.ends_with("prompt: "));
+    assert!(
+        !draft.contains("  "),
+        "Tab added extra field spacing: {draft}"
+    );
     assert!(!draft.contains("agent:"));
     assert!(!draft.contains("access:"));
     assert!(app.orch_form.is_none());
@@ -1241,6 +1245,53 @@ fn adjacent_mentions_share_only_their_following_segment() {
         input_rx.try_recv().is_err(),
         "an incomplete segment sends nothing"
     );
+}
+
+#[test]
+fn adjacent_mentions_submit_one_command_to_four_shell_panes() {
+    let _env = crate::persist::test_env("commander-four-shell-targets");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let mut panes = vec![app.layout().focus];
+    for _ in 1..4 {
+        app.new_tab();
+        panes.push(app.layout().focus);
+    }
+    let mut receivers = Vec::new();
+    for pane in &panes {
+        app.status.get_mut(pane).unwrap().agent = "zsh".into();
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        receivers.push(input_rx);
+    }
+
+    let draft = format!(
+        "{} ls",
+        panes
+            .iter()
+            .map(|pane| format!("@p{}", pane.0))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let plan = app.commander_parse(&draft).unwrap();
+    assert_eq!(plan.targets.len(), 4);
+    assert!(plan.targets.iter().all(|target| target.prompt == "ls"));
+
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.draft = draft;
+    commander.cursor = commander.draft.len();
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    for rx in receivers {
+        let crate::terminal::pty::InputAction::Submit { paste, .. } = rx.try_recv().unwrap() else {
+            panic!("each shell gets one atomic submit");
+        };
+        assert_eq!(paste, b"ls");
+        assert!(rx.try_recv().is_err());
+    }
 }
 
 #[test]

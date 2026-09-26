@@ -73,10 +73,10 @@ pub(super) fn next_field_text(
     };
     Some(format!(
         "{}{}: {}",
-        match (fields.is_empty(), draft.ends_with(char::is_whitespace)) {
-            (true, true) => "",
-            (true, false) | (false, true) => " ",
-            (false, false) => "  ",
+        if draft.ends_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
         },
         name,
         value
