@@ -3509,7 +3509,12 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 _ => return Err(anyhow!("usage: luvus module pane open|focus|close …")),
             }
         }
-        ("module", _) => ("module.list".into(), json!({})),
+        ("module", "" | "list") => ("module.list".into(), json!({})),
+        ("module", other) => {
+            return Err(anyhow!(
+                "unknown module command `{other}`. Try `luvus help module`."
+            ))
+        }
 
         ("diff", "refresh") => {
             if !rest.is_empty() {
@@ -5556,6 +5561,16 @@ mod tests {
         let (m, p) = parse(&argv("luvus module enable my-mod")).unwrap();
         assert_eq!(m, "module.enable");
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("my-mod"));
+
+        let (m, _) = parse(&argv("luvus module")).unwrap();
+        assert_eq!(m, "module.list");
+
+        assert_eq!(
+            parse(&argv("luvus module action my-mod refresh"))
+                .unwrap_err()
+                .to_string(),
+            "unknown module command `action`. Try `luvus help module`."
+        );
     }
 
     fn wait_test_server() -> crate::ipc::transport::Listener {
