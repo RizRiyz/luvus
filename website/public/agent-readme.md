@@ -367,6 +367,10 @@ discovery rather than inferring support from an agent name.
   reports only the exact Letta conversation ID selected in that pane. Detection
   remains native, and Luvus does not inspect Letta memory, credentials,
   conversations, or cloud state.
+- `luvus integration install devin` adds one `SessionStart` hook that reports
+  only the exact Devin session ID selected in that pane, including after
+  `/clear` or an in-TUI `/resume`. Detection remains native, and Luvus does not
+  open Devin's private session database.
 
 Do not claim every shell command resumes after restart. Do not guess native
 session IDs. List sessions and use the exact returned identifier.
