@@ -11,7 +11,8 @@ or apply a preset in **Settings → Keys**.
 
 | Key | Command | Key | Command |
 |-----|---------|-----|---------|
-| `←↓↑→` / `hjkl` | focus pane | `c` | new tab |
+| `←↓↑→` | preview panes and an already-open Commander; arrows move, `Enter` focuses, `Esc` cancels | `c` | new tab |
+| `hjkl` | focus one pane immediately | | |
 | `;` | next pane (cycle) | `n` / `p` / `⇥` | cycle tabs |
 | `[` / `]` | focus history back / forward | `.` / `>` | next blocked / done agent |
 | `,` | rename tab | `v` / `s` / `+` | split right / down / auto |
@@ -24,6 +25,7 @@ or apply a preset in **Settings → Keys**.
 | `e` | focus FILES tree | `m` | Mission Control |
 | `M` | jump palette (tabs / workspaces / agents) | `i` | focus DIFF review |
 | `t` | named sessions | `/` | global fuzzy finder |
+| `Enter` | Commander | | |
 | `q` / `d` | detach | `=` | Settings |
 | `1`–`9` | jump to tab | `Shift+1`–`Shift+9` | jump to workspace |
 
@@ -69,6 +71,11 @@ starts a new branch and clears the forward history. Closed panes are skipped.
 
 Agent navigation is separate: `Ctrl+Space .` cycles through Blocked agents and
 `Ctrl+Space >` cycles through Done agents.
+
+`Ctrl+Space Enter` toggles [Commander](/docs/guides/commander/), a
+bottom composer for prompting an exact agent pane or sending a command to an
+exact shell pane without changing the selected pane. The composer initially
+takes keyboard focus.
 
 ## The jump palette
 

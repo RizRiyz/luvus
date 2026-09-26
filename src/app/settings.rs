@@ -111,8 +111,7 @@ pub enum GeneralRow {
     FileClick,
     FilesShowHidden,
     ShiftEnter,
-    /// Let Luvus distinguish application clicks from drag-to-copy gestures.
-    MouseDragSelect,
+    CommanderWorking,
     CheckUpdates,
     /// Replay each agent's own CLI options on resume (docs/62).
     ResumeFlags,
@@ -148,7 +147,7 @@ impl App {
             GeneralRow::FileClick,
             GeneralRow::FilesShowHidden,
             GeneralRow::ShiftEnter,
-            GeneralRow::MouseDragSelect,
+            GeneralRow::CommanderWorking,
             GeneralRow::CheckUpdates,
             GeneralRow::ResumeFlags,
             GeneralRow::NewPaneToWorkspaceRoot,
@@ -164,9 +163,8 @@ impl App {
     /// Index of the first notification row (where the `── Notify ──` divider
     /// goes), mirroring `dock_section_start` in the Layout tab.
     ///
-    /// This remains one short: `AgentTitle` is a general setting, so the divider
-    /// renders above it and it reads as a notification option. The new mouse row
-    /// increments the index only to preserve that established placement.
+    /// Preserve the existing divider above `AgentTitle`; adding a Commander
+    /// setting before it shifts that boundary by one.
     pub fn general_section_start(&self) -> usize {
         8
     }
@@ -1302,8 +1300,15 @@ impl App {
             // Flips config *and* the live tree (docs/38), so it applies at once.
             Some(GeneralRow::FilesShowHidden) => self.toggle_files_hidden(),
             Some(GeneralRow::ShiftEnter) => self.cycle_shift_enter(delta),
-            Some(GeneralRow::MouseDragSelect) => {
-                self.config.mouse_drag_select = !self.config.mouse_drag_select;
+            Some(GeneralRow::CommanderWorking) => {
+                self.config.commander_working_policy = match self.config.commander_working_policy {
+                    crate::config::CommanderWorkingPolicy::Ask => {
+                        crate::config::CommanderWorkingPolicy::AutoSend
+                    }
+                    crate::config::CommanderWorkingPolicy::AutoSend => {
+                        crate::config::CommanderWorkingPolicy::Ask
+                    }
+                };
                 self.persist_config();
             }
             Some(GeneralRow::CheckUpdates) => {
@@ -1795,15 +1800,18 @@ mod tests {
             GeneralRow::FileClick,
             "click behavior sits next to the viewer it qualifies"
         );
-        let mouse_drag = rows
+        let working = rows
             .iter()
-            .position(|r| *r == GeneralRow::MouseDragSelect)
+            .position(|r| *r == GeneralRow::CommanderWorking)
             .unwrap();
-        assert!(app.config.mouse_drag_select);
-        app.settings_activate(mouse_drag);
-        assert!(
-            !app.config.mouse_drag_select,
-            "toggles smart mouse selection"
+        assert_eq!(
+            app.config.commander_working_policy,
+            crate::config::CommanderWorkingPolicy::AutoSend
+        );
+        app.settings_adjust(working, 1);
+        assert_eq!(
+            app.config.commander_working_policy,
+            crate::config::CommanderWorkingPolicy::Ask
         );
 
         let style = rows

@@ -858,16 +858,26 @@ fn draw_content(
                         );
                         ctls.push((i, r));
                     }
-                    GeneralRow::MouseDragSelect => ctls.push(ctl_row(
-                        f,
-                        area,
-                        y,
-                        i,
-                        cursor,
-                        cat.set_mouse_drag_select,
-                        toggle(app.config.mouse_drag_select, t),
-                        t,
-                    )),
+                    GeneralRow::CommanderWorking => {
+                        let value = match app.config.commander_working_policy {
+                            crate::config::CommanderWorkingPolicy::Ask => cat.set_commander_ask,
+                            crate::config::CommanderWorkingPolicy::AutoSend => {
+                                cat.set_commander_auto_send
+                            }
+                        };
+                        let r = slider_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor == i,
+                            cat.set_commander_working,
+                            value.to_string(),
+                            t,
+                            &mut arrows,
+                        );
+                        ctls.push((i, r));
+                    }
                     GeneralRow::CheckUpdates => ctls.push(ctl_row(
                         f,
                         area,

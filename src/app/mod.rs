@@ -26,6 +26,8 @@ mod automation;
 mod automation_persistence;
 mod backend;
 mod board;
+#[cfg(test)]
+mod commander_tests;
 mod config_persistence;
 mod cwd;
 pub use board::{
@@ -40,6 +42,7 @@ mod git;
 mod input;
 pub(crate) mod io_jobs;
 mod keys;
+pub(crate) use keys::is_ctrl_chord;
 pub(crate) mod line_edit;
 mod mission;
 mod modules;
@@ -522,9 +525,27 @@ impl Sidebars {
 pub enum Mode {
     Normal,
     Prefix,
+    /// Preview directional pane selection until Enter commits or Esc cancels.
+    PaneNavigate,
     /// Keyboard pane-resize mode (docs/27, RESIZE-3): arrows/`hjkl` resize the
     /// focused pane; `Esc`/`Enter`/`q` leave. Entered via `Ctrl+Space r`.
     Resize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneNavigationTarget {
+    Pane(PaneId),
+    Commander,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PaneNavigation {
+    pub workspace: usize,
+    pub tab: usize,
+    pub origin: PaneId,
+    pub origin_commander_focused: bool,
+    pub candidate: PaneNavigationTarget,
+    pub pane_before_commander: PaneId,
 }
 
 pub struct Tab {
@@ -1390,6 +1411,11 @@ impl OrchFormDraft {
 #[derive(Default)]
 pub struct OrchForm {
     pub kind: OrchFormKind,
+    /// A Commander form is bound to this stable workspace, even if the active
+    /// workspace changes before submission. Board forms use the active one.
+    pub(crate) workspace_id: Option<String>,
+    pub(crate) commander_origin: bool,
+    pub(crate) commander_target_label: Option<String>,
     pub title: String,
     pub prompt: String,
     pub agent: String,
@@ -2055,6 +2081,8 @@ const RESIZE_GRAB_TOL: u16 = 2;
 /// header plus one line of content, so a dock can be made small but never
 /// squeezed into nothing the user then cannot grab back.
 pub(crate) const MIN_DOCK_HEIGHT: u16 = 3;
+pub(crate) const COMMANDER_MIN_HEIGHT: u16 = 3;
+pub(crate) const COMMANDER_DEFAULT_HEIGHT: u16 = 5;
 
 impl Selection {
     /// (start, end) terminal cells in reading order (top-left → bottom-right).
@@ -2358,6 +2386,14 @@ pub struct App {
     pub prefix: keys::PrefixSpec,
     /// The open Settings modal, if any (`Some` ⇒ modal captures input).
     pub settings: Option<SettingsUi>,
+    /// Ephemeral foreground-client composer; never persisted or projected to
+    /// passive clients. A foreground handoff discards it before input routing.
+    pub(crate) commander: Option<crate::commander::Commander>,
+    /// Hitbox of the visible Commander strip on the interactive client.
+    pub(crate) commander_area: Option<Rect>,
+    /// Foreground-only strip height and active top-border drag; not persisted.
+    pub(crate) commander_height: u16,
+    pub(crate) commander_resize: bool,
     /// The open folder picker (workspace chooser), if any (captures input).
     pub picker: Option<FolderPicker>,
     /// Clickable targets in the open folder picker. Specific controls precede
@@ -2451,6 +2487,7 @@ pub struct App {
     /// the prompt so a failed create isn't silent. Cleared when the user edits.
     pub worktree_error: Option<String>,
     pub mode: Mode,
+    pub pane_navigation: Option<PaneNavigation>,
     /// Left + right sidebars, their widths, and their docks (docs/29). Resolved
     /// from `config.sidebars()` at startup; runtime edits persist via `save_sidebars`.
     pub sidebars: Sidebars,
@@ -3155,6 +3192,10 @@ impl App {
             prefix,
             agent_names: HashMap::new(),
             settings: None,
+            commander: None,
+            commander_area: None,
+            commander_height: COMMANDER_DEFAULT_HEIGHT,
+            commander_resize: false,
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
@@ -3189,6 +3230,7 @@ impl App {
             worktree_repo: None,
             worktree_error: None,
             mode: Mode::Normal,
+            pane_navigation: None,
             sidebars,
             client_shell_dock_rows: 0,
             client_shell_dock_leading: false,
@@ -3848,6 +3890,10 @@ impl App {
             prefix,
             agent_names,
             settings: None,
+            commander: None,
+            commander_area: None,
+            commander_height: COMMANDER_DEFAULT_HEIGHT,
+            commander_resize: false,
             picker: None,
             picker_rects: Vec::new(),
             help_open: false,
@@ -3882,6 +3928,7 @@ impl App {
             worktree_repo: None,
             worktree_error: None,
             mode: Mode::Normal,
+            pane_navigation: None,
             sidebars,
             client_shell_dock_rows: 0,
             client_shell_dock_leading: false,
@@ -5229,7 +5276,7 @@ impl App {
     /// Split beside a pane in the workspace and tab that actually own it.
     /// With focus disabled, the current view and the target tab's prior focus are
     /// preserved even when the target belongs to another workspace.
-    fn split_pane(&mut self, pane: PaneId, axis: Axis, focus: bool) -> Option<PaneId> {
+    pub(crate) fn split_pane(&mut self, pane: PaneId, axis: Axis, focus: bool) -> Option<PaneId> {
         let (wsi, ti) = self.pane_location(pane)?;
         // Resolve the candidate chain up front (target pane → target workspace
         // root → $HOME, existing only) and hand the primary plus its fallbacks to
@@ -7888,7 +7935,7 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    fn focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
+    pub(crate) fn focus_location(&mut self, workspace: usize, tab: usize, id: PaneId) {
         let current = self.layout().focus;
         let location_changed = self.active_ws != workspace
             || self.workspaces[workspace].active_tab != tab
@@ -14475,6 +14522,211 @@ fi
     }
 
     #[test]
+    fn prefix_arrow_previews_panes_until_enter_or_escape() {
+        let _env = crate::persist::test_env("pane-navigation-keys");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 120, 40);
+        let left = app.layout().focus;
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let right = app.layout().focus;
+        app.focus_pane_global(left);
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&left)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        let key = |code| AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Right));
+        assert_eq!(app.mode, Mode::PaneNavigate);
+        assert!(
+            matches!(app.pane_navigation.unwrap().candidate, PaneNavigationTarget::Pane(id) if id == right)
+        );
+        assert_eq!(
+            app.layout().focus,
+            left,
+            "preview did not change real focus"
+        );
+
+        app.handle_event(key(KeyCode::Left));
+        assert!(
+            matches!(app.pane_navigation.unwrap().candidate, PaneNavigationTarget::Pane(id) if id == left)
+        );
+        app.handle_event(key(KeyCode::Right));
+        app.handle_event(key(KeyCode::Char('x')));
+        assert!(
+            matches!(app.pane_navigation.unwrap().candidate, PaneNavigationTarget::Pane(id) if id == right)
+        );
+        assert_eq!(app.layout().focus, left);
+        assert!(
+            input_rx.try_recv().is_err(),
+            "navigation did not type into the original pane"
+        );
+        app.handle_event(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pane_navigation.is_none());
+        assert_eq!(app.layout().focus, right);
+
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Left));
+        assert!(
+            matches!(app.pane_navigation.unwrap().candidate, PaneNavigationTarget::Pane(id) if id == left)
+        );
+        app.handle_event(key(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pane_navigation.is_none());
+        assert_eq!(app.layout().focus, right, "Esc kept the original focus");
+    }
+
+    #[test]
+    fn pane_navigation_stays_in_current_tab_and_hjkl_remains_one_step() {
+        let _env = crate::persist::test_env("pane-navigation-scope");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 120, 40);
+        let left = app.layout().focus;
+        let key = |code| AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Right));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.layout().focus, left);
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let right = app.layout().focus;
+        app.focus_pane_global(left);
+
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Char('l')));
+        assert_eq!(app.layout().focus, right);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pane_navigation.is_none());
+
+        app.focus_pane_global(left);
+        app.zoomed = true;
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Right));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.layout().focus, right);
+        app.zoomed = false;
+
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Left));
+        assert!(
+            matches!(app.pane_navigation.unwrap().candidate, PaneNavigationTarget::Pane(id) if id == left)
+        );
+        app.new_tab();
+        let new_tab_focus = app.layout().focus;
+        app.handle_event(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.pane_navigation.is_none());
+        assert_eq!(app.layout().focus, new_tab_focus);
+    }
+
+    #[test]
+    fn pane_navigation_includes_commander_and_restores_origin_on_escape() {
+        let _env = crate::persist::test_env("pane-navigation-commander");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let pane = app.layout().focus;
+        app.last_pane_area = Rect::new(0, 0, 100, 23);
+        app.commander_area = Some(Rect::new(0, 23, 100, 5));
+        app.open_commander();
+        app.commander.as_mut().unwrap().focused = false;
+        let key = |code| AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Down));
+        assert_eq!(app.mode, Mode::PaneNavigate);
+        assert_eq!(
+            app.pane_navigation.unwrap().candidate,
+            PaneNavigationTarget::Commander
+        );
+        assert_eq!(app.layout().focus, pane);
+        assert!(!app.commander.as_ref().unwrap().focused);
+        app.handle_event(key(KeyCode::Up));
+        assert_eq!(
+            app.pane_navigation.unwrap().candidate,
+            PaneNavigationTarget::Pane(pane)
+        );
+        app.handle_event(key(KeyCode::Down));
+        app.handle_event(key(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.commander.as_ref().unwrap().focused);
+        assert_eq!(app.layout().focus, pane);
+
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Up));
+        assert_eq!(
+            app.pane_navigation.unwrap().candidate,
+            PaneNavigationTarget::Pane(pane)
+        );
+        assert!(!app.commander.as_ref().unwrap().focused);
+        app.handle_event(key(KeyCode::Esc));
+        assert!(app.commander.as_ref().unwrap().focused);
+        assert_eq!(app.layout().focus, pane);
+
+        app.handle_event(AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(key(KeyCode::Up));
+        app.handle_event(key(KeyCode::Enter));
+        assert!(!app.commander.as_ref().unwrap().focused);
+        assert_eq!(app.layout().focus, pane);
+    }
+
+    #[test]
+    fn pane_navigation_passes_the_first_mouse_event_to_its_target() {
+        let _env = crate::persist::test_env("pane-navigation-mouse");
+        use crate::event::AppEvent;
+        use ratatui::crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 100, 23);
+        app.commander_area = Some(Rect::new(0, 23, 100, 5));
+        app.workspaces_area = Rect::new(0, 0, 10, 10);
+        app.open_commander();
+        app.commander.as_mut().unwrap().focused = false;
+        let enter_preview = |app: &mut App| {
+            app.handle_event(AppEvent::Key(app.prefix.key_event()));
+            app.handle_event(AppEvent::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )));
+            assert_eq!(app.mode, Mode::PaneNavigate);
+        };
+        let mouse = |kind, column, row| {
+            AppEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        enter_preview(&mut app);
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 50, 25));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.commander.as_ref().unwrap().focused);
+
+        app.commander.as_mut().unwrap().focused = false;
+        enter_preview(&mut app);
+        app.handle_event(mouse(MouseEventKind::ScrollDown, 1, 1));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.workspaces_scroll, 1);
+    }
+
+    #[test]
     fn tab_rename_sets_name_persists_and_excludes_dashboards() {
         let _env = crate::persist::test_env("tab-rename");
         use crate::event::AppEvent;
@@ -15704,21 +15956,32 @@ fi
         let _env = crate::persist::test_env("arrow-keys");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        app.last_pane_area = Rect::new(0, 0, 80, 24);
 
         // Split right (Ctrl+Space v) → focus moves to the new right pane.
         app.handle_event(key(' ', KeyModifiers::CONTROL));
         app.handle_event(key('v', KeyModifiers::NONE));
         let right = app.layout().focus;
-        // Prefix + ← arrow focuses the left pane (the headline new binding).
+        // Prefix + ← previews the left pane; Enter commits focus.
         app.handle_event(key(' ', KeyModifiers::CONTROL));
         app.handle_event(AppEvent::Key(KeyEvent::new(
             KeyCode::Left,
             KeyModifiers::NONE,
         )));
+        assert_eq!(app.mode, Mode::PaneNavigate);
+        assert_eq!(app.layout().focus, right, "preview preserves real focus");
+        let PaneNavigationTarget::Pane(left) = app.pane_navigation.unwrap().candidate else {
+            panic!("left arrow previews a pane");
+        };
+        assert_ne!(left, right);
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
         assert_ne!(
             app.layout().focus,
             right,
-            "← moved focus off the right pane"
+            "Enter focused the previewed left pane"
         );
 
         // Rebind "New tab" from `c` to `t` through Settings → Keys.

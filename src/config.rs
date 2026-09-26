@@ -16,6 +16,16 @@ use crate::app::{SIDEBAR_WIDTH_DEFAULT, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN};
 
 const CONFIG_VERSION: u32 = 2;
 
+/// Commander admission for an agent that is working but has a ready prompt.
+/// This never changes the agent's own permission or approval policy.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommanderWorkingPolicy {
+    Ask,
+    #[default]
+    AutoSend,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default)]
@@ -50,12 +60,6 @@ pub struct Config {
     /// Disabled by default because nested clients compete for terminal input.
     #[serde(default)]
     pub allow_nested: bool,
-    /// Treat an unmodified left-button drag as Luvus text selection even when
-    /// the program in the pane enabled terminal mouse reporting. A click is
-    /// still delivered to the program after release, while Alt+drag and this
-    /// setting disabled preserve application-owned drag gestures.
-    #[serde(default = "yes")]
-    pub mouse_drag_select: bool,
     /// Check `luvus.dev/latest.json` in the background for a newer release and
     /// show an indicator by the version number. A single periodic `curl`/`wget`
     /// GET; on by default, toggled in Settings → General. Notify-only — luvus
@@ -76,6 +80,8 @@ pub struct Config {
     /// (`--permission-mode bypassPermissions`), so switching it on is deliberate.
     #[serde(default)]
     pub resume_launch_flags: bool,
+    #[serde(default)]
+    pub commander_working_policy: CommanderWorkingPolicy,
     /// Show only live agents in the AGENTS dock. Missing values retain the
     /// historical All default so resumable sessions never appear lost after an
     /// upgrade. The visible All / Active control updates this preference.
@@ -532,9 +538,9 @@ impl Default for Config {
             notifications: NotifyConfig::default(),
             session: SessionConfig::default(),
             allow_nested: false,
-            mouse_drag_select: true,
             check_updates: true,
             resume_launch_flags: false,
+            commander_working_policy: CommanderWorkingPolicy::AutoSend,
             agents_active_only: false,
             agents_this_workspace: false,
             keybindings: std::collections::HashMap::new(),
@@ -925,6 +931,7 @@ mod tests {
     fn defaults_and_roundtrip() {
         let c = Config::default();
         assert!(!c.allow_nested);
+        assert_eq!(c.commander_working_policy, CommanderWorkingPolicy::AutoSend);
         assert_eq!(c.theme, "quattro-rally");
         assert!(c.layout.show_titles);
         assert!(c.layout.workspace_paths);
@@ -936,19 +943,12 @@ mod tests {
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
         assert!(!from_empty.allow_nested);
-        assert!(
-            from_empty.mouse_drag_select,
-            "existing configs gain reliable drag selection in mouse-aware panes"
+        assert_eq!(
+            from_empty.commander_working_policy,
+            CommanderWorkingPolicy::AutoSend
         );
-        let application_drag: Config =
-            serde_json::from_str(r#"{"mouse_drag_select":false}"#).unwrap();
-        assert!(
-            !application_drag.mouse_drag_select,
-            "the application-owned drag escape persists"
-        );
-        let application_drag: Config =
-            serde_json::from_str(&serde_json::to_string(&application_drag).unwrap()).unwrap();
-        assert!(!application_drag.mouse_drag_select);
+        let ask: Config = serde_json::from_str(r#"{"commander_working_policy":"ask"}"#).unwrap();
+        assert_eq!(ask.commander_working_policy, CommanderWorkingPolicy::Ask);
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         assert!(from_empty.layout.workspace_paths);
         assert!(from_empty.layout.agent_paths);

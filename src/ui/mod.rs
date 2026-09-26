@@ -3,16 +3,17 @@
 
 pub mod theme;
 
-use std::path::Path;
+use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Widget};
+use ratatui::widgets::{Block, BorderType, Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{App, DockKind, Mode, Side};
+use crate::app::{App, DockKind, Mode, PaneNavigationTarget, Side};
 use crate::ids::PaneId;
 use crate::ui::theme::{State, Theme};
 
@@ -563,6 +564,7 @@ pub(crate) fn retained_pty_eligible(app: &App) -> bool {
         && app.hover_link.is_none()
         && app.search_flash.is_none()
         && app.settings.is_none()
+        && app.commander.is_none()
         && app.picker.is_none()
         && !app.help_open
         && !app.changelog_open
@@ -731,13 +733,35 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.right_seam = sidebar_right.map(|a| Rect::new(a.x, a.y, 1, a.height));
 
     let mobile_layout = app.compact.then(|| mobile::compute_layout(content));
-    let (tabbar, pane_area) = if let Some(layout) = mobile_layout {
+    let (tabbar, full_pane_area) = if let Some(layout) = mobile_layout {
         (layout.header, layout.content)
     } else {
         let [tabbar, pane_area] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(content);
         (tabbar, pane_area)
     };
+    // The interactive Commander has its own bottom strip, rather than
+    // painting over terminal cells. Passive clients keep their full viewport.
+    let commander_height = if resize_panes && app.commander.is_some() {
+        app.commander_height.min(
+            full_pane_area
+                .height
+                .saturating_sub(crate::layout::MIN_PANE),
+        )
+    } else {
+        0
+    };
+    let (pane_area, commander_area) = if commander_height >= crate::app::COMMANDER_MIN_HEIGHT {
+        let [panes, commander_strip] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(commander_height)])
+                .areas(full_pane_area);
+        (panes, Some(commander_strip))
+    } else {
+        (full_pane_area, None)
+    };
+    if resize_panes {
+        app.commander_area = commander_area;
+    }
 
     app.last_pane_area = pane_area;
 
@@ -920,7 +944,26 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         // Draw all pane borders in one overlay pass (manual cell-by-cell), then
         // the dot+path+close titles ON each top border row.
         if bordered {
-            borders::render_pane_borders(f, &rects, focus, app.hover_divider.as_ref(), &t);
+            let border_focus = app
+                .pane_navigation
+                .filter(|navigation| {
+                    app.mode == Mode::PaneNavigate
+                        && navigation.workspace == app.active_ws
+                        && navigation.tab == app.ws().active_tab
+                })
+                .map_or(Some(focus), |navigation| match navigation.candidate {
+                    PaneNavigationTarget::Pane(pane) if rects.iter().any(|(id, _)| *id == pane) => {
+                        Some(pane)
+                    }
+                    PaneNavigationTarget::Pane(_) => Some(focus),
+                    PaneNavigationTarget::Commander => None,
+                });
+            let hover_divider = if app.mode == Mode::PaneNavigate {
+                None
+            } else {
+                app.hover_divider.as_ref()
+            };
+            borders::render_pane_borders(f, &rects, border_focus, hover_divider, &t);
             if app.config.layout.show_titles {
                 title_rects = panes::draw_pane_titles(f, &rects, focus, app, &t);
             }
@@ -941,6 +984,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
                 .collect()
         };
     status::draw_status(f, status, app, &t);
+    // The strip is pane chrome. Menus, modals, and toasts must paint over it.
+    let commander_cursor = match (commander_area, app.commander.as_ref()) {
+        (Some(commander_area), Some(commander)) => {
+            draw_commander(f, commander_area, app, commander, cat, &t)
+                .filter(|_| commander.focused && app.commander_accepts_input())
+        }
+        _ => None,
+    };
 
     // Read-only overflow is attachment-local geometry over server-owned bar
     // content. Draw it above chrome and panes, below modal workflows.
@@ -1211,7 +1262,13 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         draw_toast(f, area, text, &t);
     }
 
-    let cursor = if settings_hits.is_some()
+    let cursor = if app.mode == Mode::PaneNavigate
+        || settings_hits.is_some()
+        || (resize_panes
+            && app
+                .commander
+                .as_ref()
+                .is_some_and(|commander| commander.focused))
         || app.search.is_some()
         || picker_open
         || app.bar.overflow.is_some()
@@ -1248,6 +1305,12 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         f.set_cursor_anchor(x, y, visible);
     }
     app.last_cursor = cursor.map(|(x, y, _)| (x, y));
+    if app.commander_accepts_input() {
+        if let Some((x, y)) = commander_cursor {
+            f.set_cursor_anchor(x, y, true);
+            app.last_cursor = Some((x, y));
+        }
+    }
     app.pane_rects = rects;
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;
@@ -1258,6 +1321,398 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.automation_rects = automation_rects;
     app.session_rects = session_rects;
     app.new_ws_rect = new_ws_rect;
+}
+
+fn draw_commander(
+    f: &mut RenderTarget,
+    rect: Rect,
+    app: &App,
+    commander: &crate::commander::Commander,
+    cat: &crate::i18n::Catalog,
+    t: &Theme,
+) -> Option<(u16, u16)> {
+    if rect.width < 24 || rect.height < 3 {
+        return None;
+    }
+    let preview = commander
+        .preview
+        .iter()
+        .filter_map(|id| {
+            let status = app.status.get(id)?;
+            app.panes.contains_key(id).then(|| {
+                if app.is_agent_pane(*id) {
+                    format!("p{} {} {}", id.0, status.agent, status.state.label())
+                } else {
+                    format!("p{} {}", id.0, status.agent)
+                }
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let title = if preview.is_empty() {
+        cat.commander_title.to_string()
+    } else {
+        format!("{} · {}", cat.commander_title, preview)
+    };
+    // Match split-pane chrome: plain border and dark terminal background.
+    // Clear the whole strip first so underlying/previous frame glyphs cannot
+    // show through the composer (including stale split-pane dividers).
+    f.render_widget(Block::new().style(Style::new().bg(t.mantle)), rect);
+    let title = truncate(&title, rect.width.saturating_sub(4) as usize);
+    let block = Block::bordered()
+        .border_type(BorderType::Plain)
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::new().fg(t.accent).bg(t.mantle).bold(),
+        ))
+        .border_style(
+            Style::new()
+                .fg(
+                    if commander.focused
+                        || (app.mode == Mode::PaneNavigate
+                            && app.pane_navigation.is_some_and(|navigation| {
+                                matches!(navigation.candidate, PaneNavigationTarget::Commander)
+                            }))
+                    {
+                        t.border_focus
+                    } else {
+                        t.border
+                    },
+                )
+                .bg(t.mantle),
+        )
+        .style(Style::new().bg(t.mantle).fg(t.text));
+    f.render_widget(block, rect);
+    let inner = Rect::new(rect.x + 2, rect.y + 1, rect.width - 4, rect.height - 2);
+    let output_rows = if commander.read_output.is_some() {
+        inner.height.saturating_sub(2)
+    } else {
+        0
+    };
+    let editor_height = inner.height.saturating_sub(output_rows + 1).max(1);
+    let (display_draft, display_cursor, display_selection) = commander_display_draft(
+        &commander.draft,
+        commander.cursor,
+        commander.selection(),
+        &commander.staged_images,
+    );
+    let (lines, cursor_row, cursor_column) = commander_editor_lines(
+        &display_draft,
+        display_cursor,
+        display_selection,
+        inner.width.saturating_sub(2) as usize,
+        editor_height as usize,
+        t,
+    );
+    for (visible_row, line) in lines.into_iter().enumerate() {
+        f.render_widget(
+            Paragraph::new(line).style(Style::new().bg(t.mantle).fg(t.text)),
+            Rect::new(inner.x, inner.y + visible_row as u16, inner.width, 1),
+        );
+    }
+    if let Some(output) = commander.read_output.as_ref() {
+        let end = output.len().saturating_sub(commander.read_scroll);
+        let start = end.saturating_sub(output_rows as usize);
+        for (index, line) in output[start..end].iter().enumerate() {
+            f.render_widget(
+                Paragraph::new(truncate(line, inner.width as usize))
+                    .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+                Rect::new(
+                    inner.x,
+                    inner.y + editor_height + index as u16,
+                    inner.width,
+                    1,
+                ),
+            );
+        }
+    }
+    let footer = if let Some(result) = commander.delivery_results.get(commander.delivery_index) {
+        result
+    } else if let Some(receipt) = commander.receipt.as_deref() {
+        receipt
+    } else if commander.guided_orch.is_some() {
+        cat.commander_guided_hint
+    } else {
+        if inner.width < 64 {
+            cat.commander_hint_compact
+        } else {
+            cat.commander_hint
+        }
+    };
+    if inner.height > 1 {
+        f.render_widget(
+            Paragraph::new(if commander.delivery_results.len() > 1 {
+                format!(
+                    "{}/{} {footer}  ↑↓",
+                    commander.delivery_index + 1,
+                    commander.delivery_results.len()
+                )
+            } else {
+                footer.to_string()
+            })
+            .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),
+        );
+    }
+    if commander.focused && app.commander_accepts_input() {
+        draw_commander_slash_preview(f, rect, app.last_pane_area.y, commander, cat, t);
+    }
+    Some((
+        inner.x + (2 + cursor_column).min(inner.width.saturating_sub(1) as usize) as u16,
+        inner.y + cursor_row as u16,
+    ))
+}
+
+fn draw_commander_slash_preview(
+    f: &mut RenderTarget,
+    strip: Rect,
+    pane_top: u16,
+    commander: &crate::commander::Commander,
+    cat: &crate::i18n::Catalog,
+    t: &Theme,
+) {
+    let Some((matches, selected)) = commander.slash_menu() else {
+        return;
+    };
+    let Some((popup, visible)) =
+        crate::commander::slash_popup_layout(strip, pane_top, matches.len())
+    else {
+        return;
+    };
+    f.render_widget(
+        Block::bordered()
+            .border_type(BorderType::Plain)
+            .title(Span::styled(
+                format!(" {} ", cat.commander_slash_title),
+                Style::new().fg(t.accent).bold(),
+            ))
+            .border_style(Style::new().fg(t.border_focus))
+            .style(Style::new().bg(t.mantle).fg(t.text)),
+        popup,
+    );
+    let first = crate::commander::slash_window_start(selected, matches.len(), visible);
+    for (row, spec) in matches.iter().skip(first).take(visible).enumerate() {
+        let active = first + row == selected;
+        let index = crate::commander::SLASH_ACTIONS
+            .iter()
+            .position(|action| action.name == spec.name)
+            .unwrap_or(0);
+        let line = format!(
+            "{} {:<13} {}",
+            if active { "›" } else { " " },
+            spec.name,
+            cat.commander_slash_summaries[index]
+        );
+        f.render_widget(
+            Paragraph::new(truncate(&line, popup.width.saturating_sub(4) as usize)).style(
+                Style::new()
+                    .bg(if active { t.surface0 } else { t.mantle })
+                    .fg(if active { t.accent } else { t.text }),
+            ),
+            Rect::new(popup.x + 1, popup.y + 1 + row as u16, popup.width - 2, 1),
+        );
+    }
+    if first > 0 {
+        f.render_widget(
+            Paragraph::new("↑").style(Style::new().bg(t.mantle).fg(t.accent)),
+            Rect::new(popup.right() - 2, popup.y + 1, 1, 1),
+        );
+    }
+    if first + visible < matches.len() {
+        f.render_widget(
+            Paragraph::new("↓").style(Style::new().bg(t.mantle).fg(t.accent)),
+            Rect::new(popup.right() - 2, popup.y + visible as u16, 1, 1),
+        );
+    }
+    if matches.is_empty() {
+        f.render_widget(
+            Paragraph::new(cat.commander_slash_no_match)
+                .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(popup.x + 1, popup.y + 1, popup.width - 2, 1),
+        );
+    }
+    if let Some(spec) = matches.get(selected) {
+        let usage = if spec.usage.is_empty() {
+            spec.name.to_string()
+        } else {
+            format!("{} {}", spec.name, spec.usage)
+        };
+        let position = format!("{}/{}", selected + 1, matches.len());
+        let position_width = position.len() as u16;
+        let usage_width = popup.width.saturating_sub(position_width + 4);
+        f.render_widget(
+            Paragraph::new(truncate(&usage, usage_width as usize))
+                .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(popup.x + 1, popup.bottom() - 2, usage_width, 1),
+        );
+        f.render_widget(
+            Paragraph::new(position).style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(
+                popup.right() - position_width - 1,
+                popup.bottom() - 2,
+                position_width,
+                1,
+            ),
+        );
+    }
+}
+
+/// Keep delivery/editing tied to the real staged path, but render each live
+/// clipboard image as a short token. Cursor and selection offsets follow the
+/// visible text so a long private path cannot displace the caret or wrap rows.
+fn commander_display_draft<'a>(
+    draft: &'a str,
+    cursor: usize,
+    selection: Option<std::ops::Range<usize>>,
+    staged_images: &[PathBuf],
+) -> (Cow<'a, str>, usize, Option<std::ops::Range<usize>>) {
+    let mut images = staged_images
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            let path = path.to_string_lossy();
+            draft
+                .find(path.as_ref())
+                .map(|start| (start..start + path.len(), index + 1))
+        })
+        .collect::<Vec<_>>();
+    if images.is_empty() {
+        return (Cow::Borrowed(draft), cursor, selection);
+    }
+    images.sort_by_key(|(range, _)| range.start);
+    let mut visible = String::with_capacity(draft.len());
+    let mut mappings = Vec::with_capacity(images.len());
+    let mut consumed = 0;
+    for (range, number) in images {
+        if range.start < consumed {
+            continue;
+        }
+        visible.push_str(&draft[consumed..range.start]);
+        let shown_start = visible.len();
+        visible.push_str(&format!("[Image #{number}]"));
+        mappings.push((range.clone(), shown_start..visible.len()));
+        consumed = range.end;
+    }
+    visible.push_str(&draft[consumed..]);
+
+    let map_offset = |offset: usize, end_bias: bool| {
+        let (mut raw_end, mut shown_end) = (0, 0);
+        for (raw, shown) in &mappings {
+            if offset < raw.start {
+                break;
+            }
+            if offset <= raw.end {
+                return if offset == raw.start {
+                    shown.start
+                } else if offset == raw.end || end_bias {
+                    shown.end
+                } else {
+                    shown.start
+                };
+            }
+            raw_end = raw.end;
+            shown_end = shown.end;
+        }
+        shown_end + offset - raw_end
+    };
+    let visible_cursor = map_offset(cursor, false);
+    let visible_selection =
+        selection.map(|range| map_offset(range.start, false)..map_offset(range.end, true));
+    (Cow::Owned(visible), visible_cursor, visible_selection)
+}
+
+/// Wrap the bounded draft into terminal cells while retaining byte-based
+/// selection and the caret's true position across pasted/newline input.
+fn commander_editor_lines(
+    draft: &str,
+    cursor: usize,
+    selection: Option<std::ops::Range<usize>>,
+    width: usize,
+    visible_rows: usize,
+    t: &Theme,
+) -> (Vec<Line<'static>>, usize, usize) {
+    use std::collections::VecDeque;
+    use unicode_width::UnicodeWidthChar;
+
+    let width = width.max(1);
+    let visible_rows = visible_rows.max(1);
+    let mut rows: VecDeque<(usize, Vec<(String, bool)>)> = VecDeque::new();
+    rows.push_back((0, Vec::new()));
+    let (mut row, mut column) = (0, 0);
+    let mut caret = (0, 0);
+    let mut caret_seen = false;
+    for (index, character) in draft.char_indices() {
+        let shown = if character == '\t' { '⇥' } else { character };
+        let character_width = UnicodeWidthChar::width(shown).unwrap_or(0);
+        if character != '\n' && column + character_width > width {
+            if caret_seen && rows.len() >= visible_rows {
+                break;
+            }
+            row += 1;
+            column = 0;
+            rows.push_back((row, Vec::new()));
+            if rows.len() > visible_rows {
+                rows.pop_front();
+            }
+        }
+        if index == cursor {
+            caret = (row, column);
+            caret_seen = true;
+        }
+        if character == '\n' {
+            if caret_seen && rows.len() >= visible_rows {
+                break;
+            }
+            row += 1;
+            column = 0;
+            rows.push_back((row, Vec::new()));
+            if rows.len() > visible_rows {
+                rows.pop_front();
+            }
+            continue;
+        }
+        let selected = selection
+            .as_ref()
+            .is_some_and(|range| range.contains(&index));
+        let line = &mut rows.back_mut().unwrap().1;
+        if let Some((text, state)) = line.last_mut() {
+            if *state == selected {
+                text.push(shown);
+            } else {
+                line.push((shown.to_string(), selected));
+            }
+        } else {
+            line.push((shown.to_string(), selected));
+        }
+        column += character_width;
+    }
+    if cursor == draft.len() {
+        if column >= width {
+            row += 1;
+            column = 0;
+            rows.push_back((row, Vec::new()));
+            if rows.len() > visible_rows {
+                rows.pop_front();
+            }
+        }
+        caret = (row, column);
+    }
+    let first_visible = rows.front().unwrap().0;
+    let lines = rows
+        .into_iter()
+        .map(|(index, chunks)| {
+            let mut spans = vec![Span::raw(if index == 0 { "› " } else { "  " })];
+            spans.extend(chunks.into_iter().map(|(text, selected)| {
+                if selected {
+                    Span::styled(text, Style::new().fg(t.text).bg(t.sel_bg))
+                } else {
+                    Span::raw(text)
+                }
+            }));
+            Line::from(spans)
+        })
+        .collect();
+    (lines, caret.0 - first_visible, caret.1)
 }
 
 // ── shared layout + state helpers (used across the ui submodules) ──
@@ -2035,5 +2490,441 @@ mod dock_projection_tests {
             "the owner-local dock remains visible outside the picker"
         );
         assert_ne!(projection.shell_overlay, Some(area));
+    }
+}
+
+#[cfg(test)]
+mod pane_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn preview_highlights_candidate_without_moving_focus_or_cursor() {
+        let _env = crate::persist::test_env("pane-navigation-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.sidebars.left.visible = false;
+        app.sidebars.right.visible = false;
+        let left = app.layout().focus;
+        app.run_cmd(crate::app::Cmd::SplitRight);
+        let right = app.layout().focus;
+        app.focus_location(0, 0, left);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut initial = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut initial, area), &mut app);
+
+        app.handle_event(crate::event::AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(crate::event::AppEvent::Key(
+            ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Right,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let mut preview = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut preview, area), &mut app);
+        let rect = |id| {
+            app.pane_rects
+                .iter()
+                .find(|(pane, _)| *pane == id)
+                .unwrap()
+                .1
+        };
+        let left_rect = rect(left);
+        let right_rect = rect(right);
+        assert_ne!(
+            preview[(left_rect.x, left_rect.y)].fg,
+            preview[(right_rect.x, right_rect.y)].fg,
+            "the candidate border is distinct from the still-active pane"
+        );
+        assert_eq!(app.layout().focus, left);
+        assert_eq!(app.last_cursor, None);
+    }
+
+    #[test]
+    fn commander_preview_highlights_strip_without_focusing_input() {
+        let _env = crate::persist::test_env("commander-navigation-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.sidebars.left.visible = false;
+        app.sidebars.right.visible = false;
+        app.open_commander();
+        app.commander.as_mut().unwrap().focused = false;
+        let area = Rect::new(0, 0, 100, 30);
+        let mut initial = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut initial, area), &mut app);
+        let strip = app.commander_area.unwrap();
+
+        app.handle_event(crate::event::AppEvent::Key(app.prefix.key_event()));
+        app.handle_event(crate::event::AppEvent::Key(
+            ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Down,
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let mut preview = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut preview, area), &mut app);
+        assert_eq!(
+            app.pane_navigation.unwrap().candidate,
+            PaneNavigationTarget::Commander
+        );
+        assert_ne!(
+            initial[(strip.x, strip.y + 1)].fg,
+            preview[(strip.x, strip.y + 1)].fg,
+            "the strip border highlights before Commander receives focus"
+        );
+        assert!(!app.commander.as_ref().unwrap().focused);
+        assert_eq!(app.last_cursor, None);
+    }
+}
+
+#[cfg(test)]
+mod commander_tests {
+    use super::*;
+
+    #[test]
+    fn commander_editor_keeps_suffix_visible_after_mid_draft_caret() {
+        let theme = Theme::quattro_rally();
+        for (draft, cursor, width, expected) in [
+            ("abcdef", 2, 4, ["› abcd", "  ef"]),
+            ("ab\ncd", 1, 4, ["› ab", "  cd"]),
+        ] {
+            let (lines, caret_row, caret_column) =
+                commander_editor_lines(draft, cursor, None, width, 2, &theme);
+            let visible = lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(visible, expected, "draft: {draft:?}");
+            assert_eq!((caret_row, caret_column), (0, cursor));
+        }
+    }
+
+    #[test]
+    fn composer_gets_own_bottom_strip_and_is_private_to_active_view() {
+        let _env = crate::persist::test_env("commander-projection");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let pane = app.layout().focus;
+        let area = Rect::new(0, 0, 100, 30);
+        let mut initial = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut initial, area), &mut app);
+        let size = app.panes[&pane].size();
+        let content = app.pane_content_rects.clone();
+
+        app.open_commander();
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "private prompt".into();
+        commander.cursor = commander.draft.len();
+        let mut active = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut active, area), &mut app);
+        let row = app.last_pane_area.bottom() + 1;
+        let active_line: String = (0..area.width).map(|x| active[(x, row)].symbol()).collect();
+        assert!(active_line.contains("private prompt"));
+        assert!(app.panes[&pane].size().1 < size.1);
+        assert!(app.pane_content_rects[0].1.bottom() <= app.last_pane_area.bottom());
+        assert_ne!(app.pane_content_rects, content);
+        let strip = app.commander_area.expect("interactive strip hitbox");
+        assert_eq!(strip.height, 5);
+        assert!(app.last_cursor.is_some_and(|(_, y)| y >= strip.y));
+
+        app.commander.as_mut().unwrap().focused = false;
+        let mut unfocused = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut unfocused, area), &mut app);
+        assert!(app.last_cursor.is_none_or(|(_, y)| y < strip.y));
+
+        let mut passive = Buffer::empty(area);
+        render_projection(&mut RenderTarget::new(&mut passive, area), &mut app);
+        let passive_line: String = (0..area.width)
+            .map(|x| passive[(x, row)].symbol())
+            .collect();
+        assert!(!passive_line.contains("private prompt"));
+        assert!(app.commander.is_some());
+
+        app.commander.as_mut().unwrap().focused = true;
+        app.help_open = true;
+        let mut help = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut help, area), &mut app);
+        let help_line: String = (0..area.width).map(|x| help[(x, row)].symbol()).collect();
+        assert!(!help_line.contains("private prompt"));
+        assert!(app.last_cursor.is_none());
+    }
+
+    #[test]
+    fn commander_shared_seam_drag_resizes_without_covering_the_terminal() {
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let _env = crate::persist::test_env("commander-drag-height");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.open_commander();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut initial = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut initial, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let pane_height = app.last_pane_area.height;
+        let mouse = |kind, row| {
+            crate::event::AppEvent::Mouse(MouseEvent {
+                kind,
+                column: strip.x + 2,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), strip.y - 1));
+        assert!(app.commander_resize);
+        app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), strip.y - 3));
+        let mut grown = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut grown, area), &mut app);
+        assert_eq!(app.commander_area.unwrap().height, strip.height + 3);
+        assert_eq!(app.last_pane_area.height, pane_height - 3);
+        app.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 0));
+        let mut clamped = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut clamped, area), &mut app);
+        assert!(app.last_pane_area.height >= crate::layout::MIN_PANE);
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
+        assert!(!app.commander_resize);
+
+        let grown_strip = app.commander_area.unwrap();
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            grown_strip.y,
+        ));
+        assert!(app.commander_resize, "Commander border is also draggable");
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            grown_strip.bottom() - 1,
+        ));
+        let mut shrunk = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut shrunk, area), &mut app);
+        assert_eq!(
+            app.commander_area.unwrap().height,
+            crate::app::COMMANDER_DEFAULT_HEIGHT,
+            "dragging cannot shrink the composer below its default height"
+        );
+        app.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 0));
+
+        let bottom = app.commander_area.unwrap().bottom();
+        app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), bottom - 1));
+        assert!(
+            !app.commander_resize,
+            "only the shared seam starts a resize"
+        );
+        let resized_height = app.commander_area.unwrap().height;
+        app.open_commander();
+        app.open_commander();
+        let mut reopened = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut reopened, area), &mut app);
+        assert_eq!(app.commander_area.unwrap().height, resized_height);
+    }
+
+    #[test]
+    fn commander_multiline_caret_and_text_share_the_visible_editor_rows() {
+        let _env = crate::persist::test_env("commander-multiline-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(50, 20, tx).unwrap();
+        app.open_commander();
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "@p1 first line\nsecond line".into();
+        commander.cursor = commander.draft.len();
+        let area = Rect::new(0, 0, 50, 20);
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let first: String = (0..area.width)
+            .map(|x| buffer[(x, strip.y + 1)].symbol())
+            .collect();
+        let second: String = (0..area.width)
+            .map(|x| buffer[(x, strip.y + 2)].symbol())
+            .collect();
+        assert!(first.contains("first line"));
+        assert!(second.contains("second line"));
+        assert_eq!(app.last_cursor.unwrap().1, strip.y + 2);
+
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = format!("@p1 {}", "x".repeat(120));
+        commander.cursor = commander.draft.len();
+        let mut wrapped = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut wrapped, area), &mut app);
+        let final_row: String = (0..area.width)
+            .map(|x| wrapped[(x, strip.y + 2)].symbol())
+            .collect();
+        assert!(final_row.contains("xxx"));
+        assert_eq!(app.last_cursor.unwrap().1, strip.y + 2);
+    }
+
+    #[test]
+    fn commander_slash_picker_previews_actions_and_filters_prefixes() {
+        let _env = crate::persist::test_env("commander-slash-picker-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 32, tx).unwrap();
+        app.open_commander();
+        let area = Rect::new(0, 0, 100, 32);
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "/".into();
+        commander.cursor = 1;
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let (bounds, _) = crate::commander::slash_popup_layout(
+            strip,
+            app.last_pane_area.y,
+            crate::commander::SLASH_ACTIONS.len(),
+        )
+        .unwrap();
+        assert_eq!(bounds.x, strip.x);
+        assert_eq!(bounds.width, strip.width);
+        assert_eq!(buffer[(bounds.x, bounds.y)].symbol(), "┌");
+        assert_eq!(buffer[(bounds.right() - 1, bounds.y)].symbol(), "┐");
+        let popup: String = (app.last_pane_area.y..strip.y)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|position| buffer[position].symbol())
+            .collect();
+        for action in ["/focus", "/split", "/automation", "/files"] {
+            assert!(popup.contains(action), "missing {action} from slash picker");
+        }
+        assert!(popup.contains("Focus an exact location"));
+
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "/au".into();
+        commander.cursor = 3;
+        let mut filtered = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut filtered, area), &mut app);
+        let popup: String = (app.last_pane_area.y..strip.y)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|position| filtered[position].symbol())
+            .collect();
+        assert!(popup.contains("/automation"));
+        assert!(!popup.contains("/focus"));
+
+        app.commander.as_mut().unwrap().focused = false;
+        let mut unfocused = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut unfocused, area), &mut app);
+        let popup: String = (app.last_pane_area.y..strip.y)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|position| unfocused[position].symbol())
+            .collect();
+        assert!(!popup.contains("/automation"));
+    }
+
+    #[test]
+    fn commander_slash_picker_scrolls_the_selected_row_into_a_short_viewport() {
+        let _env = crate::persist::test_env("commander-slash-picker-scroll-render");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 20, tx).unwrap();
+        app.open_commander();
+        let theme = app.theme.clone();
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "/".into();
+        commander.cursor = 1;
+        commander.slash_selection = Some(8);
+        let area = Rect::new(0, 0, 80, 20);
+        let strip = Rect::new(2, 15, 76, 4);
+        let (popup, visible) = crate::commander::slash_popup_layout(strip, 10, 9).unwrap();
+        assert_eq!(visible, 2);
+        let mut buffer = Buffer::empty(area);
+        draw_commander_slash_preview(
+            &mut RenderTarget::new(&mut buffer, area),
+            strip,
+            10,
+            commander,
+            &crate::i18n::EN,
+            &theme,
+        );
+        let shown: String = (popup.y..popup.bottom())
+            .flat_map(|y| (popup.x..popup.right()).map(move |x| (x, y)))
+            .map(|position| buffer[position].symbol())
+            .collect();
+        assert!(shown.contains("/files"));
+        assert!(shown.contains("/diff"));
+        assert!(!shown.contains("/focus"));
+        assert!(shown.contains("↑"));
+        assert!(shown.contains("9/9"));
+    }
+
+    #[test]
+    fn commander_clipboard_images_render_as_markers_without_changing_delivery_text() {
+        let _env = crate::persist::test_env("commander-image-marker");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 24, tx).unwrap();
+        app.open_commander();
+        let png = crate::clipboard_image::encode_rgba_png(1, 1, |_, _| [1, 2, 3, 255])
+            .expect("valid png");
+        let first = crate::clipboard_image::stage_png(&png).expect("first image");
+        let second = crate::clipboard_image::stage_png(&png).expect("second image");
+        assert!(app.handle_event(crate::event::AppEvent::PasteImage(first.clone())));
+        assert!(app.commander_paste(" then "));
+        assert!(app.handle_event(crate::event::AppEvent::PasteImage(second.clone())));
+        let commander = app.commander.as_ref().unwrap();
+        assert!(commander
+            .draft
+            .contains(&first.to_string_lossy().to_string()));
+        assert!(commander
+            .draft
+            .contains(&second.to_string_lossy().to_string()));
+        let (shown, cursor, _) = commander_display_draft(
+            &commander.draft,
+            commander.cursor,
+            None,
+            &commander.staged_images,
+        );
+        assert!(shown.contains("[Image #1] then [Image #2]"));
+        assert!(!shown.contains("luvus-image-"));
+        assert_eq!(cursor, shown.len());
+
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let editor: String = (strip.y + 1..strip.bottom() - 1)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|position| buffer[position].symbol())
+            .collect();
+        assert!(editor.contains("[Image #1] then [Image #2]"));
+        assert!(!editor.contains("luvus-image-"));
+        assert!(app
+            .last_cursor
+            .is_some_and(|(_, y)| y > strip.y && y < strip.bottom()));
+    }
+
+    #[test]
+    fn commander_image_marker_maps_selection_to_the_visible_token() {
+        let path = PathBuf::from("/private/clipboard-images/luvus-image-test.png");
+        let path_text = path.to_string_lossy();
+        let draft = format!("before {path_text} after");
+        let start = draft.find(path_text.as_ref()).unwrap();
+        let end = start + path_text.len();
+        let (shown, cursor, selection) =
+            commander_display_draft(&draft, end, Some(start + 1..end - 1), &[path]);
+        assert_eq!(shown, "before [Image #1] after");
+        assert_eq!(cursor, "before [Image #1]".len());
+        assert_eq!(selection.unwrap(), "before ".len()..cursor);
+    }
+
+    #[test]
+    fn commander_read_preview_uses_extra_rows_without_covering_the_editor_or_footer() {
+        let _env = crate::persist::test_env("commander-read-preview");
+        let (tx, _) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_commander();
+        app.commander_height = 12;
+        let commander = app.commander.as_mut().unwrap();
+        commander.draft = "/read @p1".into();
+        commander.cursor = commander.draft.len();
+        commander.read_output = Some(vec!["first output".into(), "latest output".into()]);
+        commander.receipt = Some("p1 · 2 lines · PgUp/PgDn".into());
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buffer = Buffer::empty(area);
+        render_into(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let strip = app.commander_area.unwrap();
+        let row = |y| -> String { (0..area.width).map(|x| buffer[(x, y)].symbol()).collect() };
+        assert!(row(strip.y + 1).contains("/read @p1"));
+        assert!(row(strip.y + 2).contains("first output"));
+        assert!(row(strip.y + 3).contains("latest output"));
+        assert!(row(strip.bottom() - 2).contains("PgUp/PgDn"));
     }
 }

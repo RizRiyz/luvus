@@ -475,7 +475,7 @@ impl App {
     /// detection already caches this result. If terminal output arrived after
     /// that pass, inspect only the same bounded live rows once, on this request,
     /// so an agent-start/prompt race cannot submit Enter before a composer exists.
-    pub(in crate::app::dispatch) fn agent_prompt_is_ready(&self, id: PaneId) -> bool {
+    pub(crate) fn agent_prompt_is_ready(&self, id: PaneId) -> bool {
         let Some(status) = self.status.get(&id) else {
             return true;
         };
