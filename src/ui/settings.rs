@@ -858,6 +858,16 @@ fn draw_content(
                         );
                         ctls.push((i, r));
                     }
+                    GeneralRow::MouseDragSelect => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_mouse_drag_select,
+                        toggle(app.config.mouse_drag_select, t),
+                        t,
+                    )),
                     GeneralRow::CheckUpdates => ctls.push(ctl_row(
                         f,
                         area,

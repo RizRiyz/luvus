@@ -50,6 +50,12 @@ pub struct Config {
     /// Disabled by default because nested clients compete for terminal input.
     #[serde(default)]
     pub allow_nested: bool,
+    /// Treat an unmodified left-button drag as Luvus text selection even when
+    /// the program in the pane enabled terminal mouse reporting. A click is
+    /// still delivered to the program after release, while Alt+drag and this
+    /// setting disabled preserve application-owned drag gestures.
+    #[serde(default = "yes")]
+    pub mouse_drag_select: bool,
     /// Check `luvus.dev/latest.json` in the background for a newer release and
     /// show an indicator by the version number. A single periodic `curl`/`wget`
     /// GET; on by default, toggled in Settings → General. Notify-only — luvus
@@ -526,6 +532,7 @@ impl Default for Config {
             notifications: NotifyConfig::default(),
             session: SessionConfig::default(),
             allow_nested: false,
+            mouse_drag_select: true,
             check_updates: true,
             resume_launch_flags: false,
             agents_active_only: false,
@@ -929,6 +936,19 @@ mod tests {
         let from_empty: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(from_empty.theme, "quattro-rally");
         assert!(!from_empty.allow_nested);
+        assert!(
+            from_empty.mouse_drag_select,
+            "existing configs gain reliable drag selection in mouse-aware panes"
+        );
+        let application_drag: Config =
+            serde_json::from_str(r#"{"mouse_drag_select":false}"#).unwrap();
+        assert!(
+            !application_drag.mouse_drag_select,
+            "the application-owned drag escape persists"
+        );
+        let application_drag: Config =
+            serde_json::from_str(&serde_json::to_string(&application_drag).unwrap()).unwrap();
+        assert!(!application_drag.mouse_drag_select);
         assert_eq!(from_empty.sidebar_width, SIDEBAR_WIDTH_DEFAULT);
         assert!(from_empty.layout.workspace_paths);
         assert!(from_empty.layout.agent_paths);

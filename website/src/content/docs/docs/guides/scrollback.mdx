@@ -60,7 +60,14 @@ application-cursor pager), Luvus forwards those keys unchanged. `Shift+↑`,
 ## Copying
 
 Drag across a pane to select. Release requests a copy and flashes a *Copy requested*
-toast. Luvus requests both your native OS clipboard (`pbcopy` / `wl-copy` /
+toast. In a mouse-aware TUI, Luvus distinguishes a click from a drag: a click is
+replayed to the application on release, while a drag remains Luvus selection.
+This prevents an application that enables mouse reporting only for buttons and
+hover from swallowing drag-to-copy. Turn off **Mouse drag selects text** in
+**Settings → General** when an application needs to own plain drag gestures. In
+that compatibility mode, **Shift+drag** still selects through Luvus.
+
+Luvus requests both your native OS clipboard (`pbcopy` / `wl-copy` /
 `xclip` / `clip`) and OSC 52. The terminal must permit OSC 52 clipboard writes;
 that escape sequence does not acknowledge whether the clipboard changed.
 Soft-wrapped display rows copy as one logical line. Hard line breaks and any
