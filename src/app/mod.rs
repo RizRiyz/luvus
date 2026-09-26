@@ -1730,6 +1730,9 @@ fn default_schedule(start: OrchFormStart, timezone: &str) -> String {
 #[derive(Clone, Copy)]
 pub struct MouseGrab {
     pub pane: PaneId,
+    /// Physical button that opened this gesture. A second button must not move
+    /// or release it, or the child can be left with a permanently held button.
+    pub button: ratatui::crossterm::event::MouseButton,
     pub btn: u16,
     pub drag: bool,
     pub sgr: bool,
@@ -12947,10 +12950,30 @@ fi
         )));
         let g = app.mouse_grab.expect("press grabbed for the app");
         assert_eq!(g.pane, id);
+        assert_eq!(g.button, MouseButton::Left);
         assert_eq!(g.btn, 0);
         assert!(g.drag, "1002: drag tracking cached at press");
         assert!(g.sgr, "1006: SGR encoding cached at press");
         assert!(app.selection.is_none(), "no selection while forwarding");
+
+        // A second button cannot replace or release the active left grab. The
+        // child must still receive the matching left release below.
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            content.x + 5,
+            content.y + 2,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(AppEvent::Mouse(mouse(
+            MouseEventKind::Up(MouseButton::Right),
+            content.x + 5,
+            content.y + 2,
+            KeyModifiers::NONE,
+        )));
+        let g = app.mouse_grab.expect("secondary button preserves the grab");
+        assert_eq!(g.button, MouseButton::Left);
+        assert!(app.pane_menu.is_none());
+
         // Drag + release route to the app and close out the grab.
         app.handle_event(AppEvent::Mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
