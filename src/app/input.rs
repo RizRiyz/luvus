@@ -2386,19 +2386,13 @@ impl App {
                         return;
                     }
                 }
-                // Mouse-aware pane apps still own clicks, hover, and explicit
-                // application drags. By default an unmodified left press is held
-                // until the gesture resolves: release replays a click, while
-                // movement becomes Luvus text selection. This keeps clickable
-                // agent controls working without letting a TUI that merely
-                // enables mouse tracking swallow ordinary drag-to-copy. Shift
-                // always selects in Luvus; Alt+drag and the compatibility setting
-                // retain immediate application-owned dragging.
-                let defer_for_selection =
-                    self.config.mouse_drag_select && m.modifiers == KeyModifiers::NONE;
-                if !m.modifiers.contains(KeyModifiers::SHIFT)
-                    && self.begin_mouse_forward(&m, 0, defer_for_selection)
-                {
+                // A pane app that tracks the mouse (a TUI agent like Claude
+                // Code) gets the click itself — that's how clicking a collapsed
+                // tool result expands it, exactly like in a plain terminal. The
+                // click still focuses the pane first. `Shift` bypasses
+                // forwarding for luvus's own text selection (the standard
+                // terminal convention).
+                if !m.modifiers.contains(KeyModifiers::SHIFT) && self.begin_mouse_forward(&m, 0) {
                     return;
                 }
                 // A second left press on (or within one cell of) the first,
@@ -2430,12 +2424,30 @@ impl App {
                 }
                 // Begin a selection only inside a pane's content; otherwise drop
                 // any old one. Falls through to normal click handling (focus/etc).
-                self.begin_mouse_selection(m.column, m.row);
+                self.selection = self
+                    .pane_content_at(m.column, m.row)
+                    .map(|(pane, content)| {
+                        let retained = self
+                            .retained_selection_point(pane, content, m.column, m.row)
+                            .map(|point| RetainedSelection {
+                                anchor: point,
+                                cursor: point,
+                            });
+                        Selection {
+                            pane,
+                            content,
+                            anchor: (m.column, m.row),
+                            cursor: (m.column, m.row),
+                            retained,
+                            scrolled: false,
+                            dragging: true,
+                        }
+                    });
             }
             MouseEventKind::Down(MouseButton::Middle) => {
                 // Middle click has no luvus meaning — forward it to a
                 // mouse-tracking app (button 1), otherwise ignore it.
-                self.begin_mouse_forward(&m, 1, false);
+                self.begin_mouse_forward(&m, 1);
                 return;
             }
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Middle) => {
@@ -2464,20 +2476,11 @@ impl App {
                     self.update_resize(m.column, m.row);
                     return;
                 }
-                // Resolve a smart pending press on the first cell of movement.
-                // The child has received nothing, so changing ownership here
-                // cannot leave it with a stuck button. A stationary Drag event is
-                // ignored until either real movement or release arrives.
+                // A forwarded press owns its drag — reported with the flags
+                // cached at press time (no engine lock), and only when the app
+                // asked for drag/motion tracking (a click-only app is left alone).
                 if let Some(g) = self.mouse_grab {
-                    if !g.forwarded {
-                        if (m.column, m.row) == g.origin {
-                            return;
-                        }
-                        self.mouse_grab = None;
-                        self.dbl_click_release = false;
-                        self.begin_mouse_selection(g.origin.0, g.origin.1);
-                        self.update_mouse_selection_cursor(m.column, m.row);
-                    } else if g.drag {
+                    if g.drag {
                         self.send_grabbed_mouse(g, MouseSeq::Drag, m.column, m.row);
                     }
                     return;
@@ -2517,14 +2520,8 @@ impl App {
                     self.end_resize();
                     return;
                 }
-                // A pending smart press never reached the child. Replay its
-                // press immediately before release so an ordinary click remains
-                // indistinguishable to the pane app, while drag selection sends
-                // neither event.
+                // Close out a forwarded press with its release.
                 if let Some(g) = self.mouse_grab.take() {
-                    if !g.forwarded {
-                        self.send_grabbed_mouse(g, MouseSeq::Press, g.origin.0, g.origin.1);
-                    }
                     self.send_grabbed_mouse(g, MouseSeq::Release, m.column, m.row);
                     return;
                 }
@@ -3426,16 +3423,16 @@ impl App {
     }
 
     /// The pane whose **content** rect covers terminal cell `(x, y)`.
-    /// Claim a button press for a mouse-tracking pane app. The ordinary path
-    /// sends it immediately. Smart left-button selection records it without
-    /// sending so release can replay a click or movement can become host text
-    /// selection. Both paths focus the pane and cache terminal modes under one
-    /// engine lock for the rest of the gesture.
+    /// Try to forward a button press at the event's position into a
+    /// mouse-tracking pane app. On success: focuses the pane, snaps its
+    /// viewport live, records the grab — the pressed button with its modifier
+    /// bits, plus the app's drag/SGR flags — so the rest of the gesture is
+    /// **lock-free** (one engine lock per gesture, at press), and sends the
+    /// press. Returns whether the press was forwarded.
     fn begin_mouse_forward(
         &mut self,
         m: &ratatui::crossterm::event::MouseEvent,
         base_btn: u16,
-        defer: bool,
     ) -> bool {
         let Some((id, _)) = self.pane_content_at(m.column, m.row) else {
             return false;
@@ -3454,37 +3451,10 @@ impl App {
             btn: base_btn + mouse_mod_bits(m.modifiers),
             drag: mm.drag,
             sgr: mm.sgr,
-            origin: (m.column, m.row),
-            forwarded: !defer,
         };
         self.mouse_grab = Some(g);
-        if !defer {
-            self.send_grabbed_mouse(g, MouseSeq::Press, m.column, m.row);
-        }
+        self.send_grabbed_mouse(g, MouseSeq::Press, m.column, m.row);
         true
-    }
-
-    /// Start Luvus text selection at one pane-content cell. Keeping this in one
-    /// helper makes direct selection and a smart drag use identical retained-row
-    /// coordinates, Unicode handling, and scrollback semantics.
-    fn begin_mouse_selection(&mut self, x: u16, y: u16) {
-        self.selection = self.pane_content_at(x, y).map(|(pane, content)| {
-            let retained = self
-                .retained_selection_point(pane, content, x, y)
-                .map(|point| RetainedSelection {
-                    anchor: point,
-                    cursor: point,
-                });
-            Selection {
-                pane,
-                content,
-                anchor: (x, y),
-                cursor: (x, y),
-                retained,
-                scrolled: false,
-                dragging: true,
-            }
-        });
     }
 
     /// Send one event of a forwarded gesture using the grab's cached flags —

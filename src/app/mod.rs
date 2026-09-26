@@ -1724,18 +1724,15 @@ fn default_schedule(start: OrchFormStart, timezone: &str) -> String {
     }
 }
 
-/// A mouse press claimed by a mouse-tracking pane app (see `App.mouse_grab`).
-/// Smart selection may hold an unmodified left press until the gesture becomes
-/// either a click or a drag. Everything needed to replay a click is captured at
-/// press time, so resolving the gesture never locks the terminal engine again.
+/// A forwarded mouse press held by a mouse-tracking pane app (see
+/// `App.mouse_grab`): the pressed button (with modifier bits already encoded)
+/// plus the app's drag/SGR flags captured at press time.
 #[derive(Clone, Copy)]
 pub struct MouseGrab {
     pub pane: PaneId,
     pub btn: u16,
     pub drag: bool,
     pub sgr: bool,
-    pub origin: (u16, u16),
-    pub forwarded: bool,
 }
 
 /// The board's **start-worker picker**: choose which agent to launch in the
@@ -2663,10 +2660,11 @@ pub struct App {
     /// Keyboard copy selection. This deliberately owns navigation keys so they
     /// cannot reach the child while text is being selected.
     pub copy_mode: Option<CopyMode>,
-    /// A mouse button claimed by a mouse-tracking pane app. Application-owned
-    /// gestures are forwarded immediately. Smart unmodified left-button presses
-    /// remain pending until release confirms a click or movement converts the
-    /// gesture into Luvus text selection. Cached modes keep both paths lock-free.
+    /// A mouse button forwarded into a mouse-tracking pane app: set on press so
+    /// the matching drag/release reach the same app even if the cursor leaves
+    /// the pane mid-drag. Caches the app's drag/SGR flags from press time so
+    /// drags and releases touch no engine lock (the PTY reader holds that mutex
+    /// during output bursts).
     pub mouse_grab: Option<MouseGrab>,
     /// Text to copy to the client's system clipboard (via OSC 52) — set when a
     /// selection finishes, drained + broadcast by the loop.
@@ -12897,13 +12895,12 @@ fi
     }
 
     #[test]
-    fn smart_mouse_selection_preserves_clicks_and_application_drag_escape() {
-        // A mouse-aware agent still receives ordinary clicks, but an unmodified
-        // drag becomes Luvus text selection. Disabling the preference restores
-        // the terminal-standard application-owned drag path.
-        let _env = crate::persist::test_env("mouse-smart-selection");
+    fn clicks_forward_to_a_mouse_tracking_app_instead_of_selecting() {
+        // A pane app that requested mouse tracking (a TUI agent) receives
+        // clicks — e.g. clicking a collapsed tool result expands it — instead
+        // of luvus starting a text selection. Shift restores selection.
+        let _env = crate::persist::test_env("mouse-forward");
         use crate::event::AppEvent;
-        use crate::terminal::pty::InputAction;
         use ratatui::backend::TestBackend;
         use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
@@ -12911,11 +12908,6 @@ fi
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         let id = app.layout().focus;
-        let (input_tx, input_rx) = std::sync::mpsc::channel();
-        app.panes
-            .get_mut(&id)
-            .unwrap()
-            .replace_input_sender_for_test(input_tx);
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let content = app
@@ -12932,7 +12924,7 @@ fi
             .engine
             .lock()
             .unwrap()
-            .advance(b"\x1b[?1002h\x1b[?1006h\x1b[3;1Hsmart-copy");
+            .advance(b"\x1b[?1002h\x1b[?1006h");
 
         let mouse = |kind, col, row, mods| MouseEvent {
             kind,
@@ -12940,8 +12932,7 @@ fi
             row,
             modifiers: mods,
         };
-        // Press inside the content: held pending, with no child input or visible
-        // one-cell selection while Luvus waits to distinguish click from drag.
+        // Press inside the content: forwarded (grab held), no selection begun.
         app.handle_event(AppEvent::Mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             content.x + 4,
@@ -12953,60 +12944,24 @@ fi
         assert_eq!(g.btn, 0);
         assert!(g.drag, "1002: drag tracking cached at press");
         assert!(g.sgr, "1006: SGR encoding cached at press");
-        assert!(!g.forwarded, "smart click is pending until release");
-        assert!(app.selection.is_none(), "pending click paints no selection");
-        assert!(
-            input_rx.try_recv().is_err(),
-            "press is not sent prematurely"
-        );
-
-        // Releasing without movement replays a complete click to the child.
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            content.x + 4,
-            content.y + 2,
-            KeyModifiers::NONE,
-        )));
-        for expected in [b"\x1b[<0;5;3M".as_slice(), b"\x1b[<0;5;3m".as_slice()] {
-            let InputAction::Bytes(bytes) = input_rx.try_recv().expect("click byte sequence")
-            else {
-                panic!("click should enqueue terminal bytes");
-            };
-            assert_eq!(bytes, expected);
-        }
-        assert!(app.mouse_grab.is_none(), "click release resolves the grab");
-
-        // Movement converts the untouched pending press into host selection.
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            content.x,
-            content.y + 2,
-            KeyModifiers::NONE,
-        )));
+        assert!(app.selection.is_none(), "no selection while forwarding");
+        // Drag + release route to the app and close out the grab.
         app.handle_event(AppEvent::Mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            content.x + 9,
+            content.x + 6,
             content.y + 2,
             KeyModifiers::NONE,
         )));
-        assert!(
-            app.mouse_grab.is_none(),
-            "drag transfers ownership to Luvus"
-        );
-        assert!(app.selection.is_some(), "drag creates a host selection");
-        assert!(
-            input_rx.try_recv().is_err(),
-            "host drag sends no child mouse input"
-        );
+        assert!(app.selection.is_none());
         app.handle_event(AppEvent::Mouse(mouse(
             MouseEventKind::Up(MouseButton::Left),
-            content.x + 9,
+            content.x + 6,
             content.y + 2,
             KeyModifiers::NONE,
         )));
-        assert_eq!(app.pending_clipboard.as_deref(), Some("smart-copy"));
+        assert!(app.mouse_grab.is_none(), "release ends the grab");
 
-        // Shift always bypasses forwarding for terminal-standard host selection.
+        // Shift+click bypasses forwarding: luvus's own selection begins.
         app.handle_event(AppEvent::Mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             content.x + 4,
@@ -13016,41 +12971,23 @@ fi
         assert!(app.mouse_grab.is_none());
         assert!(app.selection.is_some(), "shift+drag still selects text");
 
-        // Users of an application with real drag controls can restore the exact
-        // old path. Press, drag, and release are all forwarded immediately.
+        // With tracking off, a plain click selects as before.
         app.selection = None;
-        app.config.mouse_drag_select = false;
+        app.panes
+            .get(&id)
+            .unwrap()
+            .engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[?1002l");
         app.handle_event(AppEvent::Mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             content.x + 4,
             content.y + 2,
             KeyModifiers::NONE,
         )));
-        assert!(app.mouse_grab.is_some_and(|grab| grab.forwarded));
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Drag(MouseButton::Left),
-            content.x + 6,
-            content.y + 2,
-            KeyModifiers::NONE,
-        )));
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Up(MouseButton::Left),
-            content.x + 6,
-            content.y + 2,
-            KeyModifiers::NONE,
-        )));
-        for expected in [
-            b"\x1b[<0;5;3M".as_slice(),
-            b"\x1b[<32;7;3M".as_slice(),
-            b"\x1b[<0;7;3m".as_slice(),
-        ] {
-            let InputAction::Bytes(bytes) = input_rx.try_recv().expect("application drag bytes")
-            else {
-                panic!("application drag should enqueue terminal bytes");
-            };
-            assert_eq!(bytes, expected);
-        }
-        assert!(app.selection.is_none(), "application drag does not select");
+        assert!(app.mouse_grab.is_none());
+        assert!(app.selection.is_some(), "no tracking → selection as before");
     }
 
     /// Tapping a split pane's ⤢ button zooms it to fullscreen, and tapping again
