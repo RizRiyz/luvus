@@ -2227,6 +2227,11 @@ impl App {
         self.update_hover_sidebar(m.column, m.row);
         // Right-click a pane tab, WORKSPACES row, live/scheduled agent, ORCH
         // row, file, dock row, or pane to open the matching context menu.
+        // A mouse-aware application owns an unmodified right-click inside its
+        // terminal content. This lets semantic transcript views copy their own
+        // logical text instead of forcing Luvus to reconstruct it from display
+        // cells. Shift+right-click, or a click on the pane frame, remains the
+        // explicit path to Luvus's pane menu.
         if let MouseEventKind::Down(MouseButton::Right) = m.kind {
             let (c, r) = (m.column, m.row);
             let hit =
@@ -2284,7 +2289,11 @@ impl App {
                 // to the pane menu underneath.
                 self.open_dock_menu(&dock, row_i, c, r);
             } else if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
-                self.open_pane_menu(*id, c, r); // no-op on a git/orch dashboard tab
+                let id = *id;
+                if !m.modifiers.contains(KeyModifiers::SHIFT) && self.begin_mouse_forward(&m, 2) {
+                    return;
+                }
+                self.open_pane_menu(id, c, r); // no-op on a git/orch dashboard tab
             }
             return;
         }
@@ -2450,7 +2459,9 @@ impl App {
                 self.begin_mouse_forward(&m, 1);
                 return;
             }
-            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Middle) => {
+            MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Middle)
+            | MouseEventKind::Drag(MouseButton::Right) => {
                 // A `Ctrl`+press that began on a link turns into a divider grab
                 // the moment it moves; a link only opens on a release that never
                 // left its cell.
@@ -2491,7 +2502,9 @@ impl App {
                 self.update_mouse_selection_cursor(m.column, m.row);
                 return;
             }
-            MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
+            MouseEventKind::Up(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Middle)
+            | MouseEventKind::Up(MouseButton::Right) => {
                 // A double-click already copied and scheduled its highlight
                 // expiry on press. Its release only closes the gesture.
                 if self.dbl_click_release {
