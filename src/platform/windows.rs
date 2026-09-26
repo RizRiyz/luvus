@@ -32,6 +32,47 @@ use windows_sys::Win32::System::Threading::{
 
 mod clipboard;
 
+pub(super) fn directory_identity(path: &Path) -> Option<super::DirectoryIdentity> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: the path is NUL-terminated, and the owned handle is closed below.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `handle` is valid and `info` is writable for this call.
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) } != 0;
+    // SAFETY: `handle` is owned by this function and is no longer needed.
+    unsafe { CloseHandle(handle) };
+    if !ok || info.dwVolumeSerialNumber == 0 {
+        return None;
+    }
+    let file = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    if file == 0 {
+        return None;
+    }
+    Some(super::DirectoryIdentity {
+        volume: u64::from(info.dwVolumeSerialNumber),
+        file,
+    })
+}
+
 pub(super) fn clipboard_image() -> Option<Vec<u8>> {
     clipboard::clipboard_image()
 }
