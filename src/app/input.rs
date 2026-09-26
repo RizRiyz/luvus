@@ -2225,8 +2225,20 @@ impl App {
         // highlight (docs/27, RESIZE-4), plus the sidebar edge seam (docs/29).
         self.update_hover_divider(m.column, m.row);
         self.update_hover_sidebar(m.column, m.row);
+        // The child protocol permits more than one pressed button, but Luvus
+        // deliberately tracks one forwarded gesture at a time. Ignore another
+        // press until the owning button releases so it cannot replace the grab
+        // and leave the child believing the first button is still held.
+        if self.mouse_grab.is_some() && matches!(m.kind, MouseEventKind::Down(_)) {
+            return;
+        }
         // Right-click a pane tab, WORKSPACES row, live/scheduled agent, ORCH
         // row, file, dock row, or pane to open the matching context menu.
+        // A mouse-aware application owns an unmodified right-click inside its
+        // terminal content. This lets semantic transcript views copy their own
+        // logical text instead of forcing Luvus to reconstruct it from display
+        // cells. Shift+right-click, or a click on the pane frame, remains the
+        // explicit path to Luvus's pane menu.
         if let MouseEventKind::Down(MouseButton::Right) = m.kind {
             let (c, r) = (m.column, m.row);
             let hit =
@@ -2284,7 +2296,11 @@ impl App {
                 // to the pane menu underneath.
                 self.open_dock_menu(&dock, row_i, c, r);
             } else if let Some((id, _)) = self.pane_rects.iter().find(|(_, rect)| hit(*rect)) {
-                self.open_pane_menu(*id, c, r); // no-op on a git/orch dashboard tab
+                let id = *id;
+                if !m.modifiers.contains(KeyModifiers::SHIFT) && self.begin_mouse_forward(&m, 2) {
+                    return;
+                }
+                self.open_pane_menu(id, c, r); // no-op on a git/orch dashboard tab
             }
             return;
         }
@@ -2450,7 +2466,21 @@ impl App {
                 self.begin_mouse_forward(&m, 1);
                 return;
             }
-            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Middle) => {
+            MouseEventKind::Drag(button @ MouseButton::Left)
+            | MouseEventKind::Drag(button @ MouseButton::Middle)
+            | MouseEventKind::Drag(button @ MouseButton::Right) => {
+                // Only the button that opened a forwarded gesture may move it.
+                // An unrelated drag is consumed without touching the child or
+                // an existing Luvus selection.
+                if let Some(g) = self.mouse_grab {
+                    if g.button == button && g.drag {
+                        self.send_grabbed_mouse(g, MouseSeq::Drag, m.column, m.row);
+                    }
+                    return;
+                }
+                if button != MouseButton::Left {
+                    return;
+                }
                 // A `Ctrl`+press that began on a link turns into a divider grab
                 // the moment it moves; a link only opens on a release that never
                 // left its cell.
@@ -2476,22 +2506,30 @@ impl App {
                     self.update_resize(m.column, m.row);
                     return;
                 }
-                // A forwarded press owns its drag — reported with the flags
-                // cached at press time (no engine lock), and only when the app
-                // asked for drag/motion tracking (a click-only app is left alone).
-                if let Some(g) = self.mouse_grab {
-                    if g.drag {
-                        self.send_grabbed_mouse(g, MouseSeq::Drag, m.column, m.row);
-                    }
-                    return;
-                }
                 // Dragging after a double-click turns it back into an ordinary
                 // selection, so its release copies what was dragged.
                 self.dbl_click_release = false;
                 self.update_mouse_selection_cursor(m.column, m.row);
                 return;
             }
-            MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Middle) => {
+            MouseEventKind::Up(button @ MouseButton::Left)
+            | MouseEventKind::Up(button @ MouseButton::Middle)
+            | MouseEventKind::Up(button @ MouseButton::Right) => {
+                // A secondary button cannot close the active forwarded grab.
+                // Consume its release and wait for the owning button instead.
+                if let Some(g) = self.mouse_grab {
+                    if g.button == button {
+                        self.mouse_grab = None;
+                        self.send_grabbed_mouse(g, MouseSeq::Release, m.column, m.row);
+                    }
+                    return;
+                }
+                // Middle and right releases have no host-selection semantics.
+                // In particular, a right drag that began outside every pane
+                // must not extend and copy an older left-button selection.
+                if button != MouseButton::Left {
+                    return;
+                }
                 // A double-click already copied and scheduled its highlight
                 // expiry on press. Its release only closes the gesture.
                 if self.dbl_click_release {
@@ -2518,11 +2556,6 @@ impl App {
                 }
                 if self.resize_drag.is_some() {
                     self.end_resize();
-                    return;
-                }
-                // Close out a forwarded press with its release.
-                if let Some(g) = self.mouse_grab.take() {
-                    self.send_grabbed_mouse(g, MouseSeq::Release, m.column, m.row);
                     return;
                 }
                 self.update_mouse_selection_cursor(m.column, m.row);
@@ -3448,6 +3481,10 @@ impl App {
         self.focus_pane_global(id);
         let g = crate::app::MouseGrab {
             pane: id,
+            button: match m.kind {
+                ratatui::crossterm::event::MouseEventKind::Down(button) => button,
+                _ => return false,
+            },
             btn: base_btn + mouse_mod_bits(m.modifiers),
             drag: mm.drag,
             sgr: mm.sgr,
@@ -8049,5 +8086,51 @@ mod link_click_tests {
         app.status.get_mut(&pane).expect("pane status").agent = "codex".into();
         assert_eq!(app.selection_text(), shell);
         assert_eq!(shell.as_deref(), Some(" hello"));
+    }
+
+    #[test]
+    fn unowned_right_drag_does_not_change_or_copy_a_left_selection() {
+        let _env = crate::persist::test_env("right-drag-selection-owner");
+        let (mut app, _term, _) = fixture_showing("alpha beta", 0);
+        let pane = app.layout().focus;
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("pane content rect");
+        app.selection = Some(crate::app::Selection {
+            pane,
+            content,
+            anchor: (content.x, content.y),
+            cursor: (content.x + 4, content.y),
+            retained: None,
+            scrolled: false,
+            dragging: false,
+        });
+        assert_eq!(app.selection_text().as_deref(), Some("alpha"));
+
+        // The status row belongs to neither a pane nor a right-click menu.
+        let outside = (0, 39);
+        let inside = (content.x + 9, content.y);
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            outside,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Right),
+            inside,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Right),
+            inside,
+            KeyModifiers::NONE,
+        ));
+
+        assert_eq!(app.selection_text().as_deref(), Some("alpha"));
+        assert!(app.pending_clipboard.is_none());
+        assert!(app.mouse_grab.is_none());
     }
 }

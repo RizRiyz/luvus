@@ -240,7 +240,7 @@ pub static EN: Catalog = Catalog {
         ],
         &[
             "focus a pane or activate a row / button",
-            "context menu for a pane, workspace, agent, or tab",
+            "app action in a mouse-aware pane / Luvus menu elsewhere or with Shift",
             "scroll pane history or a list",
             "resize the split",
             "zoom it on touch / mobile",
@@ -283,7 +283,7 @@ pub static ES: Catalog = Catalog {
 &["nueva tarea", "iniciar / terminar / fusionar", "liberar / eliminar", "detalle / ir al panel del trabajador", "mover el cursor", "cerrar el tablero"],
 &["mover", "entrar en carpeta / subir", "abrir la carpeta como espacio", "nueva carpeta / abrir como worktree", "cancelar"],
 &["seleccionar texto y copiar al soltar", "seleccionar dentro de una app que usa el ratón, como un agente", "pegado del terminal en el panel enfocado"],
-&["enfocar un panel o activar una fila / botón", "menú contextual de panel, espacio, agente o pestaña", "desplazar historial del panel o una lista", "redimensionar la división", "ampliar con toque / móvil"],],
+&["enfocar un panel o activar una fila / botón", "acción de la app en un panel con ratón / menú de Luvus fuera o con Shift", "desplazar historial del panel o una lista", "redimensionar la división", "ampliar con toque / móvil"],],
     modules_empty: "No hay módulos instalados. Ejecuta `luvus module link <dir>`.", module_unavailable: "no disponible", module_action: "acción", module_actions: "acciones", module_pane: "panel", module_panes: "paneles", module_dock: "panel acoplado", module_docks: "paneles acoplados", module_setting: "ajuste", module_settings: "ajustes", module_edit_hint: "Enter guardar · Esc cancelar",
     theme_bundled: "El tema {id} viene incluido y no se puede eliminar", theme_removing: "Eliminando tema {id}…", theme_removed: "Tema {id} eliminado", theme_remove_failed: "No se pudo eliminar {id}: {error}",
 };
@@ -306,7 +306,7 @@ pub static PT: Catalog = Catalog {
 &["nova tarefa", "iniciar / concluir / mesclar", "liberar / excluir", "detalhe / ir ao painel do agente", "mover o cursor", "fechar o quadro"],
 &["mover", "entrar na pasta / subir", "abrir a pasta como espaço", "nova pasta / abrir como worktree", "cancelar"],
 &["selecionar texto e copiar ao soltar", "selecionar dentro de um app que usa o mouse, como um agente", "colar do terminal no painel focado"],
-&["focar um painel ou ativar uma linha / botão", "menu de contexto de painel, espaço, agente ou aba", "rolar histórico do painel ou uma lista", "redimensionar a divisão", "ampliar por toque / móvel"],],
+&["focar um painel ou ativar uma linha / botão", "ação do app em painel com mouse / menu do Luvus fora ou com Shift", "rolar histórico do painel ou uma lista", "redimensionar a divisão", "ampliar por toque / móvel"],],
     modules_empty: "Nenhum módulo instalado. Execute `luvus module link <dir>`.", module_unavailable: "indisponível", module_action: "ação", module_actions: "ações", module_pane: "painel", module_panes: "painéis", module_dock: "painel acoplado", module_docks: "painéis acoplados", module_setting: "configuração", module_settings: "configurações", module_edit_hint: "Enter salvar · Esc cancelar",
     theme_bundled: "O tema {id} vem incluído e não pode ser removido", theme_removing: "Removendo tema {id}…", theme_removed: "Tema {id} removido", theme_remove_failed: "Não foi possível remover {id}: {error}",
 };
@@ -329,7 +329,7 @@ pub static FR: Catalog = Catalog {
 &["nouvelle tâche", "démarrer / terminer / fusionner", "libérer / supprimer", "détail / aller au volet de l'agent", "déplacer le curseur", "fermer le tableau"],
 &["déplacer", "entrer dans le dossier / remonter", "ouvrir le dossier comme espace", "nouveau dossier / ouvrir comme worktree", "annuler"],
 &["sélectionner le texte et copier au relâchement", "sélectionner dans une app qui gère la souris, comme un agent", "coller depuis le terminal dans le volet ciblé"],
-&["cibler un volet ou activer une ligne / un bouton", "menu contextuel de volet, espace, agent ou onglet", "faire défiler l'historique du volet ou une liste", "redimensionner la division", "agrandir par toucher / mobile"],],
+&["cibler un volet ou activer une ligne / un bouton", "action de l’app dans un volet avec souris / menu Luvus ailleurs ou avec Shift", "faire défiler l'historique du volet ou une liste", "redimensionner la division", "agrandir par toucher / mobile"],],
     modules_empty: "Aucun module installé. Exécutez `luvus module link <dir>`.", module_unavailable: "indisponible", module_action: "action", module_actions: "actions", module_pane: "volet", module_panes: "volets", module_dock: "panneau ancré", module_docks: "panneaux ancrés", module_setting: "paramètre", module_settings: "paramètres", module_edit_hint: "Entrée enregistrer · Échap annuler",
     theme_bundled: "Le thème {id} est inclus et ne peut pas être supprimé", theme_removing: "Suppression du thème {id}…", theme_removed: "Thème {id} supprimé", theme_remove_failed: "Impossible de supprimer {id} : {error}",
 };
@@ -352,7 +352,7 @@ pub static DE: Catalog = Catalog {
 &["neue Aufgabe", "starten / erledigen / mergen", "freigeben / löschen", "Details / zum Worker-Bereich", "Cursor bewegen", "Board schließen"],
 &["bewegen", "Ordner öffnen / nach oben", "Ordner als Arbeitsbereich öffnen", "neuer Ordner / als Worktree öffnen", "abbrechen"],
 &["Text auswählen und beim Loslassen kopieren", "in einer mausfähigen App wie einem Agenten auswählen", "Terminalinhalt in den fokussierten Bereich einfügen"],
-&["Bereich fokussieren oder Zeile / Schaltfläche aktivieren", "Kontextmenü für Bereich, Arbeitsbereich, Agent oder Tab", "Bereichsverlauf oder Liste scrollen", "Teilung vergrößern", "per Touch / mobil zoomen"],],
+&["Bereich fokussieren oder Zeile / Schaltfläche aktivieren", "App-Aktion im Mausbereich / Luvus-Menü anderswo oder mit Shift", "Bereichsverlauf oder Liste scrollen", "Teilung vergrößern", "per Touch / mobil zoomen"],],
     modules_empty: "Keine Module installiert. Führe `luvus module link <dir>` aus.", module_unavailable: "nicht verfügbar", module_action: "Aktion", module_actions: "Aktionen", module_pane: "Bereich", module_panes: "Bereiche", module_dock: "Dock", module_docks: "Docks", module_setting: "Einstellung", module_settings: "Einstellungen", module_edit_hint: "Eingabe speichern · Esc abbrechen",
     theme_bundled: "Theme {id} ist integriert und kann nicht entfernt werden", theme_removing: "Theme {id} wird entfernt…", theme_removed: "Theme {id} entfernt", theme_remove_failed: "{id} konnte nicht entfernt werden: {error}",
 };
@@ -488,7 +488,7 @@ pub static ID: Catalog = Catalog {
         ],
 &[
             "fokus panel atau aktifkan baris / tombol",
-            "menu konteks panel, ruang kerja, agen, atau tab",
+            "aksi aplikasi di panel bermouse / menu Luvus di luar atau dengan Shift",
             "gulir riwayat panel atau daftar",
             "ubah ukuran pembagian",
             "zoom dengan sentuhan / seluler",
@@ -636,7 +636,7 @@ pub static ZH: Catalog = Catalog {
         ],
         &[
             "聚焦窗格或激活行 / 按钮",
-            "窗格、工作区、代理或标签的上下文菜单",
+            "鼠标应用窗格中的应用操作 / 其他位置或按 Shift 打开 Luvus 菜单",
             "滚动窗格历史或列表",
             "调整分隔线",
             "触摸 / 移动端缩放",
@@ -793,7 +793,7 @@ pub static JA: Catalog = Catalog {
         ],
         &[
             "ペインをフォーカス、または行 / ボタンを操作",
-            "ペイン、ワークスペース、エージェント、タブのコンテキストメニュー",
+            "マウス対応ペインのアプリ操作 / 他の場所または Shift で Luvus メニュー",
             "ペイン履歴または一覧をスクロール",
             "分割位置をリサイズ",
             "タッチ / モバイルでズーム",
@@ -951,7 +951,7 @@ pub static KO: Catalog = Catalog {
         ],
         &[
             "패널 포커스 또는 행 / 버튼 활성화",
-            "패널, 작업 공간, 에이전트, 탭의 컨텍스트 메뉴",
+            "마우스 지원 패널의 앱 동작 / 다른 곳 또는 Shift로 Luvus 메뉴",
             "패널 기록 또는 목록 스크롤",
             "분할 크기 조정",
             "터치 / 모바일에서 확대",

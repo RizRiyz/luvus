@@ -15,15 +15,19 @@ like, and luvus tiles them automatically.
 
 | Do this | Mouse | Key |
 |---|---|---|
-| Split side by side | right-click a pane → **Split** | `Ctrl+Space v` |
-| Split top / bottom | right-click a pane → **Split down** | `Ctrl+Space s` |
+| Split side by side | right-click the pane title, or Shift+right-click its body → **Split** | `Ctrl+Space v` |
+| Split top / bottom | right-click the pane title, or Shift+right-click its body → **Split down** | `Ctrl+Space s` |
 | Focus a pane | click it | `Ctrl+Space` then an arrow to preview; more arrows move, `Enter` focuses, `Esc` cancels; `hjkl` focuses immediately |
-| Move a pane to another tab | right-click → **Move to Tab** | n/a |
+| Move a pane to another tab | right-click the title, or Shift+right-click the body → **Move to Tab** | n/a |
 | Zoom (fullscreen) a pane | n/a | `Ctrl+Space z` |
-| Close a pane | the `×` on its title, or right-click → **Close** | `Ctrl+Space x` |
+| Close a pane | the `×` on its title, or open its pane menu → **Close** | `Ctrl+Space x` |
 
 Each split pane shows a title bar with a **status dot** and its working
 directory. The focused pane's frame is brighter.
+
+Mouse-aware terminal applications receive plain drag and right-click gestures
+inside pane content. This preserves their native selection and copy behavior.
+Hold `Shift` for Luvus selection or its pane menu.
 
 In a tiled tab, arrow navigation highlights a candidate without changing the
 active pane or sending it input. When Commander is open, `Down` from the bottom

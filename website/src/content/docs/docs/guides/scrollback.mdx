@@ -59,12 +59,22 @@ application-cursor pager), Luvus forwards those keys unchanged. `Shift+↑`,
 
 ## Copying
 
-Drag across a pane to select. Release requests a copy; the *Copied to Clipboard*
-toast appears only after a native clipboard helper confirms success. Luvus requests both your native OS clipboard (`pbcopy` / `wl-copy` /
-`xclip` / `clip`) and OSC 52. The terminal must permit OSC 52 clipboard writes;
-that escape sequence does not acknowledge whether the clipboard changed.
-Soft-wrapped display rows copy as one logical line. Hard line breaks and any
-leading indentation inside the selection remain unchanged.
+In a normal shell, drag across a pane to select with Luvus. Release requests a
+copy. The *Copied to Clipboard* toast appears only after a native clipboard
+helper confirms success. Luvus requests both your native OS clipboard
+(`pbcopy` / `wl-copy` / `xclip` / `clip`) and OSC 52. The terminal must permit
+OSC 52 clipboard writes because that escape sequence does not acknowledge
+whether the clipboard changed. Soft-wrapped display rows copy as one logical
+line. Hard line breaks and any leading indentation inside the selection remain
+unchanged.
+
+When an application enables terminal mouse reporting, plain mouse gestures
+belong to that application. This lets transcript interfaces select their
+underlying logical text instead of copying rendered line wraps or controls. In
+Codex, drag to select and right-click the selection to use its native semantic
+copy. Hold `Shift` while dragging to force Luvus selection instead. Use
+`Shift`+right-click, or right-click the pane title or frame, to open the Luvus
+pane menu.
 
 Clipboard helpers run on the **client machine**, including when attached over
 SSH. On Linux, the client uses `wl-copy` when `WAYLAND_DISPLAY` is set and
@@ -87,9 +97,9 @@ No clipboard text or helper stderr is logged.
 For Wayland troubleshooting, run `wl-copy` and `wl-paste` from the same outer
 terminal that launches the Luvus client. Check `WAYLAND_DISPLAY` and
 `XDG_RUNTIME_DIR` there, not just in the detached server. A socket symlink is not
-required. Applications inside a pane can also copy with OSC 52 (for example
-Claude Code drag-select or `printf` with a `\e]52;c;…` sequence). Luvus forwards
-those writes through the same client clipboard path as its own selection copy.
+required. Applications inside a pane can also copy with OSC 52, such as
+`printf` with a `\e]52;c;…` sequence. Luvus forwards those writes through the
+same client clipboard path as its own selection copy.
 OSC 52 read (paste from the host clipboard into a pane) is not enabled. Rapid
 pane and selection copies retain only the latest pending text.
 
