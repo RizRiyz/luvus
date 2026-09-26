@@ -6434,6 +6434,7 @@ impl App {
             return;
         }
         let id = workspace_id.clone();
+        let progress_path = path.clone();
         let result = self.io_jobs.submit_parallel(self.app_tx.clone(), move |_| {
             let checked = ensure_worktree_identity(&path, identity)
                 .and_then(|_| linked_worktree_branch(&repo, &path))
@@ -6447,10 +6448,9 @@ impl App {
             })
         });
         if let Err(error) = result {
-            self.worktree_deletes_inflight.remove(&workspace_id);
-            self.show_toast(format!("delete failed: {error}"));
+            self.finish_worktree_delete(&workspace_id, &progress_path, Err(error.to_string()));
         } else {
-            self.show_toast("deleting worktree…");
+            self.show_worktree_delete_progress(&workspace_id, &progress_path);
         }
     }
 
@@ -6465,8 +6465,7 @@ impl App {
         let branch = match checked {
             Ok(branch) => branch,
             Err(error) => {
-                self.worktree_deletes_inflight.remove(&workspace_id);
-                self.show_toast(format!("delete failed: {error}"));
+                self.finish_worktree_delete(&workspace_id, &path, Err(error));
                 return;
             }
         };
@@ -6478,8 +6477,11 @@ impl App {
                 })
         });
         if !still_target {
-            self.worktree_deletes_inflight.remove(&workspace_id);
-            self.show_toast("delete cancelled: worktree workspace changed");
+            self.finish_worktree_delete(
+                &workspace_id,
+                &path,
+                Err("worktree workspace changed".into()),
+            );
             return;
         }
         let provider = crate::worktree::module_remove_job(
@@ -6497,34 +6499,34 @@ impl App {
         match provider {
             Ok(Some(job)) => {
                 if self.worktree_provider_inflight || self.pending_worktree_provider.is_some() {
-                    self.worktree_deletes_inflight.remove(&workspace_id);
-                    self.show_toast(
-                        "delete failed: a worktree provider operation is already pending",
+                    self.finish_worktree_delete(
+                        &workspace_id,
+                        &path,
+                        Err("a worktree provider operation is already pending".into()),
                     );
                     return;
                 }
                 self.pending_worktree_provider = Some(job);
                 let id = workspace_id.clone();
+                let rejected_path = path.clone();
                 let (start, ready) = std::sync::mpsc::channel();
                 let scheduled = self.schedule_pending_worktree_remove_after(
                     ready,
                     path.clone(),
                     identity,
                     move |app, result| {
-                        app.worktree_deletes_inflight.remove(&id);
-                        match result {
-                            Ok(()) => match app.remove_worktree_explicit(&repo, &path, true) {
-                                Ok(()) => app.show_toast("worktree deleted"),
-                                Err(error) => app.show_toast(format!("delete failed: {error}")),
-                            },
-                            Err(error) => app.show_toast(format!("delete failed: {error}")),
-                        }
+                        let result =
+                            result.and_then(|()| app.remove_worktree_explicit(&repo, &path, true));
+                        app.finish_worktree_delete(&id, &path, result);
                         true
                     },
                 );
                 if let Err(error) = scheduled {
-                    self.worktree_deletes_inflight.remove(&workspace_id);
-                    self.show_toast(format!("delete failed: {error}"));
+                    self.finish_worktree_delete(
+                        &workspace_id,
+                        &rejected_path,
+                        Err(error.to_string()),
+                    );
                 } else {
                     if let Some(index) = self.workspaces.iter().position(|ws| ws.id == workspace_id)
                     {
@@ -6535,6 +6537,8 @@ impl App {
             }
             Ok(None) => {
                 let id = workspace_id.clone();
+                let completion_path = path.clone();
+                let rejected_path = path.clone();
                 let (start, ready) = std::sync::mpsc::channel();
                 let scheduled = self.io_jobs.submit_parallel(self.app_tx.clone(), move |_| {
                     let result = ready
@@ -6556,17 +6560,16 @@ impl App {
                             Ok(())
                         });
                     Box::new(move |app| {
-                        app.worktree_deletes_inflight.remove(&id);
-                        match result {
-                            Ok(()) => app.show_toast("worktree deleted"),
-                            Err(error) => app.show_toast(format!("delete failed: {error}")),
-                        }
+                        app.finish_worktree_delete(&id, &completion_path, result);
                         true
                     })
                 });
                 if let Err(error) = scheduled {
-                    self.worktree_deletes_inflight.remove(&workspace_id);
-                    self.show_toast(format!("delete failed: {error}"));
+                    self.finish_worktree_delete(
+                        &workspace_id,
+                        &rejected_path,
+                        Err(error.to_string()),
+                    );
                 } else {
                     if let Some(index) = self.workspaces.iter().position(|ws| ws.id == workspace_id)
                     {
@@ -6576,32 +6579,81 @@ impl App {
                 }
             }
             Err(error) => {
-                self.worktree_deletes_inflight.remove(&workspace_id);
-                self.show_toast(format!("delete failed: {error}"));
+                self.finish_worktree_delete(&workspace_id, &path, Err(error));
             }
         }
     }
 
-    /// Keyed per worktree, so two removals at once do not clear each other's.
-    fn delete_progress_key(name: &str) -> crate::bar::BarWidgetKey {
-        let slug: String = name
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        crate::bar::BarWidgetKey::new("core", format!("worktree-delete-{slug}"))
+    fn delete_progress_key(workspace_id: &str) -> crate::bar::BarWidgetKey {
+        crate::bar::BarWidgetKey::new("core", format!("worktree-delete-{workspace_id}"))
     }
 
-    /// Rename a worktree folder aside, keeping the old parent so the rename stays
-    /// on one volume. `None` means it failed, so the caller removes it inline.
-    fn park_for_delete(path: &Path) -> Option<PathBuf> {
-        let parent = path.parent()?;
-        let name = path.file_name()?.to_string_lossy().into_owned();
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or_default();
-        let parked = parent.join(format!(".{name}.deleting-{stamp}"));
-        std::fs::rename(path, &parked).ok().map(|()| parked)
+    fn show_worktree_delete_progress(&mut self, workspace_id: &str, path: &Path) {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("worktree");
+        let label = name.chars().take(24).collect::<String>();
+        if let Ok(widget) = crate::bar::BarWidget::new(
+            Self::delete_progress_key(workspace_id),
+            crate::bar::BarRegion::BottomRight,
+            vec![crate::bar::BarSegment::text(
+                format!("deleting {label}"),
+                crate::bar::BarTone::Warning,
+            )],
+            vec![crate::bar::BarSegment::text(
+                "deleting",
+                crate::bar::BarTone::Warning,
+            )],
+            95,
+        ) {
+            let _ = self.bar.push_widget(widget);
+        }
+        self.show_toast("deleting worktree…");
+    }
+
+    fn finish_worktree_delete(
+        &mut self,
+        workspace_id: &str,
+        path: &Path,
+        result: Result<(), String>,
+    ) {
+        use crate::bar::NotificationLevel::{Error, Success};
+
+        self.worktree_deletes_inflight.remove(workspace_id);
+        self.bar
+            .remove_widget(&Self::delete_progress_key(workspace_id).canonical());
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("worktree");
+        let (toast, notification, level, ttl_ms) = match result {
+            Ok(()) => (
+                "worktree deleted".to_string(),
+                format!("{name}: files deleted"),
+                Success,
+                20_000,
+            ),
+            Err(error) => (
+                format!("delete failed: {error}"),
+                format!("{name}: deletion failed: {error}"),
+                Error,
+                60_000,
+            ),
+        };
+        self.show_toast(toast);
+        let _ = self.bar.push_notification(
+            crate::bar::NotificationPush {
+                owner: None,
+                text: backend::bounded_text(&notification, crate::bar::MAX_TEXT_BYTES),
+                level,
+                ttl_ms,
+                action: None,
+                value: None,
+                dedupe_key: None,
+            },
+            Instant::now(),
+        );
     }
 
     /// Open the rename modal for workspace `index`, pre-filled with its label.
@@ -9330,6 +9382,8 @@ mod tests {
         app.confirm_worktree_delete();
         assert!(app.worktree_deletes_inflight.contains(&id));
         assert!(app.workspaces.iter().any(|workspace| workspace.id == id));
+        let progress_key = App::delete_progress_key(&id).canonical();
+        assert!(app.bar.widgets.contains_key(&progress_key));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.worktree_deletes_inflight.contains(&id) {
@@ -9343,6 +9397,8 @@ mod tests {
         assert!(crate::git::local::branch_exists(&repo, "feature"));
         assert!(!app.workspaces.iter().any(|workspace| workspace.id == id));
         assert_eq!(crate::git::local::worktrees(&repo).unwrap().len(), 1);
+        assert!(!app.bar.widgets.contains_key(&progress_key));
+        assert_eq!(app.bar.notifications.len(), 1);
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -9399,6 +9455,11 @@ mod tests {
         assert!(app.workspaces.iter().any(|workspace| workspace.id == id));
         assert!(wt.exists());
         assert_eq!(crate::git::local::worktrees(&repo).unwrap().len(), 2);
+        assert!(!app
+            .bar
+            .widgets
+            .contains_key(&App::delete_progress_key(&id).canonical()));
+        assert_eq!(app.bar.notifications.len(), 1);
         app.drain_io_jobs();
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -9431,6 +9492,7 @@ mod tests {
                 break;
             }
         }
+        app.show_worktree_delete_progress(&id, &wt);
         app.continue_worktree_delete(
             id.clone(),
             repo.clone(),
@@ -9442,8 +9504,30 @@ mod tests {
         assert!(app.workspaces.iter().any(|workspace| workspace.id == id));
         assert!(wt.exists());
         assert_eq!(crate::git::local::worktrees(&repo).unwrap().len(), 2);
+        assert!(!app
+            .bar
+            .widgets
+            .contains_key(&App::delete_progress_key(&id).canonical()));
+        assert_eq!(app.bar.notifications.len(), 1);
         app.drain_io_jobs();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn worktree_delete_progress_keys_do_not_collide_for_similar_names() {
+        let _env = crate::persist::test_env("wt-delete-progress-keys");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.show_worktree_delete_progress("workspace_a", Path::new("/repo/feat_k"));
+        app.show_worktree_delete_progress("workspace_b", Path::new("/repo/feat-k"));
+        assert!(app
+            .bar
+            .widgets
+            .contains_key(&App::delete_progress_key("workspace_a").canonical()));
+        assert!(app
+            .bar
+            .widgets
+            .contains_key(&App::delete_progress_key("workspace_b").canonical()));
     }
 
     #[test]

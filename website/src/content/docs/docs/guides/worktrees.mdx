@@ -112,8 +112,9 @@ would remove them) are left out, since there is nothing to open.
 Right-click a linked worktree in the sidebar, choose **Delete Worktree**, then
 confirm. Luvus validates that the target is a linked checkout (never the main
 checkout), closes its workspace, and removes it in bounded background work.
-The dialog closes immediately; a toast reports completion or failure. The Git
-branch is kept. If the background queue is full or validation fails, the
+The dialog closes immediately; the Luvus Bar shows deletion in progress and
+leaves a success or failure notification when it finishes. The Git branch is
+kept. If the background queue is full or validation fails, the
 workspace remains open. If removal fails after it starts, the directory may
 still exist and can be reopened from the main checkout.
 

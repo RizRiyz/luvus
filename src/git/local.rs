@@ -196,11 +196,6 @@ pub fn worktree_remove_force(repo: &Path, path: &Path) -> Result<(), String> {
     .map(|_| ())
 }
 
-/// `git worktree prune` — drop registry entries whose folders have gone.
-pub fn worktree_prune(repo: &Path) -> Result<(), String> {
-    run(repo, &["worktree", "prune"]).map(|_| ())
-}
-
 /// Branch + ahead/behind + working-tree changes + stashes.
 pub fn status(cwd: &Path) -> Result<RepoStatus, String> {
     let raw = run(cwd, &["status", "--porcelain=v1", "--branch"])?;
