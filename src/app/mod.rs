@@ -5477,6 +5477,12 @@ impl App {
         self.create_workspace_at_with_focus(cwd, true)
     }
 
+    fn worktree_delete_pending(&self) -> bool {
+        // An unknown path may alias the checkout being removed. Fail closed
+        // briefly rather than performing a blocking identity lookup on the app loop.
+        !self.worktree_deletes_inflight.is_empty()
+    }
+
     /// Open a static workspace while optionally preserving the current selection.
     ///
     /// Automatic attach-open uses `focus = false`: the new workspace must exist in
@@ -5484,14 +5490,7 @@ impl App {
     /// from the workspace the server already had selected. Remember the selection
     /// by stable ID so this stays correct if workspace ordering changes later.
     fn create_workspace_at_with_focus(&mut self, cwd: PathBuf, focus: bool) -> bool {
-        if self
-            .worktree_deletes_inflight
-            .values()
-            .any(|(path, identity)| {
-                crate::platform::same_path(path, &cwd)
-                    || crate::platform::directory_identity(&cwd) == Some(*identity)
-            })
-        {
+        if self.worktree_delete_pending() {
             self.show_toast("worktree deletion is still pending");
             return false;
         }
@@ -6444,7 +6443,11 @@ impl App {
         if self.workspaces.iter().any(|workspace| {
             workspace.id != workspace_id
                 && (crate::platform::same_path(&workspace.cwd, &path)
-                    || crate::platform::directory_identity(&workspace.cwd) == Some(identity))
+                    || workspace
+                        .worktree
+                        .as_ref()
+                        .and_then(|membership| membership.directory_identity)
+                        == Some(identity))
         }) {
             self.show_toast("close other workspaces for this worktree before deleting");
             return;
@@ -8107,6 +8110,10 @@ impl App {
         let Some(s) = self.resumable.get(idx).cloned() else {
             return;
         };
+        if self.worktree_delete_pending() {
+            self.show_toast("worktree deletion is still pending");
+            return;
+        }
         let Some(resume) = crate::agent::resume_command(&s.agent, &s.session_id) else {
             return;
         };
@@ -9554,13 +9561,15 @@ mod tests {
             .unwrap();
 
         // The background job remains in flight after its original workspace
-        // closes. Neither the same path nor an alias may spawn another pane.
+        // closes. No new workspace may spawn until alias identity is safe to check.
         app.worktree_deletes_inflight
             .insert(id.clone(), (wt.clone(), identity));
         let index = app.workspaces.iter().position(|ws| ws.id == id).unwrap();
         app.close_workspace(index);
         let count = app.workspaces.len();
         assert!(!app.create_workspace_at(wt.clone()));
+        assert_eq!(app.workspaces.len(), count);
+        assert!(!app.create_workspace_at(repo.clone()));
         assert_eq!(app.workspaces.len(), count);
         #[cfg(unix)]
         {
@@ -9577,6 +9586,43 @@ mod tests {
     }
 
     #[test]
+    fn worktree_delete_pending_blocks_agent_resume_before_pane_spawn() {
+        let _env = crate::persist::test_env("wt-delete-resume");
+        let (base, _repo, wt) = repo_with_sibling_worktree("wt-delete-resume");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(wt.clone()));
+        let id = app.ws().id.clone();
+        let identity = app
+            .ws()
+            .worktree
+            .as_ref()
+            .unwrap()
+            .directory_identity
+            .unwrap();
+        app.worktree_deletes_inflight
+            .insert(id.clone(), (wt.clone(), identity));
+        let index = app.workspaces.iter().position(|ws| ws.id == id).unwrap();
+        app.close_workspace(index);
+        app.resumable = vec![crate::agent::SessionInfo {
+            agent: "claude".into(),
+            session_id: "pending-delete".into(),
+            cwd: wt.clone(),
+            updated: std::time::SystemTime::now(),
+        }];
+        let before_panes = app.panes.len();
+        let before_workspaces = app.workspaces.len();
+
+        app.resume_session(0);
+        assert_eq!(app.panes.len(), before_panes);
+        assert_eq!(app.workspaces.len(), before_workspaces);
+        assert_eq!(app.resumable.len(), 1, "resume remains available");
+        assert!(wt.exists());
+        app.worktree_deletes_inflight.remove(&id);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn worktree_delete_rejects_another_open_workspace_at_the_target() {
         let _env = crate::persist::test_env("wt-delete-duplicate-open");
         let (base, repo, wt) = repo_with_sibling_worktree("wt-delete-duplicate-open");
@@ -9584,7 +9630,15 @@ mod tests {
         let mut app = App::new(80, 24, tx).unwrap();
         assert!(app.create_workspace_at(wt.clone()));
         let original = app.ws().id.clone();
-        assert!(app.create_workspace_at(wt.clone()));
+        #[cfg(unix)]
+        let duplicate_path = {
+            let alias = base.join("alias");
+            std::os::unix::fs::symlink(&wt, &alias).unwrap();
+            alias
+        };
+        #[cfg(not(unix))]
+        let duplicate_path = wt.clone();
+        assert!(app.create_workspace_at(duplicate_path));
         let duplicate = app.ws().id.clone();
 
         app.worktree_delete = Some(original.clone());
