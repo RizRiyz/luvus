@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 /// Physical directory identity, used to reject a replacement checkout at an
 /// already-confirmed worktree path. Neither a path nor a Git branch alone is
 /// stable across removal and recreation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DirectoryIdentity {
     volume: u64,
     file: u64,

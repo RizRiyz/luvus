@@ -116,6 +116,7 @@ removal command:
 [worktree_provider]
 command = ["./create-worktree"]
 remove_command = ["./remove-worktree"] # optional
+identity_bound_remove = true # only if remove_command binds expected_identity
 platforms = ["macos", "linux"] # optional
 ```
 
@@ -147,6 +148,17 @@ Removal receives:
   "force": false
 }
 ```
+
+Confirmed sidebar deletion also includes `expected_identity` with `volume` and
+`file` (the directory's device/inode on Unix or volume/file ID on Windows).
+Set `identity_bound_remove = true` only when the remove command binds its
+destructive operation to that directory identity and rejects a replaced target;
+checking the path only before deletion does not prevent a replacement race.
+One approach is to move the linked checkout to a unique sibling path, verify
+the moved directory's identity, then remove that moved checkout; restore it if
+the identity differs.
+Without this opt-in, confirmed sidebar deletion uses built-in Git removal. The
+field is absent for ordinary API removal, preserving existing provider requests.
 
 Creation returns exactly one JSON object on stdout:
 

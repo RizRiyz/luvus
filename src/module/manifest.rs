@@ -59,6 +59,9 @@ pub struct WorktreeProvider {
     /// retains its built-in Git removal behavior.
     #[serde(default)]
     pub remove_command: Option<Vec<String>>,
+    /// The remove command binds confirmed UI deletion to expected_identity.
+    #[serde(default)]
+    pub identity_bound_remove: bool,
     #[serde(default)]
     pub platforms: Option<Vec<String>>,
 }
@@ -576,6 +579,7 @@ mod tests {
         manifest.worktree_provider = Some(WorktreeProvider {
             command: Vec::new(),
             remove_command: None,
+            identity_bound_remove: false,
             platforms: None,
         });
         assert!(manifest.validate().unwrap_err().contains("non-empty argv"));
@@ -583,6 +587,7 @@ mod tests {
         manifest.worktree_provider = Some(WorktreeProvider {
             command: vec!["provider".into()],
             remove_command: Some(Vec::new()),
+            identity_bound_remove: false,
             platforms: None,
         });
         assert!(manifest.validate().unwrap_err().contains("remove_command"));
@@ -590,6 +595,7 @@ mod tests {
         manifest.worktree_provider = Some(WorktreeProvider {
             command: vec!["provider".into()],
             remove_command: None,
+            identity_bound_remove: false,
             platforms: Some(vec!["never-this-platform".into()]),
         });
         assert!(manifest.validate().is_ok());

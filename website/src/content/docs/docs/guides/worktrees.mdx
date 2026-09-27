@@ -26,6 +26,7 @@ min_luvus_version = "0.14.1"
 [worktree_provider]
 command = ["./create-worktree"]
 remove_command = ["./remove-worktree"] # optional
+identity_bound_remove = true # if removal binds expected_identity
 ```
 
 ```json
@@ -58,6 +59,11 @@ deletes send:
 
 `force` is `true` for a confirmed sidebar deletion and `false` for the CLI/API
 command unless requested otherwise.
+Confirmed sidebar deletion also supplies `expected_identity` (`volume` and
+`file`). A removal provider must reject a target whose directory identity has
+changed and bind deletion to the checked directory, not just its path. Providers
+without `identity_bound_remove = true` use built-in Git removal for the confirmed
+sidebar action.
 
 Removal must write nothing to stdout, exit successfully, and
 both unregister the worktree and remove its directory. If a provider violates

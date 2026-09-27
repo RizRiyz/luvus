@@ -31,6 +31,7 @@ pub struct RemoveRequest {
     pub path: PathBuf,
     pub branch: Option<String>,
     pub force: bool,
+    pub expected_identity: Option<crate::platform::DirectoryIdentity>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -157,18 +158,25 @@ fn run_remove(
     request: RemoveRequest,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<ProviderResult, String> {
+    if let Some(identity) = request.expected_identity {
+        ensure_remove_identity(&request.path, identity)?;
+    }
     let canonical_path = validate_remove_target(&request.repo, &request.path, cancelled)?;
-    let command_result = command.run(
-        json!({
-            "version": 1,
-            "operation": "remove",
-            "repository": request.repo.display().to_string(),
-            "path": request.path.display().to_string(),
-            "branch": request.branch,
-            "force": request.force,
-        }),
-        cancelled,
-    );
+    if let Some(identity) = request.expected_identity {
+        ensure_remove_identity(&request.path, identity)?;
+    }
+    let mut payload = json!({
+        "version": 1,
+        "operation": "remove",
+        "repository": request.repo.display().to_string(),
+        "path": request.path.display().to_string(),
+        "branch": request.branch,
+        "force": request.force,
+    });
+    if let Some(identity) = request.expected_identity {
+        payload["expected_identity"] = json!(identity);
+    }
+    let command_result = command.run(payload, cancelled);
     // The command may have completed the irreversible deletion before a
     // non-zero exit, stdin failure, timeout, or cancellation was observed.
     // Reconcile actual Git/filesystem state with a fresh bounded token so an
@@ -183,6 +191,17 @@ fn run_remove(
         (Err(command_error), Err(validation_error)) => Err(format!(
             "{command_error}; removal not completed: {validation_error}"
         )),
+    }
+}
+
+fn ensure_remove_identity(
+    path: &Path,
+    expected: crate::platform::DirectoryIdentity,
+) -> Result<(), String> {
+    if crate::platform::directory_identity(path) == Some(expected) {
+        Ok(())
+    } else {
+        Err("worktree changed since deletion was confirmed".into())
     }
 }
 
@@ -201,6 +220,11 @@ pub fn module_remove_job(
     let Some(argv) = provider.remove_command.as_ref() else {
         return Ok(None);
     };
+    // Legacy providers have no identity-bound removal contract. Keep the
+    // confirmed UI action on the built-in path until they explicitly opt in.
+    if request.expected_identity.is_some() && !provider.identity_bound_remove {
+        return Ok(None);
+    }
     let token = module_tokens
         .get(&module.id)
         .ok_or_else(|| format!("module {provider_id} has no runtime credential"))?;
