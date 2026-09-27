@@ -8,7 +8,8 @@
     "expected_root":{"$ref":"../common.schema.json#/$defs/expectedRoot"},
     "mode":{"enum":["visible","recent_unwrapped"],"default":"visible"},
     "lines":{"type":"integer","minimum":1,"maximum":200,"default":80},
-    "ansi":{"type":"boolean","default":true}
+    "ansi":{"type":"boolean","default":true},
+    "cursor":{"type":"boolean","default":false}
   },
   "required":["server_generation","terminal_id","pane_id"],
   "additionalProperties":false

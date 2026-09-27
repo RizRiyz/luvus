@@ -1,4 +1,4 @@
-//! Dependency-free global fuzzy finder (docs/90).
+//! Global fuzzy finder and exact retained-output search (docs/90).
 //!
 //! Small navigation metadata is ranked immediately. Complete file-path
 //! catalogs and retained terminal output are scored on workers and merged by a
@@ -26,6 +26,54 @@ pub struct SearchFlash {
     pub row: u16,
     pub scroll: usize,
     pub until: std::time::Instant,
+}
+
+#[derive(Clone, Debug)]
+pub struct PaneSearchMatch {
+    pub row: usize,
+    pub col: usize,
+    pub width: usize,
+}
+
+#[cfg(test)]
+/// Terminal adapter retained for focused matcher tests.
+pub(super) fn match_display_spans(
+    line: &str,
+    query: &str,
+    case_sensitive: bool,
+) -> Vec<(usize, usize)> {
+    crate::search::local::match_spans(line, query, case_sensitive)
+        .into_iter()
+        .map(|search_match| (search_match.column, search_match.width))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneSearchOwner {
+    Scroll,
+    Copy,
+}
+
+#[derive(Clone, Debug)]
+pub struct PaneSearch {
+    pub pane: PaneId,
+    pub owner: PaneSearchOwner,
+    pub local: crate::search::local::LocalSearch<PaneSearchMatch>,
+    pub saved_scroll: usize,
+}
+
+impl std::ops::Deref for PaneSearch {
+    type Target = crate::search::local::LocalSearch<PaneSearchMatch>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.local
+    }
+}
+
+impl std::ops::DerefMut for PaneSearch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.local
+    }
 }
 
 pub struct LegacySearchHit {
@@ -59,6 +107,12 @@ struct FederationRequest {
     scope: SearchScope,
 }
 
+pub(super) struct SearchFileAction {
+    workspace_id: String,
+    workspace_cwd: std::path::PathBuf,
+    path: std::path::PathBuf,
+}
+
 pub struct GlobalSearch {
     pub instance: u64,
     pub query: String,
@@ -87,6 +141,10 @@ pub struct GlobalSearch {
     federation_loading: bool,
     federation: Option<mpsc::Sender<FederationRequest>>,
     recent_files: Vec<SearchEntry>,
+    /// Snapshot the selected file so asynchronous result merges cannot retarget
+    /// an open action menu. The stable workspace ID survives index shifts when
+    /// another workspace closes. Focus changes only when an action is chosen.
+    pub(super) file_action: Option<SearchFileAction>,
 }
 
 fn tab_name(tab: &crate::app::Tab, index: usize) -> String {
@@ -564,6 +622,7 @@ impl App {
             federation_loading: false,
             federation,
             recent_files,
+            file_action: None,
         };
         search.recommendations();
         self.search = Some(search);
@@ -645,6 +704,13 @@ impl App {
     }
 
     pub fn close_search(&mut self) {
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| s.file_action.is_some())
+        {
+            self.file_menu = None;
+        }
         self.search = None;
     }
 
@@ -659,14 +725,9 @@ impl App {
     /// Preserve the exact-scrollback CLI/API contract while the interactive
     /// overlay uses the fuzzy worker.
     pub fn search_all(&self, query: &str, case_sensitive: bool) -> (Vec<LegacySearchHit>, usize) {
-        let needle = if case_sensitive {
-            query.to_string()
-        } else {
-            query.to_lowercase()
-        };
-        if needle.is_empty() {
+        let Some(matcher) = crate::search::local::LiteralMatcher::new(query, case_sensitive) else {
             return (Vec::new(), 0);
-        }
+        };
         let mut hits = Vec::new();
         let mut total = 0usize;
         for (wi, ws) in self.workspaces.iter().enumerate() {
@@ -677,14 +738,7 @@ impl App {
                     };
                     let mut pane_hits = 0usize;
                     pane.for_each_retained_row(&mut |row, history, _row_count, line| {
-                        let folded;
-                        let haystack = if case_sensitive {
-                            line
-                        } else {
-                            folded = line.to_lowercase();
-                            &folded
-                        };
-                        let Some(col) = haystack.find(&needle) else {
+                        let Some(col) = matcher.first_byte_start(line) else {
                             return;
                         };
                         total = total.saturating_add(1);
@@ -979,7 +1033,7 @@ impl App {
         }
     }
 
-    fn activate_output(
+    pub(super) fn activate_output(
         &mut self,
         pane_id: PaneId,
         old_row: usize,
@@ -1011,6 +1065,10 @@ impl App {
             }
             None => return,
         };
+        self.reveal_output_position(pane_id, offset, above);
+    }
+
+    pub(super) fn reveal_output_position(&mut self, pane_id: PaneId, offset: usize, above: usize) {
         if let Some(pane) = self.panes.get(&pane_id) {
             pane.scroll_to(offset);
         }
@@ -1029,6 +1087,83 @@ impl App {
                     until: std::time::Instant::now() + std::time::Duration::from_secs(60),
                 });
             }
+        }
+    }
+
+    pub fn search_file_actions(&mut self) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        let Some(result) = search.results.get(search.cursor) else {
+            return;
+        };
+        let SearchTarget::File {
+            ws,
+            path,
+            workspace_cwd,
+        } = &result.entry.target
+        else {
+            self.show_toast("File actions require a file in this session");
+            return;
+        };
+        let Some(workspace) = self
+            .workspaces
+            .get(*ws)
+            .filter(|workspace| workspace.cwd == *workspace_cwd)
+        else {
+            self.show_toast("File workspace is no longer available");
+            return;
+        };
+        let target = SearchFileAction {
+            workspace_id: workspace.id.clone(),
+            workspace_cwd: workspace_cwd.clone(),
+            path: path.clone(),
+        };
+        let path = path.clone();
+        let anchor = search
+            .rects
+            .iter()
+            .find(|(index, _)| *index == search.cursor)
+            .map(|(_, rect)| (rect.x, rect.y))
+            .unwrap_or((0, 0));
+        self.search.as_mut().unwrap().file_action = Some(target);
+        self.open_file_path_menu(path, anchor);
+    }
+
+    pub(super) fn finish_search_file_action(&mut self, menu_path: &std::path::Path) -> bool {
+        let target = self.search.as_mut().and_then(|s| s.file_action.take());
+        let Some(target) = target else {
+            return false;
+        };
+        let workspace = self.workspaces.iter().position(|workspace| {
+            workspace.id == target.workspace_id && workspace.cwd == target.workspace_cwd
+        });
+        let Some(ws) = workspace.filter(|_| target.path == menu_path) else {
+            self.show_toast("File workspace is no longer available");
+            return false;
+        };
+        self.close_search();
+        let tab = self.workspaces[ws].active_tab;
+        let pane = self.workspaces[ws].tabs[tab].layout.focus;
+        self.focus_location(ws, tab, pane);
+        true
+    }
+
+    pub fn search_context_click(&mut self, col: u16, row: u16) {
+        let hit = self.search.as_ref().and_then(|search| {
+            search
+                .rects
+                .iter()
+                .find(|(_, rect)| {
+                    col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
+                })
+                .map(|(index, _)| *index)
+        });
+        if let Some(index) = hit {
+            if let Some(search) = self.search.as_mut() {
+                search.cursor = index;
+            }
+            self.search_file_actions();
         }
     }
 
@@ -1067,8 +1202,14 @@ impl App {
     }
 
     pub fn search_key(&mut self, key: KeyEvent) {
+        if self.file_menu.is_some() {
+            self.handle_file_menu_key(key);
+            return;
+        }
         let ctrl = super::keys::is_ctrl_chord(key.modifiers); // not AltGr
         match key.code {
+            KeyCode::F(2) => self.search_file_actions(),
+            KeyCode::Char('a') if key.modifiers == KeyModifiers::ALT => self.search_file_actions(),
             KeyCode::Esc => {
                 if self.search.as_ref().is_some_and(|s| !s.query.is_empty()) {
                     if let Some(search) = self.search.as_mut() {
@@ -1442,6 +1583,27 @@ mod tests {
 
     fn key(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn legacy_exact_search_uses_shared_folding_and_original_byte_columns() {
+        let _env = crate::persist::test_env("exact-search-shared-folding");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let app = App::new(80, 24, tx).unwrap();
+        let pane_id = app.layout().focus;
+        let pane = app.panes.get(&pane_id).unwrap();
+        pane.engine
+            .lock()
+            .unwrap()
+            .advance("\x1b[H\x1b[2JKx needle ς ſ ı".as_bytes());
+
+        let (needle, total) = app.search_all("needle", false);
+        assert_eq!(total, 1);
+        assert_eq!(needle[0].col, "Kx ".len());
+        assert_eq!(app.search_all("σ", false).1, 1);
+        assert_eq!(app.search_all("s", false).1, 1);
+        assert_eq!(app.search_all("i", false).1, 0);
+        assert_eq!(app.search_all("ı", false).1, 1);
     }
 
     #[test]
@@ -1825,6 +1987,135 @@ mod tests {
     }
 
     #[test]
+    fn finder_file_actions_preserve_query_letters_and_validate_workspace() {
+        let _env = crate::persist::test_env("finder-file-actions");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let cwd = app.workspaces[0].cwd.clone();
+        let path = cwd.join("Cargo.toml");
+        app.workspaces.push(crate::app::Workspace {
+            id: "other-workspace".into(),
+            name: "other".into(),
+            cwd: cwd.join("other"),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![crate::app::Tab::panes(crate::layout::TileLayout::new(
+                PaneId::alloc(),
+            ))],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.active_ws = 1;
+        app.open_search();
+        app.search_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.search.as_ref().unwrap().query, "a");
+        assert!(app.file_menu.is_none());
+        let entry = SearchEntry::new(
+            "test-file".into(),
+            SearchKind::File,
+            "Cargo.toml".into(),
+            String::new(),
+            [],
+            SearchTarget::File {
+                ws: 0,
+                path: path.clone(),
+                workspace_cwd: cwd.clone(),
+            },
+            false,
+        );
+        app.search.as_mut().unwrap().results = vec![SearchMatch {
+            entry,
+            score: 1,
+            label_positions: Vec::new(),
+        }];
+        app.workspaces[0].cwd = cwd.join("changed");
+        app.search_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(app.file_menu.is_none());
+        assert!(app.search.is_some());
+        app.workspaces[0].cwd = cwd;
+        let tabs = app.workspaces[0].tabs.len();
+        app.search_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+        assert_eq!(app.search.as_ref().unwrap().query, "a");
+        assert_eq!(
+            app.active_ws, 1,
+            "opening a menu preserves the underlying view"
+        );
+        assert_eq!(
+            app.workspaces[0].tabs.len(),
+            tabs,
+            "menu does not open an editor"
+        );
+        assert_eq!(app.file_menu.as_ref().unwrap().path, path);
+        assert_eq!(app.file_menu.as_ref().unwrap().selected, Some(0));
+        app.search_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.file_menu.is_none());
+        assert_eq!(app.search.as_ref().unwrap().query, "a");
+        app.search_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        // A worker may replace the result list while the menu is open. The
+        // action must use the menu's snapshot, not the new selected result.
+        app.search.as_mut().unwrap().results.clear();
+        app.file_menu_action_pub(crate::app::FileMenuItem::CopyPath);
+        assert!(app.search.is_none());
+        assert_eq!(app.active_ws, 0, "actions belong to the result's workspace");
+        assert_eq!(app.pending_clipboard.as_deref(), path.to_str());
+    }
+
+    #[test]
+    fn finder_file_action_follows_workspace_across_index_shift() {
+        let _env = crate::persist::test_env("finder-file-action-workspace-shift");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let target_cwd = app.workspaces[0].cwd.join("target");
+        let target_path = target_cwd.join("Cargo.toml");
+        app.workspaces.push(crate::app::Workspace {
+            id: "target-workspace".into(),
+            name: "target".into(),
+            cwd: target_cwd.clone(),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![crate::app::Tab::panes(crate::layout::TileLayout::new(
+                PaneId::alloc(),
+            ))],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.open_search();
+        app.search.as_mut().unwrap().results = vec![SearchMatch {
+            entry: SearchEntry::new(
+                "shifted-file".into(),
+                SearchKind::File,
+                "Cargo.toml".into(),
+                String::new(),
+                [],
+                SearchTarget::File {
+                    ws: 1,
+                    path: target_path.clone(),
+                    workspace_cwd: target_cwd,
+                },
+                false,
+            ),
+            score: 1,
+            label_positions: Vec::new(),
+        }];
+
+        app.search_file_actions();
+        assert_eq!(app.file_menu.as_ref().unwrap().path, target_path);
+
+        // Closing an earlier workspace shifts the target from index 1 to 0.
+        // The deferred action follows its stable workspace ID, not the stale
+        // result index.
+        app.close_workspace(0);
+        assert_eq!(app.workspaces[0].id, "target-workspace");
+        app.file_menu_action_pub(crate::app::FileMenuItem::CopyPath);
+
+        assert!(app.search.is_none());
+        assert_eq!(app.active_ws, 0);
+        assert_eq!(app.pending_clipboard.as_deref(), target_path.to_str());
+    }
+
+    #[test]
     fn selecting_a_file_uses_the_configured_plain_click_default() {
         let _env = crate::persist::test_env("fuzzy-search-file-open");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1877,5 +2168,23 @@ mod tests {
         app.open_file_search_result(path);
         assert_eq!(app.workspaces[0].tabs.len(), tabs_after);
         assert_eq!(app.layout().focus, file_tab_view, "the whole tab is reused");
+    }
+
+    #[test]
+    fn match_display_spans_respects_case_mode_and_uses_display_cells() {
+        assert_eq!(
+            match_display_spans("hello Needle world", "needle", false),
+            vec![(6, 6)]
+        );
+        assert!(match_display_spans("hello Needle world", "needle", true).is_empty());
+        assert!(match_display_spans("nope", "needle", false).is_empty());
+        assert_eq!(
+            match_display_spans("前Needle后", "needle", false),
+            vec![(2, 6)]
+        );
+        assert_eq!(
+            match_display_spans("hit hit", "hit", true),
+            vec![(0, 3), (4, 3)]
+        );
     }
 }

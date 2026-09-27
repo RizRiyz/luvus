@@ -21,7 +21,6 @@ use ratatui::layout::Rect;
 
 pub use github::GhState;
 pub use model::Checks;
-pub use model::GitRootInfo;
 pub use model::WorktreeMembership;
 use model::{
     BranchInfo, Commit, CommitShow, Contributor, DiscussionComment, Issue, IssueDetail, PrDetail,

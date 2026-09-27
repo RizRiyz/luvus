@@ -104,9 +104,9 @@ panes / agents:
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
-  agent prompt <target> <text> [--wait] [--until STATE] [--timeout <s>]
+  agent prompt <target> <text> [--strict] [--wait] [--until STATE] [--timeout <s>]
                              atomically prompt and optionally wait (send is an alias)
-  agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
+  agent send <target> <text> [--strict] [--wait] [--until STATE] [--timeout <s>]
                              compatibility alias for agent prompt
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
@@ -276,6 +276,10 @@ universal harness protocol:
                              expose scoped UHP through a private provider endpoint
   uhp proxy                 forward one JSON request from stdin to the selected server
 
+web access:
+  web [--control|--read-only] [--port <port>] [--max-devices <1-8>] [--public-url <origin>] [--origin <origin>] [--no-open]
+                             serve the optional loopback browser client (read-only by default)
+
 sessions:
   session list [--json]      list default and named server sessions
   session attach <name>      start or attach the named session
@@ -309,7 +313,7 @@ server:
   server restart [--all]     stop + start (load a newly-installed binary)
   server update-manifest     fetch the latest agent-detection rules from luvus.dev
                              (applies live if the server is up; else on next start)
-  integration install|uninstall <claude|copilot|codex|antigravity|letta|opencode|kimi|grok|hermes|omp>
+  integration install|uninstall <claude|copilot|codex|antigravity|letta|opencode|kimi|grok|hermes|omp|devin>
                              add/remove luvus's session-resume hook (uninstall
                              removes only luvus's hook, never the agent)
 
@@ -331,6 +335,17 @@ root instead. `--no-focus` preserves the caller's current view.
 
 `luvus uhp capabilities` on the owner endpoint reports supported methods. The same RPC through paired `luvus uhp access` adds `access.mode`, `access.allowed_methods`, and gateway connection/request limits; use that effective set for permission-aware clients.
 
+`luvus web` is an explicit foreground client bridge, not part of ordinary TUI
+or server startup. It starts or reuses the selected session without restarting
+it, binds loopback, and serves the embedded browser application with read-only
+authority by default. Add `--control` for bounded terminal and workspace input.
+Stopping the command revokes only its temporary web authority; the Luvus
+server, PTYs, and other clients remain attached.
+
+See the [Luvus Web guide](/docs/guides/web/) for first-time pairing, phone
+access through a private TLS provider, multiple devices, terminal input, file
+uploads, session switching, and troubleshooting.
+
 `luvus uhp snapshot` includes nullable `agent_name` operator aliases on terminal rows alongside `pane_id`. Native view rows omit the field. Refresh snapshots after naming: `agent.name` emits no event and does not advance `event_sequence`, while `pane.rename` updates the same map, emits `pane.renamed`, and advances the sequence, including when clearing a name. The event sequence is not an alias ETag because `agent.name` is silent.
 
 ## Prompt wait observation
@@ -351,5 +366,8 @@ state transitions do not confirm consumption of the prompt text. Do not resend
 automatically after a timeout or lost response because queued input may execute.
 When the current screen is a detected startup, sign-in, selection, or approval
 surface, prompt submission returns `agent_not_ready` without queuing text or
-Enter. Inspect it with `agent read`; use `agent keys` only for an intentional
-interaction.
+Enter. Claude and Codex also reject unrecognised screens until their live input
+composers are detected. `--strict` requires positive composer evidence for any
+agent; agents without a detector return `agent_not_ready`. Without it, other
+agents keep the existing fallback. Inspect the screen with `agent read`; use
+`agent keys` only for an intentional interaction.

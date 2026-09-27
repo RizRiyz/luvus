@@ -16,7 +16,7 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &mut App, t: &The
     }
 
     let cat = app.catalog;
-    let mut commands = Vec::new();
+    let mut commands = vec![HelpRow::Heading(cat.settings.keys_prefix_commands)];
     let mut section = "";
     for &cmd in Cmd::ALL {
         let next_section = cmd.section(cat);
@@ -31,7 +31,12 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &mut App, t: &The
         ));
     }
 
-    let mut references = Vec::new();
+    let mut references = vec![HelpRow::Heading(cat.settings.keys_direct_shortcuts)];
+    for (spec, cmd) in &app.direct_keymap {
+        if !spec.is_reserved_by(&app.prefix) {
+            references.push(HelpRow::Entry(spec.label(), cmd.label(cat)));
+        }
+    }
     for (section, keys) in crate::i18n::settings::KEY_REFERENCE_KEYS.iter().enumerate() {
         references.push(HelpRow::Heading(
             cat.settings.key_reference_headings[section],
@@ -75,8 +80,9 @@ pub(super) fn draw_help(f: &mut RenderTarget, area: Rect, app: &mut App, t: &The
     );
     hline(f, inner.x, inner.y + 1, inner.width, t);
 
-    // Configurable prefix commands on the left, fixed and mode-specific
-    // shortcuts on the right. Both columns share one scroll offset.
+    // Prefix commands stay on the left. Effective direct shortcuts (after
+    // collision resolution) lead the fixed and mode-specific reference on the
+    // right. Both columns share one scroll offset.
     let col_w = inner.width / 2;
     let top = inner.y + 2;
     let visible = inner.height.saturating_sub(4) as usize;
@@ -171,13 +177,18 @@ mod tests {
     use super::*;
     use ratatui::{backend::TestBackend, Terminal};
 
-    fn screen(term: &Terminal<TestBackend>) -> String {
-        term.backend()
-            .buffer()
+    fn screen_lines(term: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = term.backend().buffer();
+        let width = usize::from(buffer.area.width);
+        buffer
             .content()
-            .iter()
-            .map(|cell| cell.symbol())
+            .chunks(width)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
             .collect()
+    }
+
+    fn screen(term: &Terminal<TestBackend>) -> String {
+        screen_lines(term).concat()
     }
 
     #[test]
@@ -186,8 +197,59 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(100, 32, tx).unwrap();
         app.help_open = true;
-        app.prefix = crate::app::PrefixSpec::parse("f12").unwrap();
+        app.prefix = crate::app::PrefixSpec::parse("ctrl+space").unwrap();
+        app.config
+            .keybindings
+            .insert(Cmd::OpenDiff.id().into(), "u".into());
+        app.config
+            .direct_keybindings
+            .insert(Cmd::NextTab.id().into(), "option+right".into());
+        app.config
+            .direct_keybindings
+            .insert(Cmd::PrevTab.id().into(), "alt+right".into());
+        app.config
+            .direct_keybindings
+            .insert(Cmd::OpenDiff.id().into(), "shift+ctrl+pagedown".into());
+        app.config
+            .direct_keybindings
+            .insert(Cmd::NewWorktree.id().into(), "ctrl+space".into());
+        app.direct_keymap = crate::app::build_direct_keymap(&app.config.direct_keybindings);
         let mut term = Terminal::new(TestBackend::new(100, 32)).unwrap();
+
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let initial_lines = screen_lines(&term);
+        assert!(
+            initial_lines
+                .iter()
+                .any(|line| line.contains("PREFIX COMMANDS")),
+            "prefix commands have an explicit section"
+        );
+        assert!(
+            initial_lines
+                .iter()
+                .any(|line| line.contains("DIRECT SHORTCUTS")),
+            "direct shortcuts have an explicit section"
+        );
+        assert!(
+            initial_lines.iter().any(|line| {
+                line.contains("Alt+Right")
+                    && line.contains("Previous tab")
+                    && !line.contains("Next tab")
+            }),
+            "only the collision winner is rendered for a direct chord"
+        );
+        assert!(
+            !initial_lines
+                .iter()
+                .any(|line| { line.contains("Ctrl+Space") && line.contains("New worktree") }),
+            "a prefix-reserved direct binding is hidden"
+        );
+        assert!(
+            initial_lines.iter().any(|line| {
+                line.contains("Ctrl+Shift+PageDown") && line.contains("Focus diff review")
+            }),
+            "direct chords use normalized user-facing labels"
+        );
 
         // Discover the real scroll range first, then inspect every reachable
         // viewport so adding commands cannot make this test depend on a magic
@@ -204,8 +266,14 @@ mod tests {
             rendered.push_str(&screen(&term));
         }
 
-        assert!(rendered.contains("F12"), "configured prefix is shown");
-        assert!(rendered.contains("Focus diff review"), "prefix+i is listed");
+        assert!(
+            rendered.contains("Ctrl+Space"),
+            "configured prefix is shown"
+        );
+        assert!(
+            rendered.contains("u") && rendered.contains("Focus diff review"),
+            "custom prefix command binding is listed"
+        );
         assert!(rendered.contains("Files: focus"), "prefix+e is listed");
 
         // The final fixed-key section proves the reference is scrollable all

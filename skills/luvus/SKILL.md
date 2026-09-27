@@ -294,13 +294,12 @@ Without `--wait`, the immediate `submitted:true`, `evidence:"queued"` response i
 unchanged and omits `observed_state`. Submission still means queue admission;
 state transitions do not confirm consumption of the prompt text. Do not resend
 automatically after a timeout or lost response because queued input may execute.
-For `agent.send` and `agent.prompt`, detected blocked prompt evidence—including
-in non-Codex panes—returns `agent_not_ready` and queues no input. Startup,
-sign-in, selection, and approval screens are examples, not an exhaustive list.
-A server-launched or restored Codex pane with an `agent_session` also returns
-`agent_not_ready` when prompt evidence is Unknown, unless live Codex composer
-geometry reports Ready. Existing Codex panes without that requirement retain the
-permissive Unknown-evidence fallback. Read the visible screen before deciding
+For `agent.send` and `agent.prompt`, detected blocked prompt evidence returns
+`agent_not_ready` and queues no input. Claude and Codex also require positive
+evidence of their live input composers. Use `--strict` (UHP `strict:true`) to
+require positive composer evidence for any agent; agents without a detector
+then return `agent_not_ready`. Without strict mode, other agents retain their
+legacy Unknown-evidence fallback. Read the visible screen before deciding
 whether an explicit `agent keys` action is authorized.
 
 When waiting was requested, keep it bounded and read a bounded result:
@@ -310,9 +309,10 @@ luvus agent send reviewer "Review the diff" --wait --timeout 300
 luvus agent read reviewer --lines 120
 ```
 
-Treat `idle`, `done`, `working`, and `blocked` as ready once the requested agent
-identity is recognized. `unknown` is not proof of completion, but it does not
-undo a matching identity. When `agent start` returns `ready: true`, accept its
+For `agent start` identity, treat `idle`, `done`, `working`, and `blocked` as
+recognized states; they do not by themselves prove prompt readiness. `unknown`
+is not proof of completion, but it does not undo a matching identity. When
+`agent start` returns `ready: true`, accept its
 name, pane, and kind without another status lookup. Use `wait agent-status` for
 a requested lifecycle transition after work is sent, not for startup identity.
 Repeat `--status` or pass a comma-separated set when any of several terminal
@@ -376,10 +376,10 @@ luvus workspace unpin <workspace-index>
 
 Closing the final project does not stop the client or leave it without a shell.
 Luvus immediately creates a neutral workspace and terminal at the user's home
-directory. Its displayed path follows the focused pane's live cwd. An empty
-`workspace list` is therefore an exceptional restore or spawn failure, not proof
-that the server is offline. Use `workspace open <path>` when the user named a
-specific project.
+directory. Its sidebar path remains the stored home root while `terminal_cwd`
+follows the focused pane. An empty `workspace list` is therefore an exceptional
+restore or spawn failure, not proof that the server is offline. Use
+`workspace open <path>` when the user named a specific project.
 
 From a managed pane, use `LUVUS_PANE_ID` as the caller or split anchor. From an
 external terminal, select an explicit pane returned by live state.
@@ -533,9 +533,11 @@ surface:
   contract.
   `opencode2` is a compatibility alias for the canonical `opencode` agent.
   Never infer V2 session IDs from its live database.
-- Devin has native detection and exact-ID resume only. Do not infer session
-  IDs from its private database; `luvus agent resume <id>` cannot find Devin
-  sessions, so bind a pane with `luvus pane report --agent devin --session
+- For Devin, `luvus integration install devin` adds one session-start hook
+  that reports only the exact session ID for restart resume. Detection remains
+  native. Do not infer session IDs from its private database;
+  `luvus agent resume <id>` cannot find Devin sessions, so without the
+  integration bind a pane with `luvus pane report --agent devin --session
   <id>` when the exact id is known.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not

@@ -436,6 +436,40 @@ fn agent_row_title_push_is_atomic_and_globally_bounded() {
 }
 
 #[test]
+fn module_title_push_and_clear_publish_only_real_changes() {
+    let _env = crate::persist::test_env("agent-row-title-events");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let title = json!({"titles":[{"agent":"pi","session_id":"live","title":"Reviewing"}]});
+    let floor = crate::ipc::api::current_sequence(&app.events);
+
+    assert_eq!(
+        app.dispatch("ui.agent_title.push", &title).unwrap()["changed"],
+        true
+    );
+    assert_eq!(
+        app.dispatch("ui.agent_title.push", &title).unwrap()["changed"],
+        false
+    );
+    assert_eq!(
+        app.dispatch(
+            "ui.agent_title.clear",
+            &json!({"agent":"pi","session_id":"live"})
+        )
+        .unwrap()["changed"],
+        true
+    );
+    let events = crate::ipc::api::replayed_events_after(&app.events, floor);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "agent.title_changed")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn agent_row_session_titles_work_without_a_workspace() {
     let _env = crate::persist::test_env("agent-row-title-no-workspace");
     let (tx, _rx) = std::sync::mpsc::channel();

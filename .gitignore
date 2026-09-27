@@ -18,6 +18,8 @@ luvus-notch/
 
 # Website (Astro) build artifacts — Cloudflare Pages builds from source.
 website/node_modules/
+web/node_modules/
+web/**/dist/
 website/dist/
 website/.astro/
 website/public/install.sh

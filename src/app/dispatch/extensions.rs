@@ -213,6 +213,7 @@ impl App {
         if changed {
             self.agent_title_panes = panes;
             self.agent_title_sessions = sessions;
+            crate::ipc::api::publish_event(&self.events, "agent.title_changed", json!({}));
         }
         Ok(changed)
     }
@@ -646,6 +647,9 @@ impl App {
                 "bars": m.manifest.bars.iter()
                     .map(|bar| json!({"id": bar.id, "title": bar.title, "region": bar.region.as_str(), "priority": bar.priority})).collect::<Vec<_>>(),
                 "events": m.manifest.events.iter().map(|e| e.on.clone()).collect::<Vec<_>>(),
+                "worktree_provider": m.manifest.worktree_provider().is_some(),
+                "worktree_remove_provider": m.manifest.worktree_provider()
+                    .and_then(|provider| provider.remove_command.as_ref()).is_some(),
                 "build_steps": m.manifest.build.len(),
             }))
         }

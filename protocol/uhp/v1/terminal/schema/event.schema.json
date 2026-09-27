@@ -24,7 +24,8 @@
             "text":{"type":"string","maxLength":65536,"$comment":"Consumers must also enforce a 65536-byte UTF-8 limit and verify bytes and lines against the decoded text."},
             "lines":{"type":"integer","minimum":1,"maximum":200},
             "bytes":{"type":"integer","minimum":0,"maximum":65536},
-            "truncated":{"type":"boolean"}
+            "truncated":{"type":"boolean"},
+            "cursor":{"type":["object","null"],"properties":{"offset":{"type":"integer","minimum":0,"maximum":65536},"padding_cells":{"type":"integer","minimum":0,"maximum":65536}},"required":["offset","padding_cells"],"additionalProperties":false}
           },
           "required":["server_generation","terminal_id","pane_id","content_revision","mode","ansi","text","lines","bytes","truncated"],
           "additionalProperties":false

@@ -14,8 +14,9 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb
 use ratatui::style::{Color, Modifier};
 
 use super::{
-    AlignedRows, CodexComposerRegion, Cursor, DamageCell, DamageKind, DamageRow, DamageSnapshot,
-    HistoryMetrics, RenderCell, RetainedRowLayout, VtEngine, ALIGNED_WIDE_CELL,
+    AlignedRows, ClaudeComposerEvidence, CodexComposerRegion, Cursor, DamageCell, DamageHyperlink,
+    DamageKind, DamageRow, DamageSnapshot, HistoryMetrics, LinkedCellVisitor, RenderCell,
+    RetainedRowLayout, VtEngine, ALIGNED_WIDE_CELL,
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
@@ -665,6 +666,60 @@ impl AlacrittyEngine {
         }
         true
     }
+
+    /// Count rendered Unicode scalars before `column`, using the same control
+    /// and wide-cell rules as backend capture. The capture protocol reports a
+    /// text offset rather than a terminal-cell coordinate so browser clients
+    /// do not need to duplicate wcwidth or ANSI parsing rules.
+    fn backend_row_chars_before(&self, line: Line, column: usize, ansi: bool) -> usize {
+        let grid = self.term.grid();
+        let row = &grid[line];
+        let last = (0..grid.columns())
+            .rfind(|column| {
+                let cell = &row[Column(*column)];
+                !cell.flags.contains(Flags::WIDE_CHAR_SPACER) && cell.c != '\0' && cell.c != ' '
+            })
+            .map_or(0, |column| column + 1);
+        let end = column.min(last);
+        let mut count = 0;
+        for column in 0..end {
+            let cell = &row[Column(column)];
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let character = if cell.c == '\0' { ' ' } else { cell.c };
+            if character.is_control() && character != '\t' {
+                if ansi {
+                    continue;
+                }
+            } else {
+                count += 1;
+            }
+            if let Some(zerowidth) = cell.zerowidth() {
+                count += zerowidth
+                    .iter()
+                    .filter(|character| !character.is_control())
+                    .count();
+            }
+        }
+        count
+    }
+
+    /// Count blank terminal cells omitted from the normalized row immediately
+    /// before the cursor. Captures intentionally trim those cells from their
+    /// text, but stream clients need the distance to place a visual caret in
+    /// the same input cell as the child terminal.
+    fn backend_cursor_padding_cells(&self, line: Line, column: usize) -> usize {
+        let grid = self.term.grid();
+        let row = &grid[line];
+        let last = (0..grid.columns())
+            .rfind(|column| {
+                let cell = &row[Column(*column)];
+                cell.flags.contains(Flags::WIDE_CHAR_SPACER) || (cell.c != '\0' && cell.c != ' ')
+            })
+            .map_or(0, |column| column + 1);
+        column.min(grid.columns()).saturating_sub(last)
+    }
 }
 
 /// What a grid cell contributes when the grid is read as *text* rather than
@@ -869,6 +924,63 @@ impl VtEngine for AlacrittyEngine {
         })
     }
 
+    fn claude_composer_evidence(&self) -> ClaudeComposerEvidence {
+        let grid = self.term.grid();
+        if grid.display_offset() != 0 {
+            return ClaudeComposerEvidence::Absent;
+        }
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        if rows < 3 || cols < 8 {
+            return ClaudeComposerEvidence::Absent;
+        }
+        let cursor = grid.cursor.point.line.0.max(0) as usize;
+        if cursor >= rows {
+            return ClaudeComposerEvidence::Absent;
+        }
+
+        // Claude's input is between two solid full-width rails. Its theme
+        // picker also has a selected `❯` item, but not this live geometry.
+        let row_is_rail = |row: usize| {
+            let mut rails = 0;
+            for col in 0..cols {
+                match grid[Line(row as i32)][Column(col)].c {
+                    '─' => rails += 1,
+                    ' ' | '\0' => {}
+                    _ => return false,
+                }
+            }
+            rails >= cols - 2
+        };
+        let row_has_prompt = |row: usize| {
+            (0..cols.min(3)).any(|col| matches!(grid[Line(row as i32)][Column(col)].c, '❯' | '>'))
+        };
+        // Bound the search by the visible grid, not an arbitrary input height.
+        // A typed divider is not an upper rail: the rail must be immediately
+        // followed by Claude's prompt marker. Continue past divider text.
+        let Some(top) = (0..cursor)
+            .rev()
+            .find(|&top| row_has_prompt(top + 1) && row_is_rail(top))
+        else {
+            return ClaudeComposerEvidence::Absent;
+        };
+        let prompt = top + 1;
+
+        if !((cursor + 1)..rows).any(row_is_rail) {
+            return ClaudeComposerEvidence::Absent;
+        }
+
+        // A rail between the prompt and cursor can be either the closing rail
+        // of a stale compact composer or literal divider text inside a current
+        // multiline input. Their VT cells are identical, so preserve the
+        // ambiguity for a trusted Claude lifecycle event to resolve.
+        if ((prompt + 1)..=cursor).any(row_is_rail) {
+            ClaudeComposerEvidence::Ambiguous
+        } else {
+            ClaudeComposerEvidence::Ready
+        }
+    }
+
     fn for_each_cell(&self, f: &mut dyn FnMut(u16, u16, &str, RenderCell)) {
         // `display_iter` walks the *displayed* region, whose lines are *negative*
         // once scrolled into history (it starts at `Line(-display_offset)`).
@@ -921,6 +1033,45 @@ impl VtEngine for AlacrittyEngine {
         }
     }
 
+    fn for_each_linked_cell(&self, f: &mut LinkedCellVisitor<'_>) {
+        let grid = self.term.grid();
+        let rows = grid.screen_lines() as i32;
+        let offset = grid.display_offset() as i32;
+        let mut stack = [0u8; 4];
+        let mut combined = String::new();
+        for indexed in grid.display_iter() {
+            let row = indexed.point.line.0 + offset;
+            if !(0..rows).contains(&row) {
+                continue;
+            }
+            let cell = indexed.cell;
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let sym: &str = match cell.zerowidth() {
+                None => cell.c.encode_utf8(&mut stack),
+                Some(zw) => {
+                    combined.clear();
+                    combined.push(cell.c);
+                    combined.extend(zw.iter());
+                    &combined
+                }
+            };
+            let hyperlink = cell.hyperlink();
+            f(
+                row as u16,
+                indexed.point.column.0 as u16,
+                sym,
+                RenderCell {
+                    fg: map_color(cell.fg),
+                    bg: map_color(cell.bg),
+                    mods: map_flags(cell.flags),
+                },
+                hyperlink.as_ref().map(|hyperlink| hyperlink.uri()),
+            );
+        }
+    }
+
     fn damage_snapshot(&mut self) -> DamageSnapshot {
         self.damage_line_indices.clear();
         let mut kind = match self.term.damage() {
@@ -965,6 +1116,7 @@ impl VtEngine for AlacrittyEngine {
             damaged_rows.push(DamageRow {
                 row: 0,
                 cells: Vec::with_capacity(columns),
+                hyperlinks: Vec::new(),
             });
         }
         damaged_rows.truncate(row_indices.len());
@@ -973,10 +1125,24 @@ impl VtEngine for AlacrittyEngine {
                 continue;
             }
             damaged_row.row = row;
+            damaged_row.hyperlinks.clear();
             let line = Line(row as i32 - display_offset);
             let mut used = 0;
             for column in 0..columns {
                 let cell = &grid[line][Column(column)];
+                if let Some(hyperlink) = cell.hyperlink() {
+                    let uri = hyperlink.uri();
+                    match damaged_row.hyperlinks.last_mut() {
+                        Some(previous) if previous.end == column as u16 && previous.uri == uri => {
+                            previous.end = previous.end.saturating_add(1);
+                        }
+                        _ => damaged_row.hyperlinks.push(DamageHyperlink {
+                            start: column as u16,
+                            end: (column as u16).saturating_add(1),
+                            uri: uri.to_string(),
+                        }),
+                    }
+                }
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
@@ -1045,6 +1211,7 @@ impl VtEngine for AlacrittyEngine {
             for cell in &mut row.cells {
                 cell.zero_width.clear();
             }
+            row.hyperlinks.clear();
         }
         self.damage_rows = snapshot.rows;
     }
@@ -1213,13 +1380,22 @@ impl VtEngine for AlacrittyEngine {
                 text,
                 lines: count,
                 truncated: !complete,
+                cursor_offset: None,
+                cursor_padding_cells: 0,
             };
         }
 
         let grid = self.term.grid();
+        let cursor = self.cursor();
+        let cursor_line = cursor
+            .visible
+            .then_some(grid.history_size() + cursor.y as usize);
         let mut output = String::new();
         let mut returned = 0;
         let mut truncated = false;
+        let mut cursor_offset = None;
+        let mut cursor_padding_cells = 0;
+        let mut rendered_chars = 0usize;
         match mode {
             CaptureMode::Visible => {
                 let rows = grid.screen_lines();
@@ -1229,6 +1405,17 @@ impl VtEngine for AlacrittyEngine {
                         truncated = true;
                         break;
                     }
+                    if returned > 0 {
+                        rendered_chars += 1;
+                    }
+                    let candidate = (cursor.visible && row == cursor.y as usize).then(|| {
+                        let line = Line(row as i32);
+                        (
+                            rendered_chars
+                                + self.backend_row_chars_before(line, cursor.x as usize, ansi),
+                            self.backend_cursor_padding_cells(line, cursor.x as usize),
+                        )
+                    });
                     let complete = if ansi {
                         self.append_ansi_grid_row(Line(row as i32), &mut output, max_bytes)
                     } else {
@@ -1239,6 +1426,12 @@ impl VtEngine for AlacrittyEngine {
                         truncated = true;
                         break;
                     }
+                    if let Some((offset, padding_cells)) = candidate {
+                        cursor_offset = Some(offset);
+                        cursor_padding_cells = padding_cells;
+                    }
+                    rendered_chars +=
+                        self.backend_row_chars_before(Line(row as i32), usize::MAX, ansi);
                 }
             }
             CaptureMode::RecentUnwrapped => {
@@ -1251,6 +1444,7 @@ impl VtEngine for AlacrittyEngine {
                     .saturating_div(std::mem::size_of::<usize>().max(1))
                     .max(1);
                 let mut inspected_rows = 0usize;
+                let mut trailing_empty = true;
                 for index in (0..count).rev() {
                     let Some(line) = self.retained_line(index) else {
                         continue;
@@ -1267,6 +1461,14 @@ impl VtEngine for AlacrittyEngine {
                         break;
                     }
                     inspected_rows += 1;
+                    if trailing_empty
+                        && cursor_line.is_some()
+                        && row.is_empty()
+                        && cursor_line != Some(index)
+                    {
+                        continue;
+                    }
+                    trailing_empty = false;
                     inspected_bytes = inspected_bytes.saturating_add(row.len());
                     current.push(index);
                     if index == 0 || !self.retained_row_wraps(index - 1) {
@@ -1282,12 +1484,25 @@ impl VtEngine for AlacrittyEngine {
                         truncated = true;
                         break;
                     }
+                    if returned > 0 {
+                        rendered_chars += 1;
+                    }
                     physical_rows.reverse();
                     let mut complete = true;
+                    let mut logical_chars = 0usize;
+                    let mut candidate = None;
                     for index in physical_rows {
                         let Some(line) = self.retained_line(index) else {
                             continue;
                         };
+                        if cursor_line == Some(index) {
+                            candidate = Some((
+                                rendered_chars
+                                    + logical_chars
+                                    + self.backend_row_chars_before(line, cursor.x as usize, ansi),
+                                self.backend_cursor_padding_cells(line, cursor.x as usize),
+                            ));
+                        }
                         complete = if ansi {
                             self.append_ansi_grid_row(line, &mut output, max_bytes)
                         } else {
@@ -1296,12 +1511,18 @@ impl VtEngine for AlacrittyEngine {
                         if !complete {
                             break;
                         }
+                        logical_chars += self.backend_row_chars_before(line, usize::MAX, ansi);
                     }
                     returned += 1;
                     if !complete {
                         truncated = true;
                         break;
                     }
+                    if let Some((offset, padding_cells)) = candidate {
+                        cursor_offset = Some(offset);
+                        cursor_padding_cells = padding_cells;
+                    }
+                    rendered_chars += logical_chars;
                 }
             }
             CaptureMode::Detection => unreachable!(),
@@ -1310,6 +1531,8 @@ impl VtEngine for AlacrittyEngine {
             text: output,
             lines: returned,
             truncated,
+            cursor_offset,
+            cursor_padding_cells,
         }
     }
 
@@ -1433,11 +1656,14 @@ impl VtEngine for AlacrittyEngine {
             .then_some(output)
     }
 
-    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str)) {
+    fn try_for_each_retained_row(
+        &self,
+        f: &mut dyn FnMut(usize, &str) -> std::ops::ControlFlow<()>,
+    ) {
         let mut output = String::with_capacity(self.term.grid().columns());
         for index in 0..self.retained_row_count() {
-            if self.write_retained_row(index, &mut output) {
-                f(index, &output);
+            if self.write_retained_row(index, &mut output) && f(index, &output).is_break() {
+                break;
             }
         }
     }
@@ -1781,6 +2007,59 @@ mod tests {
         assert_eq!(engine.history_metrics(), small);
     }
 
+    /// Opt-in measurement of the synchronous pane-search scan before deciding
+    /// whether it needs a worker. No server or production session is involved.
+    #[test]
+    #[ignore]
+    fn pane_search_scan_benchmark() {
+        use std::{hint::black_box, time::Instant};
+
+        let max_rows = history_rows_for_budget(crate::config::SCROLLBACK_BYTES_MAX, 80);
+        for rows in [1_000, 3_413, 10_000, 50_000, max_rows] {
+            let (tx, _rx) = channel();
+            let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, rows));
+            let padding = "x".repeat(64);
+            for row in 0..rows + 24 {
+                engine.advance(format!("line{row:05} {padding}\r\n").as_bytes());
+            }
+            engine.finish_output_batch();
+            let long_query = "q".repeat(crate::search::local::LOCAL_QUERY_BYTES);
+            for needle in ["absent-token", "line", long_query.as_str()] {
+                let matcher = crate::search::local::LiteralMatcher::new(needle, true).unwrap();
+                let mut samples = Vec::new();
+                for trial in 0..6 {
+                    let start = Instant::now();
+                    let mut hits = 0;
+                    let mut truncated = false;
+                    engine.try_for_each_retained_row(&mut |_row, line| {
+                        let remaining = crate::search::local::LOCAL_MATCH_CAP.saturating_sub(hits);
+                        if remaining == 0 {
+                            truncated = matcher.has_match(line);
+                        } else {
+                            let (found, more) = matcher.spans(line, remaining);
+                            hits += found.len();
+                            truncated = more;
+                        }
+                        if truncated {
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    });
+                    black_box((hits, truncated));
+                    if trial > 0 {
+                        samples.push(start.elapsed().as_secs_f64() * 1_000.0);
+                    }
+                }
+                samples.sort_by(f64::total_cmp);
+                eprintln!(
+                    "pane_search_scan rows={rows} query_bytes={} retained={} median_ms={:.3} max_ms={:.3}",
+                    needle.len(), engine.retained_row_count(), samples[samples.len() / 2], samples[samples.len() - 1],
+                );
+            }
+        }
+    }
+
     /// Opt-in inspection benchmark. No child processes or production sessions.
     #[test]
     #[ignore]
@@ -1998,6 +2277,41 @@ mod tests {
         assert_eq!(hyperlink.spans(), &[(0, 7, 14)]);
         assert!(rows.hyperlink_at(0, 6).is_none());
         assert!(rows.hyperlink_at(0, 14).is_none());
+
+        let mut linked = Vec::new();
+        engine.for_each_linked_cell(&mut |row, col, symbol, _, uri| {
+            if let Some(uri) = uri {
+                linked.push((row, col, symbol.to_string(), uri.to_string()));
+            }
+        });
+        assert_eq!(linked.len(), 7);
+        assert_eq!(
+            linked[0],
+            (0, 7, "m".into(), "file:///repo/src/main.rs".into())
+        );
+    }
+
+    #[test]
+    fn partial_damage_carries_sparse_osc8_spans() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 2, tx, budget_for_rows(40, 20));
+        let initial = engine.damage_snapshot();
+        assert!(engine.acknowledge_damage(initial.generation));
+        engine.recycle_damage_snapshot(initial);
+
+        engine.advance(
+            b"\x1b]8;id=claude;file:///repo/server/task.mjs\x1b\\server/task.mjs\x1b]8;;\x1b\\",
+        );
+        let damage = engine.damage_snapshot();
+        assert_eq!(damage.kind, DamageKind::Partial);
+        assert_eq!(damage.rows.len(), 1);
+        assert_eq!(damage.rows[0].hyperlinks.len(), 1);
+        assert_eq!(damage.rows[0].hyperlinks[0].start, 0);
+        assert_eq!(damage.rows[0].hyperlinks[0].end, 15);
+        assert_eq!(
+            damage.rows[0].hyperlinks[0].uri,
+            "file:///repo/server/task.mjs"
+        );
     }
 
     #[test]
@@ -3322,6 +3636,25 @@ mod tests {
     }
 
     #[test]
+    fn retained_row_visitor_stops_when_requested() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
+        feed_lines(&mut engine, 40);
+        let mut visited = 0usize;
+
+        engine.try_for_each_retained_row(&mut |_index, _line| {
+            visited += 1;
+            if visited == 3 {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+
+        assert_eq!(visited, 3);
+    }
+
+    #[test]
     fn rows_text_dumps_full_history_oldest_first() {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
@@ -3673,6 +4006,104 @@ mod tests {
     }
 
     #[test]
+    fn claude_composer_requires_live_input_between_solid_rails() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 10, tx, budget_for_rows(40, 2_000));
+        let rail = "─".repeat(40);
+
+        // Claude Code 2.1.283 hides the terminal cursor while drawing its own.
+        e.advance(
+            format!("\x1b[?25l\x1b[6;1H{rail}\x1b[7;1H❯\u{a0} \x1b[8;1H{rail}\x1b[7;3H").as_bytes(),
+        );
+        assert_eq!(e.claude_composer_evidence(), ClaudeComposerEvidence::Ready);
+
+        e.advance("\x1b[2J\x1b[HChoose the text style that looks best\x1b[7;1H❯ 2. Dark mode\x1b[8;1H╌╌╌╌╌╌╌╌╌╌\x1b[7;4H".as_bytes());
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Absent,
+            "theme selection is not input"
+        );
+
+        e.advance(format!("\x1b[2J\x1b[H{rail}\x1b[2;1H❯ old prompt\x1b[3;1H{rail}\x1b[7;1HTrust this folder?\x1b[7;2H").as_bytes());
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Absent,
+            "old transcript is not input"
+        );
+    }
+
+    #[test]
+    fn claude_composer_marks_a_typed_divider_as_ambiguous() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 10, tx, budget_for_rows(40, 2_000));
+        let rail = "─".repeat(40);
+        e.advance(format!("\x1b[1;1H{rail}\x1b[2;1H❯ input\x1b[4;1H{rail}\x1b[5;3Hmore input\x1b[8;1H{rail}\x1b[5;13H").as_bytes());
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Ambiguous
+        );
+
+        // The divider may begin immediately after the prompt and still belong
+        // to a valid multiline input. VT geometry cannot distinguish it from
+        // the stale compact-composer case below.
+        e.advance(
+            format!("\x1b[2J\x1b[1;1H{rail}\x1b[2;1H❯ input\x1b[3;1H{rail}\x1b[5;3Hmore input\x1b[8;1H{rail}\x1b[5;13H")
+                .as_bytes(),
+        );
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Ambiguous
+        );
+
+        // Divider text alone must not establish a composer.
+        e.advance(b"\x1b[2;1H  input\x1b[5;13H");
+        assert_eq!(e.claude_composer_evidence(), ClaudeComposerEvidence::Absent);
+    }
+
+    #[test]
+    fn claude_composer_accepts_tall_multiline_input() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 40, tx, budget_for_rows(40, 2_000));
+        let rail = "─".repeat(40);
+        e.advance(format!("\x1b[1;1H{rail}\x1b[2;1H❯ input\x1b[38;1H{rail}").as_bytes());
+        for cursor_row in [2, 18, 19, 35] {
+            e.advance(format!("\x1b[{cursor_row};3H").as_bytes());
+            assert_eq!(
+                e.claude_composer_evidence(),
+                ClaudeComposerEvidence::Ready,
+                "cursor row {cursor_row}"
+            );
+        }
+        e.advance(b"\x1b[39;1Hother screen");
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Absent,
+            "cursor below composer"
+        );
+    }
+
+    #[test]
+    fn claude_composer_rejects_disconnected_stale_prompt_and_rail() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 40, tx, budget_for_rows(40, 2_000));
+        let rail = "─".repeat(40);
+
+        // Rows 1-3 are a completed old composer. The cursor and later rail
+        // belong to another interaction and must not revive that stale prompt.
+        e.advance(
+            format!(
+                "\x1b[1;1H{rail}\x1b[2;1H❯ old prompt\x1b[3;1H{rail}\x1b[32;1HUnrelated interaction\x1b[34;1H{rail}\x1b[32;8H"
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Ambiguous
+        );
+    }
+
+    #[test]
     fn backend_capture_is_bounded_and_never_replays_unsafe_controls() {
         let (tx, _rx) = channel();
         let mut engine = AlacrittyEngine::new(30, 4, tx, budget_for_rows(30, 200));
@@ -3702,6 +4133,55 @@ mod tests {
         assert!(capture.text.contains("abcdefghij"), "{:?}", capture.text);
         assert!(capture.text.contains("next"), "{:?}", capture.text);
         assert!(capture.lines <= 3);
+    }
+
+    #[test]
+    fn backend_capture_cursor_tracks_normalized_visible_and_unwrapped_text() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(5, 3, tx, budget_for_rows(5, 200));
+        engine.advance(b"abcdefghij\r\nxy");
+
+        let visible = engine.backend_capture(CaptureMode::Visible, 3, false, 512);
+        assert_eq!(visible.cursor_padding_cells, 0);
+        let visible_offset = visible.cursor_offset.expect("visible cursor");
+        let mut marked: Vec<char> = visible.text.chars().collect();
+        marked.insert(visible_offset, '|');
+        assert!(marked.into_iter().collect::<String>().contains("xy|"));
+
+        let recent = engine.backend_capture(CaptureMode::RecentUnwrapped, 3, false, 512);
+        assert_eq!(recent.cursor_padding_cells, 0);
+        let recent_offset = recent.cursor_offset.expect("unwrapped cursor");
+        let mut marked: Vec<char> = recent.text.chars().collect();
+        marked.insert(recent_offset, '|');
+        assert!(
+            marked
+                .into_iter()
+                .collect::<String>()
+                .contains("abcdefghij\nxy|"),
+            "{}",
+            recent.text
+        );
+
+        let (tx, _rx) = channel();
+        let mut wide = AlacrittyEngine::new(5, 3, tx, budget_for_rows(5, 200));
+        wide.advance("界".as_bytes());
+        let capture = wide.backend_capture(CaptureMode::Visible, 3, false, 512);
+        assert_eq!(capture.cursor_padding_cells, 0);
+        assert_eq!(capture.cursor_offset, Some(1));
+    }
+
+    #[test]
+    fn recent_capture_drops_cleared_rows_below_the_live_cursor() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(20, 8, tx, budget_for_rows(20, 200));
+        engine.advance(b"old output\r\nmore output");
+        engine.advance(b"\x1b[2J\x1b[H$ ");
+
+        let capture = engine.backend_capture(CaptureMode::RecentUnwrapped, 80, false, 4096);
+        assert!(capture.text.ends_with("\n$"), "{}", capture.text);
+        assert!(!capture.text.ends_with('\n'));
+        assert_eq!(capture.cursor_offset, Some(capture.text.chars().count()));
+        assert_eq!(capture.cursor_padding_cells, 1);
     }
 
     /// Pi alt-screen `doRender`: 2026 + row writes + CUP to fake caret + hide.

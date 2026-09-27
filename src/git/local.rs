@@ -460,6 +460,12 @@ fn run_status(cwd: &Path, args: &[&str]) -> Result<(bool, String, String), Strin
     ))
 }
 
+/// Current local branch checked out at `cwd`. Detached HEAD is returned as
+/// `HEAD`, which intentionally fails exact branch validation by callers.
+pub(crate) fn current_branch(cwd: &Path) -> Result<String, String> {
+    run(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).map(|branch| branch.trim().to_string())
+}
+
 /// Whether a local branch exists in `repo`.
 pub(crate) fn branch_exists(repo: &Path, branch: &str) -> bool {
     run(

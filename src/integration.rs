@@ -40,12 +40,16 @@ try:
     d=json.load(sys.stdin); print(d.get("hook_event_name") or d.get("event") or "")
 except Exception: print("")' 2>/dev/null)"
 case "$evt" in
-  Notification|Stop|SubagentStop)
+  Notification|Stop|SubagentStop|UserPromptSubmit)
     msg="$(printf '%s' "$input" | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin); print((d.get("message") or "")[:200])
 except Exception: print("")' 2>/dev/null)"
-    "$luvus_bin" pane report-event --agent {agent} --kind "$evt" --message "$msg" >/dev/null 2>&1
+    notification_type="$(printf '%s' "$input" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print(d.get("notification_type") or "")
+except Exception: print("")' 2>/dev/null)"
+    "$luvus_bin" pane report-event --agent {agent} --kind "$evt" --message "$msg" --notification-type "$notification_type" >/dev/null 2>&1
     ;;
   *)
     sid="$(printf '%s' "$input" | python3 -c 'import sys,json
@@ -149,6 +153,13 @@ pub(crate) fn write_bytes_atomic(path: &Path, output: &[u8]) -> Result<()> {
         .ok_or_else(|| anyhow!("could not reserve a temporary configuration file"))?;
 
     let result = (|| -> Result<()> {
+        // The replacement must keep the existing file's mode, so a private
+        // `0600` config never becomes readable through its new inode. Apply it
+        // before writing any content.
+        #[cfg(unix)]
+        if let Ok(metadata) = fs::metadata(path) {
+            file.set_permissions(metadata.permissions())?;
+        }
         file.write_all(output)?;
         file.flush()?;
         file.sync_all()?;
@@ -382,6 +393,9 @@ mod tests {
         assert!(operation("letta")
             .and_then(|operations| operations.hook)
             .is_some());
+        assert!(operation("devin")
+            .and_then(|operations| operations.hook)
+            .is_some());
         assert!(operation("agy")
             .and_then(|operations| operations.hook)
             .is_some());
@@ -421,6 +435,33 @@ mod tests {
                 .to_string_lossy()
                 .contains(".blocked.json.luvus-")
         }));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_replaced_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "luvus-atomic-mode-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        for mode in [0o600, 0o640, 0o644] {
+            let config = root.join(format!("config-{mode:o}.json"));
+            fs::write(&config, "{}").unwrap();
+            fs::set_permissions(&config, fs::Permissions::from_mode(mode)).unwrap();
+            write_json_atomic(&config, &json!({"luvus": true})).unwrap();
+            assert_eq!(
+                fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
 
         let _ = fs::remove_dir_all(root);
     }
@@ -469,6 +510,17 @@ mod tests {
         // Only one luvus entry despite installing twice.
         let count = groups.iter().filter(|g| group_mentions_luvus(g)).count();
         assert_eq!(count, 1);
+        for event in ["Notification", "Stop", "UserPromptSubmit"] {
+            let groups = settings["hooks"][event].as_array().unwrap();
+            assert_eq!(
+                groups
+                    .iter()
+                    .filter(|group| group_mentions_luvus(group))
+                    .count(),
+                1,
+                "one Luvus {event} hook remains after an idempotent reinstall"
+            );
+        }
         assert!(is_installed("claude"));
 
         let mut incomplete = settings;
@@ -834,14 +886,11 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         let old = std::env::var_os("XDG_CONFIG_HOME");
         let old_tui = std::env::var_os("OPENCODE_TUI_CONFIG");
-        let old_path = std::env::var_os("PATH");
         std::env::set_var("XDG_CONFIG_HOME", &tmp);
         std::env::remove_var("OPENCODE_TUI_CONFIG");
         // Make the no-binary fallback deterministic even on a maintainer host
         // that still has OpenCode V1 installed.
-        std::env::set_var("PATH", &tmp);
-
-        install("opencode").unwrap();
+        crate::agent::opencode::without_binary_probe(|| install("opencode")).unwrap();
         let plugin = tmp.join("opencode/luvus-v2/tui.js");
         let js = fs::read_to_string(&plugin).unwrap();
         assert!(js.contains("session.updated"), "hooks the session event");
@@ -865,10 +914,6 @@ mod tests {
         match old_tui {
             Some(value) => std::env::set_var("OPENCODE_TUI_CONFIG", value),
             None => std::env::remove_var("OPENCODE_TUI_CONFIG"),
-        }
-        match old_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
         }
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1243,7 +1288,7 @@ console.log(JSON.stringify(calls));
         .unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let run = |devin_host: bool| -> String {
+        let run = |devin_host: bool, payload: &[u8]| -> String {
             let _ = fs::remove_file(&log);
             let mut cmd = Command::new("bash");
             cmd.arg(&script)
@@ -1258,22 +1303,26 @@ console.log(JSON.stringify(calls));
                 cmd.env("DEVIN_PROJECT_DIR", "/work/project");
             }
             let mut child = cmd.spawn().unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(br#"{"hook_event_name":"SessionStart","session_id":"abc-123"}"#)
-                .unwrap();
+            child.stdin.take().unwrap().write_all(payload).unwrap();
             assert!(child.wait().unwrap().success());
             fs::read_to_string(&log).unwrap_or_default()
         };
 
+        let session_start = br#"{"hook_event_name":"SessionStart","session_id":"abc-123"}"#;
         assert_eq!(
-            run(false).trim(),
+            run(false, session_start).trim(),
             "pane report --agent claude --session abc-123",
             "a Claude payload is reported as claude"
         );
-        assert_eq!(run(true), "", "a Devin host is never reported");
+        assert_eq!(
+            run(true, session_start),
+            "",
+            "a Devin host is never reported"
+        );
+        assert_eq!(
+            run(false, br#"{"hook_event_name":"Notification","notification_type":"idle_prompt","message":"Waiting for input"}"#).trim(),
+            "pane report-event --agent claude --kind Notification --message Waiting for input --notification-type idle_prompt",
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }

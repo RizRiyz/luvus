@@ -3,6 +3,7 @@
 //! Jobs own immutable inputs. Only their completions may mutate `App`, on its
 //! existing event loop. Capacity includes completed but unapplied results.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
@@ -44,14 +45,32 @@ enum Message {
     Drain(Box<dyn FnOnce() -> bool + Send>, mpsc::Sender<bool>),
 }
 
+pub(super) struct ParallelJob {
+    pub cancelled: Arc<AtomicBool>,
+    pub handle: std::thread::JoinHandle<()>,
+}
+
 #[derive(Default)]
 pub(super) struct IoJobs {
     sender: Option<mpsc::Sender<Message>>,
     budget: Arc<Budget>,
+    parallel: Vec<ParallelJob>,
     closing: bool,
 }
 
 impl IoJobs {
+    fn reap_parallel(&mut self) {
+        let mut active = Vec::with_capacity(self.parallel.len());
+        for job in self.parallel.drain(..) {
+            if job.handle.is_finished() {
+                let _ = job.handle.join();
+            } else {
+                active.push(job);
+            }
+        }
+        self.parallel = active;
+    }
+
     /// Nonblocking admission. Callers retain dirty/pending intent on rejection.
     /// Each caller must bound its input and admit at most one large snapshot.
     pub(super) fn submit(
@@ -62,6 +81,7 @@ impl IoJobs {
         if self.closing {
             return Err("filesystem worker is shutting down");
         }
+        self.reap_parallel();
         let mut used = self.budget.used.lock().unwrap_or_else(|e| e.into_inner());
         if *used >= MAX_JOBS {
             return Err("filesystem work queue is full");
@@ -109,6 +129,48 @@ impl IoJobs {
             .map_err(|_| "filesystem worker unavailable")
     }
 
+    /// Admit one bounded long-running job without occupying the serial filesystem
+    /// worker. The shared permit still caps all app-owned background work.
+    pub(super) fn submit_parallel(
+        &mut self,
+        events: mpsc::Sender<AppEvent>,
+        work: impl FnOnce(Arc<AtomicBool>) -> Apply + Send + 'static,
+    ) -> Result<(), &'static str> {
+        if self.closing {
+            return Err("filesystem worker is shutting down");
+        }
+        self.reap_parallel();
+        let mut used = self.budget.used.lock().unwrap_or_else(|e| e.into_inner());
+        if *used >= MAX_JOBS {
+            return Err("filesystem work queue is full");
+        }
+        *used += 1;
+        let permit = Permit(self.budget.clone());
+        drop(used);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let handle = std::thread::Builder::new()
+            .name("luvus-long-io".into())
+            .spawn(move || {
+                let apply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    work(worker_cancelled)
+                }))
+                .unwrap_or_else(|_| {
+                    Box::new(|app: &mut App| {
+                        app.show_toast("background job failed unexpectedly");
+                        true
+                    })
+                });
+                let _ = events.send(AppEvent::IoCompleted(Completion {
+                    apply,
+                    _permit: permit,
+                }));
+            })
+            .map_err(|_| "could not start background worker")?;
+        self.parallel.push(ParallelJob { cancelled, handle });
+        Ok(())
+    }
+
     /// Shutdown-only FIFO barrier. Never wait on storage in the interactive loop.
     /// OS filesystem calls cannot safely be cancelled; timeout reports uncertainty.
     #[cfg(test)]
@@ -122,14 +184,33 @@ impl IoJobs {
         final_work: impl FnOnce() -> bool + Send + 'static,
     ) -> bool {
         self.closing = true;
-        let Some(sender) = self.sender.take() else {
-            return false;
+        for job in &self.parallel {
+            job.cancelled.store(true, Ordering::Release);
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        let serial = if let Some(sender) = self.sender.take() {
+            let (tx, rx) = mpsc::channel();
+            sender
+                .send(Message::Drain(Box::new(final_work), tx))
+                .is_ok()
+                && rx
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or(false)
+        } else {
+            final_work()
         };
-        let (tx, rx) = mpsc::channel();
-        sender
-            .send(Message::Drain(Box::new(final_work), tx))
-            .is_ok()
-            && rx.recv_timeout(timeout).unwrap_or(false)
+        let mut parallel = true;
+        for job in self.parallel.drain(..) {
+            while !job.handle.is_finished() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if job.handle.is_finished() {
+                let _ = job.handle.join();
+            } else {
+                parallel = false;
+            }
+        }
+        serial && parallel
     }
 }
 
@@ -146,7 +227,7 @@ impl Drop for IoJobs {
     fn drop(&mut self) {
         // Covers early startup/test exits as well as the explicit server drain.
         // A completed explicit drain has already taken the sender.
-        if self.sender.is_some() {
+        if self.sender.is_some() || !self.parallel.is_empty() {
             let _ = self.finish(Duration::from_secs(2), || true);
         }
     }
@@ -177,6 +258,25 @@ mod tests {
         assert!(jobs.drain(Duration::from_secs(2)));
         assert_eq!(*order.lock().unwrap(), (0..MAX_JOBS).collect::<Vec<_>>());
         assert!(jobs.sender.is_none());
+    }
+
+    #[test]
+    fn parallel_jobs_are_cancelled_and_joined_on_shutdown() {
+        let (tx, _rx) = mpsc::channel();
+        let mut jobs = IoJobs::default();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = stopped.clone();
+        jobs.submit_parallel(tx, move |cancelled| {
+            while !cancelled.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            observed.store(true, Ordering::Release);
+            Box::new(|_| false)
+        })
+        .unwrap();
+        assert!(jobs.drain(Duration::from_secs(2)));
+        assert!(stopped.load(Ordering::Acquire));
+        assert!(jobs.parallel.is_empty());
     }
 
     #[test]

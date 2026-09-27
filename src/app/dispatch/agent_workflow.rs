@@ -475,28 +475,45 @@ impl App {
     /// detection already caches this result. If terminal output arrived after
     /// that pass, inspect only the same bounded live rows once, on this request,
     /// so an agent-start/prompt race cannot submit Enter before a composer exists.
-    pub(in crate::app::dispatch) fn agent_prompt_is_ready(&self, id: PaneId) -> bool {
+    pub(crate) fn agent_prompt_is_ready(&self, id: PaneId, strict: bool) -> bool {
         let Some(status) = self.status.get(&id) else {
-            return true;
+            return !strict;
         };
-        let positive_evidence_required = status.prompt_evidence_required
-            || detect::prompt_requires_positive_evidence(&status.agent)
-            || status
+        let report = status
+            .agent_report
+            .as_ref()
+            .filter(|report| Instant::now() < report.expires_at);
+        if report.is_some_and(|report| report.state == State::Blocked) {
+            return false;
+        }
+        let resolved_agent = self.manifests.is_agent(&status.agent)
+            || report.is_some_and(|report| report.agent == status.agent);
+        let agent = if resolved_agent {
+            status.agent.as_str()
+        } else {
+            status
                 .agent_session
                 .as_ref()
-                .is_some_and(|session| detect::prompt_requires_positive_evidence(&session.agent));
+                .map(|session| session.agent.as_str())
+                .unwrap_or(&status.agent)
+        };
+        let positive_evidence_required = detect::prompt_requires_positive_evidence(agent)
+            || (!resolved_agent && status.prompt_evidence_required);
         let admits = |evidence| match evidence {
             detect::PromptEvidence::Ready => true,
             detect::PromptEvidence::Blocked => false,
-            detect::PromptEvidence::Unknown => !positive_evidence_required,
+            detect::PromptEvidence::Unknown => !positive_evidence_required && !strict,
         };
         let Some(pane) = self.panes.get(&id) else {
-            return true;
+            return !strict;
         };
         let Ok(engine) = pane.engine.lock() else {
             return false;
         };
-        if !status.force_detect && status.last_detect_generation == Some(engine.output_generation())
+        if !status.force_detect
+            && status.last_detect_generation == Some(engine.output_generation())
+            && !(positive_evidence_required
+                && status.prompt_evidence == detect::PromptEvidence::Unknown)
         {
             return admits(status.prompt_evidence);
         }
@@ -505,23 +522,20 @@ impl App {
             .get(&id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let rows = detect::screen_rows(&status.agent, running, &self.manifests);
-        let bottom = if detect::screen_uses_non_empty_rows(&status.agent, running, &self.manifests)
-        {
+        let rows = detect::screen_rows(agent, running, &self.manifests);
+        let bottom = if detect::screen_uses_non_empty_rows(agent, running, &self.manifests) {
             engine.detection_text_non_empty(rows)
         } else {
             engine.detection_text(rows)
         };
-        let raw = detect::prompt_evidence(
-            engine.title().as_deref(),
-            &bottom,
-            &status.agent,
-            &self.manifests,
-        );
+        let raw =
+            detect::prompt_evidence(engine.title().as_deref(), &bottom, agent, &self.manifests);
         let evidence = if raw == detect::PromptEvidence::Blocked {
             raw
-        } else if status.agent.eq_ignore_ascii_case("codex") {
-            if engine.codex_composer_region().is_some() {
+        } else if positive_evidence_required {
+            if detect::live_composer_ready(agent, &*engine, status.claude_prompt_semantic_ready)
+                == Some(true)
+            {
                 detect::PromptEvidence::Ready
             } else {
                 detect::PromptEvidence::Unknown
@@ -549,12 +563,21 @@ impl App {
         if cancelled.load(Ordering::Acquire) {
             return;
         }
-        if let Err((code, message)) =
-            reject_api_fields(&p, &["target", "text", "wait", "until", "timeout_s"])
-        {
+        if let Err((code, message)) = reject_api_fields(
+            &p,
+            &["target", "text", "wait", "until", "timeout_s", "strict"],
+        ) {
             fail(&code, message);
             return;
         }
+        let strict = match p.get("strict") {
+            None | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) => true,
+            Some(_) => {
+                fail("invalid_request", "strict must be a boolean".to_string());
+                return;
+            }
+        };
         let pane = match self.resolve_agent_target(&p) {
             Ok(pane) if self.is_agent_pane(pane) => pane,
             Ok(_) => {
@@ -626,7 +649,7 @@ impl App {
                 return;
             }
         }
-        if !self.agent_prompt_is_ready(pane) {
+        if !self.agent_prompt_is_ready(pane, strict) {
             let (code, message) = agent_prompt_not_ready_error();
             fail(&code, message);
             return;

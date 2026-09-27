@@ -360,7 +360,8 @@
         "agent": { "type": "string" },
         "kind": { "type": "string" },
         "message": { "type": "string" },
-        "tool": { "type": "string" }
+        "tool": { "type": "string" },
+        "notification_type": { "type": "string" }
       }
     },
     "authority_reported": {

@@ -161,23 +161,15 @@ fn parse_spec(spec: &str) -> Result<(String, String, String)> {
 }
 
 fn print_preview(spec: &str, sha: &str, m: &ModuleManifest) {
-    println!("Install module from {spec}");
+    println!("Install module from {}", escape_terminal_controls(spec));
     println!("  id:      {}", m.id);
-    println!("  name:    {} {}", m.name, m.version);
+    println!(
+        "  name:    {} {}",
+        escape_terminal_controls(&m.name),
+        escape_terminal_controls(&m.version)
+    );
     println!("  commit:  {}", short(sha));
-    let mut commands: Vec<String> = Vec::new();
-    for b in &m.build {
-        commands.push(format!("  build:   {}", b.command.join(" ")));
-    }
-    for a in &m.actions {
-        commands.push(format!("  action {}: {}", a.id, a.command.join(" ")));
-    }
-    for p in &m.panes {
-        commands.push(format!("  pane {}: {}", p.id, p.command.join(" ")));
-    }
-    for e in &m.events {
-        commands.push(format!("  on {}: {}", e.on, e.command.join(" ")));
-    }
+    let commands = preview_commands(m);
     if commands.is_empty() {
         println!("  (no commands declared)");
     } else {
@@ -186,6 +178,56 @@ fn print_preview(spec: &str, sha: &str, m: &ModuleManifest) {
             println!("{c}");
         }
     }
+}
+
+fn preview_commands(m: &ModuleManifest) -> Vec<String> {
+    let mut commands = Vec::new();
+    for b in &m.build {
+        commands.push(format!("  build:   {}", format_argv(&b.command)));
+    }
+    for (index, startup) in m.startup.iter().enumerate() {
+        commands.push(format!(
+            "  startup {index}: {}",
+            format_argv(&startup.command)
+        ));
+    }
+    for a in &m.actions {
+        commands.push(format!("  action {}: {}", a.id, format_argv(&a.command)));
+    }
+    for p in &m.panes {
+        commands.push(format!("  pane {}: {}", p.id, format_argv(&p.command)));
+    }
+    for e in &m.events {
+        commands.push(format!(
+            "  on {}: {}",
+            escape_terminal_controls(&e.on),
+            format_argv(&e.command)
+        ));
+    }
+    if let Some(provider) = &m.worktree_provider {
+        commands.push(format!(
+            "  worktree creation provider: {}",
+            format_argv(&provider.command)
+        ));
+        if let Some(command) = &provider.remove_command {
+            commands.push(format!(
+                "  worktree removal provider: {}",
+                format_argv(command)
+            ));
+        }
+    }
+    commands
+}
+
+fn format_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|argument| format!("{argument:?}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn escape_terminal_controls(value: &str) -> String {
+    value.chars().flat_map(char::escape_debug).collect()
 }
 
 fn confirm() -> Result<bool> {
@@ -274,6 +316,49 @@ mod tests {
         assert!(sub.is_empty());
 
         assert!(parse_spec("nope").is_err());
+    }
+
+    #[test]
+    fn install_preview_includes_startup_and_worktree_provider_commands() {
+        let manifest: ModuleManifest = toml::from_str(
+            r#"id = "example.provider"
+name = "Provider"
+version = "0.1.0"
+min_luvus_version = "0.1.0"
+[[startup]]
+command = ["./startup"]
+[worktree_provider]
+command = ["./create-worktree"]
+remove_command = ["./remove-worktree"]
+"#,
+        )
+        .unwrap();
+        manifest.validate().unwrap();
+        let commands = preview_commands(&manifest);
+        assert!(commands
+            .iter()
+            .any(|line| line.contains("startup 0: \"./startup\"")));
+        assert!(commands
+            .iter()
+            .any(|line| line.contains("worktree creation provider: \"./create-worktree\"")));
+        assert!(commands
+            .iter()
+            .any(|line| line.contains("worktree removal provider: \"./remove-worktree\"")));
+    }
+
+    #[test]
+    fn install_preview_escapes_command_arguments_and_terminal_controls() {
+        let rendered = format_argv(&[
+            "plain".to_string(),
+            "two words".to_string(),
+            "\u{1b}[2J\nnext".to_string(),
+        ]);
+        assert_eq!(rendered, r#""plain" "two words" "\u{1b}[2J\nnext""#);
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(!rendered.contains('\n'));
+
+        assert_eq!(escape_terminal_controls("A\u{1b}[2J\nB"), r"A\u{1b}[2J\nB");
+        assert_eq!(escape_terminal_controls("A\u{202e}B"), r"A\u{202e}B");
     }
 
     #[test]

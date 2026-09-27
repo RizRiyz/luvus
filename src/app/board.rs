@@ -35,6 +35,7 @@ enum TaskStartRollback {
         repo: std::path::PathBuf,
         path: std::path::PathBuf,
         branch: String,
+        worktree_created: bool,
         branch_created: bool,
     },
 }
@@ -591,12 +592,17 @@ impl App {
                 })?;
         }
         let branch = task_branch_name(task, branch);
+        let ready = self
+            .ready_created_worktree()
+            .is_some_and(|ready| ready.matches(&self.ws().cwd, &branch));
         let persisted = task
             .worktree
             .as_ref()
             .map(std::path::PathBuf::from)
             .filter(|path| path.exists());
-        let existing = if let Some(path) = persisted {
+        let existing = if ready {
+            None
+        } else if let Some(path) = persisted {
             if requested_workspace.is_some() {
                 let worktrees = crate::git::local::worktrees(&self.ws().cwd)
                     .map_err(|error| ("git_error".to_string(), error))?;
@@ -661,7 +667,15 @@ impl App {
                     "task start needs a git repo in worktree mode — use --mode workspace for the current checkout".to_string(),
                 ));
             }
-            let branch_created = !crate::git::local::branch_exists(&repo, &branch);
+            let branch_created = self
+                .ready_created_worktree()
+                .filter(|ready| ready.matches(&repo, &branch))
+                .map(|ready| ready.branch_created)
+                .unwrap_or_else(|| !crate::git::local::branch_exists(&repo, &branch));
+            let worktree_created = self
+                .ready_created_worktree()
+                .filter(|ready| ready.matches(&repo, &branch))
+                .is_none_or(|ready| ready.worktree_created);
             let path = self
                 .create_worktree(&repo, &branch)
                 .map_err(|error| ("git_error".to_string(), error))?;
@@ -687,6 +701,7 @@ impl App {
                     repo,
                     path,
                     branch: branch.clone(),
+                    worktree_created,
                     branch_created,
                 },
             )
@@ -929,6 +944,7 @@ impl App {
                 repo,
                 path,
                 branch,
+                worktree_created,
                 branch_created,
             } => {
                 if let Some(index) = self
@@ -938,14 +954,18 @@ impl App {
                 {
                     self.close_workspace_after_rehome(index);
                 }
-                match crate::git::local::worktree_remove_force(&repo, &path) {
-                    Ok(()) if branch_created => {
-                        if let Err(error) = crate::git::local::branch_delete_force(&repo, &branch) {
-                            cleanup_error = Some(error);
+                if worktree_created {
+                    match crate::git::local::worktree_remove_force(&repo, &path) {
+                        Ok(()) if branch_created => {
+                            if let Err(error) =
+                                crate::git::local::branch_delete_force(&repo, &branch)
+                            {
+                                cleanup_error = Some(error);
+                            }
                         }
+                        Ok(()) => {}
+                        Err(error) => cleanup_error = Some(error),
                     }
-                    Ok(()) => {}
-                    Err(error) => cleanup_error = Some(error),
                 }
             }
         }
@@ -1566,10 +1586,35 @@ impl App {
             crate::app::OrchView::Tasks => crate::app::OrchFormKind::Task,
             crate::app::OrchView::Automations => crate::app::OrchFormKind::Automation,
         };
+        self.open_orch_form_kind(kind);
+    }
+
+    pub(crate) fn open_orch_form_kind(&mut self, kind: crate::app::OrchFormKind) {
         let mut form = crate::app::OrchForm::for_kind(kind);
         form.mode = self.orch_flow_mode;
         form.active_agents = self.active_agent_automation_choices();
         self.orch_form = Some(form);
+    }
+
+    pub(crate) fn close_orch_form(&mut self) {
+        let commander_kind = self
+            .orch_form
+            .as_ref()
+            .and_then(|form| form.commander_origin.then_some(form.kind));
+        self.orch_form = None;
+        if let Some(kind) = commander_kind {
+            if let Some(commander) = self.commander.as_mut() {
+                commander.focused = true;
+                commander.receipt = Some(format!(
+                    "{} form canceled",
+                    if kind == crate::app::OrchFormKind::Task {
+                        "Task"
+                    } else {
+                        "Automation"
+                    }
+                ));
+            }
+        }
     }
 
     fn active_agent_automation_choices(&self) -> Vec<crate::app::OrchActiveAgent> {
@@ -1622,7 +1667,7 @@ impl App {
         // Esc/Enter act on the whole form, so handle them before borrowing it.
         match key.code {
             KeyCode::Esc => {
-                self.orch_form = None;
+                self.close_orch_form();
                 return;
             }
             KeyCode::Enter => {
@@ -1672,7 +1717,7 @@ impl App {
 
     /// Create the task from the form (title required; paths/deps whitespace-split).
     /// On error the form stays open showing why.
-    fn submit_orch_form(&mut self) {
+    pub(crate) fn submit_orch_form(&mut self) {
         let (
             kind,
             title,
@@ -1688,6 +1733,8 @@ impl App {
             paths,
             deps,
             gate,
+            workspace_id,
+            commander_origin,
         ) = {
             let Some(f) = self.orch_form.as_ref() else {
                 return;
@@ -1716,6 +1763,8 @@ impl App {
                     let g = f.gate.trim();
                     (!g.is_empty()).then(|| g.to_string())
                 },
+                f.workspace_id.clone(),
+                f.commander_origin,
             )
         };
         let result = match kind {
@@ -1728,6 +1777,7 @@ impl App {
                 paths,
                 deps,
                 gate,
+                workspace_id.clone(),
             ),
             crate::app::OrchFormKind::Automation => self.submit_scheduled_orch_task(
                 title,
@@ -1742,12 +1792,43 @@ impl App {
                 timezone,
                 paths,
                 gate,
+                workspace_id,
             ),
         };
-        if let Err(message) = result {
-            if let Some(form) = self.orch_form.as_mut() {
-                form.error = Some(message);
+        match result {
+            Ok(()) if commander_origin => {
+                let id = match kind {
+                    crate::app::OrchFormKind::Task => self
+                        .orch
+                        .tasks
+                        .get(self.orch_cursor)
+                        .map(|task| task.id.as_str()),
+                    crate::app::OrchFormKind::Automation => self
+                        .automation
+                        .automations
+                        .get(self.orch_automation_cursor)
+                        .map(|item| item.id.as_str()),
+                };
+                if let Some(commander) = self.commander.as_mut() {
+                    commander.focused = true;
+                    commander.receipt = id.map(|id| {
+                        format!(
+                            "{} {id} created",
+                            if kind == crate::app::OrchFormKind::Task {
+                                "Task"
+                            } else {
+                                "Automation"
+                            }
+                        )
+                    });
+                }
             }
+            Err(message) => {
+                if let Some(form) = self.orch_form.as_mut() {
+                    form.error = Some(message);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1762,10 +1843,12 @@ impl App {
         paths: Vec<String>,
         deps: Vec<String>,
         gate: Option<String>,
+        workspace_id: Option<String>,
     ) -> Result<(), String> {
         let descriptor = if start_now {
             Some(
                 crate::agent::registry::find(&agent)
+                    .filter(|descriptor| crate::agent::registry::supports_local_task(descriptor))
                     .ok_or_else(|| format!("unsupported agent: {agent}"))?,
             )
         } else {
@@ -1774,8 +1857,9 @@ impl App {
         if start_now && prompt.is_empty() {
             return Err("Prompt is required when Start is Now".into());
         }
+        let workspace = self.orch_form_workspace_index(workspace_id.as_deref())?;
         let project = self
-            .task_project_at(self.active_ws)
+            .task_project_at(workspace)
             .ok_or_else(|| "No workspace is available for this task".to_string())?;
         let before = self.orch.clone();
         let task = self
@@ -1799,10 +1883,7 @@ impl App {
         self.orch_view = crate::app::OrchView::Tasks;
         self.orch_cursor = self.orch.tasks.len().saturating_sub(1);
         if let Some(descriptor) = descriptor {
-            match self.task_start(&id, None, Some(descriptor.id.to_string()), mode, None) {
-                Ok(_) => self.show_toast(format!("{id}: worker started")),
-                Err((_, message)) => self.show_toast(message),
-            }
+            self.start_task_from_ui(id, Some(descriptor.id.to_string()), mode, None, false);
         } else {
             self.show_toast(format!("added {id}"));
         }
@@ -1824,6 +1905,7 @@ impl App {
         timezone: String,
         paths: Vec<String>,
         gate: Option<String>,
+        bound_workspace_id: Option<String>,
     ) -> Result<(), String> {
         if prompt.is_empty() {
             return Err("Prompt is required for a scheduled agent".into());
@@ -1844,9 +1926,11 @@ impl App {
                         access.label().to_ascii_lowercase()
                     ));
                 }
+                let workspace_index =
+                    self.orch_form_workspace_index(bound_workspace_id.as_deref())?;
                 let workspace_id = self
                     .workspaces
-                    .get(self.active_ws)
+                    .get(workspace_index)
                     .map(|workspace| workspace.id.clone())
                     .ok_or_else(|| "an active workspace is required".to_string())?;
                 (
@@ -1860,6 +1944,12 @@ impl App {
             crate::app::OrchAutomationTarget::ActiveAgent => {
                 let target = active_agent
                     .ok_or_else(|| "No live agent is available for this automation".to_string())?;
+                if bound_workspace_id
+                    .as_deref()
+                    .is_some_and(|id| id != target.workspace_id)
+                {
+                    return Err("Selected agent is outside the bound workspace".into());
+                }
                 (
                     crate::automation::AutomationTarget::ActiveAgent {
                         pane_id: target.pane.0,
@@ -1928,6 +2018,21 @@ impl App {
         Ok(())
     }
 
+    fn orch_form_workspace_index(&self, id: Option<&str>) -> Result<usize, String> {
+        match id {
+            Some(id) => self
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == id)
+                .ok_or_else(|| "Selected workspace is no longer available".to_string()),
+            None => self
+                .workspaces
+                .get(self.active_ws)
+                .map(|_| self.active_ws)
+                .ok_or_else(|| "No active workspace is available".to_string()),
+        }
+    }
+
     /// The task under the board cursor, if any.
     fn orch_selected_id(&self) -> Option<String> {
         self.orch.tasks.get(self.orch_cursor).map(|t| t.id.clone())
@@ -1991,7 +2096,7 @@ impl App {
                 }
             }
             crate::app::OrchHit::FormCreate => self.submit_orch_form(),
-            crate::app::OrchHit::FormCancel => self.orch_form = None,
+            crate::app::OrchHit::FormCancel => self.close_orch_form(),
             crate::app::OrchHit::FormModal => {}
             crate::app::OrchHit::StartChoice(cursor) => {
                 if let Some(start) = self.orch_start.as_mut() {
@@ -2261,12 +2366,10 @@ impl App {
             Item::Release => self.orch_action_release(),
             Item::CopyId => {
                 self.pending_clipboard = Some(id);
-                self.show_toast(self.catalog.copied);
             }
             Item::CopyWorktree => {
                 if let Some(path) = self.orch.task(&id).and_then(|task| task.worktree.clone()) {
                     self.pending_clipboard = Some(path);
-                    self.show_toast(self.catalog.copied);
                 }
             }
             Item::Delete => self.orch_action_delete(),
@@ -2385,13 +2488,53 @@ impl App {
         }
     }
 
+    fn start_task_from_ui(
+        &mut self,
+        id: String,
+        agent: Option<String>,
+        mode: TaskWorkerMode,
+        workspace_id: Option<String>,
+        stay_on_board: bool,
+    ) {
+        let previous = stay_on_board.then(|| self.task_start_selection()).flatten();
+        match self.task_start(&id, None, agent.clone(), mode, workspace_id.clone()) {
+            Ok(_) => {
+                if stay_on_board {
+                    self.restore_task_start_selection(&previous);
+                }
+                let suffix = if stay_on_board {
+                    " — ⏎ to jump in"
+                } else {
+                    ""
+                };
+                self.show_toast(format!("{id}: worker started{suffix}"));
+            }
+            Err(error) if is_worktree_create_pending(&error) => {
+                self.show_toast(format!("{id}: creating worktree…"));
+                let scheduled = self.schedule_pending_worktree(move |app, result| {
+                    match result {
+                        Ok(()) => {
+                            app.start_task_from_ui(id, agent, mode, workspace_id, stay_on_board);
+                            app.discard_ready_worktree();
+                        }
+                        Err(message) => app.show_toast(message),
+                    }
+                    true
+                });
+                if let Err(message) = scheduled {
+                    self.show_toast(message);
+                }
+            }
+            Err((_, message)) => self.show_toast(message),
+        }
+    }
+
     /// Start a worker from the board and **stay on the board**: the worker
     /// spawns in the background, a toast confirms it, and `⏎` jumps into it
     /// when wanted — starting five workers is five keypresses, not five
     /// context switches.
     fn start_worker_from_board(&mut self, id: &str, agent: Option<String>, mode: TaskWorkerMode) {
         let prev_ws = self.active_ws;
-        let prev_tab = self.workspaces[prev_ws].active_tab;
         let legacy_projectless = self
             .orch
             .task(id)
@@ -2412,14 +2555,7 @@ impl App {
         } else {
             None
         };
-        match self.task_start(id, None, agent, mode, workspace_id) {
-            Ok(_) => {
-                self.active_ws = prev_ws;
-                self.workspaces[prev_ws].active_tab = prev_tab;
-                self.show_toast(format!("{id}: worker started — ⏎ to jump in"));
-            }
-            Err((_, msg)) => self.show_toast(msg),
-        }
+        self.start_task_from_ui(id.to_string(), agent, mode, workspace_id, true);
     }
 
     /// Board `o`: open the detail overlay for the selected task (branch,
@@ -2599,8 +2735,7 @@ pub fn agent_choices() -> &'static [(&'static str, Option<&'static str>)] {
     static CHOICES: std::sync::OnceLock<Vec<(&'static str, Option<&'static str>)>> =
         std::sync::OnceLock::new();
     CHOICES.get_or_init(|| {
-        crate::agent::registry::descriptors()
-            .iter()
+        crate::agent::registry::local_task_descriptors()
             .map(|descriptor| (descriptor.id, Some(descriptor.id)))
             .chain(std::iter::once(("shell", None)))
             .collect()
@@ -2613,8 +2748,7 @@ pub fn agent_choices() -> &'static [(&'static str, Option<&'static str>)] {
 pub fn task_agent_choices() -> &'static [&'static str] {
     static CHOICES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
     CHOICES.get_or_init(|| {
-        crate::agent::registry::descriptors()
-            .iter()
+        crate::agent::registry::local_task_descriptors()
             .map(|descriptor| descriptor.id)
             .collect()
     })
@@ -4253,6 +4387,7 @@ mod tests {
             ("aider", "aider --message"),
             ("amp", "amp --execute"),
             ("antigravity", "agy -p"),
+            ("arc-studio", "arc-studio"),
             ("claude", "claude"),
             ("codex", "codex"),
             ("copilot", "copilot --interactive"),
@@ -4345,8 +4480,7 @@ mod tests {
         let agents = &choices[..choices.len() - 1];
         assert_eq!(
             agents.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            crate::agent::registry::descriptors()
-                .iter()
+            crate::agent::registry::local_task_descriptors()
                 .map(|descriptor| descriptor.id)
                 .collect::<Vec<_>>()
         );
@@ -4356,11 +4490,11 @@ mod tests {
         assert!(choices.contains(&("kiro", Some("kiro"))));
         assert_eq!(
             task_agent_choices(),
-            crate::agent::registry::descriptors()
-                .iter()
+            crate::agent::registry::local_task_descriptors()
                 .map(|descriptor| descriptor.id)
                 .collect::<Vec<_>>()
         );
+        assert!(!task_agent_choices().contains(&"arc-studio"));
     }
 
     #[test]
@@ -4951,6 +5085,7 @@ mod tests {
             "08:00".into(),
             "Asia/Makassar".into(),
             Vec::new(),
+            None,
             None,
         )
         .unwrap();

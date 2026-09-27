@@ -177,6 +177,39 @@ macro_rules! tr {
 /// suffix, so canonical syntax at the start of a row is never rewritten.
 static HELP: &[Translation] = &[
     tr!(
+        "Serve the optional browser client",
+        "Servir el cliente web opcional",
+        "Servir o cliente web opcional",
+        "Servir le client web facultatif",
+        "Den optionalen Webclient bereitstellen",
+        "Sajikan klien web opsional",
+        "提供可选的 Web 客户端",
+        "オプションの Web クライアントを提供",
+        "선택적 웹 클라이언트 제공"
+    ),
+    tr!(
+        "web access:",
+        "acceso web:",
+        "acesso web:",
+        "accès web :",
+        "Webzugriff:",
+        "akses web:",
+        "Web 访问：",
+        "Web アクセス:",
+        "웹 접근:"
+    ),
+    tr!(
+        "serve the optional loopback browser client (read-only by default)",
+        "servir el cliente web opcional en loopback (solo lectura por defecto)",
+        "servir o cliente web opcional em loopback (somente leitura por padrão)",
+        "servir le client web facultatif en boucle locale (lecture seule par défaut)",
+        "den optionalen Loopback-Webclient bereitstellen (standardmäßig schreibgeschützt)",
+        "sajikan klien web loopback opsional (bawaan hanya-baca)",
+        "提供可选的回环 Web 客户端（默认只读）",
+        "オプションのループバック Web クライアントを提供（既定は読み取り専用）",
+        "선택적 루프백 웹 클라이언트 제공(기본값은 읽기 전용)"
+    ),
+    tr!(
         "expose scoped UHP through a private provider endpoint",
         "exponer UHP con alcance mediante un endpoint privado para proveedores",
         "expor UHP com escopo por um endpoint privado para provedores",
@@ -2812,6 +2845,17 @@ static HELP: &[Translation] = &[
 /// labels such as `name` can never be mistaken for a help-row description.
 static TEXT: &[Translation] = &[
     tr!(
+        "exact search query must be at most 4096 bytes",
+        "la búsqueda exacta no puede superar los 4096 bytes",
+        "a busca exata não pode exceder 4096 bytes",
+        "la recherche exacte ne doit pas dépasser 4096 octets",
+        "die exakte Suchanfrage darf höchstens 4096 Bytes lang sein",
+        "kueri pencarian persis maksimal 4096 byte",
+        "精确搜索查询不得超过 4096 字节",
+        "完全一致検索のクエリは 4096 バイト以下にしてください",
+        "정확 검색어는 4096바이트를 초과할 수 없습니다"
+    ),
+    tr!(
         "Could not authorize UHP access.",
         "No se pudo autorizar el acceso UHP.",
         "Não foi possível autorizar o acesso UHP.",
@@ -3203,6 +3247,18 @@ mod tests {
             assert_eq!(Language::from_code(code).code(), *code);
         }
         assert_eq!(Language::from_code("unknown"), Language::En);
+    }
+
+    #[test]
+    fn exact_search_limit_diagnostic_is_localized() {
+        let source = "exact search query must be at most 4096 bytes";
+        for code in crate::i18n::LANGS {
+            let language = Language::from_code(code);
+            assert_eq!(diagnostic(source, language), text(source, language));
+            if language != Language::En {
+                assert_ne!(diagnostic(source, language), source);
+            }
+        }
     }
 
     #[test]

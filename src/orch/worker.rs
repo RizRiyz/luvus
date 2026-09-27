@@ -76,8 +76,14 @@ pub(crate) fn staged_for_test(pane: crate::ids::PaneId) -> bool {
 }
 
 pub(crate) fn validate_agent_command(agent: &str) -> Result<(), String> {
-    if crate::agent::registry::find(agent).is_some() {
-        return Ok(());
+    if let Some(descriptor) = crate::agent::registry::find(agent) {
+        return if crate::agent::registry::supports_local_task(descriptor) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{agent} cannot work in a local ORCH task workspace"
+            ))
+        };
     }
     custom_agent_argv(agent).map(|_| ())
 }
@@ -186,6 +192,11 @@ fn owner_ready(task_id: &str, pane: u32) -> Result<bool> {
 
 fn launch(agent: &str, briefing: &str, task_id: &str) -> Result<ExitStatus> {
     let mut command = if let Some(descriptor) = crate::agent::registry::find(agent) {
+        if !crate::agent::registry::supports_local_task(descriptor) {
+            return Err(anyhow!(
+                "{agent} cannot work in a local ORCH task workspace"
+            ));
+        }
         let mut command = Command::new(descriptor.launch_command);
         command.args(descriptor.task_prompt_args);
         command
@@ -211,7 +222,81 @@ fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
     if argv.is_empty() || argv[0].trim().is_empty() {
         return Err("agent command cannot be empty".to_string());
     }
+    // Process detection only unwraps plain `env KEY=value command`. Resolve
+    // supported options, including nested wrappers, before checking whether
+    // the actual executable is allowed in a local task.
+    let mut inspected_argv = argv.as_slice();
+    while executable_name(&inspected_argv[0]) == "env" {
+        inspected_argv = env_command_argv(inspected_argv)?;
+    }
+    let executable = executable_name(&inspected_argv[0]);
+    let descriptor = crate::agent::registry::find(&executable).or_else(|| {
+        crate::detect::builtin_agent_in_argv(inspected_argv)
+            .and_then(|agent| crate::agent::registry::find(&agent))
+    });
+    if let Some(descriptor) = descriptor {
+        if !crate::agent::registry::supports_local_task(descriptor) {
+            return Err(format!(
+                "{agent} cannot work in a local ORCH task workspace"
+            ));
+        }
+    }
     Ok(argv)
+}
+
+fn executable_name(command: &str) -> String {
+    let basename = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let lowercase = basename.to_ascii_lowercase();
+    lowercase
+        .strip_suffix(".exe")
+        .or_else(|| lowercase.strip_suffix(".cmd"))
+        .or_else(|| lowercase.strip_suffix(".bat"))
+        .unwrap_or(&lowercase)
+        .to_string()
+}
+
+fn env_command_argv(argv: &[String]) -> Result<&[String], String> {
+    let mut index = 1;
+    let mut options = true;
+    while let Some(arg) = argv.get(index) {
+        if options {
+            match arg.as_str() {
+                "--" => {
+                    options = false;
+                    index += 1;
+                    continue;
+                }
+                "-" | "-i" | "--ignore-environment" => {
+                    index += 1;
+                    continue;
+                }
+                "-u" | "--unset" => {
+                    if argv.get(index + 1).is_none_or(|name| name.is_empty()) {
+                        return Err("env unset option requires a variable name".to_string());
+                    }
+                    index += 2;
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some(name) = arg.strip_prefix("--unset=") {
+                if name.is_empty() {
+                    return Err("env unset option requires a variable name".to_string());
+                }
+                index += 1;
+                continue;
+            }
+            if arg.starts_with('-') {
+                return Err("unsupported env option for local ORCH task agent".to_string());
+            }
+        }
+        if arg.contains('=') {
+            index += 1;
+            continue;
+        }
+        return Ok(&argv[index..]);
+    }
+    Err("env command cannot be empty".to_string())
 }
 
 #[cfg(test)]
@@ -254,6 +339,59 @@ mod tests {
         assert!(error.to_string().contains("timed out"));
     }
 
+    #[test]
+    fn remote_sandbox_agent_cannot_claim_a_local_task() {
+        assert!(validate_agent_command("arc-studio").is_err());
+        assert!(launch("arc-studio", "briefing", "t1").is_err());
+        for command in [
+            "arc-studio --continue",
+            "/usr/local/bin/arc-studio --continue",
+            r#""C:\Program Files\nodejs\arc-studio.cmd" --continue"#,
+            "node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "node --require helper /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            r#""C:\Program Files\nodejs\node.exe" "C:\Users\Ada\node_modules\@circle-fin\arc-studio-cli\bin\arc-studio.mjs""#,
+            "env FOO=bar arc-studio",
+            "env -i arc-studio",
+            "env - arc-studio",
+            "env -u FOO arc-studio",
+            "env -i env -i arc-studio",
+            "env - /usr/bin/env -u FOO arc-studio",
+            "env FOO=bar -- arc-studio",
+            "env --unset=FOO arc-studio",
+            "env FOO=bar -i arc-studio",
+            "env -i node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "env - node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "env -u FOO node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "env -i env -u FOO node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            "env -S arc-studio",
+        ] {
+            assert!(validate_agent_command(command).is_err(), "{command}");
+            assert!(launch(command, "briefing", "t1").is_err(), "{command}");
+        }
+        assert!(validate_agent_command("codex").is_ok());
+        assert!(validate_agent_command("codex --model o3").is_ok());
+        assert!(validate_agent_command("custom-agent --flag").is_ok());
+        assert!(validate_agent_command("env FOO=bar custom-agent --flag").is_ok());
+        for command in [
+            "env -i custom-agent",
+            "env - custom-agent",
+            "env -u FOO custom-agent",
+            "env --ignore-environment custom-agent",
+            "env --unset=FOO custom-agent",
+            "env FOO=bar -- custom-agent",
+            "env FOO=bar -i custom-agent",
+            "env -i env -u FOO custom-agent",
+        ] {
+            assert!(validate_agent_command(command).is_ok(), "{command}");
+        }
+        assert!(validate_agent_command("env -u custom-agent").is_err());
+        assert!(
+            validate_agent_command("node /opt/node_modules/@other/arc-studio-cli/bin/cli.mjs")
+                .is_ok()
+        );
+        assert!(validate_agent_command("node app.js --example arc-studio").is_ok());
+    }
+
     #[cfg(unix)]
     #[test]
     fn direct_launch_delivers_a_multiline_briefing_beyond_canonical_tty_limits() {
@@ -283,6 +421,16 @@ mod tests {
             std::fs::read_to_string(agent.with_extension("args")).unwrap(),
             "--flag\ntwo words"
         );
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), briefing);
+        for wrapper in ["env -", "env -i", "env -u FOO"] {
+            let wrapped_command = format!("{wrapper} {agent_command}");
+            assert!(launch(&wrapped_command, &briefing, "t42")
+                .unwrap()
+                .success());
+            assert_eq!(std::fs::read_to_string(&output).unwrap(), briefing);
+        }
+        let nested_command = format!("env - /usr/bin/env -i {agent_command}");
+        assert!(launch(&nested_command, &briefing, "t42").unwrap().success());
         assert_eq!(std::fs::read_to_string(&output).unwrap(), briefing);
         let _ = std::fs::remove_dir_all(root);
     }

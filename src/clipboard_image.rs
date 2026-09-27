@@ -12,6 +12,11 @@ use std::time::{Duration, SystemTime};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 pub(crate) const MAX_PNG_BYTES: usize = 48 * 1024 * 1024;
+/// Browser control frames remain below both bridge and UHP frame limits after
+/// JSON and base64 expansion. Larger clipboard images still use the binary
+/// native-client transport.
+pub(crate) const MAX_WEB_PNG_BYTES: usize = 160 * 1024;
+pub(crate) const MAX_WEB_PNG_BASE64_BYTES: usize = MAX_WEB_PNG_BYTES.div_ceil(3) * 4;
 pub(crate) const MAX_DIMENSION: u32 = 8192;
 pub(crate) const MAX_PIXELS: u64 = 12_000_000;
 
@@ -37,10 +42,15 @@ pub(crate) struct PngInfo {
 /// An exact image-paste gesture. Alt is deliberately excluded so AltGr text
 /// can never become a clipboard action, and repeats cannot stage duplicates.
 pub(crate) fn is_image_paste_key(key: &KeyEvent) -> bool {
+    let modifiers = key.modifiers;
+    let control_paste = modifiers == KeyModifiers::CONTROL
+        || modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+    let macos_command_paste = cfg!(target_os = "macos")
+        && (modifiers == KeyModifiers::SUPER
+            || modifiers == KeyModifiers::SUPER | KeyModifiers::SHIFT);
     key.kind == KeyEventKind::Press
         && matches!(key.code, KeyCode::Char('v' | 'V'))
-        && (key.modifiers == KeyModifiers::CONTROL
-            || key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        && (control_paste || macos_command_paste)
 }
 
 /// Validate the PNG container and the decoded allocation implied by IHDR.
@@ -481,6 +491,76 @@ pub(crate) fn stage_png(bytes: &[u8]) -> io::Result<PathBuf> {
     ))
 }
 
+/// Decode one strict standard-base64 PNG carried by a bounded semantic web
+/// control frame. Whitespace, URL-safe symbols, misplaced padding, and excess
+/// decoded bytes fail before the staging path is touched.
+pub(crate) fn stage_web_png(encoded: &str) -> io::Result<PathBuf> {
+    if encoded.is_empty()
+        || encoded.len() > MAX_WEB_PNG_BASE64_BYTES
+        || !encoded.len().is_multiple_of(4)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid browser image encoding",
+        ));
+    }
+    let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
+    let (chunks, remainder) = encoded.as_bytes().as_chunks::<4>();
+    debug_assert!(remainder.is_empty());
+    for (index, chunk) in chunks.iter().enumerate() {
+        let last = (index + 1) * 4 == encoded.len();
+        let a = base64_value(chunk[0]).ok_or_else(invalid_web_image)?;
+        let b = base64_value(chunk[1]).ok_or_else(invalid_web_image)?;
+        let c = if chunk[2] == b'=' {
+            if !last || chunk[3] != b'=' || b & 0x0f != 0 {
+                return Err(invalid_web_image());
+            }
+            None
+        } else {
+            Some(base64_value(chunk[2]).ok_or_else(invalid_web_image)?)
+        };
+        let d = if c.is_none() {
+            None
+        } else if chunk[3] == b'=' {
+            if !last || c.unwrap_or_default() & 0x03 != 0 {
+                return Err(invalid_web_image());
+            }
+            None
+        } else {
+            Some(base64_value(chunk[3]).ok_or_else(invalid_web_image)?)
+        };
+        decoded.push((a << 2) | (b >> 4));
+        if let Some(c) = c {
+            decoded.push((b << 4) | (c >> 2));
+            if let Some(d) = d {
+                decoded.push((c << 6) | d);
+            }
+        }
+        if decoded.len() > MAX_WEB_PNG_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "browser image exceeds upload limit",
+            ));
+        }
+    }
+    stage_png(&decoded)
+}
+
+fn invalid_web_image() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "invalid browser image encoding")
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
 /// Remove a staged clipboard image that could not reach its input owner.
 /// Refuse every path outside the selected session's owned staging directory.
 pub(crate) fn discard_staged_png(path: &Path) {
@@ -668,6 +748,18 @@ mod tests {
             KeyModifiers::CONTROL,
             KeyEventKind::Repeat
         )));
+        assert_eq!(
+            is_image_paste_key(&key(KeyModifiers::SUPER, KeyEventKind::Press)),
+            cfg!(target_os = "macos"),
+            "Command+V is an image-paste gesture only on macOS"
+        );
+        assert_eq!(
+            is_image_paste_key(&key(
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                KeyEventKind::Press
+            )),
+            cfg!(target_os = "macos")
+        );
     }
 
     #[test]
@@ -806,6 +898,20 @@ mod tests {
                 fs::metadata(&path).unwrap().permissions().mode() & 0o777,
                 0o600
             );
+        }
+    }
+
+    #[test]
+    fn browser_png_staging_decodes_strict_bounded_base64() {
+        let _env = crate::persist::test_env("clipboard-image-web-stage");
+        crate::persist::ensure_session_dir();
+        let png = encode_rgba_png(1, 1, |_, _| [5, 10, 15, 255]).unwrap();
+        let encoded = crate::base64_encode(&png);
+        let path = stage_web_png(&encoded).unwrap();
+        assert_eq!(fs::read(path).unwrap(), png);
+
+        for invalid in ["abc", "####", "Zg=A", "Zg==\n"] {
+            assert!(stage_web_png(invalid).is_err(), "{invalid:?}");
         }
     }
 

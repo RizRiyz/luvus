@@ -293,20 +293,20 @@ luvus agent keys reviewer esc
 luvus wait agent-status <pane-id> --status done,blocked --timeout 600
 ```
 
-The neutral home workspace supports ordinary tabs and panes, and its displayed
-path follows the focused pane's live cwd. Use `workspace open <path>` when the
-user named a specific project.
+The neutral home workspace supports ordinary tabs and panes. Its sidebar path
+remains the stored home root while `terminal_cwd` follows the focused pane. Use
+`workspace open <path>` when the user named a specific project.
 
 `agent prompt` submits one complete prompt and can wait semantically. Prefer it
 to separate text and Enter operations. A timeout does not prove that an agent
 failed or stopped. Inspect it before deciding what to do next.
-For `agent.send` and `agent.prompt`, detected blocked prompt evidence—including
-in non-Codex panes—rejects submission with `agent_not_ready` before either text
-or Enter is queued. Startup, sign-in, selection, and approval screens are
-examples, not an exhaustive list. A server-launched or restored Codex pane with
-an `agent_session` also returns `agent_not_ready` when prompt evidence is
-Unknown, unless live Codex composer geometry reports Ready. Existing Codex panes
-without that requirement retain the permissive Unknown-evidence fallback.
+For `agent.send` and `agent.prompt`, detected blocked prompt evidence rejects
+submission with `agent_not_ready` before either text or Enter is queued.
+Claude and Codex also require positive evidence of their live input composers;
+an unrecognised startup or selection screen is not prompt-ready even when its
+agent identity is known. `--strict` (UHP `strict:true`) requires positive
+composer evidence for any agent; agents without a detector reject the prompt.
+Without strict mode, other agents retain the legacy Unknown-evidence fallback.
 
 `agent keys` refuses plain shells, validates every named key before sending any
 bytes, and queues a valid list as one ordered action. A closed target returns a
@@ -367,6 +367,10 @@ discovery rather than inferring support from an agent name.
   reports only the exact Letta conversation ID selected in that pane. Detection
   remains native, and Luvus does not inspect Letta memory, credentials,
   conversations, or cloud state.
+- `luvus integration install devin` adds one `SessionStart` hook that reports
+  only the exact Devin session ID selected in that pane, including after
+  `/clear` or an in-TUI `/resume`. Detection remains native, and Luvus does not
+  open Devin's private session database.
 
 Do not claim every shell command resumes after restart. Do not guess native
 session IDs. List sessions and use the exact returned identifier.

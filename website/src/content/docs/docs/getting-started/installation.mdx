@@ -38,9 +38,10 @@ Pick whichever channel you prefer:
     ```
     luvus is a single static binary, so the package has **no hard dependencies**
     and drops it straight into `/usr/bin`. The tools luvus optionally calls
-    (`git`, `openssh-client`, `xclip`) are **Recommends**, so a desktop gets them
-    by default while a minimal server can skip them without breaking the install.
-    Good for provisioning a Linux server.
+    (`git`, `openssh-client`, `xclip`) are **Recommends**, while
+    `wl-clipboard` is suggested for Wayland clipboard copy and image paste. A
+    desktop can install the applicable helper while a minimal server can skip
+    both without breaking Luvus. Good for provisioning a Linux server.
   </TabItem>
   <TabItem label="Nix">
     luvus ships a **flake**, so it works on NixOS and any machine with Nix. Every

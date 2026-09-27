@@ -23,6 +23,7 @@ port, configure SSH forwarding, or require another daemon.
 | Open a specific named session | `luvus --session api --remote devbox` |
 | Save and switch several SSH machines in one TUI | [Multiple Machines](/docs/guides/machines/) |
 | Connect from a phone that only has an SSH app | SSH to the host, then run `luvus` there |
+| Connect from a phone or computer browser | [Luvus Web](/docs/guides/web/) behind a trusted private TLS provider |
 | Send one JSON automation request | Pipe the request through `ssh devbox luvus uhp proxy` |
 | Build an independent remote or mobile client | Use [`luvus uhp access`](/docs/uhp/remote-access/) with a secure transport provider |
 
@@ -243,16 +244,17 @@ With `luvus --remote`, the local attached client owns effects that should happen
 where you are sitting:
 
 - copied text goes to the local clipboard
-- on Windows, an explicit image paste reads the local clipboard and stages the
-  private PNG on the remote Luvus server before pasting that remote path into
-  the focused pane
+- an explicit image paste reads the local Windows, macOS, Wayland, or X11
+  clipboard and stages the private PNG on the remote Luvus server before
+  pasting that remote path into the focused pane
 - notifications and sounds play locally
 - detected links open in the local browser
 - each attached client uses its own terminal size and mobile or desktop layout
 
 Image bytes travel inside the existing encrypted SSH connection. Luvus does not
 open another port or write the image to the local machine's Luvus server. If no
-supported image is present, the original paste key continues unchanged.
+supported image is present, the original paste key continues unchanged. Linux
+and FreeBSD display clients need `wl-paste` or `xclip`; the remote host does not.
 
 The global finder searches the selected remote Luvus home. It does not mix
 local workspaces or sessions into remote results.

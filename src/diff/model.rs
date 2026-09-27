@@ -723,8 +723,7 @@ pub struct DiffView {
     pub wrap: bool,
     pub context_lines: u16,
     pub show_line_numbers: bool,
-    pub search: Option<String>,
-    pub search_editing: bool,
+    pub search: Option<crate::search::local::LocalSearch<crate::search::local::RowMatch>>,
     /// `n` arms source selection before the inline composer opens.
     pub note_selecting: bool,
     pub note_draft: Option<String>,
@@ -760,12 +759,134 @@ impl DiffView {
             context_lines,
             show_line_numbers,
             search: None,
-            search_editing: false,
             note_selecting: false,
             note_draft: None,
             note_edit_id: None,
             range_anchor: None,
             dirty: false,
+        }
+    }
+
+    pub fn search_begin(&mut self) {
+        self.search = Some(crate::search::local::LocalSearch::editing());
+    }
+
+    pub fn search_push(&mut self, ch: char) {
+        if let Some(search) = self.search.as_mut() {
+            search.push(ch);
+        }
+    }
+
+    pub fn search_backspace(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            search.backspace();
+        }
+    }
+
+    pub fn search_clear(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            search.clear();
+        }
+    }
+
+    pub fn search_commit(&mut self) {
+        let Some(query) = self.search.as_ref().map(|search| search.query.clone()) else {
+            return;
+        };
+        if query.is_empty() {
+            self.search = None;
+            return;
+        }
+        if let Some(search) = self.search.as_mut() {
+            search.commit();
+        }
+        self.rebuild_search(query);
+        self.activate_search_match();
+    }
+
+    pub fn search_toggle_case(&mut self) {
+        let rebuild = self
+            .search
+            .as_mut()
+            .is_some_and(|search| search.toggle_case());
+        if rebuild {
+            if let Some(query) = self.search.as_ref().map(|search| search.query.clone()) {
+                self.rebuild_search(query);
+                self.activate_search_match();
+            }
+        }
+    }
+
+    pub fn search_step(&mut self, forward: bool) {
+        if self
+            .search
+            .as_mut()
+            .is_some_and(|search| search.step(forward))
+        {
+            self.activate_search_match();
+        }
+    }
+
+    /// Rebuild committed matches after an asynchronous diff reload replaces
+    /// the row storage. Editing searches have no match coordinates to refresh.
+    pub fn search_refresh(&mut self) {
+        let query = self.search.as_ref().and_then(|search| {
+            (!search.editing && !search.query.is_empty()).then(|| search.query.clone())
+        });
+        if let Some(query) = query {
+            self.rebuild_search(query);
+            self.activate_search_match();
+        }
+    }
+
+    fn rebuild_search(&mut self, query: String) {
+        let case_sensitive = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.case_sensitive);
+        let mut matches = Vec::new();
+        let mut truncated = false;
+        if let Some(matcher) = crate::search::local::LiteralMatcher::new(&query, case_sensitive) {
+            for (row, line) in self.stack_rows.iter().enumerate() {
+                let remaining = crate::search::local::LOCAL_MATCH_CAP.saturating_sub(matches.len());
+                if remaining == 0 {
+                    if matcher.has_match(&line.text) {
+                        truncated = true;
+                        break;
+                    }
+                    continue;
+                }
+                let (row_matches, row_truncated) = matcher.spans(&line.text, remaining);
+                matches.extend(
+                    row_matches
+                        .into_iter()
+                        .map(|search_match| crate::search::local::RowMatch::at(row, search_match)),
+                );
+                if row_truncated {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+        let current =
+            crate::search::local::first_at_or_after(&matches, (self.selected, 0), |search_match| {
+                (search_match.row, search_match.column)
+            });
+        if let Some(search) = self.search.as_mut() {
+            search.query = query;
+            search.editing = false;
+            search.replace_matches(matches, current, truncated);
+        }
+    }
+
+    fn activate_search_match(&mut self) {
+        if let Some(row) = self
+            .search
+            .as_ref()
+            .and_then(|search| search.matches.get(search.current))
+            .map(|search_match| search_match.row)
+        {
+            self.selected = row;
         }
     }
 
@@ -1109,6 +1230,43 @@ mod tests {
         assert!(!view.effective_wrap(80));
         view.wrap = true;
         assert!(view.effective_wrap(80));
+    }
+
+    #[test]
+    fn search_refresh_rebuilds_committed_rows_without_committing_editor_input() {
+        let mut view = DiffView::new(
+            PathBuf::from("/repo"),
+            test_key(),
+            DiffLayoutPreference::Stack,
+            3,
+            false,
+            false,
+        );
+        view.stack_rows = vec![DiffLine {
+            kind: DiffLineKind::Context,
+            old_line: Some(1),
+            new_line: Some(1),
+            text: "Needle".into(),
+        }];
+        view.search_begin();
+        for ch in "needle".chars() {
+            view.search_push(ch);
+        }
+        view.search_refresh();
+        assert!(view.search.as_ref().unwrap().editing);
+        assert!(view.search.as_ref().unwrap().matches.is_empty());
+
+        view.search_commit();
+        assert_eq!(view.search.as_ref().unwrap().matches.len(), 1);
+        view.stack_rows = vec![DiffLine {
+            kind: DiffLineKind::Context,
+            old_line: Some(2),
+            new_line: Some(2),
+            text: "needle needle".into(),
+        }];
+        view.search_refresh();
+        assert_eq!(view.search.as_ref().unwrap().matches.len(), 2);
+        assert!(!view.search.as_ref().unwrap().editing);
     }
 
     #[test]

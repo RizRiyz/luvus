@@ -2,3 +2,5 @@
 {"id":"bad-2","action":"send_key","params":{"key":"ctrl-z"}}
 {"id":"bad-3","action":"run","params":{"command":"rm"}}
 {"id":"unicode-é","action":"send_key","params":{"key":"enter"}}
+{"id":"bad-image-base64","action":"paste_image","params":{"png_base64":"!!!!"}}
+{"id":"bad-upload-base64","action":"upload_chunk","params":{"upload_id":"11111111111111111111111111111111","offset":0,"data_base64":"####"}}

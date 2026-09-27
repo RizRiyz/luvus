@@ -48,10 +48,19 @@ pub(super) type SidebarHits = (
 type WorkspaceHits = (Vec<(usize, Rect)>, Option<Rect>);
 type AgentHits = (Vec<(PaneId, Rect)>, Vec<(String, Rect)>, Vec<(usize, Rect)>);
 
-/// Rows of sidebar chrome above the dock stack: the brand/menu row plus one
-/// blank separator row. The dock body, and therefore dock-height measurement
-/// during a divider drag, starts this many rows below the sidebar origin.
-pub(crate) const SIDEBAR_CHROME_ROWS: u16 = 2;
+/// Rows of sidebar chrome above the dock stack: the brand/menu row alone. The
+/// dock body, and therefore dock-height measurement during a divider drag,
+/// starts this many rows below the sidebar origin. The first dock's title sits
+/// directly under the chrome so it reads as the top of the sidebar rather than
+/// floating in the middle; the breathing room moved below it
+/// (`DOCK_HEADER_ROWS`), between the title and its rows.
+pub(crate) const SIDEBAR_CHROME_ROWS: u16 = 1;
+
+/// Rows every dock spends on its header: the title row plus one blank row that
+/// separates the title from the list. Dock renderers start their content this
+/// far below the slot origin and drop the same count from their row capacity,
+/// so a title never sits flush against the rows it labels.
+pub(crate) const DOCK_HEADER_ROWS: u16 = 2;
 
 /// Rows an expanded list item occupies: two content rows, drawn back-to-back.
 const EXPANDED_ROW_STRIDE: u16 = 2;
@@ -446,8 +455,8 @@ fn draw_workspaces_dock(
     } else {
         None
     };
-    let nlist_top = area.y + 1;
-    let nrows = area.height.saturating_sub(1);
+    let nlist_top = area.y + DOCK_HEADER_ROWS;
+    let nrows = area.height.saturating_sub(DOCK_HEADER_ROWS);
     let paths_visible = app.config.layout.workspace_paths;
     let row_stride = dock_row_stride(paths_visible);
     let ntotal = app.workspaces.len();
@@ -520,14 +529,13 @@ fn draw_workspaces_dock(
         ws_rects.push((i, Rect::new(area.x, y, area.width, row_stride)));
         let st = rollup(app, i);
         let ws = &app.workspaces[i];
-        let terminal_cwd = app.workspace_terminal_cwd(i).unwrap_or(&ws.cwd);
         super::workspace_row::draw(
             f.buffer_mut(),
             Rect::new(area.x, y, area.width, row_stride),
             super::workspace_row::WorkspaceRow {
                 name: &ws.name,
                 branch: ws.branch.as_deref(),
-                path: &short_path(terminal_cwd, u16::MAX),
+                path: &short_path(&ws.cwd, u16::MAX),
                 dot: st.dot(),
                 dot_color: st.color(t),
                 nested: machine_children || is_member,
@@ -619,7 +627,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     // Workspace scope is controlled by prefix `A`, Settings → Keys, or an
     // agent/session row's context menu. It consumes no extra dock row.
     let scoped = app.agents_scope_active();
-    let alist_top = aheader + 1;
+    let alist_top = aheader + DOCK_HEADER_ROWS;
     let arows = area.bottom().saturating_sub(alist_top);
     let paths_visible = app.config.layout.agent_paths;
     let row_stride = dock_row_stride(paths_visible);
@@ -1027,8 +1035,8 @@ fn draw_module_dock(f: &mut RenderTarget, area: Rect, id: &str, app: &mut App, t
         None => (id.to_string(), Vec::new()),
     };
     line_at(f, area.y, header(&title, t));
-    let list_top = area.y + 1;
-    let cap = area.height.saturating_sub(1) as usize;
+    let list_top = area.y + DOCK_HEADER_ROWS;
+    let cap = area.height.saturating_sub(DOCK_HEADER_ROWS) as usize;
     for (i, row) in rows.iter().take(cap).enumerate() {
         let y = list_top + i as u16;
         let mut spans: Vec<Span> = Vec::new();
@@ -1318,6 +1326,43 @@ mod tests {
             .unwrap();
         assert_eq!(app.ws_rects[0].1.height, 1);
         assert_eq!(app.session_rects[0].1.height, 1);
+    }
+
+    #[test]
+    fn workspace_sidebar_keeps_the_stored_root_when_the_pane_moves() {
+        let _env = crate::persist::test_env("sidebar-static-workspace-root");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        let root = std::path::PathBuf::from("static-root");
+        let live = std::path::PathBuf::from("live-cwd");
+        app.workspaces[0].cwd = root.clone();
+        app.panes.get_mut(&pane).unwrap().cwd = live.clone();
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let workspace = app.ws_rects[0].1;
+        let path_row: String = (workspace.x..workspace.right())
+            .map(|column| {
+                term.backend()
+                    .buffer()
+                    .cell((column, workspace.y + 1))
+                    .map(|cell| cell.symbol())
+                    .unwrap_or(" ")
+            })
+            .collect();
+        assert!(path_row.contains(&root.display().to_string()), "{path_row}");
+        assert!(
+            !path_row.contains(&live.display().to_string()),
+            "{path_row}"
+        );
+        assert_eq!(
+            app.workspace_terminal_cwd(0),
+            Some(live.as_path()),
+            "the API projection still exposes the focused pane cwd"
+        );
     }
 
     /// The column each agent row's state label starts at, for every row drawn.

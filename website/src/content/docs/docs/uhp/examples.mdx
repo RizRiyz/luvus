@@ -196,9 +196,9 @@ bounded capture request:
 ```
 
 Use `terminal.backend.submit_text` for one atomic paste-and-Enter action.
-`type_literal` never adds Enter, while `send_key` sends one documented logical
-key. A stale generation, replaced terminal, or moved route is rejected before
-input is queued.
+`type_literal` never adds Enter, `paste_text` preserves bracketed-paste semantics
+without adding Enter, and `send_key` sends one documented logical key. A stale
+generation, replaced terminal, or moved route is rejected before input is queued.
 
 For an interactive client, open `terminal.backend.control` on the discovered
 native endpoint and keep the connection open after its acknowledgment:
@@ -206,6 +206,7 @@ native endpoint and keep the connection open after its acknowledgment:
 ```json
 {"id":"control-1","method":"terminal.backend.control","params":{"server_generation":"<generation>","terminal_id":"<terminal-id>","pane_id":"7","mode":"visible","lines":80,"ansi":true}}
 {"id":"input-1","action":"type_literal","params":{"text":"cargo test"}}
+{"id":"paste-1","action":"paste_text","params":{"text":"first line\nsecond line"}}
 {"id":"input-2","action":"send_key","params":{"key":"enter"}}
 ```
 

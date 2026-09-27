@@ -387,8 +387,13 @@ fn agent_send_requires_a_live_agent() {
         .expect_err("shell is not an agent");
     assert_eq!(err.0, "agent_not_ready");
 
-    // Once detected as an agent, the send is accepted and echoes the pane.
+    // A detected agent also needs a live composer before it can accept input.
     app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let rail = "─".repeat(80);
+    app.panes[&pane].engine.lock().unwrap().advance(
+        format!("\x1b[2J\x1b[H\x1b[20;1H{rail}\x1b[21;1H❯\u{a0} \x1b[22;1H{rail}\x1b[21;3H")
+            .as_bytes(),
+    );
     let out = app
         .dispatch(
             "agent.send",
@@ -420,6 +425,11 @@ fn agent_send_admits_one_ordered_submission_and_reports_closed_queue() {
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
     app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let rail = "─".repeat(80);
+    app.panes[&pane].engine.lock().unwrap().advance(
+        format!("\x1b[2J\x1b[H\x1b[20;1H{rail}\x1b[21;1H❯\u{a0} \x1b[22;1H{rail}\x1b[21;3H")
+            .as_bytes(),
+    );
     app.panes[&pane]
         .engine
         .lock()
@@ -453,6 +463,168 @@ fn agent_send_admits_one_ordered_submission_and_reports_closed_queue() {
         )
         .unwrap_err();
     assert_eq!(error.0, "send_failed");
+}
+
+#[test]
+fn prompt_readiness_uses_current_agent_over_stale_session() {
+    let _env = crate::persist::test_env("prompt-current-agent");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    let status = app.status.get_mut(&pane).unwrap();
+    status.agent = "gemini".into();
+    status.agent_session = Some(AgentSession {
+        agent: "claude".into(),
+        session_id: "old-session".into(),
+    });
+    status.prompt_evidence_required = true;
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+
+    assert!(!app.agent_prompt_is_ready(pane, true));
+    app.dispatch(
+        "agent.send",
+        &json!({"target":pane.0.to_string(),"text":"review"}),
+    )
+    .unwrap();
+    let (reply, response) = std::sync::mpsc::channel();
+    app.start_agent_prompt(
+        "current-agent".into(),
+        json!({"target":pane.0.to_string(),"text":"review"}),
+        reply,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let response: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+    assert_eq!(response["result"]["submitted"], true);
+    assert_eq!(input_rx.try_iter().count(), 2);
+}
+
+#[test]
+fn prompt_readiness_tracks_reports_before_detection_or_output() {
+    let _env = crate::persist::test_env("prompt-report-readiness");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let rail = "─".repeat(80);
+    app.panes[&pane].engine.lock().unwrap().advance(
+        format!("\x1b[2J\x1b[20;1H{rail}\x1b[21;1H❯ \x1b[22;1H{rail}\x1b[21;3H").as_bytes(),
+    );
+    let generation = app.panes[&pane].engine.lock().unwrap().output_generation();
+    let status = app.status.get_mut(&pane).unwrap();
+    status.prompt_evidence = detect::PromptEvidence::Ready;
+    status.last_detect_generation = Some(generation);
+    status.force_detect = false;
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+
+    for state in ["blocked", "idle"] {
+        app.dispatch(
+            "agent.report",
+            &json!({
+                "pane":pane.0.to_string(), "source":"test/plugin", "agent":"claude", "status":state,
+            }),
+        )
+        .unwrap();
+        // Neither detection nor PTY output runs between the report and sends.
+        let sent = app.dispatch(
+            "agent.send",
+            &json!({"target":pane.0.to_string(),"text":"review"}),
+        );
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "report-readiness".into(),
+            json!({"target":pane.0.to_string(),"text":"review"}),
+            reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let response: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        if state == "blocked" {
+            assert_eq!(sent.unwrap_err().0, "agent_not_ready");
+            assert_eq!(response["error"]["code"], "agent_not_ready");
+            assert!(input_rx.try_recv().is_err());
+            // New terminal output must not bypass the still-active report.
+            app.panes[&pane]
+                .engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b[21;3H");
+            assert!(!app.agent_prompt_is_ready(pane, false));
+        } else {
+            assert!(sent.is_ok());
+            assert_eq!(response["result"]["submitted"], true);
+            assert_eq!(input_rx.try_iter().count(), 2);
+        }
+    }
+}
+
+#[test]
+fn strict_prompt_rejects_unverified_agents_without_changing_legacy_send() {
+    let _env = crate::persist::test_env("strict-agent-prompt");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    let target = pane.0.to_string();
+    app.status.get_mut(&pane).unwrap().agent = "gemini".into();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+
+    let error = app
+        .dispatch(
+            "agent.send",
+            &json!({"target":target,"text":"review","strict":true}),
+        )
+        .unwrap_err();
+    assert_eq!(error.0, "agent_not_ready");
+    assert!(input_rx.try_recv().is_err());
+
+    let (reply, response) = std::sync::mpsc::channel();
+    app.start_agent_prompt(
+        "strict-test".into(),
+        json!({"target":target,"text":"review","strict":true}),
+        reply,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let result: serde_json::Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+    assert_eq!(result["error"]["code"], "agent_not_ready");
+    assert!(input_rx.try_recv().is_err());
+
+    for method in ["agent.send", "agent.prompt"] {
+        let params = json!({"target":target,"text":"review","strict":"yes"});
+        let error = if method == "agent.send" {
+            app.dispatch(method, &params).unwrap_err().0
+        } else {
+            let (reply, response) = std::sync::mpsc::channel();
+            app.start_agent_prompt(
+                "strict-type-test".into(),
+                params,
+                reply,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
+            serde_json::from_str::<serde_json::Value>(&response.recv().unwrap()).unwrap()["error"]
+                ["code"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(error, "invalid_request");
+    }
+
+    app.dispatch("agent.send", &json!({"target":target,"text":"review"}))
+        .expect("legacy send remains available without strict mode");
+    assert!(matches!(
+        input_rx.try_recv().unwrap(),
+        crate::terminal::pty::InputAction::Submit { .. }
+    ));
 }
 
 #[test]
@@ -1337,6 +1509,42 @@ fn snapshot_alias_excludes_native_views_and_handles_no_workspace() {
         app.dispatch("session.snapshot", &json!({})).unwrap()["workspaces"],
         json!([])
     );
+}
+
+#[test]
+fn runtime_snapshot_projects_agent_session_title_without_using_the_alias() {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    let snapshot = app.runtime_snapshot();
+    assert_eq!(
+        snapshot["workspaces"][0]["tabs"][0]["panes"][0]["is_agent"],
+        false
+    );
+    {
+        let status = app.status.get_mut(&pane).unwrap();
+        status.agent = "pi".into();
+        status.agent_session = Some(crate::app::AgentSession {
+            agent: "pi".into(),
+            session_id: "live-1".into(),
+        });
+    }
+    app.agent_names.insert("web".into(), pane);
+    assert!(app.set_agent_row_title_for_session(
+        "pi".into(),
+        "live-1".into(),
+        Some("Build the web dashboard".into()),
+    ));
+
+    let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+    let row = &snapshot["workspaces"][0]["tabs"][0]["panes"][0];
+    assert_eq!(row["is_agent"], true);
+    assert_eq!(row["agent_name"], "web");
+    assert_eq!(row["agent_session_title"], "Build the web dashboard");
+
+    assert!(app.set_agent_row_title_for_session("pi".into(), "live-1".into(), None));
+    let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+    assert!(snapshot["workspaces"][0]["tabs"][0]["panes"][0]["agent_session_title"].is_null());
 }
 
 #[test]

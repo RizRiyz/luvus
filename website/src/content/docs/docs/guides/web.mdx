@@ -1,0 +1,224 @@
+---
+title: Luvus Web
+description: Start the optional browser client, pair computers and phones, enable control safely, and switch Luvus sessions.
+---
+
+Luvus Web is the browser client bundled with the normal Luvus binary. It shows
+the same running workspaces, tabs, panes, agents, and terminal output as the TUI.
+It is optional: starting `luvus` does **not** open an HTTP port or launch the web
+bridge.
+
+The browser is another disposable client. Closing it or stopping the web bridge
+does not stop the selected Luvus server, its PTYs, or attached TUI clients.
+
+## Start locally
+
+First [install Luvus](/docs/getting-started/installation/) and make sure its
+server can start normally. Then run:
+
+```sh
+luvus web
+```
+
+This command:
+
+1. starts or reuses the selected Luvus session;
+2. opens a foreground bridge on `127.0.0.1:4174`;
+3. creates a one-use browser pairing link; and
+4. opens that link in the default browser.
+
+The default is **read-only**. You can inspect Mission Control and terminal
+output, but the browser cannot send input or change the workspace.
+
+For interactive terminal and workspace control, opt in explicitly:
+
+```sh
+luvus web --control
+```
+
+Use `--no-open` when you only want the pairing link printed to the terminal,
+or `--port 0` to let the operating system choose a free loopback port:
+
+```sh
+luvus web --control --port 0 --no-open
+```
+
+Press Ctrl+C in the terminal that started the bridge to stop web access. Luvus
+revokes that bridge's temporary authority, while its server, panes, TUI clients,
+and named sessions keep running.
+
+## Open a named session
+
+Global options come before `web`. To open the `project` session:
+
+```sh
+luvus --session project web --control
+```
+
+The browser's Mission Control page also has a **SESSION** selector. Selecting a
+running session moves the bridge to it without detaching its other clients. In
+control mode, selecting a known stopped session may start it. A read-only bridge
+can switch only to an already-running session.
+
+Agent cards show the agent and workspace above the live agent session title.
+When the agent has not supplied a title, the card shows **Untitled session**.
+
+One bridge has one selected upstream session, so a session switch moves every
+browser device paired with that bridge. TUI and CLI clients keep their own
+attachments.
+
+## Pair more devices
+
+The initial URL contains a one-use pairing code in its fragment. After the first
+browser connects, open **Devices** to create another pairing link. Scan its QR
+code with a phone or tablet, or use Copy or Share. QR generation happens in the
+browser; the pairing secret is not sent to a QR service.
+
+A bridge allows two browser devices by default. Choose a limit from 1 through 8
+in **Devices**, or set the initial limit at startup:
+
+```sh
+luvus web --control --max-devices 4
+```
+
+Each paired browser receives its own in-memory ticket. A pairing link works only
+once, while a ticket may reconnect from the same browser tab until it expires or
+the bridge stops. The device limit cannot be reduced below the number of paired
+devices plus unspent pairing links.
+
+## Connect from a phone or another computer
+
+The native bridge deliberately listens on loopback only. A phone cannot open
+`127.0.0.1` on your computer, and Luvus Web does not expose an unencrypted public
+listener. Put a trusted private tunnel or reverse proxy with TLS/WSS in front of
+the loopback bridge, and keep access limited to devices you trust.
+
+Tell Luvus the public origin used by that provider:
+
+```sh
+luvus web --control \
+  --public-url https://luvus.example.test \
+  --origin https://luvus.example.test \
+  --max-devices 3
+```
+
+`--public-url` changes generated pairing links and must be a complete HTTPS
+origin without a path. `--origin` permits that exact browser origin during the
+WebSocket upgrade and accepts a complete HTTP(S) origin without a path. Repeat
+`--origin` when more than one exact origin is required:
+
+```sh
+luvus web --control \
+  --public-url https://luvus.example.test \
+  --origin https://luvus.example.test \
+  --origin https://luvus-backup.example.test
+```
+
+You can also add or update the pairing address while the bridge is running.
+From an authorized browser, open **Devices**, enter the tunnel's origin under
+**Pairing address**, and choose **Save address**. New QR codes and links use the
+updated address immediately, including an unspent link already shown in the
+panel. Clear the field to use the address of the current browser again.
+
+The device setting lasts for the current bridge process. Use `--public-url` to
+set its initial value after a restart. Changing the pairing address does not
+create a tunnel, change the loopback listener, or add an allowed origin; configure
+those separately when your provider does not preserve a matching Origin and Host.
+
+The transport provider owns public reachability and TLS. Luvus remains
+loopback-bound and owns pairing, browser tickets, origin checks, and scoped
+authority. Do not publish the local HTTP port directly to the internet.
+
+## Use the terminal
+
+In control mode, click or tap the terminal to focus native input. Physical and
+mobile keyboards write to the actual PTY, so the running shell or agent still
+owns editing, history, cursor movement, and Tab completion. The compact control
+dock supplies keys that are awkward on touch keyboards.
+
+Useful editing shortcuts include:
+
+- Alt/Option+Backspace or Ctrl+Backspace: delete the previous word;
+- Alt/Option+forward Delete or Ctrl+Delete: delete the next word;
+- Command+Backspace or Ctrl+U: delete to the start of the line;
+- Command+forward Delete or Ctrl+K: delete to the end of the line.
+
+On mobile, the terminal follows the visible viewport above the software
+keyboard. Submitting input resumes follow-tail so streaming output stays in
+view. Scrolling intentionally pauses follow-tail while you read history.
+
+The `+` button, clipboard file paste, and drag and drop upload files up to 32
+MiB in bounded chunks. Luvus stores the bytes on the selected server and pastes
+the resulting server-side path into the terminal. The browser never inserts its
+local file path into a remote shell.
+
+## Run the TUI and web together
+
+The TUI and browser can be attached at the same time. Each client keeps its own
+viewport and render state; a phone-sized browser does not resize or replace the
+desktop TUI layout.
+
+These operations have different effects:
+
+| Action | Result |
+|---|---|
+| Close a browser tab | Disconnects only that browser client |
+| Press Ctrl+C in `luvus web` | Stops the bridge and revokes its browser authority |
+| Detach or close the TUI | Leaves the server and panes running |
+| Run `luvus server stop` | Stops the selected server and its live PTYs |
+
+## Security model
+
+- The browser never receives the owner socket, UHP pairing code, or delegated
+  upstream token.
+- Browser pairing links are one-use and tickets stay in that tab's
+  `sessionStorage`.
+- Read-only authority is the default; control must be requested explicitly.
+- The bridge enforces exact origins, bounded messages and uploads, connection
+  limits, request-rate limits, and outbound backpressure.
+- Bridge authority is process-bound. Stopping the bridge revokes it.
+
+For the underlying automation boundary, see [UHP Remote
+Access](/docs/uhp/remote-access/).
+
+## Troubleshooting
+
+### The phone cannot open the local link
+
+`127.0.0.1` on the phone refers to the phone itself. Use a trusted TLS tunnel or
+reverse proxy, then supply its exact origin with both `--public-url` and
+`--origin`.
+
+### The page says pairing expired or rejected
+
+Pairing links are one-use and expire. From a connected browser, create a new
+link in **Devices**. If no browser remains connected, stop the bridge and run
+`luvus web` again to create a fresh initial link.
+
+### The WebSocket origin is rejected
+
+Pass the public page's exact origin to `--origin`. Scheme, hostname, and port
+must match; path-prefixed proxy mounts are not supported.
+
+### Input controls are unavailable
+
+The bridge is read-only unless started with `--control`. Stop it and run:
+
+```sh
+luvus web --control
+```
+
+### A new device cannot pair
+
+Raise the limit in **Devices** or restart with a larger `--max-devices` value.
+The accepted range is 1 through 8.
+
+### Port 4174 is already in use
+
+Choose another port or let the operating system choose one:
+
+```sh
+luvus web --port 0
+```
+
+Run `luvus help web` for the current option reference.
