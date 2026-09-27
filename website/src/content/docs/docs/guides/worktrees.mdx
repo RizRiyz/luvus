@@ -124,6 +124,11 @@ kept. If the background queue is full or validation fails, the
 workspace remains open. If removal fails after it starts, the directory may
 still exist and can be reopened from the main checkout.
 
+Unrelated workspaces and agent sessions remain usable during validation and
+removal. Before removal starts, Luvus checks again for other workspaces or panes
+using the checkout. If one opened while validation was running, deletion is
+cancelled and the checkout is preserved.
+
 ## Why it's great with agents
 
 Each agent works in its own worktree, with its own files on disk, so two agents

@@ -553,7 +553,7 @@ impl App {
         }
     }
 
-    fn workspace_delete_pending(&self, workspace_index: usize) -> bool {
+    pub(super) fn workspace_delete_pending(&self, workspace_index: usize) -> bool {
         let workspace = &self.workspaces[workspace_index];
         self.worktree_deletes_inflight.values().any(|pending| {
             pending.contains(&workspace.cwd, None)
