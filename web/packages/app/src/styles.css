@@ -130,6 +130,8 @@ button { color: inherit; }
 }
 .agent-card { display: flex; align-items: center; gap: .8rem; min-height: 5rem; padding: .85rem 1rem; overflow: hidden; text-align: left; cursor: pointer; transition: border-color .18s ease, transform .18s ease, background .18s ease; }
 .agent-card:hover, .agent-card:focus-visible { background: #24252f; border-color: #ead77846; outline: none; transform: translateY(-2px); }
+.agent-card:disabled { cursor: default; opacity: .65; }
+.agent-card:disabled:hover { background: #1d1e27; border-color: #ffffff17; transform: none; }
 .agent-card strong, .agent-card small { display: block; }
 .agent-card .agent-context { overflow: hidden; color: var(--muted); font-size: .75rem; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 .agent-card .agent-session-title { display: -webkit-box; margin-top: .3rem; overflow: hidden; color: #f2eff9; font-size: .95rem; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
