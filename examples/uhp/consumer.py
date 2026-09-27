@@ -73,7 +73,8 @@ FIELDS = {
     },
     "agent.release": {"pane", "source"},
     "agent.start": {"name", "kind", "pane", "anchor", "direction", "args", "timeout_s"},
-    "agent.prompt": {"target", "text", "wait", "until", "timeout_s"},
+    "agent.prompt": {"target", "text", "strict", "terminal_id", "wait", "until", "timeout_s"},
+    "agent.send": {"target", "text", "strict", "terminal_id"},
     "agent.wait": {"pane", "status", "statuses", "timeout_s"},
     "agent.keys": {"target", "keys", "if_content_revision", "terminal_id"},
     "events.subscribe": set(),
@@ -311,6 +312,49 @@ def valid_agent_keys_params(params):
     )
 
 
+def valid_agent_terminal_id(params):
+    return "terminal_id" not in params or (
+        isinstance(params["terminal_id"], str)
+        and re.fullmatch(r"[0-9a-f]{32}", params["terminal_id"]) is not None
+    )
+
+
+def valid_agent_send_params(params):
+    return (
+        isinstance(params, dict)
+        and {"target", "text"} <= set(params)
+        and set(params) <= FIELDS["agent.send"]
+        and bounded_string(params["target"], 128, allow_empty=False)
+        and isinstance(params["text"], str)
+        and bool(params["text"])
+        and ("strict" not in params or type(params["strict"]) is bool)
+        and valid_agent_terminal_id(params)
+    )
+
+
+def valid_agent_prompt_params(params):
+    if not (
+        isinstance(params, dict)
+        and {"target", "text"} <= set(params)
+        and set(params) <= FIELDS["agent.prompt"]
+        and bounded_string(params["target"], 128, allow_empty=False)
+        and bounded_string(params["text"], 262144, allow_empty=False)
+        and ("strict" not in params or type(params["strict"]) is bool)
+        and valid_agent_terminal_id(params)
+        and ("wait" not in params or type(params["wait"]) is bool)
+    ):
+        return False
+    if not params.get("wait", False) and ({"until", "timeout_s"} & set(params)):
+        return False
+    until = params.get("until", ["idle", "done", "blocked"])
+    if not isinstance(until, list) or not 1 <= len(until) <= 4:
+        return False
+    if not all(isinstance(state, str) and state in STATES for state in until):
+        return False
+    timeout = params.get("timeout_s", 300)
+    return type(timeout) in {int, float} and 0 <= timeout <= 3600
+
+
 def valid_request(value):
     if not isinstance(value, dict) or set(value) != {"id", "method", "params"}:
         return False
@@ -381,24 +425,9 @@ def valid_request(value):
         timeout = params.get("timeout_s", 30)
         return type(timeout) in {int, float} and 0 <= timeout <= 3600
     if method == "agent.prompt":
-        if not {"target", "text"} <= set(params):
-            return False
-        if not bounded_string(params["target"], 128, allow_empty=False):
-            return False
-        if not bounded_string(params["text"], 262144, allow_empty=False):
-            return False
-        if "wait" in params and type(params["wait"]) is not bool:
-            return False
-        wait = params.get("wait", False)
-        if not wait and ({"until", "timeout_s"} & set(params)):
-            return False
-        until = params.get("until", ["idle", "done", "blocked"])
-        if not isinstance(until, list) or not 1 <= len(until) <= 4:
-            return False
-        if len(set(until)) != len(until) or not set(until) <= STATES:
-            return False
-        timeout = params.get("timeout_s", 300)
-        return type(timeout) in {int, float} and 0 <= timeout <= 3600
+        return valid_agent_prompt_params(params)
+    if method == "agent.send":
+        return valid_agent_send_params(params)
     if method == "agent.wait":
         return valid_agent_wait_params(params)
     if method == "agent.keys":
@@ -606,6 +635,10 @@ def valid_global_request(value, methods):
         return integer(after) and after >= 0
     if value["method"] == "agent.wait":
         return valid_agent_wait_params(value["params"])
+    if value["method"] == "agent.prompt":
+        return valid_agent_prompt_params(value["params"])
+    if value["method"] == "agent.send":
+        return valid_agent_send_params(value["params"])
     if value["method"] == "agent.keys":
         return valid_agent_keys_params(value["params"])
     if value["method"] in EMPTY_HOST_METHODS:
