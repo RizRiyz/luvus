@@ -4001,6 +4001,37 @@ mod tests {
         assert_open_path_routes_to_initiator(true);
     }
 
+    #[test]
+    fn failed_open_path_delivery_removes_the_client_and_requests_repair() {
+        let _env = crate::persist::test_env("failed-open-path-delivery");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(120, 40, app_tx).expect("app starts");
+        app.server_mode = true;
+        let (other, _other_rx) = display_client(120, 40, 2);
+        let (originator, originator_rx) = display_client(50, 20, 1);
+        let mut clients = HashMap::from([(1, other), (2, originator)]);
+        drop(originator_rx);
+        let mut foreground = Some(2);
+        let mut interactive_size = (50, 20);
+        let mut next_activity = 3;
+        app.pending_open_path = Some("/tmp/notes.pdf".to_string());
+
+        assert!(apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(!clients.contains_key(&2));
+        assert!(app.pending_open_path.is_none());
+        assert_eq!(foreground, Some(1));
+    }
+
     fn assert_open_path_routes_to_initiator(machine_capable: bool) {
         let _env = crate::persist::test_env("multi-client-open-path");
         let (app_tx, _app_rx) = mpsc::channel();
