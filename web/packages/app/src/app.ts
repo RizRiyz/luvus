@@ -494,7 +494,7 @@ export class WebApp {
           element("small", { className: "agent-context", text: context }),
           element("strong", { className: `agent-session-title${titleAbsent ? " absent" : ""}`, text: title }),
         ),
-        element("span", { className: "agent-state", text: state }),
+        element("span", { className: "agent-state", text: available ? state : "Terminal unavailable" }),
         available ? missionIcon("arrow") : undefined,
         ))),
         cards.length === 0 ? element("p", { className: "workspace-empty", text: this.#showShells ? "No terminal panes in this session." : "No active agents. Choose All panes to show shells." }) : undefined,
