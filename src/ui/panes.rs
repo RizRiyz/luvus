@@ -3,8 +3,35 @@
 
 use super::*;
 
-/// Draw the dot + path (+ ✕ for the focused pane) as a title ON each pane's top
-/// border row, after the borders are drawn, so it lands on the tab bar edge.
+/// Resolve one terminal pane title for both the lone-pane header and split-pane
+/// border renderers. The pane's explicit name wins; otherwise its stable
+/// lifetime ID remains visible and addressable. Path visibility is a separate
+/// presentation choice shared by both renderers.
+fn terminal_pane_title(app: &App, id: PaneId, cwd: &Path, max_width: u16) -> String {
+    let identity = app
+        .agent_name_for(id)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("p{}", id.0));
+    let max_width = max_width as usize;
+    if !app.config.layout.pane_title_path {
+        return truncate(&identity, max_width);
+    }
+
+    const SEPARATOR: &str = " · ";
+    let identity_width = display_width(&identity);
+    let separator_width = display_width(SEPARATOR);
+    if identity_width.saturating_add(separator_width) >= max_width {
+        return truncate(&identity, max_width);
+    }
+
+    let path_width = max_width - identity_width - separator_width;
+    let path = short_path(cwd, path_width.min(u16::MAX as usize) as u16);
+    truncate(&format!("{identity}{SEPARATOR}{path}"), max_width)
+}
+
+/// Draw the dot + pane identity (+ ✕ for the focused pane) as a title ON each
+/// pane's top border row, after the borders are drawn, so it lands on the tab
+/// bar edge.
 pub(super) fn draw_pane_titles(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
@@ -82,24 +109,8 @@ pub(super) fn draw_pane_titles(
         let inner_w = rect.width - 2; // inside the two corner cells
         let btn_w = title_buttons_w(focused, rect.width);
         let title_w = inner_w.saturating_sub(btn_w);
-        // A named pane (via `pane name` / `agent name`) shows its name here; an
-        // unnamed pane shows its cwd path. So naming a pane visibly renames it.
-        // With `pane_title_path` on, a named pane shows `name  path` (both).
-        let label = match app.agent_name_for(*id) {
-            Some(name) if app.config.layout.pane_title_path => {
-                let path = short_path(&pane.cwd, title_w.saturating_sub(4 + name.len() as u16 + 2));
-                format!("{name}  {path}")
-                    .chars()
-                    .take(title_w.saturating_sub(4) as usize)
-                    .collect::<String>()
-            }
-            Some(name) => name
-                .chars()
-                .take(title_w.saturating_sub(4) as usize)
-                .collect::<String>(),
-            None => short_path(&pane.cwd, title_w.saturating_sub(4)),
-        };
-        let text_w = (3 + label.chars().count() as u16).min(title_w);
+        let label = terminal_pane_title(app, *id, &pane.cwd, title_w.saturating_sub(4));
+        let text_w = (3 + display_width(&label) as u16).min(title_w);
         let title = Line::from(vec![
             Span::styled(
                 format!(" {} ", st.dot()),
@@ -170,6 +181,7 @@ fn draw_title_buttons(
 
 struct PaneRenderContext<'a> {
     app: &'a App,
+    lone_header: bool,
     diff_source_rects: &'a mut Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
     diff_note_rects: &'a mut Vec<(PaneId, String, Rect)>,
     preview_link_rects: &'a mut Vec<(PaneId, String, Rect)>,
@@ -310,6 +322,7 @@ pub(super) fn draw_panes(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
     bordered: bool,
+    lone_header: bool,
     app: &mut App,
     t: &Theme,
 ) -> Option<(u16, u16, bool)> {
@@ -322,6 +335,7 @@ pub(super) fn draw_panes(
     {
         let mut context = PaneRenderContext {
             app,
+            lone_header,
             diff_source_rects: &mut diff_source_rects,
             diff_note_rects: &mut diff_note_rects,
             preview_link_rects: &mut preview_link_rects,
@@ -446,10 +460,11 @@ fn draw_one_pane(
     context: &mut PaneRenderContext<'_>,
     t: &Theme,
 ) -> Option<(u16, u16, bool)> {
+    let lone_header = context.lone_header;
     let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
     if let Some(view) = app.views.get(&id) {
-        let content = pane_content(area, bordered, app.compact)?;
+        let content = pane_content(area, bordered, app.compact, lone_header)?;
         match view {
             crate::app::ViewKind::File(v) => {
                 let sel = app.selection.filter(|s| s.pane == id);
@@ -484,37 +499,37 @@ fn draw_one_pane(
     }
     let pane = app.panes.get(&id)?;
     let st = pane_state(app, id);
-    let content = pane_content(area, bordered, app.compact)?;
+    let content = pane_content(area, bordered, app.compact, lone_header)?;
 
     // A lone pane has no border, so it shows a header bar on its top row.
     // Bordered panes instead get their dot+path+close as a title ON the top
     // border row (see `draw_pane_titles`), so it touches the tab bar.
-    if !bordered && !app.compact {
+    if lone_header {
         // Match the content's horizontal pad so the header bar aligns with the
         // tab bar and the terminal text below it.
         let pad = lone_pad(area.width);
         let header = Rect::new(area.x + pad, area.y, area.width.saturating_sub(2 * pad), 1);
         let hbg = if focused { t.surface1 } else { t.surface0 };
-        let path_fg = if focused { t.accent } else { t.overlay1 };
+        let title_fg = if focused { t.accent } else { t.overlay1 };
         f.render_widget(Block::new().style(Style::new().bg(hbg)), header);
         // When this lone pane is a *zoomed* split (not just the only pane), show a
         // ⤡ restore button so a phone can un-zoom without a keyboard (docs/18).
         let show_restore = app.zoomed && header.width >= 8;
-        let path_budget = header
+        let title_budget = header
             .width
             .saturating_sub(if show_restore { 8 } else { 5 });
-        let title = Line::from(vec![
-            Span::styled("▎", Style::new().fg(t.accent).bg(hbg)),
-            Span::styled(
-                format!(" {} ", st.dot()),
-                Style::new().fg(st.color(t)).bg(hbg),
-            ),
-            Span::styled(
-                short_path(&pane.cwd, path_budget),
-                Style::new().fg(path_fg).bg(hbg),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(title), header);
+        if app.config.layout.show_titles {
+            let label = terminal_pane_title(app, id, &pane.cwd, title_budget);
+            let title = Line::from(vec![
+                Span::styled("▎", Style::new().fg(t.accent).bg(hbg)),
+                Span::styled(
+                    format!(" {} ", st.dot()),
+                    Style::new().fg(st.color(t)).bg(hbg),
+                ),
+                Span::styled(label, Style::new().fg(title_fg).bg(hbg)),
+            ]);
+            f.render_widget(Paragraph::new(title), header);
+        }
         if show_restore {
             let r = super::lone_zoom_rect(area);
             f.render_widget(

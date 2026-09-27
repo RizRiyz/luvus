@@ -268,9 +268,8 @@ pub struct LayoutConfig {
     pub row_gap: u16,
     #[serde(default = "yes")]
     pub show_titles: bool,
-    /// When a pane is named (`pane name` / `agent name`), also show its cwd path
-    /// after the name in the title strip. Off by default: a named pane shows just
-    /// its name, an unnamed pane its path (the original behavior).
+    /// Show a pane's live cwd after its explicit name or `p<ID>` fallback in the
+    /// title. This applies equally to lone-pane headers and split-pane borders.
     #[serde(default)]
     pub pane_title_path: bool,
     /// In the AGENTS sidebar, show each agent's session title in place of the

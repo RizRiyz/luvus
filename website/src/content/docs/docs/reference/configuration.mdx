@@ -31,7 +31,8 @@ cleanly across versions because unknown fields get defaults.
 | `allow_nested` | allow opening an interactive Luvus client from a Luvus pane; defaults to `false` because nested clients compete for terminal input |
 | `layout.scrollback_bytes` | approximate memory budget per pane's retained history; defaults to `10485760` (10 MiB). The legacy `layout.scrollback` line count is read for compatibility. (See [Scrollback](/docs/guides/scrollback/).) |
 | `layout.mobile_width` | inclusive viewport width for automatic mobile presentation; defaults to `64`, and `0` disables it. The legacy `layout.compact_width` key is accepted and migrated. (See [Mobile Sessions](/docs/guides/mobile/).) |
-| `layout.show_titles` | show the title on each pane border |
+| `layout.show_titles` | show pane identities in lone-pane headers and split-pane borders |
+| `layout.pane_title_path` | append each terminal's live working directory to its explicit pane name or `p<ID>` fallback |
 | `layout.resume_in_new_workspace` | resume a session into its own workspace instead of a new tab |
 | `layout.file_open` | which viewer opens a file: `readonly` (default) or an editor command such as `vim` (see [Browsing & Opening Files](/docs/guides/files/)) |
 | `layout.file_click` | what a plain click in the FILES dock does: `preview` (default) reuses one read-only preview pane, `tab` opens a whole tab through `layout.file_open`. Only `tab` can launch an editor. |

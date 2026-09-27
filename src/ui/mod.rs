@@ -779,9 +779,13 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     };
     // Only frame panes when the tab is split; a lone pane needs no border.
     let bordered = rects.len() > 1;
+    // Title visibility is shared by lone and split panes. A zoomed split keeps
+    // its one-row header even when titles are hidden so the mouse/touch restore
+    // control remains available.
+    let lone_header = !bordered && !app.compact && (app.config.layout.show_titles || app.zoomed);
     if resize_panes {
         for (id, rect) in &rects {
-            let Some(content) = pane_content(*rect, bordered, app.compact) else {
+            let Some(content) = pane_content(*rect, bordered, app.compact, lone_header) else {
                 continue;
             };
             let resized = app
@@ -934,13 +938,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         let preview_rects: Vec<(PaneId, Rect)> = rects
             .iter()
             .filter_map(|(id, rect)| {
-                pane_content(*rect, bordered, app.compact).map(|content| (*id, content))
+                pane_content(*rect, bordered, app.compact, lone_header)
+                    .map(|content| (*id, content))
             })
             .collect();
         if resize_panes {
             app.ensure_preview_layouts(&preview_rects);
         }
-        let cursor = panes::draw_panes(f, &rects, bordered, app, &t);
+        let cursor = panes::draw_panes(f, &rects, bordered, lone_header, app, &t);
         // Draw all pane borders in one overlay pass (manual cell-by-cell), then
         // the dot+path+close titles ON each top border row.
         if bordered {
@@ -980,7 +985,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         } else {
             rects
                 .iter()
-                .filter_map(|(id, r)| pane_content(*r, bordered, app.compact).map(|c| (*id, c)))
+                .filter_map(|(id, r)| {
+                    pane_content(*r, bordered, app.compact, lone_header).map(|c| (*id, c))
+                })
                 .collect()
         };
     status::draw_status(f, status, app, &t);
@@ -1892,10 +1899,10 @@ pub(super) fn lone_pad(width: u16) -> u16 {
     }
 }
 
-/// The terminal content area: inside the box when bordered (the dot+path+close
-/// live on the top border row as a title), else just below the header row with a
-/// small horizontal pad so it aligns with the tab bar.
-fn pane_content(rect: Rect, bordered: bool, mobile: bool) -> Option<Rect> {
+/// The terminal content area: inside the box when bordered (the title lives on
+/// the top border row), otherwise optionally below the lone-pane header. The
+/// horizontal pad keeps desktop content aligned with the tab bar.
+fn pane_content(rect: Rect, bordered: bool, mobile: bool, lone_header: bool) -> Option<Rect> {
     if bordered {
         return pane_inner(rect, true);
     }
@@ -1903,11 +1910,12 @@ fn pane_content(rect: Rect, bordered: bool, mobile: bool) -> Option<Rect> {
         return (rect.width > 0 && rect.height > 0).then_some(rect);
     }
     let pad = lone_pad(rect.width);
+    let header_height = u16::from(lone_header);
     let c = Rect::new(
         rect.x + pad,
-        rect.y + 1,
+        rect.y + header_height,
         rect.width.saturating_sub(2 * pad),
-        rect.height.saturating_sub(1),
+        rect.height.saturating_sub(header_height),
     );
     if c.width < 1 || c.height < 1 {
         return None;
