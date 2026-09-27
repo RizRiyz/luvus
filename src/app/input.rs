@@ -506,6 +506,14 @@ impl App {
                 );
                 return true;
             }
+            AppEvent::BackendCreatePreflight {
+                cwd,
+                placement,
+                reply,
+            } => {
+                let _ = reply.send(self.backend_create_preflight(&cwd, &placement));
+                return false;
+            }
             AppEvent::PtyReady { id, cwd } => {
                 if let Some(pane) = self.panes.get_mut(&id) {
                     pane.cwd = cwd;
@@ -1223,6 +1231,7 @@ impl App {
             | AppEvent::ConfigReloaded { .. }
             | AppEvent::ManifestsReloaded { .. }
             | AppEvent::BackendCreateReady { .. }
+            | AppEvent::BackendCreatePreflight { .. }
             | AppEvent::BackendObserve { .. }
             | AppEvent::PtyReady { .. }
             | AppEvent::SearchFilesIndexed { .. }

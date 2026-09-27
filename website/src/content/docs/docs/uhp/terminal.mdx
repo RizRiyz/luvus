@@ -224,7 +224,10 @@ rejected before dispatch.
 
 Input success means the complete action was queued to the owned PTY writer.
 Immediate metadata and lifecycle mutations report `executed`. Mutation errors
-include `dispatch: not_started` or `dispatch: rejected`. If a client wrote a
+include `dispatch: not_started` or `dispatch: rejected`. A failed backend create
+may instead report `dispatch: started` when its PTY started but was discarded
+before becoming an addressable pane; clients must not retry it automatically.
+If a client wrote a
 mutation but lost its correlated response, only the client can classify it as
 possibly executed. Do not retry it automatically. Refresh inventory instead.
 

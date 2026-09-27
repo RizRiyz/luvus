@@ -62,6 +62,13 @@ pub enum AppEvent {
         commit: crate::terminal::backend::CreateCommit,
         result: Result<crate::terminal::pty::Pane, String>,
     },
+    /// Just before the background worker spawns a PTY, ask the app owner to
+    /// check the current deletion set and sibling destination.
+    BackendCreatePreflight {
+        cwd: std::path::PathBuf,
+        placement: crate::terminal::backend::CreatePlacement,
+        reply: Sender<Result<(), crate::terminal::backend::BackendError>>,
+    },
     /// Resolve and validate an opt-in ANSI stream target on the single-writer
     /// app loop. Only cloneable read handles leave the loop; capture and socket
     /// writes happen on the requesting API worker.
