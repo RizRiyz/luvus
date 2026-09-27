@@ -1975,28 +1975,29 @@ pub(crate) fn short_path(p: &Path, max: u16) -> String {
         return "…".to_string();
     }
 
-    use unicode_width::UnicodeWidthChar;
+    use unicode_segmentation::UnicodeSegmentation;
     let mut used = 0;
-    let mut reversed = Vec::new();
-    for ch in s.chars().rev() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+    let mut tail_start = s.len();
+    for grapheme in s.graphemes(true).rev() {
+        let width = display_width(grapheme);
         if used + width > max - 1 {
             break;
         }
         used += width;
-        reversed.push(ch);
+        tail_start -= grapheme.len();
     }
-    reversed.reverse();
-    let mut tail: String = reversed.into_iter().collect();
-    if let Some(first_visible) = tail
-        .char_indices()
-        .find_map(|(index, ch)| (UnicodeWidthChar::width(ch).unwrap_or(0) > 0).then_some(index))
-    {
-        tail.drain(..first_visible);
-    } else {
-        tail.clear();
+
+    while tail_start < s.len() {
+        let grapheme = s[tail_start..]
+            .graphemes(true)
+            .next()
+            .expect("tail starts at a grapheme boundary");
+        if display_width(grapheme) > 0 {
+            break;
+        }
+        tail_start += grapheme.len();
     }
-    format!("…{tail}")
+    format!("…{}", &s[tail_start..])
 }
 
 #[cfg(test)]
@@ -2008,6 +2009,14 @@ mod path_tests {
         let shortened = short_path(Path::new("界界/important-project"), 20);
         assert!(display_width(&shortened) <= 20);
         assert!(shortened.ends_with("important-project"));
+    }
+
+    #[test]
+    fn short_path_keeps_joined_emoji_intact() {
+        let family = "👨‍👩‍👧";
+        let shortened = short_path(Path::new(&format!("/tmp/very-long-workspace/{family}")), 6);
+        assert!(display_width(&shortened) <= 6);
+        assert!(shortened.ends_with(family));
     }
 
     #[test]

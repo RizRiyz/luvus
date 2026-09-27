@@ -59,6 +59,7 @@ portable-pty = "0.9"
 bitflags = "=2.13.0"
 alacritty_terminal = { package = "luvus-alacritty-terminal", version = "0.26" }
 unicode-width = "0.2"
+unicode-segmentation = "1.13"
 # Explicit terminal-native document previews. The parser is pure Rust and only
 # runs after the user chooses a Markdown/Mermaid preview action.
 pulldown-cmark = { version = "0.13", default-features = false }
