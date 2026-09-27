@@ -1965,18 +1965,56 @@ pub(crate) fn short_path(p: &Path, max: u16) -> String {
         }
     }
     let max = max as usize;
-    if s.chars().count() > max && max > 1 {
-        let tail: String = s
-            .chars()
-            .rev()
-            .take(max - 1)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        format!("…{tail}")
+    if display_width(&s) <= max {
+        return s;
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+
+    use unicode_width::UnicodeWidthChar;
+    let mut used = 0;
+    let mut reversed = Vec::new();
+    for ch in s.chars().rev() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > max - 1 {
+            break;
+        }
+        used += width;
+        reversed.push(ch);
+    }
+    reversed.reverse();
+    let mut tail: String = reversed.into_iter().collect();
+    if let Some(first_visible) = tail
+        .char_indices()
+        .find_map(|(index, ch)| (UnicodeWidthChar::width(ch).unwrap_or(0) > 0).then_some(index))
+    {
+        tail.drain(..first_visible);
     } else {
-        s
+        tail.clear();
+    }
+    format!("…{tail}")
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn short_path_keeps_a_wide_paths_tail_within_its_column_budget() {
+        let shortened = short_path(Path::new("界界/important-project"), 20);
+        assert!(display_width(&shortened) <= 20);
+        assert!(shortened.ends_with("important-project"));
+    }
+
+    #[test]
+    fn short_path_honors_zero_and_one_column_budgets() {
+        let path = Path::new("long/path");
+        assert_eq!(short_path(path, 0), "");
+        assert_eq!(short_path(path, 1), "…");
     }
 }
 
