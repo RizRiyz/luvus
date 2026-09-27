@@ -62,6 +62,13 @@ pub enum AppEvent {
         commit: crate::terminal::backend::CreateCommit,
         result: Result<crate::terminal::pty::Pane, String>,
     },
+    /// Just before the background worker spawns a PTY, ask the app owner to
+    /// check the current deletion set and sibling destination.
+    BackendCreatePreflight {
+        cwd: std::path::PathBuf,
+        placement: crate::terminal::backend::CreatePlacement,
+        reply: Sender<Result<(), crate::terminal::backend::BackendError>>,
+    },
     /// Resolve and validate an opt-in ANSI stream target on the single-writer
     /// app loop. Only cloneable read handles leave the loop; capture and socket
     /// writes happen on the requesting API worker.
@@ -136,6 +143,13 @@ pub enum AppEvent {
         id: u64,
         input: ClientInput,
     },
+    /// Native clipboard helper confirmed an exact foreground copy.
+    ClientClipboardSucceeded {
+        id: u64,
+        receipt: u64,
+    },
+    /// Native clipboard helper confirmed a monolithic `--local` copy.
+    LocalClipboardSucceeded,
     /// A module subprocess finished; fill in its log entry.
     ModuleCommandFinished {
         log_id: u64,
@@ -147,6 +161,13 @@ pub enum AppEvent {
     /// thread — the scan walks agent session stores and must never block the
     /// event loop).
     SessionsScanned(Vec<crate::agent::SessionInfo>),
+    /// Bounded FILES fuzzy results, fenced by filter instance and query generation.
+    FileFilterResults {
+        instance: u64,
+        generation: u64,
+        rows: Vec<crate::files::VisibleRow>,
+        partial: bool,
+    },
     /// A FILES-dock directory read finished (docs/38): its sorted entries, run
     /// on a worker thread so the tree never blocks a frame on `read_dir`.
     DirRead {

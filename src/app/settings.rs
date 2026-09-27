@@ -111,6 +111,7 @@ pub enum GeneralRow {
     FileClick,
     FilesShowHidden,
     ShiftEnter,
+    CommanderWorking,
     CheckUpdates,
     /// Replay each agent's own CLI options on resume (docs/62).
     ResumeFlags,
@@ -146,6 +147,7 @@ impl App {
             GeneralRow::FileClick,
             GeneralRow::FilesShowHidden,
             GeneralRow::ShiftEnter,
+            GeneralRow::CommanderWorking,
             GeneralRow::CheckUpdates,
             GeneralRow::ResumeFlags,
             GeneralRow::NewPaneToWorkspaceRoot,
@@ -161,13 +163,10 @@ impl App {
     /// Index of the first notification row (where the `── Notify ──` divider
     /// goes), mirroring `dock_section_start` in the Layout tab.
     ///
-    /// This is one short: `AgentTitle` is a general setting, so the divider
-    /// renders above it and it reads as a notification option. That off-by-one
-    /// predates the `File click behavior` row — the constant went 6 → 7 only to
-    /// keep the divider where it already was. Fixing it properly means 8, which
-    /// moves a row users have already learned, so it is left for its own change.
+    /// Preserve the existing divider above `AgentTitle`; adding a Commander
+    /// setting before it shifts that boundary by one.
     pub fn general_section_start(&self) -> usize {
-        7
+        8
     }
 
     /// The Layout tab's ordered selectable rows (docs/29). The first index of the
@@ -1301,6 +1300,17 @@ impl App {
             // Flips config *and* the live tree (docs/38), so it applies at once.
             Some(GeneralRow::FilesShowHidden) => self.toggle_files_hidden(),
             Some(GeneralRow::ShiftEnter) => self.cycle_shift_enter(delta),
+            Some(GeneralRow::CommanderWorking) => {
+                self.config.commander_working_policy = match self.config.commander_working_policy {
+                    crate::config::CommanderWorkingPolicy::Ask => {
+                        crate::config::CommanderWorkingPolicy::AutoSend
+                    }
+                    crate::config::CommanderWorkingPolicy::AutoSend => {
+                        crate::config::CommanderWorkingPolicy::Ask
+                    }
+                };
+                self.persist_config();
+            }
             Some(GeneralRow::CheckUpdates) => {
                 self.config.check_updates = !self.config.check_updates;
                 self.persist_config();
@@ -1782,13 +1792,26 @@ mod tests {
         if let Some(ui) = app.settings.as_mut() {
             ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::General), 13);
+        assert_eq!(app.settings_rows(SettingsTab::General), 14);
         let rows = app.general_rows();
         assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
         assert_eq!(
             rows[1],
             GeneralRow::FileClick,
             "click behavior sits next to the viewer it qualifies"
+        );
+        let working = rows
+            .iter()
+            .position(|r| *r == GeneralRow::CommanderWorking)
+            .unwrap();
+        assert_eq!(
+            app.config.commander_working_policy,
+            crate::config::CommanderWorkingPolicy::AutoSend
+        );
+        app.settings_adjust(working, 1);
+        assert_eq!(
+            app.config.commander_working_policy,
+            crate::config::CommanderWorkingPolicy::Ask
         );
 
         let style = rows

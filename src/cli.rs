@@ -160,9 +160,9 @@ panes / agents:
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
-  agent prompt <target> <text> [--wait] [--until STATE] [--timeout <s>]
+  agent prompt <target> <text> [--strict] [--wait] [--until STATE] [--timeout <s>]
                              atomically prompt and optionally wait (send is an alias)
-  agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
+  agent send <target> <text> [--strict] [--wait] [--until STATE] [--timeout <s>]
                              compatibility alias for agent prompt
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
@@ -2193,15 +2193,16 @@ fn skill_cmd(rest: &[String], context: crate::i18n::cli::Context) -> Result<i32>
     }
 }
 
-/// `luvus agent prompt <target> <text…> [--wait] [--until STATE] [--timeout S]`
+/// `luvus agent prompt <target> <text…> [--strict] [--wait] [--until STATE] [--timeout S]`
 /// submits and waits as one server-owned operation. `agent send` remains a
 /// compatibility alias.
 fn agent_send_cmd(args: &[String]) -> Result<i32> {
     let target = args.get(3).cloned().ok_or_else(|| {
-        anyhow!("usage: luvus agent prompt <target> <text> [--wait] [--until STATE] [--timeout S]")
+        anyhow!("usage: luvus agent prompt <target> <text> [--strict] [--wait] [--until STATE] [--timeout S]")
     })?;
     let mut text_parts = Vec::new();
     let mut wait = false;
+    let mut strict = false;
     let mut until = Vec::new();
     let mut timeout = None;
     let mut positional_only = false;
@@ -2220,6 +2221,10 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
             }
             "--wait" => {
                 wait = true;
+                index += 1;
+            }
+            "--strict" => {
+                strict = true;
                 index += 1;
             }
             "--until" => {
@@ -2256,6 +2261,9 @@ fn agent_send_cmd(args: &[String]) -> Result<i32> {
     params.insert("target".into(), json!(target));
     params.insert("text".into(), json!(text));
     params.insert("wait".into(), json!(wait));
+    if strict {
+        params.insert("strict".into(), json!(true));
+    }
     if !until.is_empty() {
         params.insert("until".into(), json!(until));
     }
@@ -2661,6 +2669,13 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 } else {
                     "usage: luvus search <text...> [--case]"
                 }));
+            }
+            let query_bytes = query
+                .iter()
+                .map(String::len)
+                .fold(query.len().saturating_sub(1), usize::saturating_add);
+            if !fuzzy && query_bytes > crate::search::local::LOCAL_QUERY_BYTES {
+                return Err(anyhow!("exact search query must be at most 4096 bytes"));
             }
             if fuzzy {
                 (
@@ -3408,6 +3423,9 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if let Some(t) = flag(args, "--tool") {
                 obj.insert("tool".to_string(), json!(t));
             }
+            if let Some(notification_type) = flag(args, "--notification-type") {
+                obj.insert("notification_type".to_string(), json!(notification_type));
+            }
             ("pane.report_event".into(), with_pane(obj))
         }
         ("pane", "" | "list") => ("pane.list".into(), json!({})),
@@ -3509,7 +3527,12 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
                 _ => return Err(anyhow!("usage: luvus module pane open|focus|close …")),
             }
         }
-        ("module", _) => ("module.list".into(), json!({})),
+        ("module", "" | "list") => ("module.list".into(), json!({})),
+        ("module", other) => {
+            return Err(anyhow!(
+                "unknown module command `{other}`. Try `luvus help module`."
+            ))
+        }
 
         ("diff", "refresh") => {
             if !rest.is_empty() {
@@ -4602,6 +4625,19 @@ mod tests {
     }
 
     #[test]
+    fn pane_report_event_forwards_notification_type() {
+        let (method, params) = parse(&argv(
+            "luvus pane report-event 9 --agent claude --kind Notification --notification-type idle_prompt",
+        ))
+        .unwrap();
+        assert_eq!(method, "pane.report_event");
+        assert_eq!(params["pane"], "9");
+        assert_eq!(params["agent"], "claude");
+        assert_eq!(params["kind"], "Notification");
+        assert_eq!(params["notification_type"], "idle_prompt");
+    }
+
+    #[test]
     fn pane_send_requests_atomic_paste_semantics() {
         let (method, params) = parse(&argv("luvus pane send 9 first second")).unwrap();
         assert_eq!(method, "pane.send_input");
@@ -4885,6 +4921,21 @@ mod tests {
         ] {
             assert!(parse(&argv(bad)).is_err(), "{bad} must be rejected");
         }
+
+        let oversized = format!(
+            "luvus search {}",
+            "x".repeat(crate::search::local::LOCAL_QUERY_BYTES + 1)
+        );
+        let error = parse(&argv(&oversized)).expect_err("oversized exact search must fail");
+        assert_eq!(
+            error.to_string(),
+            "exact search query must be at most 4096 bytes"
+        );
+        let localized = localize_cli_error_with(
+            error,
+            crate::i18n::cli::Context::for_language(crate::i18n::cli::Language::Zh),
+        );
+        assert_eq!(localized.to_string(), "精确搜索查询不得超过 4096 字节");
     }
 
     #[test]
@@ -5556,6 +5607,16 @@ mod tests {
         let (m, p) = parse(&argv("luvus module enable my-mod")).unwrap();
         assert_eq!(m, "module.enable");
         assert_eq!(p.get("id").and_then(|v| v.as_str()), Some("my-mod"));
+
+        let (m, _) = parse(&argv("luvus module")).unwrap();
+        assert_eq!(m, "module.list");
+
+        assert_eq!(
+            parse(&argv("luvus module action my-mod refresh"))
+                .unwrap_err()
+                .to_string(),
+            "unknown module command `action`. Try `luvus help module`."
+        );
     }
 
     fn wait_test_server() -> crate::ipc::transport::Listener {
@@ -5590,6 +5651,8 @@ mod tests {
             ("luvus agent prompt 7 review", json!({"target":"7","text":"review","wait":false})),
             ("luvus agent send reviewer review this", json!({"target":"reviewer","text":"review this","wait":false})),
             ("luvus agent prompt codex review --wait", json!({"target":"codex","text":"review","wait":true})),
+            ("luvus agent prompt claude --strict review", json!({"target":"claude","text":"review","wait":false,"strict":true})),
+            ("luvus agent send reviewer --strict review this", json!({"target":"reviewer","text":"review this","wait":false,"strict":true})),
             ("luvus agent send 7 review --wait --until done --timeout 0.5", json!({"target":"7","text":"review","wait":true,"until":["done"],"timeout_s":0.5})),
             ("luvus agent prompt 7 --wait --until idle --until working --until blocked --until done review --timeout 3600", json!({"target":"7","text":"review","wait":true,"until":["idle","working","blocked","done"],"timeout_s":3600.0})),
             ("luvus agent send 7 --wait --until idle --until idle --timeout 0 review", json!({"target":"7","text":"review","wait":true,"until":["idle","idle"],"timeout_s":0.0})),

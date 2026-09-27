@@ -1,4 +1,4 @@
-const CACHE = "luvus-web-v1";
+const CACHE = "luvus-web-v2";
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(["/", "/manifest.webmanifest", "/mark.svg"])));
   self.skipWaiting();
@@ -11,7 +11,10 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin || request.url.includes("/bridge")) return;
   event.respondWith(fetch(request).then((response) => {
-    if (response.ok) caches.open(CACHE).then((cache) => cache.put(request, response.clone()));
+    if (response.ok) {
+      const copy = response.clone();
+      event.waitUntil(caches.open(CACHE).then((cache) => cache.put(request, copy)).catch(() => {}));
+    }
     return response;
   }).catch(() => caches.match(request).then((cached) => cached || caches.match("/"))));
 });

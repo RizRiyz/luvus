@@ -213,6 +213,7 @@ impl App {
         if changed {
             self.agent_title_panes = panes;
             self.agent_title_sessions = sessions;
+            crate::ipc::api::publish_event(&self.events, "agent.title_changed", json!({}));
         }
         Ok(changed)
     }

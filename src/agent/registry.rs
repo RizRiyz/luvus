@@ -5,6 +5,7 @@ pub(crate) static BUILTINS: &[&AgentDescriptor] = &[
     &super::codex::DESCRIPTOR,
     &super::gemini::DESCRIPTOR,
     &super::antigravity::DESCRIPTOR,
+    &super::arc_studio::DESCRIPTOR,
     &super::letta::DESCRIPTOR,
     &super::aider::DESCRIPTOR,
     &super::opencode::DESCRIPTOR,
@@ -47,6 +48,19 @@ const _: () = assert!(
 
 pub(crate) fn descriptors() -> &'static [&'static AgentDescriptor] {
     BUILTINS
+}
+
+/// Arc Studio works in a remote sandbox and cannot fulfill a local ORCH task
+/// until that workspace can be bridged back into the assigned checkout.
+pub(crate) fn supports_local_task(descriptor: &AgentDescriptor) -> bool {
+    descriptor.id != "arc-studio"
+}
+
+pub(crate) fn local_task_descriptors() -> impl Iterator<Item = &'static AgentDescriptor> {
+    BUILTINS
+        .iter()
+        .copied()
+        .filter(|descriptor| supports_local_task(descriptor))
 }
 
 pub(crate) fn integrations() -> &'static [&'static AgentDescriptor] {
@@ -142,6 +156,7 @@ mod tests {
         assert!(aider.supports(AutomationAccess::FullAccess));
 
         assert!(find("antigravity").unwrap().automation.is_none());
+        assert!(find("arc-studio").unwrap().automation.is_none());
         assert!(find("amp").unwrap().automation.is_none());
         assert!(find("devin").unwrap().automation.is_none());
         assert!(find("letta").unwrap().automation.is_none());
@@ -160,6 +175,13 @@ mod tests {
         assert!(!opencode.supports(AutomationAccess::ReadOnly));
         assert!(!opencode.supports(AutomationAccess::Workspace));
         assert!(opencode.supports(AutomationAccess::FullAccess));
+    }
+
+    #[test]
+    fn remote_sandbox_agent_is_not_a_local_task_worker() {
+        assert!(!supports_local_task(find("arc-studio").unwrap()));
+        assert!(!local_task_descriptors().any(|descriptor| descriptor.id == "arc-studio"));
+        assert!(local_task_descriptors().any(|descriptor| descriptor.id == "codex"));
     }
 
     #[test]
@@ -224,6 +246,7 @@ mod tests {
             ("codex", &["codex"][..], &[][..]),
             ("gemini", &["gemini"][..], &[][..]),
             ("antigravity", &["antigravity-cli"][..], &["agy"][..]),
+            ("arc-studio", &["arc-studio"][..], &["arc studio"][..]),
             ("letta", &["letta-code"][..], &["letta"][..]),
             ("aider", &["aider"][..], &[][..]),
             ("opencode", &["opencode", "opencode2"][..], &[][..]),

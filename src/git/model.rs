@@ -205,6 +205,9 @@ pub struct Worktree {
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorktreeMembership {
     pub common_dir: std::path::PathBuf,
+    /// Captured when this workspace opened, so deletion cannot follow a new
+    /// checkout that later appears at the same path.
+    pub directory_identity: Option<crate::platform::DirectoryIdentity>,
     /// True when this checkout is a **linked worktree** rather than the repo's
     /// main working tree. Resolved once when the membership is built (it needs
     /// path canonicalization), so readers on the app loop stay allocation- and

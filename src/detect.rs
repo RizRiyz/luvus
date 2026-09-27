@@ -29,6 +29,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::terminal::vt::VtEngine;
 use crate::ui::theme::State;
 
 /// The runtime identity form is owned so `~/.luvus/manifests/*.toml` can refine
@@ -228,6 +229,17 @@ pub struct Manifests {
     agents: Vec<AgentIdent>,
 }
 
+/// Resolve a custom launch argv using the same built-in binary and interpreter
+/// package identity rules as live process detection, without loading user
+/// manifests or scanning processes.
+pub(crate) fn builtin_agent_in_argv(argv: &[String]) -> Option<String> {
+    Manifests {
+        rules: Vec::new(),
+        agents: builtin_agents(),
+    }
+    .agent_in_argv(argv)
+}
+
 impl Manifests {
     /// Just the compiled-in defaults (test helper; production uses `load`).
     #[cfg(test)]
@@ -336,7 +348,7 @@ pub(crate) fn screen_rows(known_agent: &str, running: &[String], manifests: &Man
     }
 }
 
-/// Claude, Codex, Hermes, and Devin can place a live interaction panel above a
+/// Claude, Codex, Hermes, Devin, and Arc Studio can place an interaction above a
 /// tall blank footer. Keep their most recent non-empty live rows without pulling
 /// in scrollback. For Codex this also keeps the first-run sign-in chooser
 /// visible to prompt admission instead of mistaking its blank footer for a
@@ -348,12 +360,43 @@ pub(crate) fn screen_uses_non_empty_rows(
 ) -> bool {
     known_agent.eq_ignore_ascii_case("claude")
         || manifests.process_has_agent(running, "claude")
+        || known_agent.eq_ignore_ascii_case("arc-studio")
+        || manifests.process_has_agent(running, "arc-studio")
         || known_agent.eq_ignore_ascii_case("codex")
         || manifests.process_has_agent(running, "codex")
         || known_agent.eq_ignore_ascii_case("hermes")
         || manifests.process_has_agent(running, "hermes")
         || known_agent.eq_ignore_ascii_case("devin")
         || manifests.process_has_agent(running, "devin")
+}
+
+/// Probe a blank bottom window for Arc Studio's full live banner only while
+/// identity and process evidence are unavailable. Other unknown panes keep
+/// the cheap bottom-row extraction and its existing false-positive boundary.
+pub(crate) fn screen_text_for_detection(
+    engine: &dyn VtEngine,
+    rows: u16,
+    non_empty_rows: bool,
+    probe_arc_studio: bool,
+) -> String {
+    if non_empty_rows {
+        return engine.detection_text_non_empty(rows);
+    }
+    let bottom = engine.detection_text(rows);
+    if probe_arc_studio && bottom.trim().is_empty() {
+        let probe = engine.detection_text_non_empty(rows);
+        if arc_studio_banner(&probe.to_lowercase()) {
+            return probe;
+        }
+    }
+    bottom
+}
+
+/// The banner must contain both phrases on one row, not unrelated shell prose.
+fn arc_studio_banner(lowercase_screen: &str) -> bool {
+    lowercase_screen.lines().any(|line| {
+        contains_agent_word(line, "arc studio") && contains_agent_word(line, "build onchain apps ·")
+    })
 }
 
 /// The compiled-in default rules (generic first, then per-agent).
@@ -762,6 +805,23 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![all(&["yes, proceed", "yes, don't ask again this session"])],
         ),
+        // Arc Studio's live question picker uses this navigation footer. It
+        // may remain visible beside the generic working interrupt hint, so
+        // the question must win over the working rule.
+        per(
+            "arc-studio",
+            State::Blocked,
+            325,
+            Region::Screen,
+            vec![all(&["↑/↓ move", "esc to"])],
+        ),
+        per(
+            "arc-studio",
+            State::Blocked,
+            315,
+            Region::Screen,
+            vec![all(&["not logged in yet", "press enter"])],
+        ),
         // Devin's first-run workspace-trust screen is a numbered menu without
         // the generic paired enter/esc controls, worded both "…authors of this
         // directory?" and "…authors of <dir>?". Match the shared stem together
@@ -1100,15 +1160,12 @@ pub fn classify(
         None => (fallback, "no_positive_state_evidence", None, None, false),
     };
 
+    // A missing blocked rule is not positive evidence of an input box. Only
+    // agent-specific live composer probes can promote Unknown to Ready.
     let prompt_evidence = if prompt_blocked {
         PromptEvidence::Blocked
-    } else if agent.eq_ignore_ascii_case("codex") {
-        // Text alone cannot distinguish Codex's live composer from a prompt
-        // marker retained in the transcript. The app combines this raw state
-        // evidence with the VT engine's bounded composer geometry.
-        PromptEvidence::Unknown
     } else {
-        PromptEvidence::Ready
+        PromptEvidence::Unknown
     };
     Detection {
         state,
@@ -1121,11 +1178,29 @@ pub fn classify(
     }
 }
 
-/// Codex can be identified from its process/title before its startup chooser or
-/// composer exists. Server-owned launches keep prompt admission closed until
-/// the screen proves which surface won that race.
+/// Codex and Claude can be identified before their startup chooser or composer
+/// exists. Keep prompt admission closed until the live screen proves readiness.
 pub(crate) fn prompt_requires_positive_evidence(agent: &str) -> bool {
-    agent.eq_ignore_ascii_case("codex")
+    agent.eq_ignore_ascii_case("codex") || agent.eq_ignore_ascii_case("claude")
+}
+
+/// Probe composer geometry only for agents requiring positive evidence.
+pub(crate) fn live_composer_ready(
+    agent: &str,
+    engine: &dyn VtEngine,
+    claude_semantic_ready: bool,
+) -> Option<bool> {
+    if agent.eq_ignore_ascii_case("codex") {
+        Some(engine.codex_composer_region().is_some())
+    } else if agent.eq_ignore_ascii_case("claude") {
+        Some(match engine.claude_composer_evidence() {
+            crate::terminal::vt::ClaudeComposerEvidence::Absent => false,
+            crate::terminal::vt::ClaudeComposerEvidence::Ready => true,
+            crate::terminal::vt::ClaudeComposerEvidence::Ambiguous => claude_semantic_ready,
+        })
+    } else {
+        None
+    }
 }
 
 /// Re-evaluate raw prompt readiness from the current bounded screen. This
@@ -1147,10 +1222,8 @@ pub(crate) fn prompt_evidence(
         .is_some_and(|rule| rule.state == State::Blocked);
     if blocked {
         PromptEvidence::Blocked
-    } else if agent.eq_ignore_ascii_case("codex") {
-        PromptEvidence::Unknown
     } else {
-        PromptEvidence::Ready
+        PromptEvidence::Unknown
     }
 }
 
@@ -1185,7 +1258,16 @@ impl Manifests {
     fn agent_in_process_command(&self, cmd: &str) -> Option<String> {
         let low = cmd.to_lowercase();
         let tokens = Self::command_tokens(&low);
-        let tokens = unwrap_leading_env(&tokens);
+        self.agent_in_lowercase_argv(&tokens)
+    }
+
+    pub(crate) fn agent_in_argv(&self, argv: &[String]) -> Option<String> {
+        let lowercase: Vec<String> = argv.iter().map(|arg| arg.to_lowercase()).collect();
+        self.agent_in_lowercase_argv(&lowercase)
+    }
+
+    fn agent_in_lowercase_argv(&self, argv: &[String]) -> Option<String> {
+        let tokens = unwrap_leading_env(argv);
         let (first, rest) = tokens.split_first()?;
         let first = binary_name(first);
         if let Some(a) = self.match_binary(first) {
@@ -1370,6 +1452,11 @@ impl Manifests {
         }
         // Incidental signal: pane output. Only names that can't be ordinary words.
         self.best_agent(|agent| {
+            if agent.name == "arc-studio" {
+                // The slogan or a copied CLI command alone is incidental shell
+                // output. Arc Studio's actual TUI prints both on one banner row.
+                return arc_studio_banner(low_bottom);
+            }
             agent
                 .distinct
                 .iter()
@@ -1654,6 +1741,202 @@ Would you like to proceed?
             incidental.agent, "zsh",
             "bare muse is never trusted from pane output"
         );
+    }
+
+    #[test]
+    fn arc_studio_identity_matches_its_cli_and_scoped_node_package() {
+        let manifests = Manifests::builtin();
+        for command in [
+            "/usr/local/bin/arc-studio",
+            "node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs",
+            r#""C:\Program Files\nodejs\node.exe" "C:\Users\Ada Lovelace\AppData\Roaming\npm\node_modules\@circle-fin\arc-studio-cli\bin\arc-studio.mjs""#,
+        ] {
+            assert_eq!(
+                manifests.agent_in_processes(&[command.into()]),
+                Some("arc-studio".into()),
+                "failed to recognize {command}"
+            );
+        }
+        assert_eq!(
+            manifests.agent_in_processes(&[
+                "node /opt/node_modules/@other/arc-studio-cli/bin/cli.mjs".into()
+            ]),
+            None,
+            "a different package must not inherit Arc Studio's identity"
+        );
+        assert_eq!(
+            classify(
+                Some("zsh"),
+                "Arc Studio can deploy a contract",
+                true,
+                false,
+                "zsh",
+                "",
+                &["zsh".into()],
+                &manifests
+            )
+            .agent,
+            "zsh",
+            "a shell printing Arc Studio prose is still a shell"
+        );
+        for incidental in [
+            "build onchain apps ·",
+            "Run arc-studio to begin",
+            "Arc Studio\nbuild onchain apps ·",
+        ] {
+            assert_eq!(
+                classify(
+                    Some("zsh"),
+                    incidental,
+                    false,
+                    false,
+                    "zsh",
+                    "",
+                    &[],
+                    &manifests
+                )
+                .agent,
+                "zsh",
+                "incidental output must not identify Arc Studio: {incidental}"
+            );
+        }
+        assert_eq!(
+            classify(
+                Some("build onchain apps ·"),
+                "",
+                false,
+                false,
+                "zsh",
+                "",
+                &[],
+                &manifests
+            )
+            .agent,
+            "zsh",
+            "the slogan alone in an OSC title is not Arc Studio identity"
+        );
+        assert_eq!(
+            classify(
+                Some("zsh"),
+                "◆ ARC STUDIO build onchain apps · v1.1.3\nnew session",
+                false,
+                false,
+                "zsh",
+                "",
+                &[],
+                &manifests
+            )
+            .agent,
+            "arc-studio",
+            "the TUI banner identifies the agent when process scanning is unavailable"
+        );
+    }
+
+    #[test]
+    fn arc_studio_tui_state_follows_work_and_question_evidence() {
+        let manifests = Manifests::builtin();
+        let detect = |screen: &str| {
+            classify(
+                Some("zsh"),
+                screen,
+                true,
+                false,
+                "zsh",
+                "",
+                &["node /opt/node_modules/@circle-fin/arc-studio-cli/bin/arc-studio.mjs".into()],
+                &manifests,
+            )
+            .state
+        };
+        assert_eq!(detect("Arc Studio · new session"), State::Idle);
+        assert_eq!(
+            detect("⠹ working 12s · compile\nesc to interrupt"),
+            State::Working
+        );
+        assert_eq!(
+            detect("⠹ working 12s · compile\nesc to interrupt\n↑/↓ move · enter to submit · esc to dismiss"),
+            State::Blocked
+        );
+        assert_eq!(
+            detect(
+                "You're not logged in yet. Press Enter to get the login command, or Esc to quit."
+            ),
+            State::Blocked
+        );
+    }
+
+    #[test]
+    fn arc_studio_login_above_a_tall_blank_footer_stays_blocked() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/local/bin/arc-studio".to_string()];
+        let rows = screen_rows("arc-studio", &running, &manifests);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(100, 32, tx, 1024 * 1024);
+        engine.advance(
+            b"\x1b[2J\x1b[HYou're not logged in yet. Press Enter to get the login command, or Esc to quit.",
+        );
+        assert!(engine.detection_text(rows).trim().is_empty());
+        assert!(screen_uses_non_empty_rows("arc-studio", &[], &manifests));
+        assert!(screen_uses_non_empty_rows("", &running, &manifests));
+        let detection = classify(
+            Some("zsh"),
+            &engine.detection_text_non_empty(rows),
+            false,
+            false,
+            "zsh",
+            "arc-studio",
+            &running,
+            &manifests,
+        );
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+    }
+
+    #[test]
+    fn arc_studio_banner_above_blank_footer_identifies_first_frame() {
+        let manifests = Manifests::builtin();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(100, 32, tx, 1024 * 1024);
+        engine.advance(b"\x1b[2J\x1b[HARC STUDIO build onchain apps \xc2\xb7 v1.1.3\r\nYou're not logged in yet. Press Enter to get the login command, or Esc to quit.");
+        assert!(engine.detection_text(14).trim().is_empty());
+
+        let screen = screen_text_for_detection(&engine, 14, false, true);
+        let detection = classify(
+            Some("zsh"),
+            &screen,
+            false,
+            false,
+            "zsh",
+            "",
+            &[],
+            &manifests,
+        );
+        assert_eq!(detection.agent, "arc-studio");
+        assert_eq!(detection.identity_source, "screen_text");
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+
+        // A failed process scan can leave a stale prior identity. The live
+        // banner must still replace it before prompt routing considers Ready.
+        let stale_identity = classify(
+            Some("zsh"),
+            &screen,
+            false,
+            false,
+            "zsh",
+            "gemini",
+            &[],
+            &manifests,
+        );
+        assert_eq!(stale_identity.agent, "arc-studio");
+        assert_eq!(stale_identity.state, State::Blocked);
+        assert_eq!(stale_identity.prompt_evidence, PromptEvidence::Blocked);
+
+        // The extra scan must not promote a shell printing only the slogan.
+        engine.advance(b"\x1b[2J\x1b[Hbuild onchain apps \xc2\xb7");
+        assert!(screen_text_for_detection(&engine, 14, false, true)
+            .trim()
+            .is_empty());
     }
 
     #[test]
@@ -2312,6 +2595,28 @@ Would you like to proceed?
         assert_eq!(detection.prompt_evidence, PromptEvidence::Unknown);
         assert_eq!(
             prompt_evidence(Some("Codex"), bottom, "codex", &manifests),
+            PromptEvidence::Unknown
+        );
+    }
+
+    #[test]
+    fn claude_theme_picker_is_unknown_without_a_live_composer() {
+        let manifests = Manifests::builtin();
+        let bottom = "Let's get started.\nChoose the text style that looks best with your terminal\n❯ 2. Dark mode";
+        let detection = classify(
+            Some("Claude Code"),
+            bottom,
+            false,
+            false,
+            "claude",
+            "claude",
+            &["/usr/local/bin/claude".to_string()],
+            &manifests,
+        );
+        assert!(prompt_requires_positive_evidence("claude"));
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Unknown);
+        assert_eq!(
+            prompt_evidence(Some("Claude Code"), bottom, "claude", &manifests),
             PromptEvidence::Unknown
         );
     }

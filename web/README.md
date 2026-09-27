@@ -79,9 +79,14 @@ LUVUS_WEB_MAX_DEVICES=3 \
 npm --prefix web run dev
 ```
 
-`LUVUS_WEB_PUBLIC_URL` currently accepts an origin only; path-prefixed proxy
+`LUVUS_WEB_PUBLIC_URL` accepts an HTTPS origin only; path-prefixed proxy
 mounts are rejected because the browser assets and WebSocket route live at the
 origin root.
+
+An authorized browser may update the pairing address for the current bridge
+lifetime in **Devices**. This only changes generated QR codes and pairing links;
+it does not expose the loopback listener or change allowed origins. Clear the
+field to return to the browser's current origin.
 
 `LUVUS_WEB_MAX_DEVICES` sets the initial limit and accepts 1 through 8. The
 Devices panel may change that limit for the current bridge lifetime, but cannot

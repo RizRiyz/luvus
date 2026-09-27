@@ -4,11 +4,11 @@
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use anyhow::{anyhow, Result};
-use ratatui::backend::Backend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::Cell;
 #[cfg(not(windows))]
 use ratatui::crossterm::event::read as read_event;
@@ -181,11 +181,19 @@ where
     crate::install_tui_panic_hook();
     let mut input = ClientInput::default();
     let mut selected = crate::session::display_name();
+    let allow_local_file_links = local && host_terminal_shares_local_filesystem();
     let result = (|| {
         let mut reader: Box<dyn ClientRead> = Box::new(reader);
         let mut writer: Box<dyn Write + Send> = Box::new(writer);
         loop {
-            let exit = run_inner(reader, writer, &mut terminal, &mut input, &selected)?;
+            let exit = run_inner(
+                reader,
+                writer,
+                &mut terminal,
+                &mut input,
+                &selected,
+                allow_local_file_links,
+            )?;
             input.route.replace(None);
             match exit {
                 ClientExit::SwitchSession(name) if local => {
@@ -257,6 +265,7 @@ fn run_inner<W>(
     terminal: &mut DefaultTerminal,
     input: &mut ClientInput,
     selected: &str,
+    allow_local_file_links: bool,
 ) -> Result<ClientExit>
 where
     W: Write + Send + 'static,
@@ -402,7 +411,19 @@ where
                     frame.cursor_visible,
                     true,
                     &mut last_cursor,
-                );
+                )
+                .and_then(|()| {
+                    paint_hyperlink_runs(
+                        terminal,
+                        &frame,
+                        frame.cursor,
+                        frame.cursor_visible,
+                        &mut last_cursor,
+                        truecolor,
+                        allow_local_file_links,
+                    )?;
+                    Ok(())
+                });
                 sync_end();
                 if r.is_err() {
                     crate::logging::event(
@@ -439,6 +460,19 @@ where
             Ok(ServerMessage::Sound(signal)) => crate::emit_sound(signal),
             Ok(ServerMessage::Clipboard(text)) => {
                 crate::emit_clipboard_to(&text, completion.clone());
+                if let Some(message) = completion.take() {
+                    crate::emit_notification(message);
+                }
+            }
+            Ok(ServerMessage::ClipboardTracked { text, receipt }) => {
+                let route = input.route.clone();
+                let generation = route.generation();
+                crate::emit_clipboard_tracked_to(&text, completion.clone(), move || {
+                    route.send_if_generation(
+                        generation,
+                        ClientMessage::ClipboardSucceeded { receipt },
+                    );
+                });
                 if let Some(message) = completion.take() {
                     crate::emit_notification(message);
                 }
@@ -489,6 +523,7 @@ where
 #[derive(Clone, Default)]
 struct InputRoute {
     writer: Arc<Mutex<RouteWriter>>,
+    writer_ready: Arc<Condvar>,
     closed: Arc<AtomicBool>,
 }
 
@@ -496,14 +531,89 @@ struct InputRoute {
 struct RouteWriter {
     generation: u64,
     active: Option<Box<dyn Write + Send>>,
+    /// An active writer was taken for I/O in this generation. `None` with
+    /// `writing == false` instead means an intentional handoff gap.
+    writing: bool,
+    pending_clipboard_ack: Option<ClientMessage>,
 }
 
 impl InputRoute {
+    fn generation(&self) -> u64 {
+        self.writer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+    }
+
+    fn send_if_generation(&self, expected: u64, message: ClientMessage) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let writer = {
+            let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            if route.generation != expected {
+                return;
+            }
+            if let Some(writer) = route.active.take() {
+                route.writing = true;
+                writer
+            } else {
+                // Input may temporarily own the writer. It flushes the latest
+                // receipt before returning the route to the shared slot.
+                route.pending_clipboard_ack = Some(message);
+                return;
+            }
+        };
+        let mut writer = writer;
+        if protocol::write_message(&mut writer, &message).is_ok() {
+            self.finish_write(expected, writer);
+        } else {
+            self.retire_failed_write(expected);
+        }
+    }
+
+    fn finish_write(&self, generation: u64, mut writer: Box<dyn Write + Send>) {
+        loop {
+            let pending = {
+                let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+                if route.generation != generation || self.closed.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Some(pending) = route.pending_clipboard_ack.take() {
+                    pending
+                } else {
+                    route.active = Some(writer);
+                    route.writing = false;
+                    self.writer_ready.notify_all();
+                    return;
+                }
+            };
+            if protocol::write_message(&mut writer, &pending).is_err() {
+                self.retire_failed_write(generation);
+                return;
+            }
+        }
+    }
+
+    fn retire_failed_write(&self, generation: u64) {
+        let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        if route.generation == generation {
+            route.generation = route.generation.wrapping_add(1);
+            route.writing = false;
+            route.pending_clipboard_ack = None;
+            self.writer_ready.notify_all();
+        }
+    }
+
     fn replace(&self, writer: Option<Box<dyn Write + Send>>) {
         let retired = {
             let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
             route.generation = route.generation.wrapping_add(1);
-            std::mem::replace(&mut route.active, writer)
+            route.writing = false;
+            route.pending_clipboard_ack = None;
+            let retired = std::mem::replace(&mut route.active, writer);
+            self.writer_ready.notify_all();
+            retired
         };
         drop(retired);
     }
@@ -524,13 +634,32 @@ impl InputRoute {
         // shutdown must remain possible even if the peer stops reading.
         let (generation, writer) = {
             let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-            (route.generation, route.active.take())
+            let generation = route.generation;
+            loop {
+                if self.closed.load(Ordering::Acquire) {
+                    return false;
+                }
+                if route.generation != generation {
+                    return true;
+                }
+                if let Some(writer) = route.active.take() {
+                    route.writing = true;
+                    break (generation, Some(writer));
+                }
+                if !route.writing {
+                    break (generation, None);
+                }
+                route = self
+                    .writer_ready
+                    .wait(route)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
         };
         if let Some(mut writer) = writer {
-            let sent = protocol::write_message(&mut writer, &message).is_ok();
-            let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-            if sent && route.generation == generation && !self.closed.load(Ordering::Acquire) {
-                route.active = Some(writer);
+            if protocol::write_message(&mut writer, &message).is_ok() {
+                self.finish_write(generation, writer);
+            } else {
+                self.retire_failed_write(generation);
             }
         }
         true
@@ -799,10 +928,154 @@ pub(super) fn diff_cells(diff: &FrameDiff, truecolor: bool) -> Vec<(u16, u16, Ce
     cells
 }
 
+fn valid_host_hyperlink(uri: &str, allow_local_files: bool) -> bool {
+    uri.len() <= 4_096
+        && !uri.is_empty()
+        && !uri.chars().any(char::is_control)
+        && ((allow_local_files && crate::links::file_uri_path(uri).is_some())
+            || crate::platform::is_openable_url(uri))
+}
+
+/// Whether file URIs from a server on this machine also name files on the
+/// machine that owns the outer terminal. A local socket proves where the client
+/// process runs, not where its terminal emulator runs, so only direct terminal
+/// ownership evidence opts in. SSH and tmux remain unknown and fail closed.
+pub(super) fn host_terminal_shares_local_filesystem() -> bool {
+    host_terminal_shares_local_filesystem_with(|key| std::env::var_os(key))
+}
+
+fn host_terminal_shares_local_filesystem_with(
+    mut read_env: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> bool {
+    let has_value =
+        |value: Option<std::ffi::OsString>| value.is_some_and(|value| !value.is_empty());
+    if ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "TMUX"]
+        .into_iter()
+        .any(|key| has_value(read_env(key)))
+    {
+        return false;
+    }
+
+    // These variables are created by the terminal emulator for a direct local
+    // child. Generic TERM/COLORTERM values are deliberately insufficient: SSH
+    // transports them too, and their absence must remain unknown rather than
+    // silently opting into a host-handled file URI.
+    [
+        "TERM_PROGRAM",
+        "WT_SESSION",
+        "KITTY_WINDOW_ID",
+        "VTE_VERSION",
+        "KONSOLE_VERSION",
+    ]
+    .into_iter()
+    .any(|key| has_value(read_env(key)))
+}
+
+fn write_osc8<W: Write>(
+    writer: &mut W,
+    uri: Option<&str>,
+    allow_local_files: bool,
+) -> std::io::Result<()> {
+    writer.write_all(b"\x1b]8;;")?;
+    if let Some(uri) = uri.filter(|uri| valid_host_hyperlink(uri, allow_local_files)) {
+        writer.write_all(uri.as_bytes())?;
+    }
+    writer.write_all(b"\x1b\\")
+}
+
+/// Overlay sparse OSC 8 runs after the ordinary Ratatui blit. The server sends
+/// a full frame whenever this projection changes, so clearing that frame also
+/// clears links which disappeared without changing their visible label.
+pub(super) fn paint_hyperlink_runs<W>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
+    frame: &FrameData,
+    cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
+    last_cursor: &mut Option<(u16, u16)>,
+    truecolor: bool,
+    allow_local_file_links: bool,
+) -> std::io::Result<()>
+where
+    W: Write,
+{
+    if frame.width == 0 {
+        return Ok(());
+    }
+    let size = terminal.size()?;
+    let backend = terminal.backend_mut();
+    let mut wrote = false;
+    for run in &frame.hyperlinks {
+        write_osc8(backend, Some(&run.uri), allow_local_file_links)?;
+        let cells = (run.start..run.end)
+            .filter_map(|index| {
+                let cell = frame.cells.get(index as usize)?;
+                if cell.symbol.is_empty() {
+                    return None;
+                }
+                let x = (index % u32::from(frame.width)) as u16;
+                let y = (index / u32::from(frame.width)) as u16;
+                (x < size.width && y < size.height).then(|| {
+                    (
+                        x,
+                        y,
+                        make_cell(&cell.symbol, cell.fg, cell.bg, cell.mods, truecolor),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let draw_result = backend.draw(cells.iter().map(|(x, y, cell)| (*x, *y, cell)));
+        let close_result = write_osc8(backend, None, allow_local_file_links);
+        draw_result?;
+        close_result?;
+        wrote = true;
+    }
+    if !wrote {
+        return Ok(());
+    }
+    restore_host_cursor(
+        backend,
+        size.width,
+        size.height,
+        cursor,
+        cursor_visible,
+        last_cursor,
+    )?;
+    Backend::flush(backend)
+}
+
 /// Visible in-bounds pane cell. Does not remap a compact/mobile row-0/1 caret
 /// onto the status line, and does not invent a prompt row.
 fn ime_position(cursor: Option<(u16, u16)>, tw: u16, th: u16) -> Option<(u16, u16)> {
     cursor.filter(|(x, y)| *x < tw && *y < th)
+}
+
+fn restore_host_cursor<B: Backend>(
+    backend: &mut B,
+    width: u16,
+    height: u16,
+    cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
+    last_cursor: &mut Option<(u16, u16)>,
+) -> std::result::Result<(), B::Error> {
+    match ime_position(cursor, width, height) {
+        Some((x, y)) => {
+            *last_cursor = Some((x, y));
+            backend.set_cursor_position(Position::new(x, y))?;
+            if cursor_visible {
+                backend.show_cursor()
+            } else {
+                backend.hide_cursor()
+            }
+        }
+        None => {
+            if let Some((x, y)) = *last_cursor {
+                if x < width && y < height {
+                    backend.set_cursor_position(Position::new(x, y))?;
+                }
+            }
+            backend.hide_cursor()
+        }
+    }
 }
 
 /// Write `cells` straight to the terminal via the backend (no full re-blit / no
@@ -838,31 +1111,49 @@ where
             .filter(|(x, y, _)| *x < tw && *y < th)
             .map(|(x, y, c)| (*x, *y, c)),
     )?;
-    match ime_position(cursor, tw, th) {
-        Some((x, y)) => {
-            *last_cursor = Some((x, y));
-            backend.set_cursor_position(Position::new(x, y))?;
-            if cursor_visible {
-                backend.show_cursor()?;
-            } else {
-                backend.hide_cursor()?;
-            }
-        }
-        None => {
-            if let Some((x, y)) = *last_cursor {
-                if x < tw && y < th {
-                    backend.set_cursor_position(Position::new(x, y))?;
-                }
-            }
-            backend.hide_cursor()?;
-        }
-    }
+    restore_host_cursor(backend, tw, th, cursor, cursor_visible, last_cursor)?;
     backend.flush()?;
     Ok(())
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn clipboard_receipt_waits_for_busy_input_writer() {
+        use super::{ClientMessage, InputRoute};
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let route = InputRoute::default();
+        let capture = Capture::default();
+        route.replace(Some(Box::new(capture.clone())));
+        let generation = route.generation();
+        let writer = route.writer.lock().unwrap().active.take().unwrap();
+        route.send_if_generation(
+            generation,
+            ClientMessage::ClipboardSucceeded { receipt: 42 },
+        );
+        assert!(capture.0.lock().unwrap().is_empty());
+        route.finish_write(generation, writer);
+        let bytes = capture.0.lock().unwrap().clone();
+        assert!(matches!(
+            crate::ipc::protocol::read_message(&mut std::io::Cursor::new(bytes)).unwrap(),
+            ClientMessage::ClipboardSucceeded { receipt: 42 }
+        ));
+    }
+
     #[test]
     fn clipboard_completion_wakes_idle_and_partial_frame_reads() {
         use std::io::{Read, Write};
@@ -1027,6 +1318,7 @@ mod tests {
             width: 4,
             height: 1,
             cells: vec![c("\u{1F534}"), c(""), c("A"), c("B")],
+            hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
         };
@@ -1315,6 +1607,89 @@ mod render_tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn input_waits_for_busy_receipt_writer_and_wakes_on_route_change() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct HeldWriter {
+            bytes: Arc<Mutex<Vec<u8>>>,
+            entered: Option<mpsc::Sender<()>>,
+            release: mpsc::Receiver<()>,
+        }
+        impl Write for HeldWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        for change in ["finish", "replace", "close"] {
+            let route = InputRoute::default();
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            route.replace(Some(Box::new(HeldWriter {
+                bytes: bytes.clone(),
+                entered: Some(entered_tx),
+                release: release_rx,
+            })));
+            let generation = route.generation();
+            let receipt_route = route.clone();
+            let receipt = thread::spawn(move || {
+                receipt_route.send_if_generation(
+                    generation,
+                    ClientMessage::ClipboardSucceeded { receipt: 7 },
+                )
+            });
+            entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let input_route = route.clone();
+            let (done_tx, done_rx) = mpsc::channel();
+            let input = thread::spawn(move || {
+                done_tx
+                    .send(input_route.send(Event::Paste("typed".into())))
+                    .unwrap()
+            });
+            let returned_early = done_rx.recv_timeout(Duration::from_millis(30)).ok();
+            if change == "replace" {
+                route.replace(None);
+            }
+            if change == "close" {
+                route.close();
+            }
+            release_tx.send(()).unwrap();
+            receipt.join().unwrap();
+            input.join().unwrap();
+            assert!(
+                returned_early.is_none(),
+                "input returned while the writer was held: {change}"
+            );
+            assert_eq!(
+                done_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                change != "close"
+            );
+            let captured = bytes.lock().unwrap().clone();
+            let mut cursor = std::io::Cursor::new(captured);
+            assert!(matches!(
+                protocol::read_message(&mut cursor).unwrap(),
+                ClientMessage::ClipboardSucceeded { receipt: 7 }
+            ));
+            if change == "finish" {
+                assert!(
+                    matches!(protocol::read_message(&mut cursor).unwrap(), ClientMessage::Paste(text) if text == "typed")
+                );
+            }
+            assert_eq!(cursor.position(), cursor.get_ref().len() as u64);
+        }
+    }
+
+    #[test]
     fn blocked_input_write_does_not_block_switch_or_close_or_restore_retired_writer() {
         use std::sync::mpsc;
         use std::time::Duration;
@@ -1529,6 +1904,7 @@ mod render_tests {
             width: 3,
             height: 1,
             cells: vec![cell("a"), cell("b"), cell("c")],
+            hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
         };
@@ -1536,6 +1912,7 @@ mod render_tests {
             width: 3,
             height: 1,
             cells: vec![cell("a"), cell("X"), cell("c")],
+            hyperlinks: Vec::new(),
             cursor: Some((1, 0)),
             cursor_visible: true,
         };
@@ -1578,7 +1955,7 @@ mod render_tests {
 
 #[cfg(test)]
 mod paint_tests {
-    use super::paint;
+    use super::{host_terminal_shares_local_filesystem_with, paint, write_osc8};
     use crate::ipc::protocol::{self, FrameData, FrameDiff};
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
@@ -1594,6 +1971,66 @@ mod paint_tests {
     }
 
     #[test]
+    fn osc8_writer_preserves_valid_mjs_file_targets_and_closes_invalid_ones() {
+        let mut output = Vec::new();
+        write_osc8(
+            &mut output,
+            Some("file:///repo/server/scripts/reconcile.mjs"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            output,
+            b"\x1b]8;;file:///repo/server/scripts/reconcile.mjs\x1b\\"
+        );
+
+        output.clear();
+        write_osc8(&mut output, Some("command://run\x07bad"), true).unwrap();
+        assert_eq!(output, b"\x1b]8;;\x1b\\");
+    }
+
+    #[test]
+    fn remote_host_suppresses_server_file_targets_but_keeps_web_links() {
+        let mut output = Vec::new();
+        write_osc8(
+            &mut output,
+            Some("file:///repo/server/scripts/reconcile.mjs"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(output, b"\x1b]8;;\x1b\\");
+
+        output.clear();
+        write_osc8(&mut output, Some("https://luvus.dev/docs"), false).unwrap();
+        assert_eq!(output, b"\x1b]8;;https://luvus.dev/docs\x1b\\");
+    }
+
+    #[test]
+    fn file_link_locality_requires_direct_terminal_evidence() {
+        assert!(
+            !host_terminal_shares_local_filesystem_with(|_| None),
+            "missing evidence must fail closed"
+        );
+        assert!(host_terminal_shares_local_filesystem_with(|key| {
+            (key == "TERM_PROGRAM").then(|| std::ffi::OsString::from("ghostty"))
+        }));
+        assert!(!host_terminal_shares_local_filesystem_with(|key| {
+            match key {
+                "TERM_PROGRAM" => Some(std::ffi::OsString::from("ghostty")),
+                "SSH_TTY" => Some(std::ffi::OsString::from("/dev/pts/4")),
+                _ => None,
+            }
+        }));
+        assert!(!host_terminal_shares_local_filesystem_with(|key| {
+            match key {
+                "TERM_PROGRAM" => Some(std::ffi::OsString::from("ghostty")),
+                "TMUX" => Some(std::ffi::OsString::from("/private/tmux/default,1,0")),
+                _ => None,
+            }
+        }));
+    }
+
+    #[test]
     fn pty_visible_cursor_is_restored_after_spinner_like_diff() {
         let mut term = Terminal::new(TestBackend::new(8, 8)).unwrap();
         let mut cells = vec![cell(" "); 64];
@@ -1601,6 +2038,7 @@ mod paint_tests {
             width: 8,
             height: 8,
             cells: cells.clone(),
+            hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
         };
@@ -1626,6 +2064,7 @@ mod paint_tests {
             width: 8,
             height: 8,
             cells,
+            hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
         };
@@ -1661,6 +2100,7 @@ mod paint_tests {
             width: 8,
             height: 8,
             cells: cells.clone(),
+            hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
         };
@@ -1685,6 +2125,7 @@ mod paint_tests {
             width: 8,
             height: 8,
             cells,
+            hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: false,
         };
@@ -1721,6 +2162,7 @@ mod paint_tests {
             width: 8,
             height: 8,
             cells,
+            hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
         };
@@ -1752,6 +2194,7 @@ mod paint_tests {
             width: 8,
             height: 8,
             cells,
+            hyperlinks: Vec::new(),
             cursor: Some((3, 5)),
             cursor_visible: false,
         };

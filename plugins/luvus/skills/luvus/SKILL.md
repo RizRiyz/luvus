@@ -289,13 +289,12 @@ Without `--wait`, the immediate `submitted:true`, `evidence:"queued"` response i
 unchanged and omits `observed_state`. Submission still means queue admission;
 state transitions do not confirm consumption of the prompt text. Do not resend
 automatically after a timeout or lost response because queued input may execute.
-For `agent.send` and `agent.prompt`, detected blocked prompt evidence—including
-in non-Codex panes—returns `agent_not_ready` and queues no input. Startup,
-sign-in, selection, and approval screens are examples, not an exhaustive list.
-A server-launched or restored Codex pane with an `agent_session` also returns
-`agent_not_ready` when prompt evidence is Unknown, unless live Codex composer
-geometry reports Ready. Existing Codex panes without that requirement retain the
-permissive Unknown-evidence fallback. Read the visible screen before deciding
+For `agent.send` and `agent.prompt`, detected blocked prompt evidence returns
+`agent_not_ready` and queues no input. Claude and Codex also require positive
+evidence of their live input composers. Use `--strict` (UHP `strict:true`) to
+require positive composer evidence for any agent; agents without a detector
+then return `agent_not_ready`. Without strict mode, other agents retain their
+legacy Unknown-evidence fallback. Read the visible screen before deciding
 whether an explicit `agent keys` action is authorized.
 
 When waiting was requested, keep it bounded and read a bounded result:
@@ -305,9 +304,10 @@ luvus agent send reviewer "Review the diff" --wait --timeout 300
 luvus agent read reviewer --lines 120
 ```
 
-Treat `idle`, `done`, `working`, and `blocked` as ready once the requested agent
-identity is recognized. `unknown` is not proof of completion, but it does not
-undo a matching identity. When `agent start` returns `ready: true`, accept its
+For `agent start` identity, treat `idle`, `done`, `working`, and `blocked` as
+recognized states; they do not by themselves prove prompt readiness. `unknown`
+is not proof of completion, but it does not undo a matching identity. When
+`agent start` returns `ready: true`, accept its
 name, pane, and kind without another status lookup. Use `wait agent-status` for
 a requested lifecycle transition after work is sent, not for startup identity.
 Repeat `--status` or pass a comma-separated set when any of several terminal

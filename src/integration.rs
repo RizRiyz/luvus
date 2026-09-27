@@ -40,12 +40,16 @@ try:
     d=json.load(sys.stdin); print(d.get("hook_event_name") or d.get("event") or "")
 except Exception: print("")' 2>/dev/null)"
 case "$evt" in
-  Notification|Stop|SubagentStop)
+  Notification|Stop|SubagentStop|UserPromptSubmit)
     msg="$(printf '%s' "$input" | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin); print((d.get("message") or "")[:200])
 except Exception: print("")' 2>/dev/null)"
-    "$luvus_bin" pane report-event --agent {agent} --kind "$evt" --message "$msg" >/dev/null 2>&1
+    notification_type="$(printf '%s' "$input" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print(d.get("notification_type") or "")
+except Exception: print("")' 2>/dev/null)"
+    "$luvus_bin" pane report-event --agent {agent} --kind "$evt" --message "$msg" --notification-type "$notification_type" >/dev/null 2>&1
     ;;
   *)
     sid="$(printf '%s' "$input" | python3 -c 'import sys,json
@@ -469,6 +473,17 @@ mod tests {
         // Only one luvus entry despite installing twice.
         let count = groups.iter().filter(|g| group_mentions_luvus(g)).count();
         assert_eq!(count, 1);
+        for event in ["Notification", "Stop", "UserPromptSubmit"] {
+            let groups = settings["hooks"][event].as_array().unwrap();
+            assert_eq!(
+                groups
+                    .iter()
+                    .filter(|group| group_mentions_luvus(group))
+                    .count(),
+                1,
+                "one Luvus {event} hook remains after an idempotent reinstall"
+            );
+        }
         assert!(is_installed("claude"));
 
         let mut incomplete = settings;
@@ -1236,7 +1251,7 @@ console.log(JSON.stringify(calls));
         .unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let run = |devin_host: bool| -> String {
+        let run = |devin_host: bool, payload: &[u8]| -> String {
             let _ = fs::remove_file(&log);
             let mut cmd = Command::new("bash");
             cmd.arg(&script)
@@ -1251,22 +1266,26 @@ console.log(JSON.stringify(calls));
                 cmd.env("DEVIN_PROJECT_DIR", "/work/project");
             }
             let mut child = cmd.spawn().unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(br#"{"hook_event_name":"SessionStart","session_id":"abc-123"}"#)
-                .unwrap();
+            child.stdin.take().unwrap().write_all(payload).unwrap();
             assert!(child.wait().unwrap().success());
             fs::read_to_string(&log).unwrap_or_default()
         };
 
+        let session_start = br#"{"hook_event_name":"SessionStart","session_id":"abc-123"}"#;
         assert_eq!(
-            run(false).trim(),
+            run(false, session_start).trim(),
             "pane report --agent claude --session abc-123",
             "a Claude payload is reported as claude"
         );
-        assert_eq!(run(true), "", "a Devin host is never reported");
+        assert_eq!(
+            run(true, session_start),
+            "",
+            "a Devin host is never reported"
+        );
+        assert_eq!(
+            run(false, br#"{"hook_event_name":"Notification","notification_type":"idle_prompt","message":"Waiting for input"}"#).trim(),
+            "pane report-event --agent claude --kind Notification --message Waiting for input --notification-type idle_prompt",
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 }

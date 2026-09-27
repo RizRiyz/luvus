@@ -104,9 +104,9 @@ panes / agents:
   agent fork <target> [--name <alias>] [--no-focus]
                              fork a supported agent's session into a sibling pane
   agent name <name>          alias the current agent, same as pane name (--clear to drop)
-  agent prompt <target> <text> [--wait] [--until STATE] [--timeout <s>]
+  agent prompt <target> <text> [--strict] [--wait] [--until STATE] [--timeout <s>]
                              atomically prompt and optionally wait (send is an alias)
-  agent send <target> <text> [--wait] [--until STATE] [--timeout <s>]
+  agent send <target> <text> [--strict] [--wait] [--until STATE] [--timeout <s>]
                              compatibility alias for agent prompt
   agent keys <target> <key>...   send control keys (enter, esc, ctrl+c, up, …)
   agent read <target> [--lines N] [--source visible|recent]   print an agent's output
@@ -366,5 +366,8 @@ state transitions do not confirm consumption of the prompt text. Do not resend
 automatically after a timeout or lost response because queued input may execute.
 When the current screen is a detected startup, sign-in, selection, or approval
 surface, prompt submission returns `agent_not_ready` without queuing text or
-Enter. Inspect it with `agent read`; use `agent keys` only for an intentional
-interaction.
+Enter. Claude and Codex also reject unrecognised screens until their live input
+composers are detected. `--strict` requires positive composer evidence for any
+agent; agents without a detector return `agent_not_ready`. Without it, other
+agents keep the existing fallback. Inspect the screen with `agent read`; use
+`agent keys` only for an intentional interaction.

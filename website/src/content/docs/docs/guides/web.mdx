@@ -60,6 +60,9 @@ running session moves the bridge to it without detaching its other clients. In
 control mode, selecting a known stopped session may start it. A read-only bridge
 can switch only to an already-running session.
 
+Agent cards show the agent and workspace above the live agent session title.
+When the agent has not supplied a title, the card shows **Untitled session**.
+
 One bridge has one selected upstream session, so a session switch moves every
 browser device paired with that bridge. TUI and CLI clients keep their own
 attachments.
@@ -99,10 +102,10 @@ luvus web --control \
   --max-devices 3
 ```
 
-`--public-url` changes generated pairing links. `--origin` permits that exact
-browser origin during the WebSocket upgrade. Both values must be complete
-HTTP(S) origins without paths. Repeat `--origin` when more than one exact origin
-is required:
+`--public-url` changes generated pairing links and must be a complete HTTPS
+origin without a path. `--origin` permits that exact browser origin during the
+WebSocket upgrade and accepts a complete HTTP(S) origin without a path. Repeat
+`--origin` when more than one exact origin is required:
 
 ```sh
 luvus web --control \
@@ -110,6 +113,17 @@ luvus web --control \
   --origin https://luvus.example.test \
   --origin https://luvus-backup.example.test
 ```
+
+You can also add or update the pairing address while the bridge is running.
+From an authorized browser, open **Devices**, enter the tunnel's origin under
+**Pairing address**, and choose **Save address**. New QR codes and links use the
+updated address immediately, including an unspent link already shown in the
+panel. Clear the field to use the address of the current browser again.
+
+The device setting lasts for the current bridge process. Use `--public-url` to
+set its initial value after a restart. Changing the pairing address does not
+create a tunnel, change the loopback listener, or add an allowed origin; configure
+those separately when your provider does not preserve a matching Origin and Host.
 
 The transport provider owns public reachability and TLS. Luvus remains
 loopback-bound and owns pairing, browser tickets, origin checks, and scoped

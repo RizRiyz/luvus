@@ -201,6 +201,8 @@ pub fn valid_id(id: &str) -> bool {
 pub enum DispatchEvidence {
     NotStarted,
     Rejected,
+    /// The PTY started, but the create was discarded before committing a pane.
+    Started,
 }
 
 impl DispatchEvidence {
@@ -208,6 +210,7 @@ impl DispatchEvidence {
         match self {
             Self::NotStarted => "not_started",
             Self::Rejected => "rejected",
+            Self::Started => "started",
         }
     }
 }

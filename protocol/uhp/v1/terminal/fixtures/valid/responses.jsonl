@@ -4,6 +4,7 @@
 {"id":"proc-1","result":{"type":"terminal_backend_processes","server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","root_process":{"pid":1234,"start_marker":"linux:100"},"scan":"observed","executables":["zsh","codex"],"arguments_exposed":false}}
 {"id":"type-1","result":{"type":"terminal_backend_action","state":"succeeded","dispatch":"queued"}}
 {"id":"bad-1","error":{"code":"stale_terminal","message":"terminal identity no longer exists","dispatch":"rejected"}}
+{"id":"started-1","error":{"code":"create_failed","message":"worktree deletion is still pending","dispatch":"started"}}
 {"id":"snap-1","result":{"type":"terminal_backend_snapshot","server_generation":"11111111111111111111111111111111","event_sequence":12,"terminals":[],"truncated":false}}
 {"id":"wait-1","result":{"type":"terminal_backend_change","content_revision":5}}
 {"id":"wait-output-1","result":{"type":"terminal_backend_output","content_revision":5}}

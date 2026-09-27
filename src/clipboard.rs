@@ -71,7 +71,7 @@ impl Completion {
     }
 }
 
-fn local_completion() -> Arc<Completion> {
+pub(crate) fn local_completion() -> Arc<Completion> {
     static LOCAL: OnceLock<Arc<Completion>> = OnceLock::new();
     LOCAL.get_or_init(Completion::local).clone()
 }
@@ -91,6 +91,7 @@ mod native {
     struct Request {
         text: String,
         completion: Arc<super::Completion>,
+        on_success: Option<Box<dyn FnOnce() + Send>>,
     }
     type Pending = Arc<(Mutex<Option<Request>>, Condvar)>;
 
@@ -109,7 +110,11 @@ mod native {
 
     /// One lazy worker, one pending selection. Rapid copies replace pending work
     /// instead of spawning a thread/process for every mouse gesture.
-    pub(super) fn copy(text: &str, completion: Arc<super::Completion>) {
+    pub(super) fn copy(
+        text: &str,
+        completion: Arc<super::Completion>,
+        on_success: Option<Box<dyn FnOnce() + Send>>,
+    ) {
         static WORKER: Mutex<Option<Pending>> = Mutex::new(None);
         let worker = worker(&WORKER, || {
             let pending: Pending = Arc::new((Mutex::new(None), Condvar::new()));
@@ -125,14 +130,7 @@ mod native {
                         }
                         slot.take().expect("pending copy")
                     };
-                    let helpers = tools();
-                    if !helpers.is_empty()
-                        && copy_with_tools(&request.text, &helpers, Duration::from_secs(2)).is_err()
-                    {
-                        // Do not log clipboard contents or helper stderr (either
-                        // can contain private data). OSC 52 was already requested.
-                        request.completion.failure();
-                    }
+                    complete_request(request, &tools(), Duration::from_secs(2));
                 })
                 .map(|_| pending)
         });
@@ -140,10 +138,30 @@ mod native {
             *queue.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Request {
                 text: text.to_owned(),
                 completion,
+                on_success,
             });
             queue.1.notify_one();
         } else {
             completion.failure();
+        }
+    }
+
+    fn complete_request(request: Request, helpers: &[(&str, &[&str])], timeout: Duration) {
+        if helpers.is_empty() {
+            // OSC 52 has no acceptance signal; never claim it succeeded.
+            return;
+        }
+        match copy_with_tools(&request.text, helpers, timeout) {
+            Ok(()) => {
+                if let Some(on_success) = request.on_success {
+                    on_success();
+                }
+            }
+            Err(_) => {
+                // Do not log clipboard contents or helper stderr. OSC 52 was
+                // already requested as a fallback.
+                request.completion.failure();
+            }
         }
     }
 
@@ -248,6 +266,32 @@ mod native {
 
     #[cfg(test)]
     mod tests {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[test]
+        fn clipboard_confirmation_requires_native_success() {
+            for (helpers, expected) in [
+                (vec![("/bin/sh", &["-c", "cat >/dev/null"] as &[&str])], 1),
+                (vec![("/bin/sh", &["-c", "exit 1"] as &[&str])], 0),
+                (vec![], 0),
+            ] {
+                let confirmed = Arc::new(AtomicUsize::new(0));
+                let counter = confirmed.clone();
+                complete_request(
+                    Request {
+                        text: "test".into(),
+                        completion: super::super::Completion::local(),
+                        on_success: Some(Box::new(move || {
+                            counter.fetch_add(1, Ordering::Relaxed);
+                        })),
+                    },
+                    &helpers,
+                    Duration::from_secs(1),
+                );
+                assert_eq!(confirmed.load(Ordering::Relaxed), expected);
+            }
+        }
+
         #[test]
         fn clipboard_worker_retries_failed_start_and_reuses_success() {
             let slot = Mutex::new(None);
@@ -284,7 +328,11 @@ mod native {
             assert_eq!(result.stdout, text.as_bytes());
             // Also exercise the production worker and latest-pending policy.
             for n in 0..20 {
-                copy(&format!("selection {n}"), super::super::local_completion());
+                copy(
+                    &format!("selection {n}"),
+                    super::super::local_completion(),
+                    None,
+                );
             }
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
@@ -382,9 +430,24 @@ pub(crate) fn copy_native(text: &str) {
 
 pub(crate) fn copy_native_to(text: &str, completion: Arc<Completion>) {
     #[cfg(unix)]
-    native::copy(text, completion);
+    native::copy(text, completion, None);
     #[cfg(not(unix))]
     if crate::system_clipboard_copy(text).is_err() {
+        completion.failure();
+    }
+}
+
+pub(crate) fn copy_native_with_confirmation(
+    text: &str,
+    completion: Arc<Completion>,
+    on_success: impl FnOnce() + Send + 'static,
+) {
+    #[cfg(unix)]
+    native::copy(text, completion, Some(Box::new(on_success)));
+    #[cfg(not(unix))]
+    if crate::system_clipboard_copy(text).is_ok() {
+        on_success();
+    } else {
         completion.failure();
     }
 }

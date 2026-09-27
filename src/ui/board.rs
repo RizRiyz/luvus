@@ -1776,11 +1776,14 @@ pub(super) fn draw_form(
     f.render_widget(
         Paragraph::new(Span::styled(
             format!(
-                " {}",
+                " {}{}",
                 match form.kind {
                     crate::app::OrchFormKind::Task => cat.board_new_task,
                     crate::app::OrchFormKind::Automation => cat.board_new_automation,
-                }
+                },
+                form.commander_target_label
+                    .as_ref()
+                    .map_or(String::new(), |label| format!(" · {label}"))
             ),
             Style::new().fg(t.text).bold(),
         )),

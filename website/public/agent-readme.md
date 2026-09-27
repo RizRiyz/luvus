@@ -300,13 +300,13 @@ remains the stored home root while `terminal_cwd` follows the focused pane. Use
 `agent prompt` submits one complete prompt and can wait semantically. Prefer it
 to separate text and Enter operations. A timeout does not prove that an agent
 failed or stopped. Inspect it before deciding what to do next.
-For `agent.send` and `agent.prompt`, detected blocked prompt evidence—including
-in non-Codex panes—rejects submission with `agent_not_ready` before either text
-or Enter is queued. Startup, sign-in, selection, and approval screens are
-examples, not an exhaustive list. A server-launched or restored Codex pane with
-an `agent_session` also returns `agent_not_ready` when prompt evidence is
-Unknown, unless live Codex composer geometry reports Ready. Existing Codex panes
-without that requirement retain the permissive Unknown-evidence fallback.
+For `agent.send` and `agent.prompt`, detected blocked prompt evidence rejects
+submission with `agent_not_ready` before either text or Enter is queued.
+Claude and Codex also require positive evidence of their live input composers;
+an unrecognised startup or selection screen is not prompt-ready even when its
+agent identity is known. `--strict` (UHP `strict:true`) requires positive
+composer evidence for any agent; agents without a detector reject the prompt.
+Without strict mode, other agents retain the legacy Unknown-evidence fallback.
 
 `agent keys` refuses plain shells, validates every named key before sending any
 bytes, and queues a valid list as one ordered action. A closed target returns a

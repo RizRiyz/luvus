@@ -5,6 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::search::local::{
+    first_at_or_after, LiteralMatcher, LocalSearch, RowMatch, LOCAL_MATCH_CAP,
+};
+
 /// Files larger than this are not read into memory — a viewer is not an excuse
 /// to allocate hundreds of MB on a whim.
 pub const SIZE_CAP: u64 = 5 * 1024 * 1024;
@@ -29,17 +33,7 @@ pub enum FileLoad {
 }
 
 /// A live in-file search over the loaded text.
-#[derive(Clone, Debug, Default)]
-pub struct Search {
-    /// The query being typed / active (lowercased match is case-insensitive).
-    pub query: String,
-    /// True while the user is still typing the query (before Enter).
-    pub editing: bool,
-    /// `(line, start_col)` of every match, in document order.
-    pub matches: Vec<(usize, usize)>,
-    /// Index into `matches` of the current hit.
-    pub current: usize,
-}
+pub type Search = LocalSearch<RowMatch>;
 
 /// One open file: what it is, and where the viewport sits.
 pub struct FileView {
@@ -108,10 +102,11 @@ impl FileView {
         let max = self.line_count().saturating_sub(1);
         self.scroll = self.scroll.min(max);
         self.hscroll = 0;
-        if let Some(s) = self.search.take() {
-            if !s.query.is_empty() {
-                self.run_search(&s.query);
-            }
+        let committed_query = self.search.as_ref().and_then(|search| {
+            (!search.editing && !search.query.is_empty()).then(|| search.query.clone())
+        });
+        if let Some(query) = committed_query {
+            self.run_search(&query);
         }
     }
 
@@ -186,23 +181,20 @@ impl FileView {
 
     /// Begin typing a query.
     pub fn search_begin(&mut self) {
-        self.search = Some(Search {
-            editing: true,
-            ..Default::default()
-        });
+        self.search = Some(Search::editing());
     }
 
     /// A char typed into the active query.
     pub fn search_push(&mut self, c: char) {
-        if let Some(s) = self.search.as_mut().filter(|s| s.editing) {
-            s.query.push(c);
+        if let Some(search) = self.search.as_mut() {
+            search.push(c);
         }
     }
 
     /// Backspace in the active query.
     pub fn search_backspace(&mut self) {
-        if let Some(s) = self.search.as_mut().filter(|s| s.editing) {
-            s.query.pop();
+        if let Some(search) = self.search.as_mut() {
+            search.backspace();
         }
     }
 
@@ -216,6 +208,9 @@ impl FileView {
             self.search = None;
             return;
         }
+        if let Some(search) = self.search.as_mut() {
+            search.commit();
+        }
         self.run_search(&query);
     }
 
@@ -224,62 +219,82 @@ impl FileView {
         self.search = None;
     }
 
+    pub fn search_clear(&mut self) {
+        if let Some(search) = self.search.as_mut() {
+            search.clear();
+        }
+    }
+
+    pub fn search_toggle_case(&mut self) {
+        let rebuild = self
+            .search
+            .as_mut()
+            .is_some_and(|search| search.toggle_case());
+        if rebuild {
+            let query = self.search.as_ref().map(|search| search.query.clone());
+            if let Some(query) = query {
+                self.run_search(&query);
+            }
+        }
+    }
+
     /// Step to the next (`forward`) / previous match, wrapping, and scroll it
     /// into view.
     pub fn search_step(&mut self, forward: bool, viewport: usize) {
-        let (len, next) = match self.search.as_ref() {
-            Some(s) if !s.matches.is_empty() => {
-                let n = s.matches.len();
-                let cur = s.current;
-                (
-                    n,
-                    if forward {
-                        (cur + 1) % n
-                    } else {
-                        (cur + n - 1) % n
-                    },
-                )
-            }
-            _ => return,
-        };
-        if let Some(s) = self.search.as_mut() {
-            s.current = next;
+        if self
+            .search
+            .as_mut()
+            .is_some_and(|search| search.step(forward))
+        {
+            self.reveal_current_match(viewport);
         }
-        let _ = len;
-        self.reveal_current_match(viewport);
     }
 
     fn run_search(&mut self, query: &str) {
-        let needle = query.to_lowercase();
+        let case_sensitive = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.case_sensitive);
         let mut matches = Vec::new();
-        if let FileLoad::Text(lines) = &self.load {
-            for (li, line) in lines.iter().enumerate() {
-                let hay = line.to_lowercase();
-                let mut from = 0;
-                while let Some(rel) = hay[from..].find(&needle) {
-                    let col = from + rel;
-                    matches.push((li, col));
-                    from = col + needle.len().max(1);
+        let mut truncated = false;
+        if let (FileLoad::Text(lines), Some(matcher)) =
+            (&self.load, LiteralMatcher::new(query, case_sensitive))
+        {
+            for (row, line) in lines.iter().enumerate() {
+                let remaining = LOCAL_MATCH_CAP.saturating_sub(matches.len());
+                if remaining == 0 {
+                    truncated = matcher.has_match(line);
+                    if truncated {
+                        break;
+                    }
+                    continue;
+                }
+                let (line_matches, line_truncated) = matcher.spans(line, remaining);
+                matches.extend(
+                    line_matches
+                        .into_iter()
+                        .map(|search_match| RowMatch::at(row, search_match)),
+                );
+                if line_truncated {
+                    truncated = true;
+                    break;
                 }
             }
         }
-        // Jump to the first match at/after the current viewport top.
-        let current = matches
-            .iter()
-            .position(|(l, _)| *l >= self.scroll)
-            .unwrap_or(0);
-        self.search = Some(Search {
-            query: query.to_string(),
-            editing: false,
-            matches,
-            current,
+        let current = first_at_or_after(&matches, (self.scroll, 0), |search_match| {
+            (search_match.row, search_match.column)
         });
+        if let Some(search) = self.search.as_mut() {
+            search.query = query.to_string();
+            search.editing = false;
+            search.replace_matches(matches, current, truncated);
+        }
     }
 
-    fn reveal_current_match(&mut self, viewport: usize) {
+    pub(crate) fn reveal_current_match(&mut self, viewport: usize) {
         if let Some(s) = &self.search {
-            if let Some((line, _)) = s.matches.get(s.current).copied() {
-                // Center-ish: keep the match on screen.
+            if let Some(search_match) = s.matches.get(s.current) {
+                let line = search_match.row;
                 if line < self.scroll || line >= self.scroll + viewport.max(1) {
                     self.scroll = line.saturating_sub(viewport / 2);
                 }
@@ -304,44 +319,50 @@ pub fn gutter_width(line_count: usize) -> u16 {
 }
 
 /// Character ranges `(start, end)` of each visual segment when `line` is
-/// soft-wrapped to `width` columns. Breaks on the last space inside the window
-/// when there is one (word wrap), else hard-splits at the width. Always returns
-/// at least one range, so an empty line still occupies a row. Shared by the
-/// renderer and mouse-selection so a wrapped view maps screen rows to file
-/// columns identically in both.
+/// soft-wrapped to `width` terminal cells. Breaks on the last space inside the
+/// window when there is one (word wrap), else hard-splits at a grapheme boundary.
+/// An oversized grapheme occupies a row of its own, even when wider than the
+/// viewport. Always returns at least one range, so an empty line still occupies
+/// a row. Shared by the renderer and mouse-selection so a wrapped view maps
+/// screen rows to file columns identically in both.
 pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
-    let chars: Vec<char> = line.chars().collect();
-    let n = chars.len();
-    if width == 0 || n <= width {
-        return vec![(0, n)];
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    let mut char_end = 0;
+    let graphemes: Vec<_> = line
+        .graphemes(true)
+        .map(|grapheme| {
+            let start = char_end;
+            char_end += grapheme.chars().count();
+            (start, char_end, grapheme.width(), grapheme == " ")
+        })
+        .collect();
+    if width == 0 || graphemes.is_empty() {
+        return vec![(0, char_end)];
     }
     let mut out = Vec::new();
     let mut start = 0;
-    while start < n {
-        if n - start <= width {
-            out.push((start, n));
-            break;
+    while start < graphemes.len() {
+        let mut end = start;
+        let mut cells = 0usize;
+        while end < graphemes.len() {
+            let next = graphemes[end].2;
+            if end > start && cells.saturating_add(next) > width {
+                break;
+            }
+            cells = cells.saturating_add(next);
+            end += 1;
         }
-        let hard_end = start + width;
-        let mut brk = hard_end;
-        // Prefer a word boundary: the last space in the window, if it isn't the
-        // very first column (which would make an empty segment).
-        if let Some(pos) = chars[start..hard_end].iter().rposition(|&c| c == ' ') {
-            let abs = start + pos;
-            if abs > start {
-                brk = abs;
+        let mut break_at = end;
+        if end < graphemes.len() {
+            if let Some(space) = (start + 1..end).rev().find(|&index| graphemes[index].3) {
+                break_at = space;
+                end = space + 1;
             }
         }
-        out.push((start, brk));
-        // Swallow the space we broke on so it doesn't lead the next row.
-        start = if brk < n && chars[brk] == ' ' {
-            brk + 1
-        } else {
-            brk
-        };
-    }
-    if out.is_empty() {
-        out.push((0, n));
+        out.push((graphemes[start].0, graphemes[break_at - 1].1));
+        start = end;
     }
     out
 }
@@ -351,36 +372,9 @@ pub fn wrap_ranges(line: &str, width: usize) -> Vec<(usize, usize)> {
 /// Must agree exactly with `wrap_ranges(..).len()` — the renderer lays rows out
 /// with that, and the scroll clamp counts them with this, so a disagreement
 /// would let the view scroll past its own last row (or stop short of it). Pinned
-/// by `wrap_rows_matches_wrap_ranges`. Counts without allocating, because the
-/// clamp runs on every keypress and wheel tick.
+/// by `wrap_rows_matches_wrap_ranges`.
 pub fn wrap_rows(line: &str, width: usize) -> usize {
-    let n = line.chars().count();
-    if width == 0 || n <= width {
-        return 1;
-    }
-    let chars: Vec<char> = line.chars().collect();
-    let mut rows = 0usize;
-    let mut start = 0usize;
-    while start < n {
-        rows += 1;
-        if n - start <= width {
-            break;
-        }
-        let hard_end = start + width;
-        let mut brk = hard_end;
-        if let Some(pos) = chars[start..hard_end].iter().rposition(|&c| c == ' ') {
-            let abs = start + pos;
-            if abs > start {
-                brk = abs;
-            }
-        }
-        start = if brk < n && chars[brk] == ' ' {
-            brk + 1
-        } else {
-            brk
-        };
-    }
-    rows.max(1)
+    wrap_ranges(line, width).len()
 }
 
 /// Slice the `(start, end)` char range out of `line`.
@@ -413,7 +407,14 @@ pub fn token_rows(
     if v.wrap {
         'lines: for line in lines.iter().skip(v.scroll) {
             for range in wrap_ranges(line, text_width) {
-                rows.push(format!("{prefix}{}", seg_text(line, range)));
+                let segment = seg_text(line, range);
+                let visible =
+                    if unicode_width::UnicodeWidthStr::width(segment.as_str()) > text_width {
+                        "…".to_string()
+                    } else {
+                        segment
+                    };
+                rows.push(format!("{prefix}{visible}"));
                 if rows.len() >= body_rows {
                     break 'lines;
                 }
@@ -489,16 +490,33 @@ pub fn selection_text(
             .get(line)
             .map(|l| l.chars().collect())
             .unwrap_or_default();
-        // Screen column → char within this segment. No-wrap adds horizontal scroll.
-        let to_col = |screen_x: u16| {
-            (screen_x.saturating_sub(text_x)) as usize + if v.wrap { 0 } else { v.hscroll as usize }
-        };
-        let start = seg_s + if ty == sy { to_col(sx) } else { 0 };
-        let end = if ty == ey {
-            seg_s + to_col(ex) + 1
-        } else {
+        // Wrapped rows are measured in terminal cells; each selected cell maps
+        // back to the whole source grapheme, including an overflow marker.
+        let segment = v
+            .wrap
+            .then(|| chars[seg_s..seg_e].iter().collect::<String>());
+        let to_char = |screen_x: u16, end_boundary: bool| {
+            let cell = screen_x.saturating_sub(text_x) as usize;
+            let Some(segment) = &segment else {
+                return (seg_s + cell + v.hscroll as usize + usize::from(end_boundary)).min(seg_e);
+            };
+            use unicode_segmentation::UnicodeSegmentation;
+            use unicode_width::UnicodeWidthStr;
+            let mut column = 0;
+            let mut char_index = seg_s;
+            for grapheme in segment.graphemes(true) {
+                let next_char = char_index + grapheme.chars().count();
+                let visible_width = grapheme.width().min(text_w).max(1);
+                if cell < column + visible_width {
+                    return if end_boundary { next_char } else { char_index };
+                }
+                column += visible_width;
+                char_index = next_char;
+            }
             seg_e
         };
+        let start = if ty == sy { to_char(sx, false) } else { seg_s };
+        let end = if ty == ey { to_char(ex, true) } else { seg_e };
         let (start, end) = (
             start.min(seg_e).min(chars.len()),
             end.min(seg_e).min(chars.len()),
@@ -657,6 +675,23 @@ mod tests {
     }
 
     #[test]
+    fn mobile_token_rows_reserve_the_active_search_footer() {
+        let mut view = FileView::new(PathBuf::from("source.txt"));
+        view.apply(FileLoad::Text(vec![
+            "first".into(),
+            "second".into(),
+            "last-token".into(),
+        ]));
+        view.search = Some(crate::search::local::LocalSearch::editing());
+        let content = ratatui::layout::Rect::new(0, 0, 20, 3);
+
+        let rows = token_rows(&view, content, true).expect("text rows");
+
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].ends_with("second"));
+    }
+
+    #[test]
     fn wrapped_selection_joins_visual_rows_without_inventing_a_newline() {
         let mut view = FileView::new(PathBuf::from("article.txt"));
         view.apply(FileLoad::Text(vec!["the quick brown fox".into()]));
@@ -698,6 +733,67 @@ mod tests {
         assert_eq!(v.scroll, 6);
         v.scroll_by(-100, 4, 0);
         assert_eq!(v.scroll, 0);
+    }
+
+    #[test]
+    fn narrow_token_rows_project_the_visible_overflow_marker() {
+        let mut view = FileView::new(PathBuf::from("sample.txt"));
+        view.apply(FileLoad::Text(vec!["👩‍💻Z".into()]));
+        let content = ratatui::layout::Rect::new(0, 0, 6, 3);
+        assert_eq!(
+            token_rows(&view, content, false).unwrap(),
+            ["     …", "     Z"]
+        );
+    }
+
+    #[test]
+    fn narrow_wrapped_selection_copies_the_full_oversized_grapheme() {
+        let mut view = FileView::new(PathBuf::from("sample.txt"));
+        view.apply(FileLoad::Text(vec!["👩‍💻Z".into()]));
+        let content = ratatui::layout::Rect::new(0, 0, 6, 3);
+        let text_x = gutter_width(1) + 1;
+        assert_eq!(
+            selection_text(&view, content, ((text_x, 0), (text_x, 0))).as_deref(),
+            Some("👩‍💻")
+        );
+        assert_eq!(
+            selection_text(&view, content, ((text_x, 0), (text_x, 1))).as_deref(),
+            Some("👩‍💻Z")
+        );
+        let wide_content = ratatui::layout::Rect::new(0, 0, 7, 3);
+        assert_eq!(
+            selection_text(&view, wide_content, ((text_x + 1, 0), (text_x + 1, 0))).as_deref(),
+            Some("👩‍💻")
+        );
+    }
+
+    #[test]
+    fn wrapping_never_splits_combining_or_zwj_clusters() {
+        for line in ["a\u{301}bc", "a👩‍💻bc"] {
+            let segments: Vec<_> = wrap_ranges(line, 2)
+                .into_iter()
+                .map(|range| seg_text(line, range))
+                .collect();
+            assert_eq!(segments.concat(), line);
+            assert!(segments.iter().any(|part| part.contains("a")));
+            assert!(segments
+                .iter()
+                .all(|part| !part.starts_with('\u{301}') && !part.starts_with('\u{200d}')));
+        }
+        assert_eq!(
+            wrap_ranges("👩‍💻Z", 1)
+                .into_iter()
+                .map(|range| seg_text("👩‍💻Z", range))
+                .collect::<Vec<_>>(),
+            ["👩‍💻", "Z"]
+        );
+        assert_eq!(
+            wrap_ranges("a👩‍💻Z", 2)
+                .into_iter()
+                .map(|range| seg_text("a👩‍💻Z", range))
+                .collect::<Vec<_>>(),
+            ["a", "👩‍💻", "Z"]
+        );
     }
 
     /// `wrap_rows` is the scroll clamp's view of how tall a line is and
@@ -782,6 +878,19 @@ mod tests {
     }
 
     #[test]
+    fn file_search_caps_highly_repetitive_valid_input() {
+        let mut view = FileView::new(PathBuf::from("repetitive.txt"));
+        view.apply(FileLoad::Text(vec!["a".repeat(SIZE_CAP as usize)]));
+        view.search_begin();
+        view.search_push('a');
+        view.search_commit();
+
+        let search = view.search.as_ref().expect("search");
+        assert_eq!(search.matches.len(), crate::search::local::LOCAL_MATCH_CAP);
+        assert!(search.truncated);
+    }
+
+    #[test]
     fn search_finds_navigates_and_reveals() {
         let mut v = FileView::new(PathBuf::from("/x"));
         v.apply(FileLoad::Text(vec![
@@ -813,6 +922,15 @@ mod tests {
         // A refreshed read re-evaluates the query against new text.
         v.apply(FileLoad::Text(vec!["only foo".into()]));
         assert_eq!(v.search.as_ref().unwrap().matches.len(), 1);
+
+        // Refreshing while the query editor is open must not commit it.
+        v.search_begin();
+        for c in "draft".chars() {
+            v.search_push(c);
+        }
+        v.apply(FileLoad::Text(vec!["draft".into()]));
+        assert!(v.search.as_ref().unwrap().editing);
+        assert!(v.search.as_ref().unwrap().matches.is_empty());
 
         v.search_cancel();
         assert!(v.search.is_none());

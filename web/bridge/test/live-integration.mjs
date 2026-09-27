@@ -57,8 +57,14 @@ try {
   const deviceStatus = await request(socket, "device-status", "web.devices.status", {});
   assert.equal(deviceStatus.paired_devices, 1);
   assert.equal(deviceStatus.max_devices, 2);
+  assert.equal(deviceStatus.public_url, null);
+  const publicStatus = await request(socket, "public-url", "web.devices.set_public_url", {
+    url: "https://phone.example",
+  });
+  assert.equal(publicStatus.public_url, "https://phone.example");
   const phonePairing = await request(socket, "phone-pairing", "web.devices.create_pairing", {});
   assert.equal(phonePairing.type, "browser_device_pairing");
+  assert.equal(phonePairing.url, `https://phone.example/#pair=${encodeURIComponent(phonePairing.code)}`);
   const pairedDeviceEvent = waitFor(socket, (frame) => frame.type === "devices" && frame.devices?.paired_devices === 2);
   const phone = await connect(socketUrl, origin);
   const phoneReady = await exchange(phone, { type: "authenticate", code: phonePairing.code }, "ready");

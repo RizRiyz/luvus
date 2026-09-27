@@ -165,7 +165,17 @@ impl App {
                     "agent send text must not be empty".to_string(),
                 ));
             }
-            if !self.agent_prompt_is_ready(id) {
+            let strict = match p.get("strict") {
+                None | Some(Value::Bool(false)) => false,
+                Some(Value::Bool(true)) => true,
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "strict must be a boolean".to_string(),
+                    ));
+                }
+            };
+            if !self.agent_prompt_is_ready(id, strict) {
                 return Err(super::agent_workflow::agent_prompt_not_ready_error());
             }
             let pane = self.panes.get(&id).ok_or_else(|| {
@@ -471,6 +481,14 @@ impl App {
                 let changed = status.state != state || status.agent != agent;
                 status.agent = agent.to_string();
                 status.state = state;
+                // Reports can change admission without any new terminal bytes.
+                status.prompt_evidence = if state == State::Blocked {
+                    detect::PromptEvidence::Blocked
+                } else {
+                    detect::PromptEvidence::Unknown
+                };
+                status.force_detect = true;
+                status.last_detect_generation = None;
                 status.candidate = state;
                 status.candidate_since = now;
                 status.prev_working = state == State::Working;
@@ -750,10 +768,7 @@ impl App {
     /// agent **kind** (`claude`, `kimi`, …) when exactly one live agent is that
     /// kind. Two agents of the same kind are ambiguous, so the error names the
     /// candidates and asks for a pane id or a name.
-    pub(in crate::app::dispatch) fn resolve_agent_target(
-        &self,
-        p: &Value,
-    ) -> Result<PaneId, (String, String)> {
+    pub(crate) fn resolve_agent_target(&self, p: &Value) -> Result<PaneId, (String, String)> {
         let t = p.get("target").and_then(|v| v.as_str()).unwrap_or("");
         if t.is_empty() {
             return Err(agent_not_found());

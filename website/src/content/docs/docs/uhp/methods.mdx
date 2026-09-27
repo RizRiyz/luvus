@@ -467,6 +467,16 @@ reconcile later events without a snapshot race. Neither method reads terminal
 text or starts a process.
 
 Every snapshot terminal row includes `pane_id` and nullable `agent_name`.
+The boolean `is_agent` distinguishes detected or bound agents from plain shells,
+independently of whether the agent is working, idle, or waiting.
+It also includes nullable `agent_session_title`: the bounded, single-line title
+used by the AGENTS sidebar for a live agent pane (OSC title first, then a
+module-provided pane or session title). It is `null` when no title is available
+or the pane is not an agent. Native `kind:"view"` rows omit it.
+OSC and module title changes emit `agent.title_changed`. OSC events carry
+`pane` and nullable `title` so clients can update that row directly; module
+title events have no per-pane payload and require a snapshot refresh. Neither
+requires polling terminal output.
 `agent_name` is the operator alias set by `agent.name` or `pane.rename`; a terminal-backend title
 does not mask it. This differs from the presentation name in `agent.get` and
 `agent.list`, which prefer a backend title. Clearing an alias returns JSON
@@ -518,17 +528,23 @@ the pane, queues the launch as one submitted shell action, reserves the unique
 name, and waits for manifest-driven detection without composing separate UHP
 requests.
 
-`agent.prompt` takes `target`, `text`, optional `wait` (default `false`),
+`agent.prompt` takes `target`, `text`, optional `strict` (default `false`),
+optional `wait` (default `false`),
 optional `until`, and optional `timeout_s`. `until` and `timeout_s` require
 `wait:true`. Paste and Enter remain one PTY queue action. Without `wait`, the
 response remains immediate: `submitted:true`, `matched:false`, `evidence:"queued"`,
 with no `observed_state` field. Submission means queue admission, not confirmation
 that the agent consumed the prompt text.
 
-Before either prompt method queues input, Luvus rejects a currently detected
-startup, sign-in, selection, or approval screen with `agent_not_ready`. The
-rejection queues neither text nor Enter. Read the visible agent output and use
-`agent.keys` only when an explicit interaction is intended.
+Before either prompt method queues input, Luvus rejects detected startup,
+sign-in, selection, and approval screens with `agent_not_ready`. Claude and
+Codex also require positive evidence of their live input composers, so an
+unrecognised screen cannot receive a prompt. Pass `strict:true` to either
+`agent.prompt` or `agent.send` to require positive composer evidence for any
+agent; an agent without a detector returns `agent_not_ready`. The default for
+other agents remains permissive on Unknown evidence. Rejection queues neither
+text nor Enter. Read the visible agent output and use `agent.keys` only when an
+explicit interaction is intended.
 
 For explicit key interactions, `agent.read` adds `content_revision` (the pane's
 PTY output counter) and `terminal_id` (32 lowercase hexadecimal characters for

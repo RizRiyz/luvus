@@ -5,6 +5,19 @@ use super::*;
 use std::sync::Arc;
 
 impl App {
+    /// Retain cached processes for lifecycle recovery, but never let an
+    /// unavailable scan's stale snapshot veto current PTY screen evidence.
+    pub(crate) fn running_for_detection(&self, id: PaneId) -> &[String] {
+        if self.proc_scan_unavailable {
+            &[]
+        } else {
+            self.proc_commands
+                .get(&id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        }
+    }
+
     /// Recover a stale persisted selection before any periodic work indexes it.
     ///
     /// Workspace and tab mutations normally keep these indices valid. A restored
@@ -397,6 +410,7 @@ impl App {
     }
 
     pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
+        self.runtime_clients_attached = clients_attached;
         let repaired_location = self.repair_active_location();
         self.schedule_config_save(now);
         self.schedule_automation_save(now);
@@ -573,11 +587,7 @@ impl App {
                     }
                 })
                 .unwrap_or_default();
-            let running_for_detection = self
-                .proc_commands
-                .get(&id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let running_for_detection = self.running_for_detection(id);
             let detection_rows =
                 detect::screen_rows(&known_agent, running_for_detection, &self.manifests);
             let non_empty_rows = detect::screen_uses_non_empty_rows(
@@ -585,15 +595,33 @@ impl App {
                 running_for_detection,
                 &self.manifests,
             );
-            let inspect_codex_composer = known_agent.eq_ignore_ascii_case("codex")
-                || self
-                    .manifests
-                    .process_has_agent(running_for_detection, "codex");
-            let (last_generation, force_detect) = self
+            let probe_arc_studio = running_for_detection.is_empty();
+            let composer_agent = if detect::prompt_requires_positive_evidence(&known_agent) {
+                Some(known_agent.as_str())
+            } else if self
+                .manifests
+                .process_has_agent(running_for_detection, "codex")
+            {
+                Some("codex")
+            } else if self
+                .manifests
+                .process_has_agent(running_for_detection, "claude")
+            {
+                Some("claude")
+            } else {
+                None
+            };
+            let (last_generation, force_detect, claude_semantic_ready) = self
                 .status
                 .get(&id)
-                .map(|s| (s.last_detect_generation, s.force_detect))
-                .unwrap_or((None, true));
+                .map(|s| {
+                    (
+                        s.last_detect_generation,
+                        s.force_detect,
+                        s.claude_prompt_semantic_ready,
+                    )
+                })
+                .unwrap_or((None, true, false));
             let inspected = if report.is_some() {
                 // An explicit lease is the state authority. Keep the cached
                 // screen untouched and avoid a needless VT lock/extraction.
@@ -603,18 +631,20 @@ impl App {
                     Ok(engine) => {
                         let generation = engine.output_generation();
                         if force_detect || last_generation != Some(generation) {
-                            let text = if non_empty_rows {
-                                engine.detection_text_non_empty(detection_rows)
-                            } else {
-                                engine.detection_text(detection_rows)
-                            };
-                            let codex_composer_ready = inspect_codex_composer
-                                .then(|| engine.codex_composer_region().is_some());
+                            let text = detect::screen_text_for_detection(
+                                &*engine,
+                                detection_rows,
+                                non_empty_rows,
+                                probe_arc_studio,
+                            );
+                            let composer_ready = composer_agent.and_then(|agent| {
+                                detect::live_composer_ready(agent, &*engine, claude_semantic_ready)
+                            });
                             Some((
                                 generation,
                                 engine.title().map(Arc::<str>::from),
                                 Arc::<str>::from(text),
-                                codex_composer_ready,
+                                composer_ready,
                             ))
                         } else {
                             None
@@ -663,23 +693,17 @@ impl App {
             // What this pane is already known to be: the last resolved agent, or
             // the one a hook/disk-discovery bound to it. Keeps identity stable
             // across frames where the agent's UI doesn't show its own name.
-            let known = known_agent;
+            let known = known_agent.as_str();
             // Ground truth for identity, when the last scan could see this pane.
-            let running = self
-                .proc_commands
-                .get(&id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+            let running = self.running_for_detection(id);
             let det = match report.as_ref() {
                 Some(report) => detect::Detection {
                     state: report.state,
                     agent: report.agent.clone(),
                     prompt_evidence: if report.state == State::Blocked {
                         detect::PromptEvidence::Blocked
-                    } else if report.agent.eq_ignore_ascii_case("codex") {
-                        detect::PromptEvidence::Unknown
                     } else {
-                        detect::PromptEvidence::Ready
+                        detect::PromptEvidence::Unknown
                     },
                     identity_source: "integration_report",
                     state_source: "integration_report",
@@ -692,7 +716,7 @@ impl App {
                     recent,
                     recent_input,
                     base,
-                    &known,
+                    known,
                     running,
                     &self.manifests,
                 ),
@@ -703,17 +727,6 @@ impl App {
                 s.state_source = det.state_source;
                 s.rule_priority = det.rule_priority;
                 s.rule_region = det.rule_region;
-                s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
-                    detect::PromptEvidence::Blocked
-                } else if det.agent.eq_ignore_ascii_case("codex") {
-                    match inspected_composer_ready {
-                        Some(true) => detect::PromptEvidence::Ready,
-                        Some(false) => detect::PromptEvidence::Unknown,
-                        None => s.prompt_evidence,
-                    }
-                } else {
-                    det.prompt_evidence
-                };
                 let focused = id == focus;
                 if focused {
                     s.seen = true;
@@ -731,6 +744,11 @@ impl App {
                 if s.last_resize
                     .is_some_and(|t| now.duration_since(t) < RESIZE_GRACE)
                 {
+                    s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
+                        detect::PromptEvidence::Blocked
+                    } else {
+                        detect::PromptEvidence::Unknown
+                    };
                     continue;
                 }
                 s.last_resize = None;
@@ -761,6 +779,27 @@ impl App {
                     || s.agent_session.is_some()
                     || s.agent_report.is_some();
                 s.agent = detected;
+                if agent_changed && !s.agent.eq_ignore_ascii_case("claude") {
+                    s.claude_prompt_semantic_ready = false;
+                }
+                let composer_ready = composer_agent
+                    .filter(|agent| agent.eq_ignore_ascii_case(&s.agent))
+                    .and(inspected_composer_ready);
+                s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
+                    detect::PromptEvidence::Blocked
+                } else if detect::prompt_requires_positive_evidence(&s.agent) {
+                    match composer_ready {
+                        Some(true) => detect::PromptEvidence::Ready,
+                        Some(false) => detect::PromptEvidence::Unknown,
+                        None if agent_changed => {
+                            s.force_detect = true;
+                            detect::PromptEvidence::Unknown
+                        }
+                        None => s.prompt_evidence,
+                    }
+                } else {
+                    det.prompt_evidence
+                };
                 if agent_changed {
                     log_agent_identity(id, &s.agent, s.identity_source);
                     visible_identity_changed |= was_visible_agent || is_visible_agent;

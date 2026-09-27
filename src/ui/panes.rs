@@ -3,8 +3,35 @@
 
 use super::*;
 
-/// Draw the dot + path (+ ✕ for the focused pane) as a title ON each pane's top
-/// border row, after the borders are drawn, so it lands on the tab bar edge.
+/// Resolve one terminal pane title for both the lone-pane header and split-pane
+/// border renderers. The pane's explicit name wins; otherwise its stable
+/// lifetime ID remains visible and addressable. Path visibility is a separate
+/// presentation choice shared by both renderers.
+fn terminal_pane_title(app: &App, id: PaneId, cwd: &Path, max_width: u16) -> String {
+    let identity = app
+        .agent_name_for(id)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("p{}", id.0));
+    let max_width = max_width as usize;
+    if !app.config.layout.pane_title_path {
+        return truncate(&identity, max_width);
+    }
+
+    const SEPARATOR: &str = " · ";
+    let identity_width = display_width(&identity);
+    let separator_width = display_width(SEPARATOR);
+    if identity_width.saturating_add(separator_width) >= max_width {
+        return truncate(&identity, max_width);
+    }
+
+    let path_width = max_width - identity_width - separator_width;
+    let path = short_path(cwd, path_width.min(u16::MAX as usize) as u16);
+    truncate(&format!("{identity}{SEPARATOR}{path}"), max_width)
+}
+
+/// Draw the dot + pane identity (+ ✕ for the focused pane) as a title ON each
+/// pane's top border row, after the borders are drawn, so it lands on the tab
+/// bar edge.
 pub(super) fn draw_pane_titles(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
@@ -82,24 +109,8 @@ pub(super) fn draw_pane_titles(
         let inner_w = rect.width - 2; // inside the two corner cells
         let btn_w = title_buttons_w(focused, rect.width);
         let title_w = inner_w.saturating_sub(btn_w);
-        // A named pane (via `pane name` / `agent name`) shows its name here; an
-        // unnamed pane shows its cwd path. So naming a pane visibly renames it.
-        // With `pane_title_path` on, a named pane shows `name  path` (both).
-        let label = match app.agent_name_for(*id) {
-            Some(name) if app.config.layout.pane_title_path => {
-                let path = short_path(&pane.cwd, title_w.saturating_sub(4 + name.len() as u16 + 2));
-                format!("{name}  {path}")
-                    .chars()
-                    .take(title_w.saturating_sub(4) as usize)
-                    .collect::<String>()
-            }
-            Some(name) => name
-                .chars()
-                .take(title_w.saturating_sub(4) as usize)
-                .collect::<String>(),
-            None => short_path(&pane.cwd, title_w.saturating_sub(4)),
-        };
-        let text_w = (3 + label.chars().count() as u16).min(title_w);
+        let label = terminal_pane_title(app, *id, &pane.cwd, title_w.saturating_sub(4));
+        let text_w = (3 + display_width(&label) as u16).min(title_w);
         let title = Line::from(vec![
             Span::styled(
                 format!(" {} ", st.dot()),
@@ -170,15 +181,148 @@ fn draw_title_buttons(
 
 struct PaneRenderContext<'a> {
     app: &'a App,
+    lone_header: bool,
     diff_source_rects: &'a mut Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
     diff_note_rects: &'a mut Vec<(PaneId, String, Rect)>,
     preview_link_rects: &'a mut Vec<(PaneId, String, Rect)>,
+    rendered_hyperlinks: &'a mut Vec<crate::app::RenderedHyperlink>,
+}
+
+const MAX_RENDERED_HYPERLINKS: usize = 256;
+
+fn push_rendered_hyperlink(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    x: u16,
+    y: u16,
+    width: u16,
+    uri: &str,
+) {
+    if width == 0
+        || uri.len() > crate::terminal::vt::MAX_TERMINAL_HYPERLINK_URI_BYTES
+        || (crate::links::file_uri_path(uri).is_none() && !crate::platform::is_openable_url(uri))
+    {
+        return;
+    }
+    let end = x.saturating_add(width);
+    if let Some(previous) = links.last_mut().filter(|previous| {
+        previous.pane == pane && previous.y == y && previous.end == x && previous.uri == uri
+    }) {
+        previous.end = end;
+        return;
+    }
+    if links.len() < MAX_RENDERED_HYPERLINKS {
+        links.push(crate::app::RenderedHyperlink {
+            pane,
+            y,
+            start: x,
+            end,
+            uri: uri.to_string(),
+        });
+    }
+}
+
+fn clip_rendered_hyperlinks(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    cover: Rect,
+) {
+    if cover.is_empty() {
+        return;
+    }
+    let mut right_halves = Vec::new();
+    links.retain_mut(|link| {
+        if link.pane != pane
+            || link.y < cover.y
+            || link.y >= cover.bottom()
+            || link.end <= cover.x
+            || link.start >= cover.right()
+        {
+            return true;
+        }
+        if cover.x <= link.start && cover.right() >= link.end {
+            return false;
+        }
+        if cover.x <= link.start {
+            link.start = cover.right().min(link.end);
+            return link.start < link.end;
+        }
+        if cover.right() >= link.end {
+            link.end = cover.x.max(link.start);
+            return link.start < link.end;
+        }
+
+        let mut right = link.clone();
+        right.start = cover.right();
+        link.end = cover.x;
+        right_halves.push(right);
+        true
+    });
+    let remaining = MAX_RENDERED_HYPERLINKS.saturating_sub(links.len());
+    links.extend(right_halves.into_iter().take(remaining));
+}
+
+/// Give the outer terminal an authoritative target for a plain path that Luvus
+/// has already resolved during the deliberate Ctrl/Super hover scan. Without
+/// this projection, terminals such as iTerm2 can reinterpret a label beginning
+/// with `server/` as an HTTP address before Luvus receives the click.
+///
+/// This performs no IO and no grid scan on the render path. It reuses the
+/// bounded spans and validated absolute path already stored in `HoverLink`.
+fn project_hover_file_hyperlink(
+    links: &mut Vec<crate::app::RenderedHyperlink>,
+    pane: PaneId,
+    content: Rect,
+    hover: Option<&crate::app::HoverLink>,
+) {
+    let Some(hover) = hover.filter(|hover| hover.pane == pane) else {
+        return;
+    };
+    let crate::app::LinkTarget::File { path, .. } = &hover.target else {
+        return;
+    };
+    let Some(uri) = crate::links::file_path_uri(path) else {
+        return;
+    };
+
+    for &(row, start, end) in &hover.link.spans {
+        if row >= content.height {
+            continue;
+        }
+        let start = start.min(content.width);
+        let end = end.min(content.width);
+        if start >= end {
+            continue;
+        }
+        let cover = Rect::new(content.x + start, content.y + row, end - start, 1);
+        // The resolved file is authoritative for these cells. Replace any stale
+        // child projection rather than leaving overlapping OSC 8 targets whose
+        // winner would depend on terminal implementation details.
+        clip_rendered_hyperlinks(links, pane, cover);
+        if links.len() >= MAX_RENDERED_HYPERLINKS
+            && !links.last().is_some_and(|previous| {
+                previous.pane == pane
+                    && previous.y == cover.y
+                    && previous.end == cover.x
+                    && previous.uri == uri
+            })
+        {
+            // The deliberate hover is the one link the user is actively asking
+            // the host terminal to follow. Prefer it over the oldest passive
+            // child link when a link-dense frame reaches the sparse projection
+            // cap. Hover spans are appended, so removing from the front keeps
+            // any earlier wrapped span of this same target intact.
+            links.remove(0);
+        }
+        push_rendered_hyperlink(links, pane, cover.x, cover.y, cover.width, &uri);
+    }
 }
 
 pub(super) fn draw_panes(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
     bordered: bool,
+    lone_header: bool,
     app: &mut App,
     t: &Theme,
 ) -> Option<(u16, u16, bool)> {
@@ -187,12 +331,15 @@ pub(super) fn draw_panes(
     let mut diff_source_rects = Vec::new();
     let mut diff_note_rects = Vec::new();
     let mut preview_link_rects = Vec::new();
+    let mut rendered_hyperlinks = Vec::new();
     {
         let mut context = PaneRenderContext {
             app,
+            lone_header,
             diff_source_rects: &mut diff_source_rects,
             diff_note_rects: &mut diff_note_rects,
             preview_link_rects: &mut preview_link_rects,
+            rendered_hyperlinks: &mut rendered_hyperlinks,
         };
         for (id, rect) in rects {
             if let Some(c) = draw_one_pane(f, *rect, *id, *id == focus, bordered, &mut context, t) {
@@ -203,6 +350,8 @@ pub(super) fn draw_panes(
     app.diff_source_rects = diff_source_rects;
     app.diff_note_rects = diff_note_rects;
     app.preview_link_rects = preview_link_rects;
+    rendered_hyperlinks.sort_by_key(|link| (link.y, link.start, link.pane.0));
+    app.rendered_hyperlinks = rendered_hyperlinks;
     cursor
 }
 
@@ -215,6 +364,7 @@ pub(super) fn patch_terminal_damage(
     app: &App,
     content_rects: &[(PaneId, Rect)],
     snapshots: &std::collections::HashMap<PaneId, crate::terminal::vt::DamageSnapshot>,
+    hyperlinks: &mut Vec<crate::app::RenderedHyperlink>,
 ) -> Result<(), ()> {
     let leaves = app.layout().leaves();
     if leaves.len() != content_rects.len()
@@ -255,6 +405,7 @@ pub(super) fn patch_terminal_damage(
                 continue;
             }
             let y = content.y + row.row;
+            hyperlinks.retain(|link| !(link.pane == id && link.y == y));
             for x in content.x..content.x.saturating_add(content.width) {
                 let cell = &mut buffer[(x, y)];
                 cell.reset();
@@ -273,8 +424,21 @@ pub(super) fn patch_terminal_damage(
                 };
                 paint_terminal_cell(buffer, content, row.row, cell.column, symbol, style);
             }
+            for hyperlink in &row.hyperlinks {
+                let start = hyperlink.start.min(content.width);
+                let end = hyperlink.end.min(content.width);
+                if start < end {
+                    push_rendered_hyperlink(
+                        hyperlinks,
+                        id,
+                        content.x + start,
+                        y,
+                        end - start,
+                        &hyperlink.uri,
+                    );
+                }
+            }
         }
-
         if id == focus {
             cursor = pane_ime_cursor(content, snapshot.cursor);
         }
@@ -283,6 +447,7 @@ pub(super) fn patch_terminal_damage(
     if let Some((x, y, visible)) = cursor {
         f.set_cursor_anchor(x, y, visible);
     }
+    hyperlinks.sort_by_key(|link| (link.y, link.start, link.pane.0));
     Ok(())
 }
 
@@ -295,10 +460,11 @@ fn draw_one_pane(
     context: &mut PaneRenderContext<'_>,
     t: &Theme,
 ) -> Option<(u16, u16, bool)> {
+    let lone_header = context.lone_header;
     let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
     if let Some(view) = app.views.get(&id) {
-        let content = pane_content(area, bordered, app.compact)?;
+        let content = pane_content(area, bordered, app.compact, lone_header)?;
         match view {
             crate::app::ViewKind::File(v) => {
                 let sel = app.selection.filter(|s| s.pane == id);
@@ -333,37 +499,37 @@ fn draw_one_pane(
     }
     let pane = app.panes.get(&id)?;
     let st = pane_state(app, id);
-    let content = pane_content(area, bordered, app.compact)?;
+    let content = pane_content(area, bordered, app.compact, lone_header)?;
 
     // A lone pane has no border, so it shows a header bar on its top row.
     // Bordered panes instead get their dot+path+close as a title ON the top
     // border row (see `draw_pane_titles`), so it touches the tab bar.
-    if !bordered && !app.compact {
+    if lone_header {
         // Match the content's horizontal pad so the header bar aligns with the
         // tab bar and the terminal text below it.
         let pad = lone_pad(area.width);
         let header = Rect::new(area.x + pad, area.y, area.width.saturating_sub(2 * pad), 1);
         let hbg = if focused { t.surface1 } else { t.surface0 };
-        let path_fg = if focused { t.accent } else { t.overlay1 };
+        let title_fg = if focused { t.accent } else { t.overlay1 };
         f.render_widget(Block::new().style(Style::new().bg(hbg)), header);
         // When this lone pane is a *zoomed* split (not just the only pane), show a
         // ⤡ restore button so a phone can un-zoom without a keyboard (docs/18).
         let show_restore = app.zoomed && header.width >= 8;
-        let path_budget = header
+        let title_budget = header
             .width
             .saturating_sub(if show_restore { 8 } else { 5 });
-        let title = Line::from(vec![
-            Span::styled("▎", Style::new().fg(t.accent).bg(hbg)),
-            Span::styled(
-                format!(" {} ", st.dot()),
-                Style::new().fg(st.color(t)).bg(hbg),
-            ),
-            Span::styled(
-                short_path(&pane.cwd, path_budget),
-                Style::new().fg(path_fg).bg(hbg),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(title), header);
+        if app.config.layout.show_titles {
+            let label = terminal_pane_title(app, id, &pane.cwd, title_budget);
+            let title = Line::from(vec![
+                Span::styled("▎", Style::new().fg(t.accent).bg(hbg)),
+                Span::styled(
+                    format!(" {} ", st.dot()),
+                    Style::new().fg(st.color(t)).bg(hbg),
+                ),
+                Span::styled(label, Style::new().fg(title_fg).bg(hbg)),
+            ]);
+            f.render_widget(Paragraph::new(title), header);
+        }
         if show_restore {
             let r = super::lone_zoom_rect(area);
             f.render_widget(
@@ -388,11 +554,7 @@ fn draw_one_pane(
     // The link under a `Ctrl`-held cursor (docs/58). Borrowed, not cloned: this
     // is the render path, and the spans are recomputed only when the hovered
     // cell changes anyway.
-    let hover_link = app
-        .hover_link
-        .as_ref()
-        .filter(|h| h.pane == id)
-        .map(|h| &h.link);
+    let hover_link = app.hover_link.as_ref().filter(|h| h.pane == id);
     // The line a search jump landed on (docs/63): (content row, scroll offset it
     // was jumped to). Banded only while the view is unchanged, so any scroll or
     // new output hides it.
@@ -401,6 +563,11 @@ fn draw_one_pane(
         .as_ref()
         .filter(|fl| fl.pane == id)
         .map(|fl| (fl.row, fl.scroll));
+    let pane_search = app
+        .pane_search
+        .as_ref()
+        .filter(|search| search.pane == id && !search.editing && !search.query.is_empty());
+    let mut retained_top = 0usize;
     let mut scrolled = 0usize;
     let agent = app.status.get(&id).map(|s| s.agent.as_str()).unwrap_or("");
     let is_codex = agent == "codex";
@@ -417,7 +584,7 @@ fn draw_one_pane(
             let mut pi_caret: Option<(u16, u16)> = None;
             {
                 let buf = f.buffer_mut();
-                engine.for_each_cell(&mut |row, col, sym, cell| {
+                engine.for_each_linked_cell(&mut |row, col, sym, cell, hyperlink| {
                     if row >= content.height || col >= content.width {
                         return;
                     }
@@ -463,14 +630,25 @@ fn draw_one_pane(
                     // Underline the `Ctrl`-hovered link, so it reads as clickable
                     // before you commit to the click. Applied after the selection
                     // so a link inside selected text keeps both.
-                    if hover_link.is_some_and(|l| l.covers(col, row)) {
+                    if hover_link.is_some_and(|hover| hover.link.covers(col, row)) {
                         style = style
                             .fg(t.accent)
                             .add_modifier(ratatui::style::Modifier::UNDERLINED);
                     }
                     paint_terminal_cell(buf, content, row, col, sym, style);
+                    if let Some(uri) = hyperlink {
+                        push_rendered_hyperlink(
+                            context.rendered_hyperlinks,
+                            id,
+                            content.x + col,
+                            content.y + row,
+                            crate::ui::display_width(sym).max(1) as u16,
+                            uri,
+                        );
+                    }
                 });
             }
+            retained_top = engine.history_len().saturating_sub(engine.scroll_offset());
             scrolled = engine.scroll_offset();
             if is_codex {
                 composer_region = engine.codex_composer_region();
@@ -487,6 +665,7 @@ fn draw_one_pane(
         }
         Err(_) => None,
     };
+    project_hover_file_hyperlink(context.rendered_hyperlinks, id, content, hover_link);
 
     if let Some(region) = composer_region {
         draw_codex_composer(
@@ -498,11 +677,12 @@ fn draw_one_pane(
         );
     }
 
-    // The search-jump flash band (docs/63): recolor the landed row's background
-    // full width, keeping the text, so it reads as a highlighted line. Only while
-    // the pane is still at the offset we jumped to, so a scroll or new output
-    // (which changes `scrolled`) hides it instead of banding the wrong line.
-    if let Some((fr, fscroll)) = flash {
+    // Pane-local search uses retained-row and display-cell coordinates captured
+    // by the committed scan. The current hit uses accent; other visible hits use
+    // amber. Global finder jumps keep their existing transient row band.
+    if let Some(search) = pane_search {
+        draw_pane_search_matches(f.buffer_mut(), content, retained_top, search, t);
+    } else if let Some((fr, fscroll)) = flash {
         if fr < content.height && scrolled == fscroll {
             let y = content.y + fr;
             let buf = f.buffer_mut();
@@ -529,6 +709,9 @@ fn draw_one_pane(
                 ))),
                 badge,
             );
+            // The badge replaces terminal cells, so those cells must not keep
+            // the hidden OSC 8 target emitted by the PTY underneath it.
+            clip_rendered_hyperlinks(context.rendered_hyperlinks, id, badge);
         }
     }
     cursor_pos
@@ -544,6 +727,49 @@ fn pane_ime_cursor(content: Rect, cur: crate::terminal::vt::Cursor) -> Option<(u
         return None;
     }
     Some((content.x + cur.x, content.y + cur.y, cur.visible))
+}
+
+fn draw_pane_search_matches(
+    buf: &mut ratatui::buffer::Buffer,
+    content: Rect,
+    retained_top: usize,
+    search: &crate::app::PaneSearch,
+    t: &Theme,
+) {
+    let visible = visible_pane_search_range(&search.matches, retained_top, content.height);
+    for (relative, search_match) in search.matches[visible.clone()].iter().enumerate() {
+        let index = visible.start + relative;
+        let screen_row = search_match.row - retained_top;
+        let start = content
+            .x
+            .saturating_add(search_match.col.min(u16::MAX as usize) as u16);
+        let end = start
+            .saturating_add(search_match.width.min(u16::MAX as usize) as u16)
+            .min(content.right());
+        let background = if index == search.current {
+            t.accent
+        } else {
+            t.amber
+        };
+        let y = content.y + screen_row as u16;
+        for x in start..end {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_bg(background);
+                cell.set_fg(t.base);
+            }
+        }
+    }
+}
+
+fn visible_pane_search_range(
+    matches: &[crate::app::PaneSearchMatch],
+    retained_top: usize,
+    height: u16,
+) -> std::ops::Range<usize> {
+    let start = matches.partition_point(|search_match| search_match.row < retained_top);
+    let bottom = retained_top.saturating_add(usize::from(height));
+    let end = start + matches[start..].partition_point(|search_match| search_match.row < bottom);
+    start..end
 }
 
 fn terminal_cell_style(
@@ -662,6 +888,35 @@ mod tests {
     use crate::terminal::vt::CodexComposerRegion;
 
     #[test]
+    fn pane_search_rendering_limits_iteration_to_visible_matches() {
+        let matches = vec![
+            crate::app::PaneSearchMatch {
+                row: 1,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 5,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 6,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 8,
+                col: 0,
+                width: 1,
+            },
+        ];
+
+        assert_eq!(visible_pane_search_range(&matches, 5, 2), 1..3);
+        assert_eq!(visible_pane_search_range(&matches, 9, 3), 4..4);
+    }
+
+    #[test]
     fn composer_uses_only_a_subtle_theme_fill_and_preserves_geometry() {
         let t = Theme::quattro_rally();
         let area = Rect::new(0, 0, 20, 5);
@@ -731,5 +986,125 @@ mod tests {
         assert_eq!(pick_bottom_left_caret(Some((3, 2)), (5, 18)), (5, 18));
         assert_eq!(pick_bottom_left_caret(Some((5, 18)), (5, 4)), (5, 4));
         assert_eq!(pick_bottom_left_caret(Some((5, 4)), (4, 0)), (5, 4));
+    }
+
+    #[test]
+    fn rendered_hyperlinks_reject_oversized_uris_before_frame_projection() {
+        let mut links = Vec::new();
+        let uri = format!(
+            "https://example.com/{}",
+            "a".repeat(crate::terminal::vt::MAX_TERMINAL_HYPERLINK_URI_BYTES)
+        );
+        push_rendered_hyperlink(&mut links, PaneId(1), 0, 0, 4, &uri);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn hovered_file_displaces_a_passive_link_at_capacity() {
+        let passive_uri = "https://example.com".to_string();
+        let mut links = (0..MAX_RENDERED_HYPERLINKS)
+            .map(|index| crate::app::RenderedHyperlink {
+                pane: PaneId(2),
+                y: (index % 40) as u16,
+                start: 0,
+                end: 1,
+                uri: passive_uri.clone(),
+            })
+            .collect::<Vec<_>>();
+        let path = std::env::current_dir().unwrap().join("Cargo.toml");
+        let expected = crate::links::file_path_uri(&path).unwrap();
+        let hover = crate::app::HoverLink {
+            pane: PaneId(1),
+            link: crate::links::Link {
+                hit: crate::links::Hit::Path {
+                    raw: "Cargo.toml".into(),
+                    text: "Cargo.toml".into(),
+                    line: None,
+                },
+                spans: vec![(0, 3, 13)],
+            },
+            target: crate::app::LinkTarget::File { path, line: None },
+        };
+
+        project_hover_file_hyperlink(&mut links, PaneId(1), Rect::new(4, 5, 80, 20), Some(&hover));
+
+        assert_eq!(links.len(), MAX_RENDERED_HYPERLINKS);
+        assert!(links.iter().any(|link| {
+            link.pane == PaneId(1)
+                && link.y == 5
+                && link.start == 7
+                && link.end == 17
+                && link.uri == expected
+        }));
+    }
+
+    #[test]
+    fn pane_chrome_clips_covered_hyperlink_cells() {
+        let pane = PaneId(1);
+        let other = PaneId(2);
+        let uri = "file:///repo/server/task.mjs".to_string();
+        let mut links = vec![
+            crate::app::RenderedHyperlink {
+                pane,
+                y: 3,
+                start: 4,
+                end: 18,
+                uri: uri.clone(),
+            },
+            crate::app::RenderedHyperlink {
+                pane: other,
+                y: 3,
+                start: 4,
+                end: 18,
+                uri,
+            },
+        ];
+        clip_rendered_hyperlinks(&mut links, pane, Rect::new(12, 3, 6, 1));
+        assert_eq!(links.len(), 2);
+        let clipped = links.iter().find(|link| link.pane == pane).unwrap();
+        assert_eq!((clipped.start, clipped.end), (4, 12));
+        assert_eq!(
+            links.iter().find(|link| link.pane == other).unwrap().end,
+            18
+        );
+    }
+
+    #[test]
+    fn pane_search_highlights_words_by_retained_row() {
+        let t = Theme::noir();
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let search = crate::app::PaneSearch {
+            pane: PaneId(1),
+            owner: crate::app::PaneSearchOwner::Scroll,
+            local: crate::search::local::LocalSearch {
+                query: "needle".into(),
+                editing: false,
+                case_sensitive: false,
+                matches: vec![
+                    crate::app::PaneSearchMatch {
+                        row: 10,
+                        col: 1,
+                        width: 3,
+                    },
+                    crate::app::PaneSearchMatch {
+                        row: 11,
+                        col: 6,
+                        width: 6,
+                    },
+                ],
+                current: 1,
+                truncated: false,
+            },
+            saved_scroll: 0,
+        };
+        draw_pane_search_matches(&mut buf, area, 10, &search, &t);
+        assert_eq!(buf[(0, 0)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(1, 0)].bg, t.amber);
+        assert_eq!(buf[(3, 0)].bg, t.amber);
+        assert_eq!(buf[(6, 1)].bg, t.accent);
+        assert_eq!(buf[(11, 1)].bg, t.accent);
+        assert_eq!(buf[(12, 1)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(6, 1)].fg, t.base);
     }
 }

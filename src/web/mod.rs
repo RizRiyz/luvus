@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 
 use auth::BrowserAuthority;
-use server::{normalize_origin, BridgeState};
+use server::{normalize_origin, normalize_public_origin, BridgeState};
 use uhp::UhpAccess;
 
 const USAGE: &str = "\
@@ -25,7 +25,7 @@ Options:
   --read-only           explicitly select the default read-only authority
   --port <port>         loopback port (default: 4174; 0 selects a free port)
   --max-devices <1-8>   authorized browser devices (default: 2)
-  --public-url <origin> public HTTP(S) origin used in pairing links
+  --public-url <origin> public HTTPS origin used in pairing links
   --origin <origin>     allow a public HTTP(S) WebSocket origin (repeatable)
   --no-open             print the pairing URL without opening a browser
   --help, -h            show this help
@@ -143,8 +143,8 @@ impl Options {
                 "--public-url" => {
                     let raw = args.get(index + 1).ok_or("--public-url requires a value")?;
                     public_url = Some(
-                        normalize_origin(raw)
-                            .ok_or("--public-url must be an HTTP(S) origin without a path")?,
+                        normalize_public_origin(raw)
+                            .ok_or("--public-url must be an HTTPS origin without a path")?,
                     );
                     index += 1;
                 }
@@ -234,6 +234,7 @@ mod tests {
         assert!(options.no_open);
         assert!(Options::parse(&strings(&["--control", "--read-only"])).is_err());
         assert!(Options::parse(&strings(&["--max-devices", "9"])).is_err());
+        assert!(Options::parse(&strings(&["--public-url", "http://phone.example"])).is_err());
         assert!(Options::parse(&strings(&["--origin", "https://phone.example/path"])).is_err());
     }
 }

@@ -23,6 +23,15 @@ impl App {
         let _ = (method, p);
         {
             let query = p.get("query").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if query.len() > crate::search::local::LOCAL_QUERY_BYTES {
+                return Err((
+                    "invalid_request".to_string(),
+                    format!(
+                        "query must be at most {} bytes",
+                        crate::search::local::LOCAL_QUERY_BYTES
+                    ),
+                ));
+            }
             let case_sensitive = p
                 .get("case_sensitive")
                 .and_then(|v| v.as_bool())
@@ -588,7 +597,7 @@ impl App {
             self.prepare_file_tree_api(false);
             let rows: Vec<Value> = self
                 .file_tree
-                .visible_rows()
+                .tree_rows()
                 .iter()
                 .map(|r| {
                     json!({
