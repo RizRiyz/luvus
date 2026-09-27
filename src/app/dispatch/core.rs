@@ -186,6 +186,7 @@ impl App {
                                 "content_revision":pane.content_revision(),
                                 "agent_name":agent_names.get(&pane_id).copied(),
                                 "agent":status.map(|status| status.agent.clone()),
+                                "is_agent":self.is_agent_pane(pane_id),
                                 "agent_status":status.map(|status| state_str(status.state)),
                                 "agent_session_title":agent_session_title,
                                 "agent_authority":status.map(|status| status.identity_source),

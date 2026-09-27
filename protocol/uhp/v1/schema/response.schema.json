@@ -109,7 +109,7 @@
         {
           "if": { "properties": { "kind": { "const": "terminal" } }, "required": ["kind"] },
           "then": {
-            "properties": { "agent_session_title": { "anyOf": [
+            "properties": { "is_agent": { "type": "boolean" }, "agent_session_title": { "anyOf": [
               { "type": "null" },
               { "type": "string", "minLength": 1, "maxLength": 160 }
             ] }, "agent_name": { "anyOf": [

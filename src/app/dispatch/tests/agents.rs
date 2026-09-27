@@ -1344,6 +1344,11 @@ fn runtime_snapshot_projects_agent_session_title_without_using_the_alias() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
+    let snapshot = app.runtime_snapshot();
+    assert_eq!(
+        snapshot["workspaces"][0]["tabs"][0]["panes"][0]["is_agent"],
+        false
+    );
     {
         let status = app.status.get_mut(&pane).unwrap();
         status.agent = "pi".into();
@@ -1361,6 +1366,7 @@ fn runtime_snapshot_projects_agent_session_title_without_using_the_alias() {
 
     let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
     let row = &snapshot["workspaces"][0]["tabs"][0]["panes"][0];
+    assert_eq!(row["is_agent"], true);
     assert_eq!(row["agent_name"], "web");
     assert_eq!(row["agent_session_title"], "Build the web dashboard");
 

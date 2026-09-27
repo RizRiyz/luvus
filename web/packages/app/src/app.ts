@@ -40,6 +40,7 @@ export class WebApp {
   #sessions: BrowserSession[] | undefined;
   #sessionPanelOpen = false;
   #sessionLoading = false;
+  #showShells = false;
 
   constructor(private readonly root: HTMLElement) {
     const pair = consumePairingFragment();
@@ -386,10 +387,12 @@ export class WebApp {
   }
 
   #dashboard(snapshot: SessionSnapshot): HTMLElement {
-    const agents = snapshot.workspaces.flatMap((workspace, workspaceIndex) => workspace.tabs.flatMap((tab) => tab.panes.map((pane) => ({
+    const terminals = snapshot.workspaces.flatMap((workspace, workspaceIndex) => workspace.tabs.flatMap((tab) => tab.panes.map((pane) => ({
       pane,
       workspace: displayText(workspace.name, `Workspace ${workspaceIndex + 1}`),
-    })))).filter(({ pane }) => displayText(pane.agent, "") !== "");
+    })))).filter(({ pane }) => pane.kind === "terminal");
+    const agents = terminals.filter(({ pane }) => pane.is_agent === true);
+    const visibleAgents = this.#showShells ? terminals : agents;
     const workingAgents = agents.filter(({ pane }) => pane.agent_status === "working").length;
     const tabCount = snapshot.workspaces.reduce((total, workspace) => total + workspace.tabs.length, 0);
     const paneCount = snapshot.workspaces.reduce((total, workspace) => total
@@ -471,12 +474,23 @@ export class WebApp {
         ),
         button("Refresh telemetry", "ghost hero-refresh", () => void this.#session.refresh().catch((error) => this.#showError(error))),
       ),
-      agents.length ? element("section", { className: "section" },
+      element("section", { className: "section" },
         element("div", { className: "section-heading", attrs: { id: "mission-agents" } },
           element("h2", { className: "section-title", text: "Agents" }),
-          element("span", { className: "section-status", text: workingAgents ? `${workingAgents} executing` : "All standing by" }),
+          element("div", { className: "agent-filters", attrs: { role: "group", "aria-label": "Filter agents" } },
+            ...[false, true].map((showShells) => element("button", {
+              className: "agent-filter",
+              text: showShells ? "All panes" : "Active agents",
+              attrs: { type: "button", "aria-pressed": String(this.#showShells === showShells), title: showShells ? "Include shell panes" : "Show detected agents, including idle and waiting agents" },
+              on: { click: () => {
+                this.#showShells = showShells;
+                this.#render();
+                this.root.querySelector<HTMLButtonElement>('.agent-filter[aria-pressed="true"]')?.focus();
+              } },
+            })),
+          ),
         ),
-        element("div", { className: "agent-grid" }, ...agents.map(({ pane, workspace }) => element("button", {
+        element("div", { className: "agent-grid" }, ...visibleAgents.map(({ pane, workspace }) => element("button", {
           className: "agent-card",
           attrs: { type: "button" },
           on: { click: () => this.#openTerminal(snapshot, pane) },
@@ -488,7 +502,8 @@ export class WebApp {
         element("span", { className: "agent-state", text: displayText(pane.agent_status, "unknown") }),
         missionIcon("arrow"),
         ))),
-      ) : undefined,
+        visibleAgents.length === 0 ? element("p", { className: "workspace-empty", text: this.#showShells ? "No terminal panes in this session." : "No active agents. Choose All panes to show shells." }) : undefined,
+      ),
       element("section", { className: "section" },
         element("div", { className: "section-heading", attrs: { id: "mission-workspaces" } },
           element("h2", { className: "section-title", text: "Workspaces" }),

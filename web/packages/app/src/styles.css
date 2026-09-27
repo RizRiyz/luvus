@@ -119,6 +119,10 @@ button { color: inherit; }
 .section-title { margin: 0; color: #f2eff9; font-size: clamp(1.35rem, 3vw, 2rem); font-weight: 560; letter-spacing: -.035em; }
 .section-status { padding: .38rem .6rem; color: var(--green); background: #9ed68a0b; border: 1px solid #9ed68a24; border-radius: 999px; font: .58rem ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; }
 .agent-grid { display: grid; grid-template-columns: 1fr; align-items: start; gap: .8rem; }
+.agent-filters { display: flex; gap: .2rem; padding: .2rem; border: 1px solid var(--rally-border); border-radius: 999px; }
+.agent-filter { padding: .45rem .65rem; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font-size: .75rem; cursor: pointer; }
+.agent-filter[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.agent-filter:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .workspace-grid { column-count: 1; column-gap: .8rem; }
 .agent-card, .workspace-card {
   position: relative; background: #1d1e27; border: 1px solid #ffffff17; border-radius: 1rem;

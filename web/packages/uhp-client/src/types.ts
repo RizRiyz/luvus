@@ -9,6 +9,7 @@ export interface PaneSnapshot {
   content_revision?: number;
   agent_name?: string | null;
   agent?: string | null;
+  is_agent?: boolean;
   agent_status?: "idle" | "working" | "blocked" | "done" | null;
   agent_session_title?: string | null;
 }
