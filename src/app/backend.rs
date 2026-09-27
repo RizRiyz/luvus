@@ -728,14 +728,24 @@ impl App {
         let appearance = self.pane_appearance;
         let app_tx = self.app_tx.clone();
         let event_tx = self.app_tx.clone();
+        let pending_deletes = self
+            .worktree_deletes_inflight
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         std::thread::spawn(move || {
             let canonical = std::fs::canonicalize(&cwd)
                 .map_err(|_| "cwd does not exist or cannot be resolved".to_string())
-                .and_then(|cwd| {
-                    if cwd.is_dir() {
-                        Ok(cwd)
-                    } else {
+                .and_then(|resolved| {
+                    if !resolved.is_dir() {
                         Err("cwd is not a directory".to_string())
+                    } else if pending_deletes
+                        .iter()
+                        .any(|pending| pending.contains(&cwd, Some(&resolved)))
+                    {
+                        Err("worktree deletion is still pending".to_string())
+                    } else {
+                        Ok(resolved)
                     }
                 });
             let (resolved_cwd, branch, worktree, result) = match canonical {
@@ -799,6 +809,16 @@ impl App {
         let fail = |error: BackendError| {
             let _ = reply.send(error.envelope(&request_id));
         };
+        // A deletion may have started after the worker took its snapshot.
+        // Never commit a newly spawned pane into that disappearing checkout.
+        if self.worktree_delete_pending_for(&cwd, Some(&cwd)) {
+            fail(BackendError::mutation(
+                "create_failed",
+                "worktree deletion is still pending",
+                DispatchEvidence::NotStarted,
+            ));
+            return;
+        }
         let pane = match result {
             Ok(pane) => pane,
             Err(_) => {
