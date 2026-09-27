@@ -3,6 +3,7 @@
 
 pub mod appearance;
 pub mod backend;
+pub mod graphics;
 #[cfg(any(windows, test))]
 pub mod host_input;
 pub mod host_key;
