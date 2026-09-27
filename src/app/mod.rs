@@ -5477,10 +5477,16 @@ impl App {
         self.create_workspace_at_with_focus(cwd, true)
     }
 
-    fn worktree_delete_pending(&self) -> bool {
-        // An unknown path may alias the checkout being removed. Fail closed
-        // briefly rather than performing a blocking identity lookup on the app loop.
-        !self.worktree_deletes_inflight.is_empty()
+    fn worktree_delete_pending_for(
+        &self,
+        cwd: &Path,
+        identity: Option<crate::platform::DirectoryIdentity>,
+    ) -> bool {
+        self.worktree_deletes_inflight
+            .values()
+            .any(|(path, target)| {
+                crate::platform::same_path(path, cwd) || identity == Some(*target)
+            })
     }
 
     /// Open a static workspace while optionally preserving the current selection.
@@ -5490,7 +5496,15 @@ impl App {
     /// from the workspace the server already had selected. Remember the selection
     /// by stable ID so this stays correct if workspace ordering changes later.
     fn create_workspace_at_with_focus(&mut self, cwd: PathBuf, focus: bool) -> bool {
-        if self.worktree_delete_pending() {
+        // Reuse the membership lookup this open already needs; do not add a
+        // separate synchronous identity probe for every pending deletion.
+        let pending_membership =
+            (!self.worktree_deletes_inflight.is_empty()).then(|| worktree_membership(&cwd));
+        let identity = pending_membership
+            .as_ref()
+            .and_then(|membership| membership.as_ref())
+            .and_then(|membership| membership.directory_identity);
+        if self.worktree_delete_pending_for(&cwd, identity) {
             self.show_toast("worktree deletion is still pending");
             return false;
         }
@@ -5511,7 +5525,7 @@ impl App {
         self.workspaces.push(Workspace {
             id: crate::ids::public_id("workspace"),
             name,
-            worktree: worktree_membership(&cwd),
+            worktree: pending_membership.unwrap_or_else(|| worktree_membership(&cwd)),
             cwd,
             branch,
             git_ahead_behind: None,
@@ -6440,15 +6454,16 @@ impl App {
             self.show_toast("delete failed: could not verify worktree identity");
             return;
         };
-        if self.workspaces.iter().any(|workspace| {
-            workspace.id != workspace_id
-                && (crate::platform::same_path(&workspace.cwd, &path)
-                    || workspace
-                        .worktree
-                        .as_ref()
-                        .and_then(|membership| membership.directory_identity)
-                        == Some(identity))
-        }) {
+        let other_paths = self
+            .workspaces
+            .iter()
+            .filter(|workspace| workspace.id != workspace_id)
+            .map(|workspace| workspace.cwd.clone())
+            .collect::<Vec<_>>();
+        if other_paths
+            .iter()
+            .any(|other| crate::platform::same_path(other, &path))
+        {
             self.show_toast("close other workspaces for this worktree before deleting");
             return;
         }
@@ -6462,6 +6477,16 @@ impl App {
         let progress_path = path.clone();
         let result = self.io_jobs.submit_parallel(self.app_tx.clone(), move |_| {
             let checked = ensure_worktree_identity(&path, identity)
+                .and_then(|_| {
+                    if other_paths
+                        .iter()
+                        .any(|other| crate::platform::directory_identity(other) == Some(identity))
+                    {
+                        Err("close other workspaces for this worktree before deleting".into())
+                    } else {
+                        Ok(())
+                    }
+                })
                 .and_then(|_| linked_worktree_branch(&repo, &path))
                 .and_then(|branch| {
                     ensure_worktree_identity(&path, identity)?;
@@ -6506,6 +6531,22 @@ impl App {
                 &workspace_id,
                 &path,
                 Err("worktree workspace changed".into()),
+            );
+            return;
+        }
+        if self.workspaces.iter().any(|workspace| {
+            workspace.id != workspace_id
+                && (crate::platform::same_path(&workspace.cwd, &path)
+                    || workspace
+                        .worktree
+                        .as_ref()
+                        .and_then(|membership| membership.directory_identity)
+                        == Some(identity))
+        }) {
+            self.finish_worktree_delete(
+                &workspace_id,
+                &path,
+                Err("close other workspaces for this worktree before deleting".into()),
             );
             return;
         }
@@ -8110,7 +8151,13 @@ impl App {
         let Some(s) = self.resumable.get(idx).cloned() else {
             return;
         };
-        if self.worktree_delete_pending() {
+        let pending_membership =
+            (!self.worktree_deletes_inflight.is_empty()).then(|| worktree_membership(&s.cwd));
+        let identity = pending_membership
+            .as_ref()
+            .and_then(|membership| membership.as_ref())
+            .and_then(|membership| membership.directory_identity);
+        if self.worktree_delete_pending_for(&s.cwd, identity) {
             self.show_toast("worktree deletion is still pending");
             return;
         }
@@ -8144,7 +8191,7 @@ impl App {
                 branch,
                 git_ahead_behind: None,
                 pinned: false,
-                worktree: worktree_membership(&s.cwd),
+                worktree: pending_membership.unwrap_or_else(|| worktree_membership(&s.cwd)),
                 tabs: vec![tab],
                 active_tab: 0,
             });
@@ -9561,7 +9608,7 @@ mod tests {
             .unwrap();
 
         // The background job remains in flight after its original workspace
-        // closes. No new workspace may spawn until alias identity is safe to check.
+        // closes. The same checkout and its alias are blocked; other paths work.
         app.worktree_deletes_inflight
             .insert(id.clone(), (wt.clone(), identity));
         let index = app.workspaces.iter().position(|ws| ws.id == id).unwrap();
@@ -9569,14 +9616,14 @@ mod tests {
         let count = app.workspaces.len();
         assert!(!app.create_workspace_at(wt.clone()));
         assert_eq!(app.workspaces.len(), count);
-        assert!(!app.create_workspace_at(repo.clone()));
-        assert_eq!(app.workspaces.len(), count);
+        assert!(app.create_workspace_at(repo.clone()));
+        assert_eq!(app.workspaces.len(), count + 1);
         #[cfg(unix)]
         {
             let alias = base.join("alias");
             std::os::unix::fs::symlink(&wt, &alias).unwrap();
             assert!(!app.create_workspace_at(alias));
-            assert_eq!(app.workspaces.len(), count);
+            assert_eq!(app.workspaces.len(), count + 1);
         }
 
         app.worktree_deletes_inflight.remove(&id);
@@ -9588,7 +9635,7 @@ mod tests {
     #[test]
     fn worktree_delete_pending_blocks_agent_resume_before_pane_spawn() {
         let _env = crate::persist::test_env("wt-delete-resume");
-        let (base, _repo, wt) = repo_with_sibling_worktree("wt-delete-resume");
+        let (base, repo, wt) = repo_with_sibling_worktree("wt-delete-resume");
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         assert!(app.create_workspace_at(wt.clone()));
@@ -9604,19 +9651,31 @@ mod tests {
             .insert(id.clone(), (wt.clone(), identity));
         let index = app.workspaces.iter().position(|ws| ws.id == id).unwrap();
         app.close_workspace(index);
-        app.resumable = vec![crate::agent::SessionInfo {
-            agent: "claude".into(),
-            session_id: "pending-delete".into(),
-            cwd: wt.clone(),
-            updated: std::time::SystemTime::now(),
-        }];
+        app.resumable = vec![
+            crate::agent::SessionInfo {
+                agent: "claude".into(),
+                session_id: "pending-delete".into(),
+                cwd: wt.clone(),
+                updated: std::time::SystemTime::now(),
+            },
+            crate::agent::SessionInfo {
+                agent: "claude".into(),
+                session_id: "unrelated".into(),
+                cwd: repo.clone(),
+                updated: std::time::SystemTime::now(),
+            },
+        ];
         let before_panes = app.panes.len();
         let before_workspaces = app.workspaces.len();
 
         app.resume_session(0);
         assert_eq!(app.panes.len(), before_panes);
         assert_eq!(app.workspaces.len(), before_workspaces);
-        assert_eq!(app.resumable.len(), 1, "resume remains available");
+        assert_eq!(app.resumable.len(), 2, "resume remains available");
+        app.resume_session(1);
+        assert_eq!(app.panes.len(), before_panes + 1);
+        assert_eq!(app.workspaces.len(), before_workspaces + 1);
+        assert_eq!(app.resumable.len(), 1);
         assert!(wt.exists());
         app.worktree_deletes_inflight.remove(&id);
         let _ = std::fs::remove_dir_all(&base);
@@ -9626,7 +9685,7 @@ mod tests {
     fn worktree_delete_rejects_another_open_workspace_at_the_target() {
         let _env = crate::persist::test_env("wt-delete-duplicate-open");
         let (base, repo, wt) = repo_with_sibling_worktree("wt-delete-duplicate-open");
-        let (tx, _rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         assert!(app.create_workspace_at(wt.clone()));
         let original = app.ws().id.clone();
@@ -9643,11 +9702,77 @@ mod tests {
 
         app.worktree_delete = Some(original.clone());
         app.confirm_worktree_delete();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.worktree_deletes_inflight.contains_key(&original) {
+            app.handle_event(
+                rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .expect("duplicate workspace validation completes"),
+            );
+        }
         assert!(!app.worktree_deletes_inflight.contains_key(&original));
         assert!(app.workspaces.iter().any(|ws| ws.id == original));
         assert!(app.workspaces.iter().any(|ws| ws.id == duplicate));
         assert!(wt.exists());
         assert_eq!(crate::git::local::worktrees(&repo).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_delete_rechecks_stale_symlink_workspace_identity() {
+        let _env = crate::persist::test_env("wt-delete-stale-alias");
+        let (base, repo, wt) = repo_with_sibling_worktree("wt-delete-stale-alias");
+        let alias = base.join("alias");
+        std::os::unix::fs::symlink(&wt, &alias).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(alias.clone()));
+        let alias_id = app.ws().id.clone();
+        let old_identity = app.ws().worktree.as_ref().unwrap().directory_identity;
+
+        let original = base.join("original");
+        let moved = std::process::Command::new("git")
+            .args(["worktree", "move"])
+            .arg(&wt)
+            .arg(&original)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            moved.status.success(),
+            "{}",
+            String::from_utf8_lossy(&moved.stderr)
+        );
+        let added = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "replacement"])
+            .arg(&wt)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        assert_ne!(old_identity, crate::platform::directory_identity(&alias));
+
+        assert!(app.create_workspace_at(wt.clone()));
+        let target_id = app.ws().id.clone();
+        app.worktree_delete = Some(target_id.clone());
+        app.confirm_worktree_delete();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.worktree_deletes_inflight.contains_key(&target_id) {
+            app.handle_event(
+                rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .expect("alias validation completes"),
+            );
+        }
+        assert!(wt.exists(), "replacement checkout must remain");
+        assert!(app.workspaces.iter().any(|ws| ws.id == alias_id));
+        assert!(app.workspaces.iter().any(|ws| ws.id == target_id));
+        assert_eq!(crate::git::local::worktrees(&repo).unwrap().len(), 3);
+        crate::git::local::worktree_remove_force(&repo, &wt).unwrap();
+        crate::git::local::worktree_remove_force(&repo, &original).unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 
