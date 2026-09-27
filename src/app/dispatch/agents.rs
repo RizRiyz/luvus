@@ -151,6 +151,7 @@ impl App {
     pub(super) fn api_agent_send(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
+            reject_api_fields(p, &["target", "text", "strict", "terminal_id"])?;
             let id = self.resolve_agent_target(p)?;
             if !self.is_agent_pane(id) {
                 return Err((
@@ -175,15 +176,16 @@ impl App {
                     ));
                 }
             };
-            if !self.agent_prompt_is_ready(id, strict) {
-                return Err(super::agent_workflow::agent_prompt_not_ready_error());
-            }
             let pane = self.panes.get(&id).ok_or_else(|| {
                 (
                     "send_failed".to_string(),
                     "target pane closed before input was queued".to_string(),
                 )
             })?;
+            check_agent_terminal_id(p, pane)?;
+            if !self.agent_prompt_is_ready(id, strict) {
+                return Err(super::agent_workflow::agent_prompt_not_ready_error());
+            }
             pane.try_submit_text_with_settle(text, AGENT_MESSAGE_SETTLE)
                 .map_err(|message| ("send_failed".to_string(), message))?;
             let (agent, status) = self

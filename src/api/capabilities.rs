@@ -429,7 +429,7 @@ pub fn capabilities(event_sequence: u64) -> Value {
         },
         "authorization":{"default":"local_owner","delegation":"scoped_ephemeral_token",
             "scopes":["read","workspace","agent","terminal","orchestration","extensions","admin","all"]},
-        "concurrency":{"mutation_guard":"if_revision"},
+        "concurrency":{"mutation_guard":"if_revision","agent_prompt_terminal_id":true},
         "atomic_methods":["agent.start","agent.prompt","automation.create","automation.rebind","automation.run","task.retry","workspace.move_block","layout.apply","diff.note.apply"],
         "idempotency_keys":{"methods":["automation.create","automation.run"],"max_bytes":128},
         "graphics":false,
@@ -471,6 +471,10 @@ mod tests {
                 && contract["idempotent"].is_boolean()
         }));
         let capabilities = capabilities(0);
+        assert_eq!(
+            capabilities["concurrency"]["agent_prompt_terminal_id"],
+            true
+        );
         assert_eq!(capabilities["limits"]["terminal_stream_capacity"], 8);
         assert_eq!(capabilities["limits"]["terminal_stream_queue"], 2);
         assert_eq!(

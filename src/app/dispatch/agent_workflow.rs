@@ -565,7 +565,15 @@ impl App {
         }
         if let Err((code, message)) = reject_api_fields(
             &p,
-            &["target", "text", "wait", "until", "timeout_s", "strict"],
+            &[
+                "target",
+                "text",
+                "wait",
+                "until",
+                "timeout_s",
+                "strict",
+                "terminal_id",
+            ],
         ) {
             fail(&code, message);
             return;
@@ -649,15 +657,19 @@ impl App {
                 return;
             }
         }
+        let Some(target) = self.panes.get(&pane) else {
+            fail("not_found", "pane not found".to_string());
+            return;
+        };
+        if let Err((code, message)) = check_agent_terminal_id(&p, target) {
+            fail(&code, message);
+            return;
+        }
         if !self.agent_prompt_is_ready(pane, strict) {
             let (code, message) = agent_prompt_not_ready_error();
             fail(&code, message);
             return;
         }
-        let Some(target) = self.panes.get(&pane) else {
-            fail("not_found", "pane not found".to_string());
-            return;
-        };
         let baseline_revision = target.content_revision();
         if let Err(message) = target.try_submit_text(text) {
             fail("send_failed", message);

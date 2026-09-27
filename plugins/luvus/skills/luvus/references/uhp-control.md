@@ -202,6 +202,12 @@ prompt. Other agents retain the permissive Unknown-evidence fallback when
 strict is omitted. Inspect the visible screen and use `agent.keys` only for an
 explicitly authorized interaction.
 
+For UHP prompt calls that must reach the same PTY after a possible restart,
+pass the `terminal_id` from `agent.read` or `agent.list` to `agent.prompt` or
+`agent.send`. A mismatch returns `content_revision_conflict` before input is
+queued. Check `uhp.capabilities.concurrency.agent_prompt_terminal_id` first:
+older servers can silently ignore this field on `agent.send`.
+
 For UHP interactions that must match the inspected screen, use `agent.read`
 with `source:"visible"` and pass its `content_revision` as `if_content_revision`
 together with its `terminal_id` in `agent.keys` params. The revision is a

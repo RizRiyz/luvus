@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://luvus.dev/protocol/uhp/v1/request.schema.json",
   "title": "Luvus Universal Harness Protocol request",
-  "$comment": "agent.prompt preserves target/text/strict/wait/until/timeout_s. strict defaults false and requires positive live composer evidence; agents without a detector reject in strict mode. No-wait returns queue admission immediately. wait=true requires a new working or blocked transition before matching until, bounded by timeout_s (default 300). until and timeout_s require wait=true. agent.wait remains a current-state matcher.",
+  "$comment": "agent.prompt preserves target/text/strict/wait/until/timeout_s and accepts an optional terminal_id fence. strict defaults false and requires positive live composer evidence; agents without a detector reject in strict mode. No-wait returns queue admission immediately. wait=true requires a new working or blocked transition before matching until, bounded by timeout_s (default 300). until and timeout_s require wait=true. agent.wait remains a current-state matcher.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "method", "params"],
@@ -116,6 +116,29 @@
         { "pattern": "^(?:[Cc][Tt][Rr][Ll]\\+|[Cc]-)[A-Za-z]$" },
         { "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\uD800-\\uDFFF]$" }
       ]
+    },
+    "agentPromptParams": {
+      "type": "object", "additionalProperties": false, "required": ["target", "text"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 262144 },
+        "strict": { "type": "boolean" },
+        "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "wait": { "type": "boolean" },
+        "until": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "enum": ["idle", "working", "blocked", "done"] } },
+        "timeout_s": { "type": "number", "minimum": 0, "maximum": 3600 }
+      },
+      "if": { "anyOf": [{ "required": ["until"] }, { "required": ["timeout_s"] }] },
+      "then": { "required": ["wait"], "properties": { "wait": { "const": true } } }
+    },
+    "agentSendParams": {
+      "type": "object", "additionalProperties": false, "required": ["target", "text"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "text": { "type": "string", "minLength": 1 },
+        "strict": { "type": "boolean" },
+        "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" }
+      }
     },
     "agentKeysParams": {
       "type": "object", "additionalProperties": false, "required": ["target", "keys"],
@@ -381,6 +404,10 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/agentWaitParams" } } } },
     { "if": { "properties": { "method": { "const": "agent.keys" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/agentKeysParams" } } } },
+    { "if": { "properties": { "method": { "const": "agent.prompt" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/agentPromptParams" } } } },
+    { "if": { "properties": { "method": { "const": "agent.send" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/agentSendParams" } } } },
     { "if": { "properties": { "method": { "enum": ["mission.snapshot", "mission.refresh"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/missionQueryParams" } } } },
     { "if": { "properties": { "method": { "enum": ["session.status", "session.start", "session.stop", "session.restart"] } } },

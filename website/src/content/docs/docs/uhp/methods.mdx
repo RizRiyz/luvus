@@ -529,12 +529,31 @@ name, and waits for manifest-driven detection without composing separate UHP
 requests.
 
 `agent.prompt` takes `target`, `text`, optional `strict` (default `false`),
+optional `terminal_id` (the current PTY lifetime),
 optional `wait` (default `false`),
 optional `until`, and optional `timeout_s`. `until` and `timeout_s` require
 `wait:true`. Paste and Enter remain one PTY queue action. Without `wait`, the
 response remains immediate: `submitted:true`, `matched:false`, `evidence:"queued"`,
 with no `observed_state` field. Submission means queue admission, not confirmation
 that the agent consumed the prompt text.
+
+For a client holding a pane ID across a restart, pass the `terminal_id` from
+`agent.read` or `agent.list` with either `agent.prompt` or `agent.send`:
+
+```json
+{"id":"prompt","method":"agent.prompt","params":{"target":"8","text":"continue","terminal_id":"0123456789abcdef0123456789abcdef"}}
+```
+
+The server validates the ID after resolving the target and before queuing text
+or Enter. A different or unavailable PTY returns `content_revision_conflict`
+with expected and actual terminal IDs; malformed IDs and unknown fields return
+`invalid_request`. Omitting the fence keeps the existing behavior. This fence
+protects terminal identity, not the visible screen revision; `agent.keys` still
+uses its paired revision and terminal fence for inspected key interactions.
+`uhp.capabilities.concurrency.agent_prompt_terminal_id` advertises support.
+Older servers may ignore unknown fields on `agent.send`, so clients requiring
+the fence must verify this capability before calling it; do not treat a queued
+legacy response as proof that the fence was enforced.
 
 Before either prompt method queues input, Luvus rejects detected startup,
 sign-in, selection, and approval screens with `agent_not_ready`. Claude and

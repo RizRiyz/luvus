@@ -308,6 +308,12 @@ agent identity is known. `--strict` (UHP `strict:true`) requires positive
 composer evidence for any agent; agents without a detector reject the prompt.
 Without strict mode, other agents retain the legacy Unknown-evidence fallback.
 
+UHP `agent.prompt` and `agent.send` accept an optional `terminal_id` from
+`agent.read` or `agent.list`. A mismatch rejects the request before input is
+queued, which protects against pane ID reuse after server restart. Verify
+`uhp.capabilities.concurrency.agent_prompt_terminal_id` first when relying on
+this fence; older servers may silently ignore it on `agent.send`.
+
 `agent keys` refuses plain shells, validates every named key before sending any
 bytes, and queues a valid list as one ordered action. A closed target returns a
 structured `send_failed` error.

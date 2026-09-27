@@ -6,6 +6,37 @@ pub(in crate::app::dispatch) fn not_found() -> (String, String) {
     ("not_found".to_string(), "pane not found".to_string())
 }
 
+/// Fence prompt submission to the PTY lifetime the caller observed. Pane IDs
+/// can be reused after a server restart, while terminal IDs cannot.
+pub(in crate::app::dispatch) fn check_agent_terminal_id(
+    params: &Value,
+    pane: &crate::terminal::pty::Pane,
+) -> Result<(), (String, String)> {
+    let Some(value) = params.get("terminal_id") else {
+        return Ok(());
+    };
+    let expected = value
+        .as_str()
+        .filter(|id| crate::terminal::backend::valid_id(id))
+        .ok_or_else(|| {
+            (
+                "invalid_request".to_string(),
+                "terminal_id must be 32 lowercase hexadecimal characters".to_string(),
+            )
+        })?;
+    let actual = pane.terminal_runtime().map(|runtime| runtime.terminal_id);
+    if actual.as_deref() != Some(expected) {
+        return Err((
+            "content_revision_conflict".to_string(),
+            format!(
+                "expected terminal_id={expected}; actual terminal_id={}",
+                actual.as_deref().unwrap_or("null")
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(in crate::app::dispatch) fn pane_move_error(err: PaneMoveError) -> (String, String) {
     let message = match err {
         PaneMoveError::PaneNotFound => "pane not found",

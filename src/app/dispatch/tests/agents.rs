@@ -419,6 +419,85 @@ fn agent_send_requires_a_live_agent() {
 }
 
 #[test]
+fn prompt_terminal_id_fence_rejects_stale_routes_before_input() {
+    let _env = crate::persist::test_env("prompt-terminal-id-fence");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    mark_codex_prompt_ready(&mut app, pane);
+    let actual = app.panes[&pane].terminal_runtime().unwrap().terminal_id;
+    let stale = if actual == "00000000000000000000000000000000" {
+        "11111111111111111111111111111111"
+    } else {
+        "00000000000000000000000000000000"
+    };
+    let (input, received) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input);
+    let target = pane.0.to_string();
+
+    for terminal_id in [json!(stale), json!(null), json!("BAD")] {
+        let params = json!({"target":target,"text":"review","terminal_id":terminal_id});
+        let error = app.dispatch("agent.send", &params).unwrap_err();
+        assert_eq!(
+            error.0,
+            if terminal_id == json!(stale) {
+                "content_revision_conflict"
+            } else {
+                "invalid_request"
+            }
+        );
+        assert!(
+            received.try_recv().is_err(),
+            "agent.send queued stale input"
+        );
+
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "fenced".into(),
+            params,
+            reply,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let value: Value = serde_json::from_str(&response.try_recv().unwrap()).unwrap();
+        assert_eq!(value["error"]["code"], error.0);
+        assert!(
+            received.try_recv().is_err(),
+            "agent.prompt queued stale input"
+        );
+        assert!(app.agent_prompts.is_empty());
+    }
+
+    assert_eq!(
+        app.dispatch(
+            "agent.send",
+            &json!({"target":target,"text":"review","unknown":true})
+        )
+        .unwrap_err()
+        .0,
+        "invalid_request"
+    );
+    assert!(received.try_recv().is_err());
+
+    let params = json!({"target":target,"text":"review","terminal_id":actual});
+    app.dispatch("agent.send", &params)
+        .expect("matching send fence");
+    assert!(received.try_recv().is_ok());
+    let (reply, response) = std::sync::mpsc::channel();
+    app.start_agent_prompt(
+        "matching".into(),
+        params,
+        reply,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let value: Value = serde_json::from_str(&response.try_recv().unwrap()).unwrap();
+    assert_eq!(value["result"]["submitted"], true);
+    assert!(received.try_recv().is_ok());
+}
+
+#[test]
 fn agent_send_admits_one_ordered_submission_and_reports_closed_queue() {
     let _env = crate::persist::test_env("agent-send-atomic");
     let (tx, _rx) = std::sync::mpsc::channel();
