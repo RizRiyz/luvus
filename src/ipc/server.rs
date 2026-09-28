@@ -677,6 +677,11 @@ pub fn run() -> Result<()> {
         if let Some(url) = app.pending_open_url.take() {
             broadcast_effect(&mut clients, ServerMessage::OpenUrl(url));
         }
+        // `pending_open_path` is never broadcast: it is routed to the one client
+        // whose input produced it, inside `apply`. Nothing else sets it today;
+        // if something ever did, dropping it here beats opening the path on a
+        // desktop that never asked for it.
+        app.pending_open_path = None;
         if let Some(text) = app.pending_clipboard.take() {
             dispatch_clipboard(&mut clients, foreground, &mut next_activity, text);
         }
@@ -1137,58 +1142,82 @@ fn apply(
                 ClientInput::PasteImage(path) => AppEvent::PasteImage(path),
                 ClientInput::Resize { .. } => unreachable!("handled above"),
             };
-            let client = clients
-                .get_mut(&id)
-                .expect("input client remains registered");
-            let scoped = client.machine_capable && client.shell_dock_layout.owns_workspaces;
-            if !scoped {
-                let changed = app.handle_event(event);
-                if let Some(text) = app
-                    .commander
-                    .as_mut()
-                    .and_then(|commander| commander.pending_clipboard.take())
-                {
-                    let _ = client.send_control(ServerMessage::Clipboard(text));
+            let changed = {
+                let client = clients
+                    .get_mut(&id)
+                    .expect("input client remains registered");
+                let scoped = client.machine_capable && client.shell_dock_layout.owns_workspaces;
+                if !scoped {
+                    let changed = app.handle_event(event);
+                    if let Some(text) = app
+                        .commander
+                        .as_mut()
+                        .and_then(|commander| commander.pending_clipboard.take())
+                    {
+                        let _ = client.send_control(ServerMessage::Clipboard(text));
+                    }
+                    changed
+                } else {
+                    let previous = app.sidebars.clone();
+                    let previous_workspace_paths = app.config.layout.workspace_paths;
+                    if let Some(state) = &client.shell_sidebars {
+                        app.sidebars = crate::app::Sidebars::from_config(&state.layout);
+                        app.config.layout.workspace_paths = state.workspace_paths;
+                    }
+                    app.client_sidebar_input = true;
+                    let changed = app.handle_event(event);
+                    // The composer belongs to this exact input client.
+                    if let Some(text) = app
+                        .commander
+                        .as_mut()
+                        .and_then(|commander| commander.pending_clipboard.take())
+                    {
+                        let _ = client.send_control(ServerMessage::Clipboard(text));
+                    }
+                    app.client_sidebar_input = false;
+                    let layout = app.sidebars.to_config();
+                    let workspace_paths = app.config.layout.workspace_paths;
+                    app.sidebars = previous;
+                    app.config.layout.workspace_paths = previous_workspace_paths;
+                    let revision = client.shell_sidebars.as_ref().map_or(1, |state| {
+                        state.revision.saturating_add(u64::from(
+                            state.layout != layout || state.workspace_paths != workspace_paths,
+                        ))
+                    });
+                    client.shell_sidebars = Some(protocol::ShellSidebars {
+                        revision,
+                        layout,
+                        workspace_paths,
+                    });
+                    client.sidebar_cache = client
+                        .shell_sidebars
+                        .as_ref()
+                        .map(|state| crate::app::Sidebars::from_config(&state.layout));
+                    changed
                 }
-                return changed;
+            };
+            // A desktop-side effect belongs to the client whose input produced
+            // it, not to every attached display: with two clients, one user's
+            // Open Externally must not open the path on the other desktop too.
+            // The originator is only known here, so the path is routed now
+            // rather than at the loop's broadcast point, where later batched
+            // input may already have moved `foreground` to someone else.
+            let mut changed = changed;
+            if let Some(path) = app.pending_open_path.take() {
+                let gone = clients.get(&id).is_some_and(|client| {
+                    client.send_control(ServerMessage::OpenPath(path)).is_err()
+                });
+                if gone {
+                    clients.remove(&id);
+                    app.client_files_visible = client_files_visible(clients);
+                    if *foreground == Some(id) {
+                        app.commander = None;
+                        *foreground = latest_client(clients);
+                    }
+                    apply_foreground_client(app, clients, *foreground);
+                    changed = true;
+                }
             }
-            let previous = app.sidebars.clone();
-            let previous_workspace_paths = app.config.layout.workspace_paths;
-            if let Some(state) = &client.shell_sidebars {
-                app.sidebars = crate::app::Sidebars::from_config(&state.layout);
-                app.config.layout.workspace_paths = state.workspace_paths;
-            }
-            app.client_sidebar_input = true;
-            let changed = app.handle_event(event);
-            // The composer belongs to this exact input client. Deliver its
-            // copy/cut effect here, before another input can take foreground,
-            // rather than using the ordinary all-clients clipboard broadcast.
-            if let Some(text) = app
-                .commander
-                .as_mut()
-                .and_then(|commander| commander.pending_clipboard.take())
-            {
-                let _ = client.send_control(ServerMessage::Clipboard(text));
-            }
-            app.client_sidebar_input = false;
-            let layout = app.sidebars.to_config();
-            let workspace_paths = app.config.layout.workspace_paths;
-            app.sidebars = previous;
-            app.config.layout.workspace_paths = previous_workspace_paths;
-            let revision = client.shell_sidebars.as_ref().map_or(1, |state| {
-                state.revision.saturating_add(u64::from(
-                    state.layout != layout || state.workspace_paths != workspace_paths,
-                ))
-            });
-            client.shell_sidebars = Some(protocol::ShellSidebars {
-                revision,
-                layout,
-                workspace_paths,
-            });
-            client.sidebar_cache = client
-                .shell_sidebars
-                .as_ref()
-                .map(|state| crate::app::Sidebars::from_config(&state.layout));
             changed
         }
         // Redraw only if the event actually changed the UI — a plain keystroke
@@ -3948,5 +3977,100 @@ mod tests {
         assert_eq!(interactive_size, (46, 16));
         assert!(app.compact, "the newly active narrow client owns its view");
         assert_eq!(received_frame_size(&small_rx), (46, 16));
+    }
+
+    fn received_open_path(rx: &mpsc::Receiver<ServerMessage>) -> Option<String> {
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMessage::OpenPath(path) = msg {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Open Externally is a desktop effect, so it goes to the one client whose
+    /// input queued it. The other attached display must not receive it, even
+    /// though it is the foreground client when the input arrives.
+    #[test]
+    fn open_path_is_routed_to_the_initiating_client_only() {
+        assert_open_path_routes_to_initiator(false);
+    }
+
+    #[test]
+    fn open_path_is_routed_after_machine_sidebar_input() {
+        assert_open_path_routes_to_initiator(true);
+    }
+
+    #[test]
+    fn failed_open_path_delivery_removes_the_client_and_requests_repair() {
+        let _env = crate::persist::test_env("failed-open-path-delivery");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(120, 40, app_tx).expect("app starts");
+        app.server_mode = true;
+        let (other, _other_rx) = display_client(120, 40, 2);
+        let (originator, originator_rx) = display_client(50, 20, 1);
+        let mut clients = HashMap::from([(1, other), (2, originator)]);
+        drop(originator_rx);
+        let mut foreground = Some(2);
+        let mut interactive_size = (50, 20);
+        let mut next_activity = 3;
+        app.pending_open_path = Some("/tmp/notes.pdf".to_string());
+
+        assert!(apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        ));
+        assert!(!clients.contains_key(&2));
+        assert!(app.pending_open_path.is_none());
+        assert_eq!(foreground, Some(1));
+    }
+
+    fn assert_open_path_routes_to_initiator(machine_capable: bool) {
+        let _env = crate::persist::test_env("multi-client-open-path");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(120, 40, app_tx).expect("app starts");
+        app.server_mode = true;
+        let (large, large_rx) = display_client(120, 40, 2);
+        let (mut small, small_rx) = display_client(50, 20, 1);
+        small.machine_capable = machine_capable;
+        small.shell_dock_layout.owns_workspaces = machine_capable;
+        let mut clients = HashMap::from([(1, large), (2, small)]);
+        let mut foreground = Some(1);
+        let mut interactive_size = (120, 40);
+        let mut next_activity = 3;
+
+        // Stand in for the FILES action the key would trigger: the path is
+        // already queued when client 2's input is applied.
+        let path = "/tmp/notes.pdf".to_string();
+        app.pending_open_path = Some(path.clone());
+        apply(
+            AppEvent::ClientInput {
+                id: 2,
+                input: ClientInput::Key(KeyEvent::new(KeyCode::Null, KeyModifiers::NONE)),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            &mut next_activity,
+        );
+
+        assert!(app.pending_open_path.is_none(), "drained by the input path");
+        assert_eq!(
+            received_open_path(&small_rx).as_ref(),
+            Some(&path),
+            "the initiating client receives the path"
+        );
+        assert!(
+            received_open_path(&large_rx).is_none(),
+            "the other attached client must not open it too"
+        );
     }
 }
