@@ -291,12 +291,14 @@ while preserving the original records. Retrying from `review` or `blocked`
 finishes the superseded run as cancelled without closing its worker pane.
 
 The top-level `branch`, `worktree`, `attempt_started_at`, and
-`attempt_finished_at` always describe the current attempt. A newly queued retry
-therefore omits those values until it starts. The superseded attempt remains
-available as the final `previous_attempts` entry, including its branch,
-worktree, start time, and finish time. A `task.retried` event tells event-stream
-consumers to refresh that task; the event itself carries only its ID and new
-attempt number.
+`attempt_finished_at` always describe the current attempt. On a newly queued
+retry, `attempt_started_at` appears when the attempt starts and
+`attempt_finished_at` when it finishes. `branch` and `worktree` receive values
+only when a worktree is assigned; workspace mode has no branch. The superseded
+attempt remains available as the final `previous_attempts` entry, including
+its branch, worktree, start time, and finish time. A `task.retried` event tells
+event-stream consumers to refresh that task; the event itself carries only its
+ID and new attempt number.
 
 - **Only armed agent automations spawn unattended.** Manual tasks still start
   only when you press `s` or run `task start`. Every automation stores one
