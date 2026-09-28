@@ -2668,6 +2668,10 @@ pub struct App {
     /// Multi-agent orchestration ledger + path leases (docs/22, ORCH-1/2). Kept
     /// in its own file (`orch.json`), independent of the session snapshot.
     pub orch: crate::orch::OrchState,
+    /// Task IDs whose asynchronous quality gate has been launched but whose
+    /// result has not yet returned to the app loop. Process-local by design:
+    /// gate workers do not survive a server restart.
+    task_gates_inflight: HashSet<String>,
     /// Durable agent automation definitions and bounded run history. The app
     /// event loop remains their only mutable owner.
     pub automation: crate::automation::AutomationState,
@@ -3394,6 +3398,7 @@ impl App {
             session_dirty: true,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
+            task_gates_inflight: HashSet::new(),
             automation: crate::automation::AutomationState::load(),
             orch_scroll: 0,
             orch_view: OrchView::Tasks,
@@ -4096,6 +4101,7 @@ impl App {
             session_dirty: discarded_pane_screens,
             events: api::new_bus(),
             orch: crate::orch::OrchState::load(),
+            task_gates_inflight: HashSet::new(),
             automation: crate::automation::AutomationState::load(),
             orch_scroll: 0,
             orch_view: OrchView::Tasks,

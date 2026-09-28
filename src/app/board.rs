@@ -1387,6 +1387,12 @@ impl App {
     /// (`AppEvent::TaskGateFinished`) decides Done vs Review. Returns whether a gate
     /// was launched (so the caller can report "gate running" vs "done").
     pub fn complete_task(&mut self, id: &str) -> Result<bool, (String, String)> {
+        if self.task_gates_inflight.contains(id) {
+            return Err((
+                "gate_running".to_string(),
+                format!("quality gate is already running for {id}"),
+            ));
+        }
         let task = self
             .orch
             .task(id)
@@ -1441,6 +1447,7 @@ impl App {
             "task.gate_running",
             serde_json::json!({ "id": id, "gate": gate }),
         );
+        self.task_gates_inflight.insert(id.to_string());
         spawn_gate(id.to_string(), cwd, gate, self.app_tx.clone());
         Ok(true)
     }
@@ -1448,6 +1455,7 @@ impl App {
     /// Apply a finished gate (ORCH-5): exit 0 → Done (+ dependents announced);
     /// non-zero → held at `Review` with the tail of the output captured.
     pub fn task_gate_finished(&mut self, id: &str, code: Option<i32>, out: String) {
+        self.task_gates_inflight.remove(id);
         if code == Some(0) {
             self.finalize_task_done(id, TaskCompletionSource::Gate);
             self.emit_event("task.gate_passed", serde_json::json!({ "id": id }));
@@ -4534,11 +4542,19 @@ mod tests {
         app.orch.claim("t1", focus.0).unwrap();
         assert_eq!(app.complete_task("t1"), Ok(true));
         assert_eq!(
+            app.complete_task("t1"),
+            Err((
+                "gate_running".into(),
+                "quality gate is already running for t1".into()
+            ))
+        );
+        assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Running
         );
         // A passing gate finalizes it to Done.
         app.task_gate_finished("t1", Some(0), String::new());
+        assert!(!app.task_gates_inflight.contains("t1"));
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Done

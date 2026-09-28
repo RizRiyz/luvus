@@ -84,6 +84,12 @@ pub(crate) fn task_json(t: &crate::orch::Task) -> Value {
     if let Some(project) = &t.project {
         value["project"] = json!(project);
     }
+    if let Some(started_at) = t.attempt_started_at {
+        value["attempt_started_at"] = json!(started_at);
+    }
+    if let Some(finished_at) = t.attempt_finished_at {
+        value["attempt_finished_at"] = json!(finished_at);
+    }
     value
 }
 

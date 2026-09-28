@@ -415,6 +415,8 @@
         "project": { "$ref": "#/$defs/task_project" },
         "context": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "attempt": { "type": "integer", "minimum": 1 },
+        "attempt_started_at": { "type": "integer", "minimum": 0 },
+        "attempt_finished_at": { "type": "integer", "minimum": 0 },
         "previous_attempts": {
           "type": "array",
           "maxItems": 16,

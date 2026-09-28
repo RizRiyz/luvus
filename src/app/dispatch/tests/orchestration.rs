@@ -23,17 +23,55 @@ fn task_retry_api_queues_a_new_attempt_and_projects_history() {
     app.orch
         .add_task("retry".into(), vec![], vec![], None)
         .unwrap();
+    app.orch.claim("t1", 7).unwrap();
+    app.orch.bind_worktree(
+        "t1",
+        Some("/repo/.luvus/worktrees/t1".into()),
+        Some("luvus/t1".into()),
+    );
     app.orch
         .set_status("t1", crate::orch::TaskStatus::Failed)
         .unwrap();
 
+    let finished = app.dispatch("task.get", &json!({"id":"t1"})).unwrap();
+    assert!(finished["task"]["attempt_started_at"].is_u64());
+    assert!(finished["task"]["attempt_finished_at"].is_u64());
+
     let result = app.dispatch("task.retry", &json!({"id":"t1"})).unwrap();
     assert_eq!(result["task"]["status"], "queued");
     assert_eq!(result["task"]["attempt"], 2);
+    assert!(result["task"].get("attempt_started_at").is_none());
+    assert!(result["task"].get("attempt_finished_at").is_none());
+    assert!(result["task"]["branch"].is_null());
+    assert!(result["task"]["worktree"].is_null());
     assert_eq!(
         result["task"]["previous_attempts"][0]["final_status"],
         "failed"
     );
+    assert_eq!(result["task"]["previous_attempts"][0]["branch"], "luvus/t1");
+    assert_eq!(
+        result["task"]["previous_attempts"][0]["worktree"],
+        "/repo/.luvus/worktrees/t1"
+    );
+    assert!(result["task"]["previous_attempts"][0]["started_at"].is_u64());
+    assert!(result["task"]["previous_attempts"][0]["finished_at"].is_u64());
+}
+
+#[test]
+fn task_attempt_timestamps_are_omitted_until_the_attempt_starts() {
+    let (_env, mut app) = app("socket-task-attempt-times");
+    app.orch
+        .add_task("timed".into(), vec![], vec![], None)
+        .unwrap();
+
+    let queued = app.dispatch("task.get", &json!({"id":"t1"})).unwrap();
+    assert!(queued["task"].get("attempt_started_at").is_none());
+    assert!(queued["task"].get("attempt_finished_at").is_none());
+
+    app.orch.claim("t1", 7).unwrap();
+    let running = app.dispatch("task.list", &json!({})).unwrap();
+    assert!(running["tasks"][0]["attempt_started_at"].is_u64());
+    assert!(running["tasks"][0].get("attempt_finished_at").is_none());
 }
 
 #[test]
