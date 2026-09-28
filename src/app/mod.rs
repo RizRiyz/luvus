@@ -280,6 +280,14 @@ pub(crate) const MAX_AGENT_ROW_TITLE_BYTES: usize = 256;
 pub(crate) const MAX_AGENT_ROW_TITLES: usize = 256;
 pub(crate) const MAX_AGENT_ROW_TITLE_AGENT_BYTES: usize = 64;
 
+/// Whether `key` is an enhanced-host auto-repeat. A same-receiver action
+/// (toggle, mutation, external side effect) returns early on a repeat so a held
+/// key runs it once. Legacy hosts send auto-repeat as Press, so this is only
+/// true when the host reports Kitty event types.
+pub(crate) fn is_key_repeat(key: &KeyEvent) -> bool {
+    key.kind == KeyEventKind::Repeat
+}
+
 pub(crate) fn agent_session_title_count(
     titles: &HashMap<String, HashMap<String, AgentRowTitle>>,
 ) -> usize {
@@ -2358,6 +2366,89 @@ struct PendingPtyExit {
     deadline: Instant,
 }
 
+/// A Press forwarded to a pane. Later Repeat/Release phases return to this
+/// pane even after focus moves; client teardown releases it synthetically.
+#[derive(Clone, Copy, Debug)]
+struct ForwardedKeyPress {
+    pane: PaneId,
+    press: KeyEvent,
+}
+
+/// How a UI-consumed Press treats its later Repeat phases. A Press that left
+/// its input receiver unchanged may be replayed while that receiver remains;
+/// a Press that transitioned the UI never repeats until its key is released.
+#[derive(Clone, Copy, Debug)]
+enum UiRepeatLease {
+    Reprocess {
+        context: UiRepeatContext,
+        press: KeyEvent,
+    },
+    Suppress,
+}
+
+/// The component that would receive the next key. Opening, closing, or
+/// switching a receiver changes this value, so a held key cannot continue into
+/// whatever surface its Press revealed. Same-receiver actions stay Press-only
+/// through explicit guards in their handlers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UiRepeatContext {
+    PaneNavigate,
+    Commander,
+    BarOverflow,
+    CommandInspect,
+    Help,
+    Changelog,
+    ModuleSetting,
+    Confirm,
+    NamedSessions,
+    NamedSessionPrompt,
+    SessionMenu,
+    Settings { capturing: bool },
+    Search { instance: u64, file_menu: bool },
+    PickerList,
+    PickerText,
+    WorktreePrompt,
+    WorktreeList,
+    TabRename,
+    TabMenu,
+    WorkspaceMenu,
+    PaneMenu,
+    AgentMenu,
+    FilePrompt,
+    FileMenu,
+    DiffMenu,
+    Switcher,
+    PaneRename,
+    WorkspaceRename,
+    OrchForm(OrchFormField),
+    OrchStart(OrchStartStep),
+    OrchDetail,
+    Scroll { pane: PaneId, searching: bool },
+    Copy { pane: PaneId, searching: bool },
+    Resize(PaneId),
+    FilesFilter,
+    Sidebar(SidebarListFocus),
+    Files(crate::diff::FilesMode),
+    GitFilter,
+    GitDetail,
+    Git,
+    Orch(OrchView),
+    MissionAnswer,
+    MissionDetail,
+    Mission,
+    Prefix,
+    FileView(PaneId),
+    FileSearch(PaneId),
+    DiffView(PaneId),
+    DiffNoteSelect(PaneId),
+    DiffText(PaneId),
+    DiffAgentPicker(PaneId),
+    Preview(PaneId),
+    PreviewSearch(PaneId),
+    Pane(PaneId),
+    Empty,
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// A short, event-driven rendezvous between PTY EOF and process reaping.
@@ -2432,6 +2523,18 @@ pub struct App {
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
     /// authoritative unless the user opts a chord into Luvus handling.
     pub direct_keymap: keys::DirectKeymap,
+    /// Presses forwarded to a pane, keyed by client, semantic key, and keypad
+    /// state. Modifiers are excluded so releasing Ctrl first cannot orphan a
+    /// held key. Local monolithic input uses `None` as the client.
+    forwarded_key_presses: HashMap<(Option<u64>, KeyCode, bool), ForwardedKeyPress>,
+    /// UI-consumed presses and their repeat disposition, client-scoped.
+    ui_repeat_leases: HashMap<(Option<u64>, KeyCode, bool), UiRepeatLease>,
+    /// Transient source for one server-routed input event. Never persisted or
+    /// exposed on the wire; reset immediately after dispatch.
+    input_client_id: Option<u64>,
+    /// Set only while a UI Repeat is replayed. A replay reaches the same
+    /// receiver as its Press and must never become fresh pane input.
+    replaying_ui_repeat: bool,
     /// Process-local pane jump history. Ordinary focus changes append to the
     /// back stack and clear the forward stack, matching browser/Vim jump-list
     /// branch semantics. Entries are bounded and are not persisted.
@@ -3249,6 +3352,10 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            forwarded_key_presses: HashMap::new(),
+            ui_repeat_leases: HashMap::new(),
+            input_client_id: None,
+            replaying_ui_repeat: false,
             focus_history_back: Vec::new(),
             focus_history_forward: Vec::new(),
             prefix,
@@ -3951,6 +4058,10 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            forwarded_key_presses: HashMap::new(),
+            ui_repeat_leases: HashMap::new(),
+            input_client_id: None,
+            replaying_ui_repeat: false,
             focus_history_back: Vec::new(),
             focus_history_forward: Vec::new(),
             prefix,
@@ -4556,6 +4667,10 @@ impl App {
 
     /// Keyboard navigation for WORKSPACES, mirroring FILES and DIFF.
     pub fn handle_workspaces_key(&mut self, key: KeyEvent) -> bool {
+        // Filters, scope, and the row menu act once per press.
+        if is_key_repeat(&key) && key.code == KeyCode::Char('a') {
+            return true;
+        }
         let order = self.workspace_display_order();
         let page = (usize::from(self.workspaces_area.height) / 2).max(1) as isize;
         match key.code {
@@ -4609,6 +4724,10 @@ impl App {
     /// Keyboard navigation for AGENTS. `f` changes All/Active and `s` changes
     /// workspace scope; row activation matches the existing mouse behavior.
     pub fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
+        // Filters, scope, and the row menu act once per press.
+        if is_key_repeat(&key) && matches!(key.code, KeyCode::Char('a' | 'f' | 's')) {
+            return true;
+        }
         let rows = self.agent_dock_targets();
         let page = (usize::from(self.agents_area.height) / 2).max(1) as isize;
         match key.code {
@@ -8938,6 +9057,7 @@ impl App {
             self.agent_usage.remove(&key);
             self.usage_mtimes.remove(&key);
         }
+        self.forwarded_key_presses.retain(|_, held| held.pane != id);
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);

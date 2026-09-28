@@ -339,6 +339,33 @@ impl App {
             }
             return;
         }
+        // A held key moves the cursor, radio selection, or numeric sliders.
+        // Toggles, activations, resets, tab switches, and cycles run once.
+        if super::is_key_repeat(&key) {
+            let continuous = match key.code {
+                KeyCode::Up | KeyCode::Down => true,
+                KeyCode::Left | KeyCode::Right => match tab {
+                    SettingsTab::Theme | SettingsTab::Language => true,
+                    SettingsTab::Layout => matches!(
+                        self.layout_rows().get(cursor),
+                        Some(
+                            LayoutRow::SidebarWidth
+                                | LayoutRow::RightWidth
+                                | LayoutRow::ColGap
+                                | LayoutRow::RowGap
+                                | LayoutRow::Scrollback
+                                | LayoutRow::MobileWidth
+                                | LayoutRow::DiffContext
+                        )
+                    ),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !continuous {
+                return;
+            }
+        }
         match key.code {
             KeyCode::Esc => self.close_settings(),
             KeyCode::Tab => self.settings_set_tab(SettingsTab::from_index(tab.index() + 1)),

@@ -192,6 +192,11 @@ impl App {
             commander.focused = false;
             return true;
         }
+        // Tab completes or cycles targets while the strip keeps focus; a held
+        // Tab runs once. Text editing and caret motion repeat.
+        if crate::app::is_key_repeat(&key) && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            return true;
+        }
         if key.code == KeyCode::Enter {
             if key
                 .modifiers

@@ -291,6 +291,10 @@ impl App {
 
     /// Key handling while the PR detail panel is open.
     fn handle_pr_detail_key(&mut self, key: KeyEvent) {
+        // Refresh, browser opens, checkout, and approve are one-shot actions.
+        if super::is_key_repeat(&key) && matches!(key.code, KeyCode::Char('r' | 'o' | 'c' | 'a')) {
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_pr_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
@@ -360,6 +364,9 @@ impl App {
     /// Keys while the commit detail is open: `esc`/`q` back, `j`/`k` scroll,
     /// `o` open the commit on GitHub.
     fn handle_commit_detail_key(&mut self, key: KeyEvent) {
+        if super::is_key_repeat(&key) && key.code == KeyCode::Char('o') {
+            return; // one browser tab per press
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_commit_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
@@ -599,6 +606,9 @@ impl App {
 
     /// Keys while the issue detail is open: `esc`/`q` back, `j`/`k` scroll, `o` web.
     fn handle_issue_detail_key(&mut self, key: KeyEvent) {
+        if super::is_key_repeat(&key) && key.code == KeyCode::Char('o') {
+            return; // one browser tab per press
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_issue_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
@@ -778,6 +788,18 @@ impl App {
         // The issue detail view captures keys while open (docs/17).
         if self.active_git().is_some_and(|g| g.open_issue.is_some()) {
             self.handle_issue_detail_key(key);
+            return;
+        }
+        // Section switches refetch, and the rest toggle state, open a browser,
+        // or run a command without leaving this tab.
+        if super::is_key_repeat(&key)
+            && matches!(
+                key.code,
+                KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Char('1'..='6' | 'r' | 'o' | 'd' | 'm' | 'x' | 'E' | 's' | 'c')
+            )
+        {
             return;
         }
         match key.code {

@@ -512,6 +512,10 @@ impl App {
     /// Navigate the DIFF list while the shared FILES/DIFF dock owns keyboard
     /// focus. Opening a review returns normal keys to the new native view.
     pub fn handle_diff_list_key(&mut self, key: KeyEvent) -> bool {
+        // Filter cycling and refresh stay in this list; hold them once.
+        if super::is_key_repeat(&key) && matches!(key.code, KeyCode::Char('f' | 'r')) {
+            return true;
+        }
         let page = self.diff.viewport.max(1) as isize;
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
@@ -1689,6 +1693,43 @@ impl App {
             let Some(ViewKind::Diff(view)) = self.views.get_mut(&id) else {
                 return false;
             };
+            // A held key repeats continuous navigation and text editing only.
+            // Toggles, note mutations, file jumps, refreshes, and agent sends
+            // leave this DIFF receiver active, so their repeats do nothing.
+            if super::is_key_repeat(&key) {
+                let ctrl = super::keys::is_ctrl_chord(key.modifiers);
+                let action = if view.note_draft.is_some() || view.note_selecting {
+                    false
+                } else if view.search.is_some() {
+                    ctrl && key.code == KeyCode::Char('i')
+                } else {
+                    matches!(
+                        key.code,
+                        KeyCode::Char(
+                            's' | 'w'
+                                | 'v'
+                                | '+'
+                                | '='
+                                | '-'
+                                | 'J'
+                                | 'K'
+                                | 'N'
+                                | 'P'
+                                | ' '
+                                | 'e'
+                                | 'x'
+                                | 'D'
+                                | 'a'
+                                | 'r'
+                                | 'm'
+                                | 'f'
+                        )
+                    )
+                };
+                if action {
+                    return false;
+                }
+            }
             if view.note_draft.is_some() {
                 match key.code {
                     KeyCode::Char(c) => {
@@ -2834,6 +2875,123 @@ mod tests {
             app.views.get(&id),
             Some(ViewKind::Diff(view)) if view.selected == 3 && view.scroll == 3
         ));
+    }
+
+    fn seed_saved_note(app: &mut App) -> (PaneId, usize) {
+        let key = install_snapshot(app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let changed = DiffLine {
+            kind: DiffLineKind::Addition,
+            old_line: None,
+            new_line: Some(8),
+            text: "let corrected = true;".into(),
+        };
+        let file_diff = FileDiff {
+            key: key.clone(),
+            status: DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: vec![DiffHunk {
+                id: "hunk".into(),
+                old_start: 7,
+                new_start: 8,
+                header: "@@ -7,0 +8 @@".into(),
+                lines: vec![changed],
+            }],
+        };
+        let stack_rows = crate::diff::rows::stack_rows(&file_diff);
+        let split_rows = crate::diff::rows::split_rows(&file_diff);
+        let selected = stack_rows
+            .iter()
+            .position(|line| line.new_line == Some(8))
+            .expect("new source row");
+        let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) else {
+            panic!("native DIFF view");
+        };
+        view.preference = crate::diff::DiffLayoutPreference::Stack;
+        view.stack_rows = stack_rows;
+        view.split_rows = split_rows;
+        view.selected = selected;
+        view.load = DiffLoad::Ready(Arc::new(file_diff));
+        app.diff.notes.push(crate::diff::ReviewNote {
+            id: "clicked-note".into(),
+            review_id: "review".into(),
+            author: "user".into(),
+            kind: crate::diff::NoteKind::Issue,
+            body: "Please keep this behavior".into(),
+            anchor: crate::diff::notes::NoteAnchor {
+                diff_key: key,
+                side: crate::diff::DiffSide::New,
+                start_line: 8,
+                end_line: 8,
+                context: "let corrected = true;".into(),
+                context_sha256: "hash".into(),
+            },
+            state: crate::diff::NoteState::Open,
+            deliveries: Vec::new(),
+            revision: 1,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        });
+        (id, selected)
+    }
+
+    #[test]
+    fn diff_view_left_and_right_repeat_source_side_selection() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("diff-side-navigation");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let (id, _) = seed_saved_note(&mut app);
+        let side = |app: &App| match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.selected_side,
+            _ => panic!("native DIFF view"),
+        };
+        let event =
+            |code, kind| AppEvent::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind));
+
+        app.handle_event(event(KeyCode::Left, KeyEventKind::Press));
+        assert_eq!(side(&app), crate::diff::DiffSide::Old);
+        app.handle_event(event(KeyCode::Left, KeyEventKind::Release));
+        app.handle_event(event(KeyCode::Right, KeyEventKind::Press));
+        assert_eq!(side(&app), crate::diff::DiffSide::New);
+        app.handle_event(event(KeyCode::Right, KeyEventKind::Release));
+
+        // Held navigation is continuous: the Repeat reaches the same view.
+        app.handle_event(event(KeyCode::Left, KeyEventKind::Press));
+        app.handle_event(event(KeyCode::Right, KeyEventKind::Press));
+        app.handle_event(event(KeyCode::Left, KeyEventKind::Repeat));
+        assert_eq!(side(&app), crate::diff::DiffSide::Old);
+    }
+
+    #[test]
+    fn diff_view_space_repeat_does_not_toggle_note_selection() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("diff-note-space-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let _ = seed_saved_note(&mut app);
+        let event = |kind| {
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                kind,
+            ))
+        };
+
+        app.handle_event(event(KeyEventKind::Press));
+        assert!(app.diff.selected_notes.contains("clicked-note"));
+        app.handle_event(event(KeyEventKind::Repeat));
+        assert!(
+            app.diff.selected_notes.contains("clicked-note"),
+            "held Space cannot toggle review-note send selection"
+        );
     }
 
     #[test]

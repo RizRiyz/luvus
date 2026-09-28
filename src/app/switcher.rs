@@ -401,6 +401,8 @@ impl App {
                     self.switcher_cursor = (self.switcher_cursor + 1).min(n - 1);
                 }
             }
+            // Scope cycles once per press.
+            KeyCode::Tab if super::is_key_repeat(&key) => {}
             KeyCode::Tab => {
                 let next = self.switcher_scope.next();
                 self.switcher_set_scope(next);

@@ -1321,6 +1321,18 @@ impl App {
         // Text column width: the scroll clamp needs it to measure how many rows a
         // soft-wrapped line really occupies.
         let text_w = rect.map(|r| view_text_w(v, r.width)).unwrap_or(0);
+        // Case, wrap, and copy toggle or copy in place; a held key runs once.
+        if super::is_key_repeat(&key) {
+            let ctrl = super::keys::is_ctrl_chord(key.modifiers);
+            let action = if v.search.is_some() {
+                ctrl && key.code == KeyCode::Char('i')
+            } else {
+                !ctrl && matches!(key.code, KeyCode::Char('w' | 'y' | 'c'))
+            };
+            if action {
+                return true;
+            }
+        }
         // Active search owns all input. Editing accepts query text; committed
         // search accepts only navigation and search controls. Everything else
         // is swallowed so FILE commands cannot mutate or close the view under

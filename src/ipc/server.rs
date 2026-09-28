@@ -587,6 +587,7 @@ pub fn run() -> Result<()> {
             app.detach_requested = false;
             if let Some(id) = foreground.take() {
                 if let Some(c) = clients.remove(&id) {
+                    app.release_client_key_presses(id);
                     let _ = c.send_control(ServerMessage::Detach);
                 }
                 foreground = latest_client(&clients);
@@ -763,6 +764,10 @@ pub fn run() -> Result<()> {
         if refresh_navigation {
             refresh_suspended_workspaces(&app, &mut clients);
         }
+        // Every client-removal path (disconnect, failed broadcast, dead render
+        // writer, detach) converges here: a key held by a vanished client
+        // would otherwise stay pressed inside its pane forever.
+        app.release_absent_client_key_presses(|id| clients.contains_key(&id));
         if !has_render_clients(&clients) {
             // Suspended remote endpoints retain no render debt. Preparing one
             // later always starts with a complete fresh projection.
@@ -838,6 +843,7 @@ fn apply(
             );
             let was_foreground = *foreground == Some(id);
             clients.remove(&id);
+            app.release_client_key_presses(id);
             app.client_files_visible = client_files_visible(clients);
             if was_foreground {
                 app.commander = None;
@@ -858,6 +864,7 @@ fn apply(
             client.prepare_ticket = Some(ticket);
             client.size = (cols.max(1), rows.max(1));
             client.interest = SurfaceInterest::Prepared;
+            app.release_client_key_presses(id);
             client.force_full = true;
             client.retained_ready = false;
             client.retained_pane_content.clear();
@@ -876,6 +883,9 @@ fn apply(
                 return false;
             }
             client.interest = interest;
+            if interest != SurfaceInterest::Active {
+                app.release_client_key_presses(id);
+            }
             client.prepare_ticket = None;
             client.force_full = true;
             client.behind = false;
@@ -1104,22 +1114,31 @@ fn apply(
             }
 
             // Input ownership follows actual interaction, not background resize
-            // noise. Before hit-testing a newly active client, commit its view
-            // geometry and PTY dimensions synchronously.
-            let promoted = *foreground != Some(id);
+            // noise or trailing enhanced-key phases. Repeat/Release still reach
+            // App for pairing, but only a Press may adopt another client's
+            // viewport and PTY geometry.
+            let key_phase_promotes = !matches!(
+                &input,
+                ClientInput::Key(key)
+                    if key.kind != ratatui::crossterm::event::KeyEventKind::Press
+            );
+            let promoted = key_phase_promotes && *foreground != Some(id);
             if promoted {
                 app.commander = None;
                 *foreground = Some(id);
                 apply_foreground_client(app, clients, *foreground);
             }
             let target_size = clients.get(&id).map(|client| client.size);
-            if promoted || target_size.is_some_and(|size| size != *interactive_size) {
+            let adopts_input_view = key_phase_promotes
+                && (promoted || target_size.is_some_and(|size| size != *interactive_size));
+            if adopts_input_view {
                 let no_damage = HashMap::new();
                 let disconnected = clients.get_mut(&id).is_some_and(|client| {
                     render_client(app, client, true, false, false, &no_damage).disconnected
                 });
                 if disconnected {
                     clients.remove(&id);
+                    app.release_client_key_presses(id);
                     *foreground = latest_client(clients);
                     apply_foreground_client(app, clients, *foreground);
                     discard_client_input(input);
@@ -1142,7 +1161,7 @@ fn apply(
                 .expect("input client remains registered");
             let scoped = client.machine_capable && client.shell_dock_layout.owns_workspaces;
             if !scoped {
-                let changed = app.handle_event(event);
+                let changed = app.handle_client_event(id, event);
                 if let Some(text) = app
                     .commander
                     .as_mut()
@@ -1159,7 +1178,7 @@ fn apply(
                 app.config.layout.workspace_paths = state.workspace_paths;
             }
             app.client_sidebar_input = true;
-            let changed = app.handle_event(event);
+            let changed = app.handle_client_event(id, event);
             // The composer belongs to this exact input client. Deliver its
             // copy/cut effect here, before another input can take foreground,
             // rather than using the ordinary all-clients clipboard broadcast.
@@ -2782,6 +2801,48 @@ mod tests {
         ));
         assert!(plain_rx.try_recv().is_err());
         assert_eq!(clients.len(), 2);
+    }
+
+    #[test]
+    fn clients_removed_by_any_path_release_their_held_pane_keys() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("broadcast-held-key-cleanup");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(80, 24, app_tx).expect("app starts");
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = mpsc::channel();
+        let target = app.panes.get_mut(&pane).expect("focused pane");
+        target.replace_input_sender_for_test(input_tx);
+        target.engine.lock().expect("engine").advance(b"\x1b[=2u");
+
+        app.handle_client_event(
+            7,
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            )),
+        );
+        let crate::terminal::pty::InputAction::Bytes(press) = input_rx.recv().unwrap() else {
+            panic!("Press must reach the pane");
+        };
+        assert_eq!(press, b"\x1b[A");
+
+        // A failed broadcast removes the client without an explicit detach.
+        let (client, receiver) = display_client(80, 24, 1);
+        drop(receiver);
+        let mut clients = HashMap::from([(7, client)]);
+        broadcast(&mut clients, ServerMessage::Notify("done".into()));
+        assert!(clients.is_empty());
+        app.release_absent_client_key_presses(|id| clients.contains_key(&id));
+
+        let crate::terminal::pty::InputAction::Bytes(release) = input_rx.recv().unwrap() else {
+            panic!("client removal must release its held key");
+        };
+        assert_eq!(release, b"\x1b[1;1:3A");
+        app.release_absent_client_key_presses(|id| clients.contains_key(&id));
+        assert!(input_rx.try_recv().is_err(), "the release is sent once");
     }
 
     fn received_frame_size(rx: &mpsc::Receiver<ServerMessage>) -> (u16, u16) {
