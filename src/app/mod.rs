@@ -10842,6 +10842,32 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_keeps_the_active_tab_when_an_earlier_external_tab_is_omitted() {
+        let _env = crate::persist::test_env("backend-restore-active-tab");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let external = app.layout().focus;
+        app.backend_non_restorable.insert(external);
+
+        app.new_tab();
+        let expected_tab = app.ws().tabs[1].id.clone();
+        app.new_tab();
+        app.workspaces[0].active_tab = 1;
+
+        let snapshot = persist::snapshot(&app);
+        assert_eq!(snapshot.workspaces[0].tabs.len(), 2);
+        assert_eq!(snapshot.workspaces[0].active_tab, 0);
+        assert_eq!(snapshot.workspaces[0].tabs[0].id, expected_tab);
+
+        let (restored_tx, _restored_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restored_tx).expect("remaining tabs restore");
+        assert_eq!(
+            restored.ws().tabs[restored.ws().active_tab].id,
+            expected_tab
+        );
+    }
+
+    #[test]
     fn pane_screen_opt_out_ignores_and_schedules_scrubbing_of_existing_content() {
         let _env = crate::persist::test_env("pane-screen-restore-opt-out");
         let (tx, _rx) = std::sync::mpsc::channel();
