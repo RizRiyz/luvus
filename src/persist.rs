@@ -836,7 +836,7 @@ fn snapshot_layout(
                 });
                 continue;
             }
-            let panes = tab
+            let panes: Vec<(u32, PaneSnap)> = tab
                 .layout
                 .leaves()
                 .into_iter()
