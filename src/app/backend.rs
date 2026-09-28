@@ -631,7 +631,7 @@ impl App {
                         DispatchEvidence::NotStarted,
                     )
                 })?;
-            let restore_explicit = req.params.contains_key("restore");
+            let restore_explicit = req.params.get("restore").is_some();
             let restore = match req.params.get("restore") {
                 None => true,
                 Some(Value::Bool(restore)) => *restore,

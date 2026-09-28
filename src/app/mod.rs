@@ -3927,6 +3927,10 @@ impl App {
             .into_iter()
             .filter(|(_, id)| panes.contains_key(id))
             .collect();
+        let backend_labels = restored_backend_labels
+            .into_iter()
+            .filter(|(id, _)| panes.contains_key(id))
+            .collect();
 
         let mut app = App {
             pending_pty_exits: HashMap::new(),
@@ -3934,10 +3938,7 @@ impl App {
             panes,
             backend_server_generation,
             backend_terminal_index,
-            backend_labels: restored_backend_labels
-                .into_iter()
-                .filter(|(id, _)| panes.contains_key(id))
-                .collect(),
+            backend_labels,
             backend_non_restorable: HashSet::new(),
             backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
@@ -10784,9 +10785,16 @@ mod tests {
                 .unwrap(),
         );
         assert!(app.backend_non_restorable.contains(&external));
-        let inventory = app.backend_inventory(&json!({})).unwrap();
+        let (inventory_reply, _inventory_response) = std::sync::mpsc::channel();
+        let inventory: Value = serde_json::from_str(&app.handle_terminal_backend(&ApiRequest {
+            id: "inventory".into(),
+            method: "terminal.backend.inventory".into(),
+            params: json!({}),
+            reply: inventory_reply,
+        }))
+        .unwrap();
         let pane_id = external.0.to_string();
-        let terminal = inventory["terminals"]
+        let terminal = inventory["result"]["terminals"]
             .as_array()
             .unwrap()
             .iter()
