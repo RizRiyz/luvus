@@ -2373,6 +2373,9 @@ pub struct App {
     /// Harness-assigned display labels are separate from addressable agent
     /// aliases and from child-controlled OSC titles.
     pub(crate) backend_labels: HashMap<PaneId, String>,
+    /// UHP-created terminals whose lifecycle belongs to an external manager.
+    /// They remain ordinary live panes, but are omitted from restart snapshots.
+    pub(crate) backend_non_restorable: HashSet<PaneId>,
     /// Last terminal content revision announced to backend observers. PTY
     /// readers coalesce wakeups, so the re-arm boundary may need to publish a
     /// newer trailing revision without duplicating the first wake's event.
@@ -3210,6 +3213,7 @@ impl App {
             backend_server_generation,
             backend_terminal_index,
             backend_labels: HashMap::new(),
+            backend_non_restorable: HashSet::new(),
             backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
             last_backend_wait_scan: Instant::now(),
@@ -3591,6 +3595,7 @@ impl App {
         let mut module_panes: HashMap<PaneId, crate::module::ModulePaneRecord> = HashMap::new();
         let mut views: HashMap<PaneId, ViewKind> = HashMap::new();
         let mut restored_names: Vec<(String, PaneId)> = Vec::new();
+        let mut restored_backend_labels: Vec<(PaneId, String)> = Vec::new();
         let mut workspaces = Vec::new();
         for ws in snap.workspaces {
             let mut tabs = Vec::new();
@@ -3848,6 +3853,14 @@ impl App {
                     }
                     panes.insert(id, pane);
                     status.insert(id, st);
+                    if let Some(label) = &ps.backend_label {
+                        if !label.is_empty()
+                            && label.len() <= crate::terminal::backend::MAX_TITLE_BYTES
+                            && !label.chars().any(char::is_control)
+                        {
+                            restored_backend_labels.push((id, label.clone()));
+                        }
+                    }
                     remap.insert(*raw, id);
                 }
                 // A tree that references panes that failed to restore (or is
@@ -3921,7 +3934,11 @@ impl App {
             panes,
             backend_server_generation,
             backend_terminal_index,
-            backend_labels: HashMap::new(),
+            backend_labels: restored_backend_labels
+                .into_iter()
+                .filter(|(id, _)| panes.contains_key(id))
+                .collect(),
+            backend_non_restorable: HashSet::new(),
             backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
             last_backend_wait_scan: Instant::now(),
@@ -8925,6 +8942,7 @@ impl App {
         self.runtime_cwd_dirty_panes.remove(&id);
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
+        self.backend_non_restorable.remove(&id);
         self.backend_published_revisions.remove(&id);
         self.agent_title_panes.remove(&id);
         self.cancel_backend_revision_waits(id);
@@ -10126,6 +10144,8 @@ mod tests {
                 placement: crate::terminal::backend::CreatePlacement::Workspace,
                 focus: false,
                 label: None,
+                restore: true,
+                restore_explicit: false,
             },
             Ok(pane),
         );
@@ -10718,6 +10738,99 @@ mod tests {
         assert_eq!(restored.layout().len(), 2);
         assert_eq!(restored.workspaces[0].name, "Luvus website");
         assert!(restored.workspaces[0].pinned);
+    }
+
+    #[test]
+    fn backend_restore_policy_omits_external_panes_and_preserves_live_labels() {
+        let _env = crate::persist::test_env("backend-restore-policy");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let restorable = app.layout().focus;
+        app.backend_labels
+            .insert(restorable, "interactive-shell".into());
+
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_backend_create(ApiRequest {
+            id: "external-supervisor".into(),
+            method: "terminal.backend.create".into(),
+            params: json!({
+                "cwd": std::env::current_dir().unwrap(),
+                "label": "hand-supervisor",
+                "placement": {"kind": "workspace"},
+                "focus": false,
+                "restore": false,
+            }),
+            reply,
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let response = loop {
+            if let Ok(response) = response.try_recv() {
+                break response;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "terminal creation timed out");
+            app.handle_event(
+                rx.recv_timeout(remaining)
+                    .expect("terminal creation publishes an app event"),
+            );
+        };
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["restore"], false);
+        let external = PaneId(
+            response["result"]["pane_id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+        assert!(app.backend_non_restorable.contains(&external));
+        let inventory = app.backend_inventory(&json!({})).unwrap();
+        let pane_id = external.0.to_string();
+        let terminal = inventory["terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|terminal| terminal["pane_id"].as_str() == Some(pane_id.as_str()))
+            .expect("external terminal is inventoried");
+        assert_eq!(terminal["label"], "hand-supervisor");
+        assert_eq!(terminal["restore"], false);
+
+        let status = app.status.get_mut(&external).unwrap();
+        status.agent = "claude".into();
+        status.agent_session = Some(AgentSession {
+            agent: "claude".into(),
+            session_id: "external-session".into(),
+        });
+
+        let snapshot = persist::snapshot(&app);
+        let saved = snapshot.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .map(|(id, pane)| (*id, pane))
+            .collect::<Vec<_>>();
+        assert_eq!(saved.len(), 1, "external pane is absent from the snapshot");
+        assert_eq!(saved[0].0, restorable.0);
+        assert_eq!(
+            saved[0].1.backend_label.as_deref(),
+            Some("interactive-shell")
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("hand-supervisor"));
+        assert!(!json.contains("external-session"));
+
+        let (restored_tx, _restored_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restored_tx).expect("surviving pane restores");
+        assert_eq!(restored.layout().len(), 1);
+        let restored_pane = restored.layout().focus;
+        assert_eq!(
+            restored
+                .backend_labels
+                .get(&restored_pane)
+                .map(String::as_str),
+            Some("interactive-shell")
+        );
+        assert!(restored.backend_non_restorable.is_empty());
     }
 
     #[test]
@@ -13445,6 +13558,7 @@ fi
         let old: persist::PaneSnap =
             serde_json::from_str(r#"{"cwd":"/tmp/x","command":"sh"}"#).unwrap();
         assert_eq!(old.agent_launch, None);
+        assert_eq!(old.backend_label, None);
     }
 
     #[test]

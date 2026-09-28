@@ -116,8 +116,9 @@ def main():
             runtime_stream, runtime_reader, runtime_subscription = subscribe(
                 socket_path, "events.subscribe"
             )
-            created = request(socket_path, {"id":"create","method":"terminal.backend.create","params":{"cwd":str(ROOT),"command":["/bin/sh","-c","cat"],"label":"live-conformance","placement":{"kind":"workspace"},"focus":False}})
+            created = request(socket_path, {"id":"create","method":"terminal.backend.create","params":{"cwd":str(ROOT),"command":["/bin/sh","-c","cat"],"label":"live-conformance","placement":{"kind":"workspace"},"focus":False,"restore":False}})
             assert created["result"]["dispatch"] == "executed"
+            assert created["result"]["restore"] is False
             runtime = locator(created["result"])
             session = request(socket_path, {
                 "id": "session",
@@ -181,6 +182,13 @@ def main():
             })
             assert released["result"]["type"] == "agent_release"
             snapshot = request(socket_path, {"id":"snapshot","method":"terminal.backend.snapshot","params":{}})
+            terminal = next(
+                terminal
+                for terminal in snapshot["result"]["terminals"]
+                if terminal["terminal_id"] == runtime["terminal_id"]
+            )
+            assert terminal["label"] == "live-conformance"
+            assert terminal["restore"] is False
             created_event = wait_event(event_reader, "terminal.created", runtime["terminal_id"])
             assert subscription["sequence"] < created_event["sequence"] <= snapshot["result"]["event_sequence"]
             replayed = reconcile_snapshot(snapshot["result"], [created_event])

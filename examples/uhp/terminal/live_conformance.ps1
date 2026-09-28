@@ -231,10 +231,14 @@ try {
             label = "windows-conformance"
             placement = @{ kind = "workspace" }
             focus = $false
+            restore = $false
         }
     }
     if ($Created.result.dispatch -ne "executed") {
         throw "Windows terminal creation was not executed"
+    }
+    if ($Created.result.restore -ne $false) {
+        throw "Windows terminal creation did not preserve the restore policy"
     }
     $TerminalId = [string]$Created.result.terminal_id
     $PaneId = [string]$Created.result.pane_id
@@ -242,6 +246,20 @@ try {
     $StartMarker = [string]$Created.result.root_process.start_marker
     if (-not $StartMarker.StartsWith("windows:")) {
         throw "Windows terminal did not expose a creation-time start marker"
+    }
+    $Inventory = Send-Request $Address @{
+        id = "inventory"
+        method = "terminal.backend.inventory"
+        params = @{}
+    }
+    $InventoryTerminal = $Inventory.result.terminals |
+        Where-Object { $_.terminal_id -eq $TerminalId } |
+        Select-Object -First 1
+    if ($null -eq $InventoryTerminal -or $InventoryTerminal.restore -ne $false) {
+        throw "Windows terminal inventory did not preserve the restore policy"
+    }
+    if ($InventoryTerminal.label -ne "windows-conformance") {
+        throw "Windows terminal inventory did not preserve the label"
     }
     $CreatedEvent = Wait-TerminalEvent $EventConnection "terminal.created" $TerminalId
     if ($CreatedEvent.data.pane_id -ne $PaneId) {

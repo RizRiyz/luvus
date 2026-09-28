@@ -93,6 +93,9 @@ fn new_tab_id() -> String {
 pub struct PaneSnap {
     pub cwd: PathBuf,
     pub command: String,
+    /// UHP terminal label, kept separate from the user-facing agent alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_label: Option<String>,
     /// The pane's live name (`pane name` / `agent name`), so the alias and its
     /// title survive a restart. Re-attached to the pane's new id on restore.
     #[serde(default)]
@@ -590,7 +593,12 @@ struct SessionEvidence {
 fn capture_session_evidence(app: &App) -> SessionEvidence {
     let mut out: HashMap<PaneId, Option<(String, String)>> = HashMap::new();
     let mut claimed: HashSet<(String, String)> = HashSet::new();
-    let mut ids: Vec<PaneId> = app.status.keys().copied().collect();
+    let mut ids: Vec<PaneId> = app
+        .status
+        .keys()
+        .filter(|id| !app.backend_non_restorable.contains(id))
+        .copied()
+        .collect();
     ids.sort_by_key(|p| p.0);
 
     // Pass 1: precise, hook-reported sessions take their id outright.
@@ -723,6 +731,9 @@ pub(crate) fn capture_session(app: &App) -> SessionCapture {
     let evidence = capture_session_evidence(app);
     let mut launch_args = HashMap::new();
     for (id, status) in &app.status {
+        if app.backend_non_restorable.contains(id) {
+            continue;
+        }
         let agent = evidence
             .out
             .get(id)
@@ -815,6 +826,9 @@ fn snapshot_layout(
                 .leaves()
                 .into_iter()
                 .filter_map(|id| {
+                    if app.backend_non_restorable.contains(&id) {
+                        return None;
+                    }
                     // A file-view leaf (docs/38 FILE-3) is saved by its path and
                     // rebuilt on restore; it has no PTY.
                     if let Some(view) = app.views.get(&id) {
@@ -863,6 +877,7 @@ fn snapshot_layout(
                             PaneSnap {
                                 cwd: PathBuf::new(),
                                 command: String::new(),
+                                backend_label: None,
                                 name: app.agent_name_for(id).map(|s| s.to_string()),
                                 agent_session: None,
                                 agent_launch: None,
@@ -922,6 +937,7 @@ fn snapshot_layout(
                             PaneSnap {
                                 cwd: p.cwd.clone(),
                                 command: p.command.clone(),
+                                backend_label: app.backend_labels.get(&id).cloned(),
                                 name: app.agent_name_for(id).map(|s| s.to_string()),
                                 agent_session,
                                 agent_launch,
