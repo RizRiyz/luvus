@@ -222,6 +222,78 @@ def main():
             runtime_stream.close()
             gone = request(socket_path, {"id":"gone","method":"terminal.backend.validate","params":runtime})
             assert gone["result"]["state"] == "gone"
+
+            for identifier, label, restore in (
+                ("restorable", "restorable-terminal", True),
+                ("external", "external-terminal", False),
+            ):
+                created = request(socket_path, {
+                    "id": identifier,
+                    "method": "terminal.backend.create",
+                    "params": {
+                        "cwd": str(ROOT),
+                        "command": ["/bin/sh", "-c", "cat"],
+                        "label": label,
+                        "placement": {"kind": "workspace"},
+                        "focus": False,
+                        "restore": restore,
+                    },
+                })
+                assert created["result"]["state"] == "succeeded"
+                assert created["result"]["restore"] is restore
+
+            previous_socket = socket_path.lstat()
+            previous_evidence = (
+                previous_socket.st_dev,
+                previous_socket.st_ino,
+                previous_socket.st_ctime_ns,
+            )
+            server.terminate()
+            server.wait(timeout=3)
+            server = subprocess.Popen(
+                [str(binary), "server"],
+                cwd=ROOT,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + 10
+            while True:
+                if server.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("isolated Luvus server did not restart")
+                try:
+                    current_socket = socket_path.lstat()
+                    current_evidence = (
+                        current_socket.st_dev,
+                        current_socket.st_ino,
+                        current_socket.st_ctime_ns,
+                    )
+                    if current_evidence != previous_evidence:
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                            probe.settimeout(0.1)
+                            probe.connect(str(socket_path))
+                        break
+                except (FileNotFoundError, OSError):
+                    pass
+                time.sleep(0.025)
+
+            inventory = request(socket_path, {
+                "id": "inventory-after-restart",
+                "method": "terminal.backend.inventory",
+                "params": {},
+            })
+            terminals = inventory["result"]["terminals"]
+            restored = next(
+                terminal
+                for terminal in terminals
+                if terminal["label"] == "restorable-terminal"
+            )
+            assert restored["restore"] is True
+            assert all(
+                terminal["label"] != "external-terminal"
+                for terminal in terminals
+            )
             print("terminal-backend live conformance passed in isolated LUVUS_HOME")
         finally:
             server.terminate()
