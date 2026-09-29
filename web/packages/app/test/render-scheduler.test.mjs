@@ -30,26 +30,64 @@ test("a redraw waits while a pointer is pressed and runs after release", () => {
   const scheduler = new RenderScheduler(() => { renders += 1; }, frame.nextFrame);
 
   scheduler.request();
-  scheduler.hold(); // pressed before the frame ran
+  scheduler.hold(1); // pressed before the frame ran
+  assert.equal(scheduler.holding, true);
   frame.run();
   scheduler.request();
   frame.run();
   assert.equal(renders, 0, "the pressed element stays in place");
 
-  scheduler.release();
+  scheduler.release(1);
+  assert.equal(scheduler.holding, false);
   frame.run();
   assert.equal(renders, 1, "one redraw once released");
 });
 
-test("a release that is never seen does not hold redraws forever", async () => {
+test("a long press keeps holding until that pointer is released", async () => {
+  const frame = frames();
+  let renders = 0;
+  const scheduler = new RenderScheduler(() => { renders += 1; }, frame.nextFrame, 10_000);
+  scheduler.hold(1);
+  scheduler.request();
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  frame.run();
+  assert.equal(renders, 0, "still pressed after more than a second");
+  scheduler.release(1);
+  frame.run();
+  assert.equal(renders, 1);
+});
+
+test("with several pointers pressed, one release does not end the hold", () => {
+  const frame = frames();
+  let renders = 0;
+  const scheduler = new RenderScheduler(() => { renders += 1; }, frame.nextFrame);
+  scheduler.hold(1);
+  scheduler.hold(2);
+  scheduler.request();
+  scheduler.release(1);
+  frame.run();
+  assert.equal(renders, 0, "the second finger is still down");
+  scheduler.release(7); // an unknown pointer changes nothing
+  frame.run();
+  assert.equal(renders, 0);
+  scheduler.release(2);
+  frame.run();
+  assert.equal(renders, 1);
+});
+
+test("releases the page never saw still let redraws resume", async () => {
   const frame = frames();
   let renders = 0;
   const scheduler = new RenderScheduler(() => { renders += 1; }, frame.nextFrame, 20);
-  scheduler.hold();
+  scheduler.hold(1);
   scheduler.request();
-  frame.run();
-  assert.equal(renders, 0);
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  scheduler.releaseAll(); // window blur or a hidden tab
   frame.run();
   assert.equal(renders, 1);
+
+  scheduler.hold(2);
+  scheduler.request();
+  await new Promise((resolve) => setTimeout(resolve, 40)); // last-resort timeout
+  frame.run();
+  assert.equal(renders, 2);
 });

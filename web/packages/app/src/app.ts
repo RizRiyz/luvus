@@ -53,15 +53,24 @@ export class WebApp {
   #sent: SentCredential = { ticket: false, code: false };
   #pairError: string | undefined;
   /** Redraws caused by live updates, as opposed to the person's own actions. */
-  readonly #renders = new RenderScheduler(() => this.#render());
+  readonly #renders = new RenderScheduler(() => this.#renderNow());
 
   constructor(private readonly root: HTMLElement) {
     // Hold live redraws while a pointer is pressed, so the pressed element
     // is still there when it is released and the click is delivered.
-    root.addEventListener("pointerdown", () => this.#renders.hold(), true);
-    for (const type of ["pointerup", "pointercancel"]) {
-      window.addEventListener(type, () => this.#renders.release(), true);
+    root.addEventListener("pointerdown", (event) => this.#renders.hold(event.pointerId), true);
+    for (const type of ["pointerup", "pointercancel"] as const) {
+      window.addEventListener(type, (event) => this.#renders.release(event.pointerId), true);
     }
+    // A mouse that moves with no button pressed was released where this page
+    // could not see it, for example outside the window.
+    window.addEventListener("pointermove", (event) => {
+      if (event.buttons === 0) this.#renders.release(event.pointerId);
+    }, true);
+    window.addEventListener("blur", () => this.#renders.releaseAll());
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) this.#renders.releaseAll();
+    });
     this.#tabCode = consumePairingFragment();
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     this.#bridge = new BridgeClient(`${scheme}//${location.host}/bridge`, () => {
@@ -112,7 +121,17 @@ export class WebApp {
     }
   }
 
+  /**
+   * Redraw now, unless a pointer is pressed on the page: then the redraw is
+   * queued until release, so a request that completes mid-press (device or
+   * session lists, for example) cannot replace the pressed element.
+   */
   #render(): void {
+    if (this.#renders.holding) this.#renders.request();
+    else this.#renderNow();
+  }
+
+  #renderNow(): void {
     if (this.#terminal) return;
     const snapshot = this.#session.snapshot;
     // Without authority nothing on the dashboard can act, so show the access
@@ -350,6 +369,10 @@ export class WebApp {
       const url = rawUrl.trim();
       this.#devices = asDeviceStatus(await this.#bridge.request("web.devices.set_public_url", { url: url || null }));
       if (this.#pairingCode) this.#pairingUrl = this.#pairingLink(this.#pairingCode);
+      // The bridge may normalize the address; show what it saved rather than
+      // carrying the typed spelling into the rebuilt field.
+      const field = this.root.querySelector<HTMLInputElement>(".device-url-input");
+      if (field) field.value = field.defaultValue;
       this.#render();
     } catch (error) {
       failure = error;

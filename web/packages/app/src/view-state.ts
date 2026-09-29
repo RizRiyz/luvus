@@ -2,27 +2,29 @@
  * Rebuild `root` without disturbing the person using it: focus, the caret in a
  * text field, text typed but not yet submitted, and the scroll position of
  * containers marked with `data-scroll-key` all carry over to the new elements.
+ * Typed text is kept only while the field's saved value is unchanged; once the
+ * page has a newer value, for example after a save, that value is shown.
  *
  * Elements are matched by `data-view-key` when present, otherwise by tag,
  * class, accessible label, and (for buttons) text, then by their order among
  * elements with the same key.
  */
 export function rebuildPreservingView(root: HTMLElement, rebuild: () => void): void {
-  const active = root.ownerDocument.activeElement;
-  const focused = active instanceof HTMLElement && active !== root && root.contains(active)
+  const active = root.ownerDocument.activeElement as HTMLElement | null;
+  const focused = active && active !== root && root.contains(active)
     ? { tag: active.tagName, ...locate(root, active) }
     : undefined;
   const caret = focused && isTextField(active) ? readCaret(active) : undefined;
 
-  const edits = new Map<string, string>();
-  for (const field of root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")) {
-    if (isTextField(field) && !field.readOnly && field.value !== field.defaultValue) {
+  const edits = new Map<string, { value: string; saved: string }>();
+  for (const field of textFields(root)) {
+    if (!field.readOnly && field.value !== field.defaultValue) {
       const place = locate(root, field);
-      edits.set(`${place.key}#${place.index}`, field.value);
+      edits.set(`${place.key}#${place.index}`, { value: field.value, saved: field.defaultValue });
     }
   }
   const scrolls = new Map<string, [number, number]>();
-  for (const container of root.querySelectorAll<HTMLElement>("[data-scroll-key]")) {
+  for (const container of Array.from(root.querySelectorAll<HTMLElement>("[data-scroll-key]"))) {
     if (container.scrollTop || container.scrollLeft) {
       scrolls.set(container.dataset.scrollKey ?? "", [container.scrollTop, container.scrollLeft]);
     }
@@ -31,18 +33,18 @@ export function rebuildPreservingView(root: HTMLElement, rebuild: () => void): v
   rebuild();
 
   if (edits.size) {
-    for (const field of root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")) {
+    for (const field of textFields(root)) {
       const place = locate(root, field);
-      const value = edits.get(`${place.key}#${place.index}`);
-      if (value !== undefined && !field.readOnly) field.value = value;
+      const edit = edits.get(`${place.key}#${place.index}`);
+      if (edit && !field.readOnly && field.defaultValue === edit.saved) field.value = edit.value;
     }
   }
-  for (const container of root.querySelectorAll<HTMLElement>("[data-scroll-key]")) {
+  for (const container of Array.from(root.querySelectorAll<HTMLElement>("[data-scroll-key]"))) {
     const position = scrolls.get(container.dataset.scrollKey ?? "");
     if (position) [container.scrollTop, container.scrollLeft] = position;
   }
   if (focused) {
-    const target = [...root.querySelectorAll<HTMLElement>(focused.tag)]
+    const target = Array.from(root.querySelectorAll<HTMLElement>(focused.tag))
       .filter((candidate) => viewKey(candidate) === focused.key)[focused.index];
     if (target && !target.hasAttribute("disabled")) {
       target.focus({ preventScroll: true });
@@ -53,7 +55,7 @@ export function rebuildPreservingView(root: HTMLElement, rebuild: () => void): v
 
 function locate(root: HTMLElement, target: HTMLElement): { key: string; index: number } {
   const key = viewKey(target);
-  const same = [...root.querySelectorAll<HTMLElement>(target.tagName)].filter((candidate) => viewKey(candidate) === key);
+  const same = Array.from(root.querySelectorAll<HTMLElement>(target.tagName)).filter((candidate) => viewKey(candidate) === key);
   return { key, index: Math.max(0, same.indexOf(target)) };
 }
 
@@ -68,10 +70,16 @@ function viewKey(element: HTMLElement): string {
 type TextField = HTMLInputElement | HTMLTextAreaElement;
 type Caret = [number | null, number | null, "forward" | "backward" | "none" | null];
 
-function isTextField(element: unknown): element is TextField {
-  if (element instanceof HTMLTextAreaElement) return true;
-  return element instanceof HTMLInputElement
-    && ["text", "url", "search", "tel", "password", ""].includes(element.type);
+const TEXT_INPUT_TYPES = new Set(["text", "url", "search", "tel", "password", ""]);
+
+function textFields(root: HTMLElement): TextField[] {
+  return Array.from(root.querySelectorAll<TextField>("input, textarea")).filter(isTextField);
+}
+
+function isTextField(element: HTMLElement | null): element is TextField {
+  if (!element) return false;
+  if (element.tagName === "TEXTAREA") return true;
+  return element.tagName === "INPUT" && TEXT_INPUT_TYPES.has((element as HTMLInputElement).type);
 }
 
 function readCaret(field: TextField): Caret | undefined {
