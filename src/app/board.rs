@@ -3256,6 +3256,21 @@ fn run_gate_command(
             let _ = child.kill();
             break (child.wait(), true);
         }
+        #[cfg(unix)]
+        match crate::platform::child_exited_unreaped(&child) {
+            Ok(true) => {
+                // Keep the exited shell waitable until its original process
+                // group is gone. Reaping first would allow the group ID to be
+                // reused before cleanup can safely signal it.
+                if let Err(error) = tree_guard.terminate_unreaped_root(&child) {
+                    break (Err(error), false);
+                }
+                break (child.wait(), false);
+            }
+            Ok(false) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => break (Err(error), false),
+        }
+        #[cfg(not(unix))]
         match child.try_wait() {
             Ok(Some(status)) => break (Ok(status), false),
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),

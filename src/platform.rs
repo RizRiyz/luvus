@@ -313,38 +313,59 @@ impl ChildTreeGuard {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
         }
         #[cfg(unix)]
-        {
-            if self.terminated {
-                return;
-            }
-            if self.root_is_current() {
-                self.refresh_descendants();
-            }
-            let root_is_current = self.root_is_current();
-            self.terminated = true;
+        self.terminate_unix(false);
+    }
 
-            // The direct child is created as its own process group. Kill that
-            // group first, then any PID-reuse-safe descendants observed before
-            // they escaped it with setsid(2) or setpgid(2). The group ID is the
-            // root PID, so do not signal it after that PID belongs to another
-            // process lifetime.
-            let root_is_current = self.root_is_current();
-            let process_group_is_live = process_group_exists(self.root_pid);
-            self.terminated = true;
+    /// Terminate a Unix tree while its exited root is still owned and
+    /// unreaped by `child`.
+    ///
+    /// That ownership keeps the root PID, and therefore its process-group ID,
+    /// from being reused even on systems that stop exposing a zombie's start
+    /// marker. The caller must reap `child` after this returns.
+    #[cfg(unix)]
+    pub fn terminate_unreaped_root(&mut self, child: &std::process::Child) -> std::io::Result<()> {
+        if child.id() != self.root_pid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "child does not own this process tree",
+            ));
+        }
+        if !child_exited_unreaped(child)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "child has not exited",
+            ));
+        }
+        self.terminate_unix(true);
+        Ok(())
+    }
 
-            // The original process group remains valid while any late
-            // background child is still alive, even after the root exits.
-            if root_is_current || process_group_is_live {
+    #[cfg(unix)]
+    fn terminate_unix(&mut self, root_identity_is_owned: bool) {
+        if self.terminated {
+            return;
+        }
+        if self.root_is_current() {
+            self.refresh_descendants();
+        }
+        let root_is_current = root_identity_is_owned || self.root_is_current();
+        self.terminated = true;
+
+        // The direct child is created as its own process group. Kill that
+        // group first, then any PID-reuse-safe descendants observed before
+        // they escaped it with setsid(2) or setpgid(2). The group ID is the
+        // root PID, so do not signal it without either a matching marker or an
+        // unreaped Child that still owns that PID.
+        if root_is_current {
+            unsafe {
+                let _ = libc::kill(-(self.root_pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+        for (&pid, marker) in &self.descendants {
+            if process_start_marker(pid).as_deref() == Some(marker.as_str()) {
                 unsafe {
-                    let _ = libc::kill(-(self.root_pid as libc::pid_t), libc::SIGKILL);
-                }
-            }
-            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
-            for (&pid, marker) in &self.descendants {
-                if process_start_marker(pid).as_deref() == Some(marker.as_str()) {
-                    unsafe {
-                        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                    }
+                    let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
                 }
             }
         }
@@ -356,6 +377,27 @@ impl ChildTreeGuard {
             .as_deref()
             .is_some_and(|marker| process_start_marker(self.root_pid).as_deref() == Some(marker))
     }
+}
+
+/// Report whether a Unix child has exited without reaping it.
+///
+/// Keeping an exited process waitable preserves its PID identity until its
+/// process group has been terminated. The caller must still call `wait`.
+#[cfg(unix)]
+pub fn child_exited_unreaped(child: &std::process::Child) -> std::io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { info.si_pid() } != 0)
 }
 
 #[cfg(target_os = "linux")]
@@ -1523,6 +1565,71 @@ mod tests {
             let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
         }
         child.wait().expect("reap child");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn child_tree_guard_kills_the_group_before_reaping_an_exited_root() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 </dev/null >/dev/null 2>&1 & echo $!"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().expect("spawn isolated process group");
+        let mut guard = super::ChildTreeGuard::attach(&mut child).expect("attach guard");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().expect("shell output"))
+            .read_line(&mut line)
+            .expect("read background pid");
+        let background_pid: u32 = line.trim().parse().expect("background pid");
+        let background_marker =
+            super::process_start_marker(background_pid).expect("background process is live");
+
+        // Model a child created after the final tree scan. The process group
+        // still contains it, but PID-safe descendant tracking does not.
+        guard.descendants.clear();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !super::child_exited_unreaped(&child).expect("inspect child")
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            super::child_exited_unreaped(&child).expect("root remains waitable"),
+            "shell did not exit"
+        );
+        guard
+            .terminate_unreaped_root(&child)
+            .expect("owned unreaped root permits safe group cleanup");
+        child.wait().expect("reap root after group cleanup");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let group_child_stopped = loop {
+            if super::process_start_marker(background_pid).as_deref()
+                != Some(background_marker.as_str())
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !group_child_stopped {
+            unsafe {
+                let _ = libc::kill(background_pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        assert!(
+            group_child_stopped,
+            "background group member survived cleanup"
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
