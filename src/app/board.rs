@@ -109,7 +109,11 @@ impl App {
     }
 
     pub(crate) fn invalidate_task_gate(&mut self, id: &str) {
-        self.task_gates_inflight.remove(id);
+        if let Some(active) = self.task_gates_inflight.get(id) {
+            active
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 
     pub(crate) fn release_task_to_queue(
@@ -1407,14 +1411,13 @@ impl App {
             .task(id)
             .cloned()
             .ok_or_else(|| ("not_found".to_string(), format!("no such task: {id}")))?;
-        if let Some(run) = self.task_gates_inflight.get(id).copied() {
-            if run.attempt == task.attempt && task.status == crate::orch::TaskStatus::Running {
-                return Err((
-                    "gate_running".to_string(),
-                    format!("quality gate is already running for {id}"),
-                ));
-            }
-            self.invalidate_task_gate(id);
+        if let Some(active) = self.task_gates_inflight.get(id) {
+            let message = if active.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                format!("quality gate is stopping for {id}")
+            } else {
+                format!("quality gate is already running for {id}")
+            };
+            return Err(("gate_running".to_string(), message));
         }
         if matches!(
             task.status,
@@ -1470,8 +1473,22 @@ impl App {
             generation: self.task_gate_generation,
             attempt: task.attempt,
         };
-        self.task_gates_inflight.insert(id.to_string(), run);
-        spawn_gate(id.to_string(), run, cwd, gate, self.app_tx.clone());
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.task_gates_inflight.insert(
+            id.to_string(),
+            ActiveTaskGate {
+                run,
+                cancelled: cancelled.clone(),
+            },
+        );
+        spawn_gate(
+            id.to_string(),
+            run,
+            cancelled,
+            cwd,
+            gate,
+            self.app_tx.clone(),
+        );
         Ok(true)
     }
 
@@ -1484,13 +1501,22 @@ impl App {
         code: Option<i32>,
         out: String,
     ) {
-        if self.task_gates_inflight.get(id).copied() != Some(run) {
+        if self.task_gates_inflight.get(id).map(|active| active.run) != Some(run) {
+            return;
+        }
+        let Some(active) = self.task_gates_inflight.remove(id) else {
+            return;
+        };
+        if active.cancelled.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
         let is_current = self.orch.task(id).is_some_and(|task| {
-            task.attempt == run.attempt && task.status == crate::orch::TaskStatus::Running
+            task.attempt == run.attempt
+                && matches!(
+                    task.status,
+                    crate::orch::TaskStatus::Running | crate::orch::TaskStatus::Blocked
+                )
         });
-        self.task_gates_inflight.remove(id);
         if !is_current {
             return;
         }
@@ -3083,12 +3109,13 @@ fn spawn_task_merge(job: TaskMergeJob) -> Result<(), String> {
 fn spawn_gate(
     task: String,
     run: TaskGateRun,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cwd: std::path::PathBuf,
     gate: String,
     app_tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
 ) {
     std::thread::spawn(move || {
-        let (code, out) = run_gate_command(&cwd, &gate);
+        let (code, out) = run_gate_command(&cwd, &gate, &cancelled);
         let _ = app_tx.send(crate::event::AppEvent::TaskGateFinished {
             task,
             generation: run.generation,
@@ -3101,8 +3128,38 @@ fn spawn_gate(
 
 /// Run `gate` through the platform shell in `cwd`; returns its exit code and the
 /// combined stdout+stderr.
-fn run_gate_command(cwd: &std::path::Path, gate: &str) -> (Option<i32>, String) {
+fn run_gate_command(
+    cwd: &std::path::Path,
+    gate: &str,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> (Option<i32>, String) {
+    use std::io::Read;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    const OUTPUT_CAP: usize = 64 * 1024;
+
+    fn read_tail_capped<R: Read>(reader: &mut R) -> String {
+        let mut kept = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let overflow = kept.len().saturating_add(read).saturating_sub(OUTPUT_CAP);
+                    if overflow > 0 {
+                        kept.drain(..overflow);
+                    }
+                    kept.extend_from_slice(&chunk[..read]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&kept).into_owned()
+    }
+
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(gate);
@@ -3117,13 +3174,77 @@ fn run_gate_command(cwd: &std::path::Path, gate: &str) -> (Option<i32>, String) 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::platform::no_window(&mut cmd);
-    match cmd.output() {
-        Ok(o) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-            s.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.code(), s)
+    crate::platform::suspend_for_child_tree(&mut cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return (None, format!("failed to run gate: {error}")),
+    };
+    let mut tree_guard = match crate::platform::ChildTreeGuard::attach(&mut child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (None, format!("failed to contain gate process: {error}"));
         }
-        Err(e) => (None, format!("failed to run gate: {e}")),
+    };
+    let pid = child.id();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let stdout =
+        std::thread::spawn(move || stdout.as_mut().map(read_tail_capped).unwrap_or_default());
+    let stderr =
+        std::thread::spawn(move || stderr.as_mut().map(read_tail_capped).unwrap_or_default());
+
+    let (status, was_cancelled) = loop {
+        if cancelled.load(Ordering::Acquire) {
+            tree_guard.terminate();
+            #[cfg(unix)]
+            unsafe {
+                let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            break (child.wait(), true);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break (Ok(status), false),
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => break (Err(error), false),
+        }
+    };
+
+    // A shell may exit after leaving descendants behind. End the contained
+    // group before joining the pipe readers so a background child cannot keep
+    // this gate registered forever.
+    tree_guard.terminate();
+    #[cfg(unix)]
+    if was_cancelled || !stdout.is_finished() || !stderr.is_finished() {
+        unsafe {
+            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    let mut out = stdout.join().unwrap_or_default();
+    out.push_str(&stderr.join().unwrap_or_default());
+    if was_cancelled {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("gate cancelled");
+        return (None, out);
+    }
+    match status {
+        Ok(status) => (status.code(), out),
+        Err(error) => {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("failed to wait for gate: {error}"));
+            (None, out)
+        }
     }
 }
 
@@ -4552,12 +4673,32 @@ mod tests {
 
     #[test]
     fn gate_command_runner_reports_exit_and_output() {
-        let dir = std::env::temp_dir();
-        assert_eq!(run_gate_command(&dir, "exit 0").0, Some(0));
-        assert_eq!(run_gate_command(&dir, "exit 7").0, Some(7));
-        let (code, out) = run_gate_command(&dir, "echo hello");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(run_gate_command(dir, "exit 0", &cancelled).0, Some(0));
+        assert_eq!(run_gate_command(dir, "exit 7", &cancelled).0, Some(7));
+        let (code, out) = run_gate_command(dir, "echo hello", &cancelled);
         assert_eq!(code, Some(0));
         assert!(out.contains("hello"));
+    }
+
+    #[test]
+    fn gate_command_cancellation_terminates_the_process_tree() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let command = if cfg!(windows) {
+            "ping -n 31 127.0.0.1 >NUL"
+        } else {
+            "sleep 30"
+        };
+        let started = std::time::Instant::now();
+        let (code, out) = run_gate_command(dir, command, &cancelled);
+        assert_eq!(code, None);
+        assert!(out.contains("gate cancelled"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "cancellation must not wait for the gate command"
+        );
     }
 
     #[test]
@@ -4586,7 +4727,7 @@ mod tests {
             .unwrap();
         app.orch.claim("t1", focus.0).unwrap();
         assert_eq!(app.complete_task("t1"), Ok(true));
-        let passing_run = app.task_gates_inflight["t1"];
+        let passing_run = app.task_gates_inflight["t1"].run;
         assert_eq!(
             app.complete_task("t1"),
             Err((
@@ -4611,7 +4752,7 @@ mod tests {
             .add_task("y".into(), vec![], vec![], Some("false".into()))
             .unwrap();
         assert_eq!(app.complete_task("t2"), Ok(true));
-        let failing_run = app.task_gates_inflight["t2"];
+        let failing_run = app.task_gates_inflight["t2"].run;
         app.task_gate_finished("t2", failing_run, Some(1), "boom\n".into());
         let t2 = app.orch.task("t2").unwrap();
         assert_eq!(t2.status, crate::orch::TaskStatus::Review);
@@ -4628,25 +4769,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(app.complete_task("t1"), Ok(true));
-        let first_run = app.task_gates_inflight["t1"];
+        let first_run = app.task_gates_inflight["t1"].run;
         app.orch
             .set_status("t1", crate::orch::TaskStatus::Review)
             .unwrap();
         let retry = app.retry_task("t1").unwrap();
         assert!(matches!(retry, TaskRetryResult::Task(_)));
-        assert!(!app.task_gates_inflight.contains_key("t1"));
+        assert!(app.task_gates_inflight["t1"]
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            app.complete_task("t1"),
+            Err((
+                "gate_running".into(),
+                "quality gate is stopping for t1".into()
+            ))
+        );
 
-        app.task_gate_finished("t1", first_run, Some(0), String::new());
+        app.task_gate_finished("t1", first_run, None, "gate cancelled".into());
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Queued
         );
 
         assert_eq!(app.complete_task("t1"), Ok(true));
-        let second_run = app.task_gates_inflight["t1"];
+        let second_run = app.task_gates_inflight["t1"].run;
         assert_ne!(second_run, first_run);
         app.task_gate_finished("t1", first_run, Some(0), String::new());
-        assert_eq!(app.task_gates_inflight.get("t1"), Some(&second_run));
+        assert_eq!(
+            app.task_gates_inflight.get("t1").map(|active| active.run),
+            Some(second_run)
+        );
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Running
@@ -4668,24 +4821,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(app.complete_task("t1"), Ok(true));
-        let released_run = app.task_gates_inflight["t1"];
+        let released_run = app.task_gates_inflight["t1"].run;
         app.release_task_to_queue("t1").unwrap();
-        assert!(!app.task_gates_inflight.contains_key("t1"));
-        app.task_gate_finished("t1", released_run, Some(0), String::new());
+        assert!(app.task_gates_inflight["t1"]
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            app.complete_task("t1"),
+            Err((
+                "gate_running".into(),
+                "quality gate is stopping for t1".into()
+            ))
+        );
+        app.task_gate_finished("t1", released_run, None, "gate cancelled".into());
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Queued
         );
 
         assert_eq!(app.complete_task("t1"), Ok(true));
-        let current_run = app.task_gates_inflight["t1"];
+        let current_run = app.task_gates_inflight["t1"].run;
         app.task_gate_finished("t1", released_run, Some(0), String::new());
-        assert_eq!(app.task_gates_inflight.get("t1"), Some(&current_run));
+        assert_eq!(
+            app.task_gates_inflight.get("t1").map(|active| active.run),
+            Some(current_run)
+        );
         app.task_gate_finished("t1", current_run, Some(0), String::new());
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Done
         );
+    }
+
+    #[test]
+    fn matching_gate_result_settles_a_temporarily_blocked_task() {
+        let _env = crate::persist::test_env("gate-blocked-result");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("blocked".into(), vec![], vec![], Some("false".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let run = app.task_gates_inflight["t1"].run;
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Blocked)
+            .unwrap();
+        app.task_gate_finished("t1", run, Some(7), "failed while blocked".into());
+
+        let task = app.orch.task("t1").unwrap();
+        assert_eq!(task.status, crate::orch::TaskStatus::Review);
+        assert!(task
+            .outputs
+            .iter()
+            .any(|line| line.contains("failed while blocked")));
     }
 
     #[test]

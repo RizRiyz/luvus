@@ -2446,6 +2446,11 @@ pub(crate) struct TaskGateRun {
     attempt: u32,
 }
 
+struct ActiveTaskGate {
+    run: TaskGateRun,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
     /// A short, event-driven rendezvous between PTY EOF and process reaping.
@@ -2674,9 +2679,9 @@ pub struct App {
     /// Multi-agent orchestration ledger + path leases (docs/22, ORCH-1/2). Kept
     /// in its own file (`orch.json`), independent of the session snapshot.
     pub orch: crate::orch::OrchState,
-    /// The exact asynchronous quality-gate run currently owned by each task.
-    /// Process-local by design: gate workers do not survive a server restart.
-    task_gates_inflight: HashMap<String, TaskGateRun>,
+    /// The exact asynchronous quality-gate run and cancellation handle owned by
+    /// each task. Process-local by design: gate workers do not survive restart.
+    task_gates_inflight: HashMap<String, ActiveTaskGate>,
     /// Monotonic identity for gate runs within this server process. A late
     /// result must match this value before it may mutate its task.
     task_gate_generation: u64,
