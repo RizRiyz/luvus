@@ -342,6 +342,8 @@ pub enum AppEvent {
     /// at Review with the captured output.
     TaskGateFinished {
         task: String,
+        generation: u64,
+        attempt: u32,
         code: Option<i32>,
         out: String,
     },

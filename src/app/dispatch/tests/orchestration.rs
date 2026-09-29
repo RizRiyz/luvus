@@ -58,6 +58,50 @@ fn task_retry_api_queues_a_new_attempt_and_projects_history() {
 }
 
 #[test]
+fn task_release_api_invalidates_a_running_gate_result() {
+    let (_env, mut app) = app("socket-task-release-gate");
+    app.orch
+        .add_task("release".into(), vec![], vec![], Some("true".into()))
+        .unwrap();
+
+    let result = app.dispatch("task.done", &json!({"id":"t1"})).unwrap();
+    assert_eq!(result["gate_running"], true);
+    let run = app.task_gates_inflight["t1"];
+
+    let released = app.dispatch("task.release", &json!({"id":"t1"})).unwrap();
+    assert_eq!(released["task"]["status"], "queued");
+    assert!(!app.task_gates_inflight.contains_key("t1"));
+
+    app.task_gate_finished("t1", run, Some(0), String::new());
+    assert_eq!(
+        app.orch.task("t1").unwrap().status,
+        crate::orch::TaskStatus::Queued
+    );
+}
+
+#[test]
+fn task_update_and_retry_fence_the_previous_gate_attempt() {
+    let (_env, mut app) = app("socket-task-retry-gate");
+    app.orch
+        .add_task("retry".into(), vec![], vec![], Some("true".into()))
+        .unwrap();
+
+    app.dispatch("task.done", &json!({"id":"t1"})).unwrap();
+    let first_run = app.task_gates_inflight["t1"];
+    app.dispatch("task.update", &json!({"id":"t1", "status":"failed"}))
+        .unwrap();
+    assert!(!app.task_gates_inflight.contains_key("t1"));
+
+    let retry = app.dispatch("task.retry", &json!({"id":"t1"})).unwrap();
+    assert_eq!(retry["task"]["attempt"], 2);
+    app.task_gate_finished("t1", first_run, Some(0), String::new());
+    assert_eq!(
+        app.orch.task("t1").unwrap().status,
+        crate::orch::TaskStatus::Queued
+    );
+}
+
+#[test]
 fn task_attempt_timestamps_are_omitted_until_the_attempt_starts() {
     let (_env, mut app) = app("socket-task-attempt-times");
     app.orch

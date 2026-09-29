@@ -515,6 +515,9 @@ impl App {
             }
             if let Some(st) = status {
                 self.orch.set_status(&id, st).map_err(orch_err)?;
+                if st != crate::orch::TaskStatus::Running {
+                    self.invalidate_task_gate(&id);
+                }
             }
             if let Some(o) = p.get("output").and_then(|v| v.as_str()) {
                 self.orch.add_output(&id, o.to_string()).map_err(orch_err)?;
@@ -684,6 +687,7 @@ impl App {
         {
             let id = req_str(p, "id")?.to_string();
             let task = self.orch.delete_task(&id).map_err(orch_err)?;
+            self.invalidate_task_gate(&id);
             self.orch.save();
             self.emit_event("task.deleted", json!({ "id": id }));
             Ok(json!({ "type": "task", "task": task_json(&task) }))
@@ -694,7 +698,7 @@ impl App {
         let _ = (method, p);
         {
             let id = req_str(p, "id")?.to_string();
-            let task = self.orch.release_task(&id).map_err(orch_err)?;
+            let task = self.release_task_to_queue(&id).map_err(orch_err)?;
             let released = self.orch.release_task_leases(&id);
             self.orch.save();
             self.emit_event("task.released", task_json(&task));

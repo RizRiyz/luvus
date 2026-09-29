@@ -300,6 +300,10 @@ its branch, worktree, start time, and finish time. A `task.retried` event tells
 event-stream consumers to refresh that task; the event itself carries only its
 ID and new attempt number.
 
+Releasing a task while its quality gate is running invalidates that gate's
+ownership. A late result cannot complete the released or subsequently retried
+work, and the next worker can run a fresh gate normally.
+
 - **Only armed agent automations spawn unattended.** Manual tasks still start
   only when you press `s` or run `task start`. Every automation stores one
   explicit agent, workspace, prompt, worker mode, access policy, and bounded schedule.

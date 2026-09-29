@@ -88,6 +88,7 @@ impl App {
             );
             self.start_automation_run(&run.id, now);
             let run = self.automation.run(&run.id).cloned().unwrap_or(run);
+            self.invalidate_task_gate(id);
             return Ok(TaskRetryResult::AutomationRun(run));
         }
 
@@ -99,11 +100,25 @@ impl App {
             .try_save()
             .map_err(|error| ("persist_failed".to_string(), error.to_string()))?;
         self.orch = candidate;
+        self.invalidate_task_gate(id);
         self.emit_event(
             "task.retried",
             serde_json::json!({"id": task.id, "attempt": task.attempt}),
         );
         Ok(TaskRetryResult::Task(task))
+    }
+
+    pub(crate) fn invalidate_task_gate(&mut self, id: &str) {
+        self.task_gates_inflight.remove(id);
+    }
+
+    pub(crate) fn release_task_to_queue(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::orch::Task, crate::orch::Reject> {
+        let task = self.orch.release_task(id)?;
+        self.invalidate_task_gate(id);
+        Ok(task)
     }
 
     /// Open (or focus, if already open) the orchestration board in the active
@@ -1387,17 +1402,20 @@ impl App {
     /// (`AppEvent::TaskGateFinished`) decides Done vs Review. Returns whether a gate
     /// was launched (so the caller can report "gate running" vs "done").
     pub fn complete_task(&mut self, id: &str) -> Result<bool, (String, String)> {
-        if self.task_gates_inflight.contains(id) {
-            return Err((
-                "gate_running".to_string(),
-                format!("quality gate is already running for {id}"),
-            ));
-        }
         let task = self
             .orch
             .task(id)
             .cloned()
             .ok_or_else(|| ("not_found".to_string(), format!("no such task: {id}")))?;
+        if let Some(run) = self.task_gates_inflight.get(id).copied() {
+            if run.attempt == task.attempt && task.status == crate::orch::TaskStatus::Running {
+                return Err((
+                    "gate_running".to_string(),
+                    format!("quality gate is already running for {id}"),
+                ));
+            }
+            self.invalidate_task_gate(id);
+        }
         if matches!(
             task.status,
             crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
@@ -1447,15 +1465,35 @@ impl App {
             "task.gate_running",
             serde_json::json!({ "id": id, "gate": gate }),
         );
-        self.task_gates_inflight.insert(id.to_string());
-        spawn_gate(id.to_string(), cwd, gate, self.app_tx.clone());
+        self.task_gate_generation = self.task_gate_generation.wrapping_add(1);
+        let run = TaskGateRun {
+            generation: self.task_gate_generation,
+            attempt: task.attempt,
+        };
+        self.task_gates_inflight.insert(id.to_string(), run);
+        spawn_gate(id.to_string(), run, cwd, gate, self.app_tx.clone());
         Ok(true)
     }
 
     /// Apply a finished gate (ORCH-5): exit 0 → Done (+ dependents announced);
     /// non-zero → held at `Review` with the tail of the output captured.
-    pub fn task_gate_finished(&mut self, id: &str, code: Option<i32>, out: String) {
+    pub(crate) fn task_gate_finished(
+        &mut self,
+        id: &str,
+        run: TaskGateRun,
+        code: Option<i32>,
+        out: String,
+    ) {
+        if self.task_gates_inflight.get(id).copied() != Some(run) {
+            return;
+        }
+        let is_current = self.orch.task(id).is_some_and(|task| {
+            task.attempt == run.attempt && task.status == crate::orch::TaskStatus::Running
+        });
         self.task_gates_inflight.remove(id);
+        if !is_current {
+            return;
+        }
         if code == Some(0) {
             self.finalize_task_done(id, TaskCompletionSource::Gate);
             self.emit_event("task.gate_passed", serde_json::json!({ "id": id }));
@@ -2670,7 +2708,7 @@ impl App {
         let Some(id) = self.orch_selected_id() else {
             return;
         };
-        match self.orch.release_task(&id) {
+        match self.release_task_to_queue(&id) {
             Ok(_) => {
                 self.orch.release_task_leases(&id);
                 self.orch.save();
@@ -3044,13 +3082,20 @@ fn spawn_task_merge(job: TaskMergeJob) -> Result<(), String> {
 /// responsive while a `cargo test` / `npm test` gate runs.
 fn spawn_gate(
     task: String,
+    run: TaskGateRun,
     cwd: std::path::PathBuf,
     gate: String,
     app_tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
 ) {
     std::thread::spawn(move || {
         let (code, out) = run_gate_command(&cwd, &gate);
-        let _ = app_tx.send(crate::event::AppEvent::TaskGateFinished { task, code, out });
+        let _ = app_tx.send(crate::event::AppEvent::TaskGateFinished {
+            task,
+            generation: run.generation,
+            attempt: run.attempt,
+            code,
+            out,
+        });
     });
 }
 
@@ -4541,6 +4586,7 @@ mod tests {
             .unwrap();
         app.orch.claim("t1", focus.0).unwrap();
         assert_eq!(app.complete_task("t1"), Ok(true));
+        let passing_run = app.task_gates_inflight["t1"];
         assert_eq!(
             app.complete_task("t1"),
             Err((
@@ -4553,8 +4599,8 @@ mod tests {
             crate::orch::TaskStatus::Running
         );
         // A passing gate finalizes it to Done.
-        app.task_gate_finished("t1", Some(0), String::new());
-        assert!(!app.task_gates_inflight.contains("t1"));
+        app.task_gate_finished("t1", passing_run, Some(0), String::new());
+        assert!(!app.task_gates_inflight.contains_key("t1"));
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Done
@@ -4564,10 +4610,82 @@ mod tests {
         app.orch
             .add_task("y".into(), vec![], vec![], Some("false".into()))
             .unwrap();
-        app.task_gate_finished("t2", Some(1), "boom\n".into());
+        assert_eq!(app.complete_task("t2"), Ok(true));
+        let failing_run = app.task_gates_inflight["t2"];
+        app.task_gate_finished("t2", failing_run, Some(1), "boom\n".into());
         let t2 = app.orch.task("t2").unwrap();
         assert_eq!(t2.status, crate::orch::TaskStatus::Review);
         assert!(t2.outputs.iter().any(|o| o.contains("gate failed")));
+    }
+
+    #[test]
+    fn stale_gate_result_cannot_finish_a_retried_attempt() {
+        let _env = crate::persist::test_env("gate-retry-fence");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("retry".into(), vec![], vec![], Some("true".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let first_run = app.task_gates_inflight["t1"];
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Review)
+            .unwrap();
+        let retry = app.retry_task("t1").unwrap();
+        assert!(matches!(retry, TaskRetryResult::Task(_)));
+        assert!(!app.task_gates_inflight.contains_key("t1"));
+
+        app.task_gate_finished("t1", first_run, Some(0), String::new());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Queued
+        );
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let second_run = app.task_gates_inflight["t1"];
+        assert_ne!(second_run, first_run);
+        app.task_gate_finished("t1", first_run, Some(0), String::new());
+        assert_eq!(app.task_gates_inflight.get("t1"), Some(&second_run));
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Running
+        );
+        app.task_gate_finished("t1", second_run, Some(0), String::new());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Done
+        );
+    }
+
+    #[test]
+    fn releasing_a_task_invalidates_its_running_gate() {
+        let _env = crate::persist::test_env("gate-release-fence");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("release".into(), vec![], vec![], Some("true".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let released_run = app.task_gates_inflight["t1"];
+        app.release_task_to_queue("t1").unwrap();
+        assert!(!app.task_gates_inflight.contains_key("t1"));
+        app.task_gate_finished("t1", released_run, Some(0), String::new());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Queued
+        );
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let current_run = app.task_gates_inflight["t1"];
+        app.task_gate_finished("t1", released_run, Some(0), String::new());
+        assert_eq!(app.task_gates_inflight.get("t1"), Some(&current_run));
+        app.task_gate_finished("t1", current_run, Some(0), String::new());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Done
+        );
     }
 
     #[test]

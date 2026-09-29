@@ -1221,8 +1221,22 @@ impl App {
                 self.git_data(view, payload);
                 true
             }
-            AppEvent::TaskGateFinished { task, code, out } => {
-                self.task_gate_finished(&task, code, out);
+            AppEvent::TaskGateFinished {
+                task,
+                generation,
+                attempt,
+                code,
+                out,
+            } => {
+                self.task_gate_finished(
+                    &task,
+                    crate::app::TaskGateRun {
+                        generation,
+                        attempt,
+                    },
+                    code,
+                    out,
+                );
                 true
             }
             AppEvent::TaskMergeFinished {
