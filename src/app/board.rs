@@ -3209,7 +3209,14 @@ fn run_gate_command(
         c
     } else {
         let mut c = Command::new("sh");
-        c.arg("-c").arg(gate);
+        // Keep the shell alive briefly while its EXIT trap runs so the parent
+        // can observe direct background children before Unix reparents them.
+        // The gate remains in an environment value so its own positional
+        // parameters retain the same meaning as a plain `sh -c` invocation.
+        c.env("LUVUS_GATE_COMMAND", gate).args([
+            "-c",
+            "trap 'sleep 0.05' EXIT; eval \"unset LUVUS_GATE_COMMAND; $LUVUS_GATE_COMMAND\"",
+        ]);
         c
     };
     cmd.current_dir(cwd)
@@ -3235,8 +3242,6 @@ fn run_gate_command(
             return (None, format!("failed to contain gate process: {error}"));
         }
     };
-    #[cfg(unix)]
-    let pid = child.id();
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let stdout =
@@ -3245,12 +3250,9 @@ fn run_gate_command(
         std::thread::spawn(move || stderr.as_mut().map(read_tail_capped).unwrap_or_default());
 
     let (status, was_cancelled) = loop {
+        tree_guard.refresh_descendants();
         if cancelled.load(Ordering::Acquire) {
             tree_guard.terminate();
-            #[cfg(unix)]
-            unsafe {
-                let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-            }
             let _ = child.kill();
             break (child.wait(), true);
         }
@@ -3265,12 +3267,6 @@ fn run_gate_command(
     // group before joining the pipe readers so a background child cannot keep
     // this gate registered forever.
     tree_guard.terminate();
-    #[cfg(unix)]
-    if was_cancelled || !stdout.is_finished() || !stderr.is_finished() {
-        unsafe {
-            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
     let mut out = stdout.join().unwrap_or_default();
     out.push_str(&stderr.join().unwrap_or_default());
     if was_cancelled {
@@ -4724,6 +4720,44 @@ mod tests {
         let (code, out) = run_gate_command(dir, "echo hello", &cancelled);
         assert_eq!(code, Some(0));
         assert!(out.contains("hello"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn gate_command_runner_terminates_a_detached_session() {
+        let executable = shell_quote(&std::env::current_exe().unwrap().to_string_lossy());
+        let command = format!(
+            "LUVUS_GATE_DETACH_HELPER=1 {executable} --exact app::board::tests::gate_detached_child_helper & sleep 0.05; exit 0"
+        );
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            let (code, out) = run_gate_command(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                &command,
+                &cancelled,
+            );
+            assert_eq!(code, Some(0));
+            assert!(out.contains("detached-helper-ready"));
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "an escaped descendant kept the gate output pipe open"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn gate_detached_child_helper() {
+        use std::io::Write;
+
+        if std::env::var_os("LUVUS_GATE_DETACH_HELPER").is_none() {
+            return;
+        }
+        assert!(unsafe { libc::setsid() } >= 0);
+        writeln!(std::io::stdout(), "detached-helper-ready").unwrap();
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
     }
 
     #[test]

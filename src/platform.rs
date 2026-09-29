@@ -216,12 +216,18 @@ pub fn suspend_for_child_tree(cmd: &mut std::process::Command) {
 
 /// Own a spawned process tree so dropping the guard terminates descendants.
 ///
-/// Windows descendants can retain inherited output handles after their direct
-/// parent exits. A kill-on-close Job Object gives bounded command runners a
-/// stable tree handle instead of relying on an already-reaped parent PID.
+/// Windows uses a kill-on-close Job Object. Linux, macOS, and FreeBSD retain
+/// PID-reuse-safe identities for descendants while their parent relationship is
+/// visible, so later session or process-group changes cannot escape cleanup.
 pub struct ChildTreeGuard {
     #[cfg(windows)]
     handle: Option<windows_sys::Win32::Foundation::HANDLE>,
+    #[cfg(unix)]
+    root_pid: u32,
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    descendants: std::collections::HashMap<u32, String>,
+    #[cfg(unix)]
+    terminated: bool,
 }
 
 impl ChildTreeGuard {
@@ -259,10 +265,35 @@ impl ChildTreeGuard {
             }
             Ok(guard)
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        {
+            let mut guard = Self {
+                root_pid: child.id(),
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+                descendants: std::collections::HashMap::new(),
+                terminated: false,
+            };
+            guard.refresh_descendants();
+            Ok(guard)
+        }
+        #[cfg(not(any(windows, unix)))]
         {
             let _ = child;
             Ok(Self {})
+        }
+    }
+
+    /// Remember live Unix descendants while their parent relationship is still
+    /// observable. A child that later creates a new session can then still be
+    /// terminated without relying on the original process group.
+    pub fn refresh_descendants(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+        if !self.terminated {
+            for pid in unix_descendant_pids(self.root_pid) {
+                if let Some(marker) = process_start_marker(pid) {
+                    self.descendants.entry(pid).or_insert(marker);
+                }
+            }
         }
     }
 
@@ -271,7 +302,119 @@ impl ChildTreeGuard {
         if let Some(handle) = self.handle.take() {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
         }
+        #[cfg(unix)]
+        {
+            if self.terminated {
+                return;
+            }
+            self.refresh_descendants();
+            self.terminated = true;
+
+            // The direct child is created as its own process group. Kill that
+            // group first, then any PID-reuse-safe descendants observed before
+            // they escaped it with setsid(2) or setpgid(2).
+            unsafe {
+                let _ = libc::kill(-(self.root_pid as libc::pid_t), libc::SIGKILL);
+            }
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+            for (&pid, marker) in &self.descendants {
+                if process_start_marker(pid).as_deref() == Some(marker.as_str()) {
+                    unsafe {
+                        let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                    }
+                }
+            }
+        }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn unix_descendant_pids(root: u32) -> Vec<u32> {
+    use std::collections::HashSet;
+
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) || found.len() >= 64 {
+            continue;
+        }
+        found.push(pid);
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            continue;
+        };
+        for task in tasks.flatten() {
+            let path = task.path().join("children");
+            let Ok(children) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            stack.extend(
+                children
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse::<u32>().ok()),
+            );
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "freebsd")]
+fn unix_descendant_pids(root: u32) -> Vec<u32> {
+    use std::collections::{HashMap, HashSet};
+
+    let Some(processes) = freebsd_processes() else {
+        return vec![root];
+    };
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, ppid) in processes {
+        children.entry(ppid).or_default().push(pid);
+    }
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) || found.len() >= 64 {
+            continue;
+        }
+        found.push(pid);
+        if let Some(child_pids) = children.get(&pid) {
+            stack.extend(child_pids.iter().copied());
+        }
+    }
+    found
+}
+
+#[cfg(target_os = "macos")]
+fn unix_descendant_pids(root: u32) -> Vec<u32> {
+    use std::collections::HashSet;
+
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) || found.len() >= 64 {
+            continue;
+        }
+        found.push(pid);
+        let mut children = [0 as libc::pid_t; 64];
+        let child_count = unsafe {
+            libc::proc_listchildpids(
+                pid as libc::pid_t,
+                children.as_mut_ptr().cast(),
+                std::mem::size_of_val(&children) as libc::c_int,
+            )
+        };
+        if child_count <= 0 {
+            continue;
+        }
+        let count = (child_count as usize).min(children.len());
+        stack.extend(
+            children[..count]
+                .iter()
+                .filter_map(|&pid| u32::try_from(pid).ok()),
+        );
+    }
+    found
 }
 
 impl Drop for ChildTreeGuard {
@@ -558,13 +701,113 @@ pub fn process_start_marker(pid: u32) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "freebsd")]
+pub fn process_start_marker(pid: u32) -> Option<String> {
+    use std::mem::{size_of, zeroed};
+
+    unsafe {
+        let mib = [
+            libc::CTL_KERN,
+            libc::KERN_PROC,
+            libc::KERN_PROC_PID,
+            libc::c_int::try_from(pid).ok()?,
+        ];
+        let mut info: libc::kinfo_proc = zeroed();
+        let expected = size_of::<libc::kinfo_proc>();
+        let mut len = expected;
+        if libc::sysctl(
+            mib.as_ptr(),
+            mib.len() as libc::c_uint,
+            (&mut info as *mut libc::kinfo_proc).cast(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        ) != 0
+            || len != expected
+            || info.ki_structsize != expected as libc::c_int
+            || info.ki_pid != pid as libc::pid_t
+        {
+            return None;
+        }
+        Some(format!(
+            "{}.{:06}",
+            info.ki_start.tv_sec, info.ki_start.tv_usec
+        ))
+    }
+}
+
 #[cfg(windows)]
 pub fn process_start_marker(pid: u32) -> Option<String> {
     windows::process_start_marker(pid)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    windows
+)))]
 pub fn process_start_marker(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "freebsd")]
+fn freebsd_processes() -> Option<Vec<(u32, u32)>> {
+    use std::mem::size_of;
+
+    let mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL];
+    for _ in 0..3 {
+        let mut bytes = 0;
+        if unsafe {
+            libc::sysctl(
+                mib.as_ptr(),
+                mib.len() as libc::c_uint,
+                std::ptr::null_mut(),
+                &mut bytes,
+                std::ptr::null(),
+                0,
+            )
+        } != 0
+            || bytes == 0
+        {
+            return None;
+        }
+        let item_size = size_of::<libc::kinfo_proc>();
+        let capacity = bytes.div_ceil(item_size).saturating_add(16);
+        let mut entries = Vec::<libc::kinfo_proc>::with_capacity(capacity);
+        let mut filled = capacity.saturating_mul(item_size);
+        let result = unsafe {
+            libc::sysctl(
+                mib.as_ptr(),
+                mib.len() as libc::c_uint,
+                entries.as_mut_ptr().cast(),
+                &mut filled,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if result != 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOMEM) {
+                continue;
+            }
+            return None;
+        }
+        if filled % item_size != 0 {
+            return None;
+        }
+        unsafe { entries.set_len(filled / item_size) };
+        return Some(
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.ki_structsize == item_size as libc::c_int
+                        && entry.ki_pid > 0
+                        && entry.ki_ppid >= 0
+                })
+                .map(|entry| (entry.ki_pid as u32, entry.ki_ppid as u32))
+                .collect(),
+        );
+    }
     None
 }
 
