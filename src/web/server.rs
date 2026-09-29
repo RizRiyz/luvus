@@ -282,12 +282,14 @@ async fn asset(method: Method, OriginalUri(uri): OriginalUri) -> Response {
     *response.status_mut() = StatusCode::OK;
     let headers = response.headers_mut();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(asset.content_type));
+    // The page is tied to the bridge build serving it, and loads from
+    // loopback, so a browser never keeps a copy that could outlive an upgrade.
     headers.insert(
         CACHE_CONTROL,
         HeaderValue::from_static(if asset.immutable {
             "public, max-age=31536000, immutable"
         } else {
-            "no-cache"
+            "no-store"
         }),
     );
     set_security_headers(headers);

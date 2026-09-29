@@ -125,6 +125,9 @@ pub struct Pane {
     /// exactly matches the screen snapshot it serialized.
     content_revision: Arc<AtomicU64>,
     observed_title_generation: AtomicU64,
+    /// The session title last announced to event subscribers, so a title that
+    /// only animates its leading icon is not re-announced unchanged.
+    published_title: Mutex<Option<String>>,
     #[cfg(windows)]
     history_maintenance_pending: AtomicBool,
     /// `PtyData` coalescing: set by the reader when it announces new output,
@@ -491,6 +494,7 @@ impl Pane {
             terminal_runtime: Arc::new(Mutex::new(Some(terminal_runtime))),
             content_revision,
             observed_title_generation: AtomicU64::new(0),
+            published_title: Mutex::new(None),
             #[cfg(windows)]
             history_maintenance_pending: AtomicBool::new(true),
             master: Arc::new(Mutex::new(Some(pair.master))),
@@ -703,6 +707,7 @@ impl Pane {
             terminal_runtime,
             content_revision,
             observed_title_generation: AtomicU64::new(0),
+            published_title: Mutex::new(None),
             #[cfg(windows)]
             history_maintenance_pending: AtomicBool::new(true),
             master,
@@ -771,6 +776,19 @@ impl Pane {
         self.observed_title_generation
             .swap(generation, Ordering::AcqRel)
             != generation
+    }
+
+    /// Record `title` as the session title announced to event subscribers.
+    /// Returns whether it differs from the last one announced.
+    pub(crate) fn note_published_title(&self, title: &Option<String>) -> bool {
+        let Ok(mut published) = self.published_title.lock() else {
+            return true;
+        };
+        if *published == *title {
+            return false;
+        }
+        published.clone_from(title);
+        true
     }
 
     pub(crate) fn take_pending_clipboard(&self) -> Option<String> {

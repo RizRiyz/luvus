@@ -25,18 +25,26 @@ export function dashboardAgents(snapshot: SessionSnapshot, showShells: boolean):
     workingCount: agents.filter(({ pane }) => pane.agent_status === "working").length,
     cards: (showShells ? terminals : agents).map(({ pane, workspace }) => {
       const isAgent = pane.is_agent === true;
-      const sessionTitle = displayText(pane.agent_session_title, "");
       return {
         pane,
         context: isAgent
           ? `${displayText(pane.agent_name, displayText(pane.agent, "Agent"))} · ${workspace}`
           : `Shell · ${workspace}`,
-        title: isAgent ? sessionTitle || "Untitled session" : `Pane ${pane.pane_id}`,
+        ...agentCardTitle(pane),
         state: isAgent ? displayText(pane.agent_status, "unknown") : "shell",
-        titleAbsent: isAgent && !sessionTitle,
         available: Boolean(pane.terminal_id),
       };
     }),
+  };
+}
+
+/** The title an agent card shows, shared by full renders and in-place title updates. */
+export function agentCardTitle(pane: PaneSnapshot): { title: string; titleAbsent: boolean } {
+  const isAgent = pane.is_agent === true;
+  const sessionTitle = displayText(pane.agent_session_title, "");
+  return {
+    title: isAgent ? sessionTitle || "Untitled session" : `Pane ${pane.pane_id}`,
+    titleAbsent: isAgent && !sessionTitle,
   };
 }
 

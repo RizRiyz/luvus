@@ -5199,21 +5199,26 @@ impl App {
         self.config.layout.agent_title && changed
     }
 
-    /// Emit a snapshot refresh only when an agent's OSC title generation moves.
+    /// Report whether an agent's OSC title generation moved, and announce
+    /// `agent.title_changed` only when the displayed title actually changed.
+    /// Agents such as Claude Code animate a spinner in front of their title
+    /// many times a second; the displayed title drops that icon, so those
+    /// frames must not flood subscribers with identical events.
     pub(crate) fn agent_session_title_changed(&self, id: PaneId) -> bool {
-        if !self.is_agent_pane(id)
-            || !self
-                .panes
-                .get(&id)
-                .is_some_and(|pane| pane.take_title_change())
-        {
+        let Some(pane) = self.panes.get(&id) else {
+            return false;
+        };
+        if !self.is_agent_pane(id) || !pane.take_title_change() {
             return false;
         }
-        crate::ipc::api::publish_event(
-            &self.events,
-            "agent.title_changed",
-            json!({"pane": id.0.to_string(), "title": self.web_agent_session_title(id)}),
-        );
+        let title = self.web_agent_session_title(id);
+        if pane.note_published_title(&title) {
+            crate::ipc::api::publish_event(
+                &self.events,
+                "agent.title_changed",
+                json!({"pane": id.0.to_string(), "title": title}),
+            );
+        }
         true
     }
 

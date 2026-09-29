@@ -20,6 +20,8 @@ export class LiveSession extends EventTarget {
   #retry = 0;
   #refreshTimer: ReturnType<typeof setTimeout> | undefined;
   #titleRenderTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Panes whose displayed title changed since the last `titles` event. */
+  #changedTitles = new Set<string>();
   #refreshRetryAfter = 0;
 
   constructor(readonly bridge: BridgeClient) {
@@ -53,6 +55,7 @@ export class LiveSession extends EventTarget {
     this.#refreshTimer = undefined;
     if (this.#titleRenderTimer) clearTimeout(this.#titleRenderTimer);
     this.#titleRenderTimer = undefined;
+    this.#changedTitles.clear();
     this.#refreshRetryAfter = 0;
     this.#events?.close();
     this.#events = undefined;
@@ -84,6 +87,7 @@ export class LiveSession extends EventTarget {
     this.#refreshTimer = undefined;
     if (this.#titleRenderTimer) clearTimeout(this.#titleRenderTimer);
     this.#titleRenderTimer = undefined;
+    this.#changedTitles.clear();
     this.#refreshRetryAfter = 0;
     this.#events?.close();
     this.#events = undefined;
@@ -170,8 +174,11 @@ export class LiveSession extends EventTarget {
       }
       this.#snapshot = snapshot;
       this.#refreshRetryAfter = 0;
+      // The new snapshot carries every title, and its `snapshot` event
+      // redraws them, so pending title updates are superseded.
       if (this.#titleRenderTimer) clearTimeout(this.#titleRenderTimer);
       this.#titleRenderTimer = undefined;
+      this.#changedTitles.clear();
       this.#lastSequence = snapshot.event_sequence;
       const buffered = this.#buffer;
       this.#buffer = [];
@@ -221,6 +228,15 @@ export class LiveSession extends EventTarget {
     }
   }
 
+  /**
+   * Apply an `agent.title_changed` event to the live snapshot. Returns whether
+   * it was handled. The event is already counted in the sequence, so an
+   * unchanged title (an agent animating an icon in its terminal title, for
+   * example) needs nothing more. A changed title is reported through a batched
+   * `titles` event naming the panes, so the page can update that text in place
+   * instead of rebuilding everything, which would replace the element under
+   * the pointer and lose the click.
+   */
   #applyAgentTitle(event: UhpEvent): boolean {
     const data = event.data;
     if (!data || typeof data !== "object" || Array.isArray(data)) return false;
@@ -231,11 +247,15 @@ export class LiveSession extends EventTarget {
       for (const tab of workspace.tabs) {
         const pane = tab.panes.find((candidate) => candidate.pane_id === paneId);
         if (!pane) continue;
+        if ((pane.agent_session_title ?? null) === title) return true;
         pane.agent_session_title = title;
+        this.#changedTitles.add(paneId);
         if (!this.#titleRenderTimer) {
           this.#titleRenderTimer = setTimeout(() => {
             this.#titleRenderTimer = undefined;
-            if (!this.#stopped) this.dispatchEvent(new CustomEvent("snapshot", { detail: this.#snapshot }));
+            const panes = [...this.#changedTitles];
+            this.#changedTitles.clear();
+            if (!this.#stopped && panes.length) this.dispatchEvent(new CustomEvent("titles", { detail: panes }));
           }, 60);
         }
         return true;
