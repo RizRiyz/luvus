@@ -1,6 +1,7 @@
 import { BridgeClient, BridgeError, LiveSession, type PaneSnapshot, type SessionSnapshot } from "@luvus/uhp-client";
 import { button, element } from "./dom.js";
 import { dashboardAgents, displayText } from "./dashboard-agents.js";
+import { accessProblem, pairingCredential, parsePairingInput, type SentCredential } from "./pairing.js";
 import { pairingQrDataUrl } from "./pairing-qr.js";
 import { supportsFileUpload } from "./terminal-capabilities.js";
 import { TerminalView, type TerminalPaneOption } from "./terminal-view.js";
@@ -12,6 +13,8 @@ type DeviceStatus = {
   paired_devices: number;
   pending_pairings: number;
   max_devices: number;
+  /** The operator's --max-devices; a browser may not choose more. */
+  limit_ceiling?: number;
   public_url: string | null;
 };
 
@@ -42,15 +45,24 @@ export class WebApp {
   #sessionPanelOpen = false;
   #sessionLoading = false;
   #showShells = false;
+  /** This tab's own pairing code, from its link or pasted on the access screen. */
+  #tabCode: string | undefined;
+  /** What this tab last presented, so a rejection can be explained truthfully. */
+  #sent: SentCredential = { ticket: false, code: false };
+  #pairError: string | undefined;
 
   constructor(private readonly root: HTMLElement) {
-    const pair = consumePairingFragment();
-    if (pair) sessionStorage.removeItem(TICKET_KEY);
+    this.#tabCode = consumePairingFragment();
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    this.#bridge = new BridgeClient(`${scheme}//${location.host}/bridge`, () => ({
-      ...(sessionStorage.getItem(TICKET_KEY) ? { ticket: sessionStorage.getItem(TICKET_KEY)! } : {}),
-      ...(!sessionStorage.getItem(TICKET_KEY) && pair ? { code: pair } : {}),
-    }), (ticket) => sessionStorage.setItem(TICKET_KEY, ticket));
+    this.#bridge = new BridgeClient(`${scheme}//${location.host}/bridge`, () => {
+      const credential = pairingCredential(sessionStorage.getItem(TICKET_KEY), this.#tabCode);
+      this.#sent = { ticket: Boolean(credential.ticket), code: Boolean(credential.code) };
+      return credential;
+    }, (ticket) => {
+      sessionStorage.setItem(TICKET_KEY, ticket);
+      // The code was spent to issue this ticket.
+      this.#tabCode = undefined;
+    });
     this.#bridge.addEventListener("devices", (event) => {
       try {
         this.#devices = asDeviceStatus((event as CustomEvent).detail);
@@ -62,6 +74,13 @@ export class WebApp {
     });
     this.#session = new LiveSession(this.#bridge);
     this.#session.addEventListener("state", () => {
+      if (this.#session.state === "ready") this.#tabCode = undefined; // authorized; no longer needed
+      if (this.#session.state === "expired" && this.#terminal) {
+        // Access ended while a terminal was open. Leave it, or the terminal
+        // would sit on a dead connection with no way forward.
+        this.#terminal.destroy();
+        this.#terminal = undefined;
+      }
       this.#render();
       if (this.#session.state === "ready" && !this.#devices) void this.#refreshDevices();
     });
@@ -77,19 +96,25 @@ export class WebApp {
     try {
       await this.#session.start();
     } catch (error) {
-      this.#showError(error);
+      // The access screen already explains a rejection.
+      if (this.#session.state !== "expired") this.#showError(error);
     }
   }
 
   #render(): void {
     if (this.#terminal) return;
     const snapshot = this.#session.snapshot;
+    // Without authority nothing on the dashboard can act, so show the access
+    // screen instead of a stale dashboard or a loading state that never ends.
+    const expired = this.#session.state === "expired";
     this.root.replaceChildren(
       element("div", { className: "shell" },
-        snapshot
-          ? this.#dashboard(snapshot)
-          : element("div", { className: "dashboard loading-dashboard" }, this.#missionDock(false), this.#connecting()),
-        snapshot && this.#devicePanelOpen ? this.#devicePanel() : undefined,
+        expired
+          ? element("div", { className: "dashboard loading-dashboard" }, this.#accessScreen())
+          : snapshot
+            ? this.#dashboard(snapshot)
+            : element("div", { className: "dashboard loading-dashboard" }, this.#missionDock(false), this.#connecting()),
+        !expired && snapshot && this.#devicePanelOpen ? this.#devicePanel() : undefined,
       ),
     );
   }
@@ -97,9 +122,57 @@ export class WebApp {
   #connecting(): HTMLElement {
     return element("section", { className: "empty-state" },
       element("div", { className: "pulse" }),
-      element("h1", { text: this.#session.state === "expired" ? "Access expired" : "Connecting to Luvus" }),
-      element("p", { text: this.#session.state === "expired" ? "This device ticket expired, or this one-use pairing link was already used. Ask a connected device to create a new link." : "Authenticating and reconciling the live session." }),
+      element("h1", { text: "Connecting to Luvus" }),
+      element("p", { text: "Authenticating and reconciling the live session." }),
     );
+  }
+
+  /** Why this tab has no access, and a way to fix it without leaving the page. */
+  #accessScreen(): HTMLElement {
+    const problem = accessProblem(this.#sent);
+    const input = element("input", {
+      className: "pair-input",
+      attrs: {
+        type: "text",
+        placeholder: "Paste a pairing link",
+        "aria-label": "Pairing link or code",
+        autocomplete: "off",
+        autocapitalize: "off",
+        spellcheck: "false",
+      },
+    });
+    const form = element("form", {
+      className: "pair-form",
+      on: {
+        submit: (event) => {
+          event.preventDefault();
+          this.#pairWith(input.value);
+        },
+      },
+    },
+      input,
+      element("button", { className: "primary", text: "Connect", attrs: { type: "submit" } }),
+    );
+    return element("section", { className: "empty-state access-problem", attrs: { role: "alert" } },
+      element("h1", { text: problem.title }),
+      element("p", { text: problem.body }),
+      form,
+      this.#pairError ? element("p", { className: "pair-error", text: this.#pairError }) : undefined,
+    );
+  }
+
+  #pairWith(value: string): void {
+    const code = parsePairingInput(value);
+    if (!code) {
+      this.#pairError = "That is not a Luvus pairing link or code.";
+      this.#render();
+      return;
+    }
+    // A ticket the bridge just rejected can never work again.
+    if (this.#sent.ticket) sessionStorage.removeItem(TICKET_KEY);
+    this.#tabCode = code;
+    this.#pairError = undefined;
+    void this.start();
   }
 
   #devicePanel(): HTMLElement {
@@ -110,7 +183,10 @@ export class WebApp {
       attrs: { "aria-label": "Maximum paired devices", ...(this.#deviceLoading ? { disabled: "" } : {}) },
       on: { change: (event) => void this.#setDeviceLimit(Number((event.currentTarget as HTMLSelectElement).value)) },
     });
-    for (let limit = 1; limit <= 8; limit += 1) {
+    // The bridge refuses a limit above the operator's --max-devices, so only
+    // offer what it will accept.
+    const ceiling = status?.limit_ceiling ?? 8;
+    for (let limit = 1; limit <= ceiling; limit += 1) {
       select.append(element("option", {
         text: String(limit),
         attrs: {
@@ -613,7 +689,8 @@ function asDeviceStatus(value: unknown): DeviceStatus {
   if (!status || status.type !== "browser_device_status"
     || !Number.isSafeInteger(status.paired_devices) || !Number.isSafeInteger(status.pending_pairings)
     || !Number.isSafeInteger(status.max_devices)
-    || (status.public_url !== null && typeof status.public_url !== "string")) {
+    || (status.public_url !== null && typeof status.public_url !== "string")
+    || (status.limit_ceiling !== undefined && !Number.isSafeInteger(status.limit_ceiling))) {
     throw new BridgeError("Invalid browser device status", "invalid_response");
   }
   return status as DeviceStatus;

@@ -340,6 +340,9 @@ root instead. `--no-focus` preserves the caller's current view.
 or server startup. It starts or reuses the selected session without restarting
 it, binds loopback, and serves the embedded browser application with read-only
 authority by default. Add `--control` for bounded terminal and workspace input.
+It answers only to its loopback address and to origins given with
+`--public-url` or `--origin` at startup. Each pairing link works once, in one
+browser tab; press Enter in the command's terminal to print a new one.
 Stopping the command revokes only its temporary web authority; the Luvus
 server, PTYs, and other clients remain attached.
 

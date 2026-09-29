@@ -3,15 +3,22 @@ mod auth;
 mod server;
 mod uhp;
 
+use std::io::IsTerminal;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
 use auth::BrowserAuthority;
-use server::{normalize_origin, normalize_public_origin, BridgeState};
+use server::{allowed_hosts, normalize_origin, normalize_public_origin, BridgeState};
 use uhp::UhpAccess;
+
+/// How long the private launcher file for the auto-opened link is kept. The
+/// browser reads it immediately; the file only needs to outlive that read.
+const LAUNCHER_LIFETIME: Duration = Duration::from_secs(60);
 
 const USAGE: &str = "\
 Usage: luvus [--session <name>] web [options]
@@ -19,6 +26,9 @@ Usage: luvus [--session <name>] web [options]
 Serve the optional browser client for the selected Luvus session. The web
 bridge runs in the foreground and stops without stopping the Luvus server,
 its PTYs, or attached TUI clients.
+
+Each pairing link works once, in one browser tab, and expires after five
+minutes. Press Enter in this terminal while the bridge runs to print a new one.
 
 Options:
   --control             allow bounded terminal and workspace control
@@ -63,12 +73,8 @@ async fn run(session: String, options: Options) -> Result<()> {
     );
     let (authority, initial) =
         BrowserAuthority::new(12 * 60 * 60, options.max_devices).map_err(anyhow::Error::msg)?;
-    let state = BridgeState::new(
-        authority,
-        Arc::clone(&uhp),
-        options.origins,
-        options.public_url.clone(),
-    );
+    // Bind before building the state: the Host allowlist needs the real port,
+    // which `--port 0` only learns here.
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(
         IpAddr::V4(Ipv4Addr::LOCALHOST),
         options.port,
@@ -76,15 +82,42 @@ async fn run(session: String, options: Options) -> Result<()> {
     .await
     .with_context(|| format!("could not bind Luvus Web to 127.0.0.1:{}", options.port))?;
     let port = listener.local_addr()?.port();
+    let hosts = allowed_hosts(port, options.public_url.as_deref(), &options.origins);
+    let state = BridgeState::new(
+        authority,
+        Arc::clone(&uhp),
+        options.origins,
+        hosts,
+        options.public_url.clone(),
+    );
+    // Links printed here always use the address chosen at startup. A paired
+    // browser can change the pairing address for the links it creates, but
+    // never where the operator's own links point.
     let base = options
         .public_url
         .unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
     let url = format!("{base}/#pair={}", initial.code);
     println!("Luvus Web is ready for session '{session}'.");
     println!("{url}");
+    println!(
+        "Open this link once, in one browser tab. It works one time and expires in 5 minutes."
+    );
+    let interactive = std::io::stdin().is_terminal();
+    if interactive {
+        println!("Press Enter here for a new one-use link.");
+    }
     println!("Press Ctrl+C to stop the web bridge. Luvus and its panes will keep running.");
-    if !options.no_open {
-        open_browser(&url);
+    let _launcher = if options.no_open {
+        None
+    } else {
+        let launcher = open_browser_privately(&url);
+        if launcher.is_none() {
+            println!("Could not open a browser automatically; open the link above.");
+        }
+        launcher
+    };
+    if interactive {
+        tokio::spawn(operator_links(state.clone(), base));
     }
 
     axum::serve(listener, server::router(state))
@@ -95,6 +128,131 @@ async fn run(session: String, options: Options) -> Result<()> {
         .context("Luvus Web server failed")?;
     drop(uhp);
     Ok(())
+}
+
+/// Print a fresh one-use pairing link each time the operator presses Enter in
+/// the terminal running the bridge. Only whoever controls that terminal can
+/// do this, which is the same trust as reading the initial link.
+async fn operator_links(state: BridgeState, base: String) {
+    let (lines, mut entered) = tokio::sync::mpsc::unbounded_channel::<()>();
+    // Blocking stdin read on its own thread; it ends with the process.
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        while matches!(std::io::stdin().read_line(&mut line), Ok(read) if read > 0) {
+            line.clear();
+            if lines.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    while entered.recv().await.is_some() {
+        let (pairing, revoked) = state.operator_pairing();
+        println!(
+            "{}",
+            operator_link_message(&base, pairing.as_ref(), revoked)
+        );
+    }
+}
+
+fn operator_link_message(
+    base: &str,
+    pairing: Option<&auth::BrowserPairing>,
+    revoked: usize,
+) -> String {
+    let Some(pairing) = pairing else {
+        return "No room for another device: every allowed device is still connected. \
+                Close a Luvus Web tab, or restart with a larger --max-devices."
+            .to_string();
+    };
+    let mut message = String::new();
+    if revoked > 0 {
+        let noun = if revoked == 1 { "device" } else { "devices" };
+        message.push_str(&format!(
+            "Revoked {revoked} disconnected {noun} to make room.\n"
+        ));
+    }
+    message.push_str(&format!(
+        "New one-use link (expires in 5 minutes):\n{base}/#pair={}",
+        pairing.code
+    ));
+    message
+}
+
+/// Removes the private launcher directory when dropped.
+struct Launcher(PathBuf);
+
+impl Drop for Launcher {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Open the pairing link without putting its secret on a command line.
+///
+/// Passing the URL to `open`/`xdg-open` would expose the one-use code in the
+/// process list, where another local user could read it and redeem it first.
+/// Instead the link goes into an owner-only HTML file that redirects to it, and
+/// only that file's path is passed to the opener. If the file cannot be
+/// written privately, nothing is opened; the terminal still shows the link.
+fn open_browser_privately(url: &str) -> Option<Launcher> {
+    let launcher = write_launcher(&std::env::temp_dir(), url).ok()?;
+    let file = launcher.0.join("open.html");
+    open_path(&file);
+    let dir = launcher.0.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(LAUNCHER_LIFETIME).await;
+        let _ = std::fs::remove_dir_all(dir);
+    });
+    Some(launcher)
+}
+
+/// Write `open.html` into a new owner-only directory under `parent`.
+fn write_launcher(parent: &Path, url: &str) -> std::io::Result<Launcher> {
+    use std::io::Write;
+    let mut suffix = [0_u8; 12];
+    getrandom::fill(&mut suffix).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let name: String = suffix.iter().map(|byte| format!("{byte:02x}")).collect();
+    let dir = parent.join(format!("luvus-web-{name}"));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    // `create`, not `create_all`: the directory must be new, so a name that an
+    // attacker pre-created or linked elsewhere fails instead of being reused.
+    builder.create(&dir)?;
+    let launcher = Launcher(dir);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(launcher.0.join("open.html"))?;
+    file.write_all(launcher_html(url).as_bytes())?;
+    Ok(launcher)
+}
+
+fn launcher_html(url: &str) -> String {
+    // JSON escaping alone would let `</script>` close the element, so `<` is
+    // escaped too. The URL is a validated origin plus a base64url code today;
+    // this keeps the launcher safe if either ever widens.
+    let script = serde_json::to_string(url)
+        .unwrap_or_else(|_| "\"about:blank\"".to_string())
+        .replace('<', "\\u003c");
+    let attribute = url
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!(
+        "<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"referrer\" content=\"no-referrer\">\n\
+         <title>Opening Luvus Web</title>\n\
+         <meta http-equiv=\"refresh\" content=\"0;url={attribute}\">\n\
+         <script>location.replace({script});</script>\n"
+    )
 }
 
 struct Options {
@@ -176,13 +334,19 @@ impl Options {
     }
 }
 
-fn open_browser(url: &str) {
+/// Open a local file with the platform's default handler. Only the file's path
+/// reaches the command line; see [`open_browser_privately`].
+fn open_path(path: &Path) {
+    let path = path.as_os_str();
     #[cfg(target_os = "macos")]
-    let (program, arguments): (&str, Vec<&str>) = ("open", vec![url]);
+    let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = ("open", vec![path]);
     #[cfg(target_os = "windows")]
-    let (program, arguments): (&str, Vec<&str>) = ("cmd.exe", vec!["/c", "start", "", url]);
+    let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = (
+        "cmd.exe",
+        vec!["/c".as_ref(), "start".as_ref(), "".as_ref(), path],
+    );
     #[cfg(all(unix, not(target_os = "macos")))]
-    let (program, arguments): (&str, Vec<&str>) = ("xdg-open", vec![url]);
+    let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = ("xdg-open", vec![path]);
 
     let mut command = Command::new(program);
     command
@@ -200,6 +364,55 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    /// The auto-open link travels in an owner-only file, so the pairing code
+    /// never appears in the process list. The file is removed with its guard.
+    #[test]
+    fn the_launcher_is_private_and_removed_afterwards() {
+        let parent = std::env::temp_dir();
+        let url = "http://127.0.0.1:4174/#pair=abc-DEF_123";
+        let launcher = write_launcher(&parent, url).unwrap();
+        let dir = launcher.0.clone();
+        let file = dir.join("open.html");
+        let html = std::fs::read_to_string(&file).unwrap();
+        assert!(html.contains("location.replace(\"http://127.0.0.1:4174/#pair=abc-DEF_123\")"));
+        assert!(html.contains("content=\"0;url=http://127.0.0.1:4174/#pair=abc-DEF_123\""));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            let file_mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700, "only the owner may list or enter it");
+            assert_eq!(file_mode, 0o600, "only the owner may read the code");
+        }
+        drop(launcher);
+        assert!(!dir.exists(), "the launcher is deleted with its guard");
+    }
+
+    #[test]
+    fn the_launcher_cannot_be_broken_out_of() {
+        let html = launcher_html("http://x/#a</script><script>alert(1)</script>\"&");
+        assert!(!html.contains("</script><script>"), "{html}");
+        assert!(html.contains("\\u003c/script>"), "{html}");
+        assert!(html.contains("&lt;/script&gt;") && html.contains("&quot;&amp;"));
+    }
+
+    #[test]
+    fn operator_messages_say_what_happened() {
+        let pairing = auth::BrowserPairing {
+            code: "CODE".into(),
+            expires_at: 0,
+        };
+        let fresh = operator_link_message("http://127.0.0.1:4174", Some(&pairing), 0);
+        assert_eq!(
+            fresh,
+            "New one-use link (expires in 5 minutes):\nhttp://127.0.0.1:4174/#pair=CODE"
+        );
+        let reclaimed = operator_link_message("http://127.0.0.1:4174", Some(&pairing), 2);
+        assert!(reclaimed.starts_with("Revoked 2 disconnected devices to make room.\n"));
+        let full = operator_link_message("http://127.0.0.1:4174", None, 0);
+        assert!(full.contains("every allowed device is still connected"));
     }
 
     #[test]

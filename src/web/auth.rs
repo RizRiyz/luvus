@@ -17,19 +17,42 @@ pub(super) struct BrowserDeviceStatus {
     pub paired_devices: usize,
     pub pending_pairings: usize,
     pub max_devices: usize,
+    /// The highest limit a browser may choose: the operator's `--max-devices`.
+    pub limit_ceiling: usize,
 }
 
 pub(super) struct Authentication {
     pub ticket: Option<String>,
     pub expires_at: u64,
+    /// The ticket this connection holds, whether presented or newly issued.
+    /// Used only to count live connections per device.
+    pub ticket_digest: [u8; 32],
     pairing: Option<([u8; 32], u64)>,
+}
+
+/// Why a requested device limit was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LimitError {
+    /// Lower than the devices and unspent links already counted.
+    BelowUsed,
+    /// Higher than the limit the operator chose when starting the bridge. A
+    /// browser may tighten that limit but never raise it.
+    AboveCeiling,
+}
+
+struct Ticket {
+    expires_at: u64,
+    /// Open WebSocket connections authenticated with this ticket.
+    live: usize,
 }
 
 pub(super) struct BrowserAuthority {
     ticket_seconds: u64,
     max_devices: usize,
+    /// The operator's `--max-devices` value, fixed for the bridge's lifetime.
+    ceiling: usize,
     pairings: HashMap<[u8; 32], u64>,
-    tickets: HashMap<[u8; 32], u64>,
+    tickets: HashMap<[u8; 32], Ticket>,
 }
 
 impl BrowserAuthority {
@@ -37,6 +60,7 @@ impl BrowserAuthority {
         let mut authority = Self {
             ticket_seconds,
             max_devices,
+            ceiling: max_devices,
             pairings: HashMap::new(),
             tickets: HashMap::new(),
         };
@@ -52,12 +76,17 @@ impl BrowserAuthority {
         ticket: Option<&str>,
     ) -> Option<Authentication> {
         self.purge();
+        // A valid ticket always wins, and does not spend a code sent with it:
+        // reopening a used pairing link must not cost a working device its
+        // access, and an unspent code stays available for another device.
         if let Some(ticket) = ticket {
-            if let Some(expires_at) = self.tickets.get(&digest(ticket)).copied() {
-                if expires_at > unix_now() {
+            let ticket_digest = digest(ticket);
+            if let Some(existing) = self.tickets.get(&ticket_digest) {
+                if existing.expires_at > unix_now() {
                     return Some(Authentication {
                         ticket: None,
-                        expires_at,
+                        expires_at: existing.expires_at,
+                        ticket_digest,
                         pairing: None,
                     });
                 }
@@ -71,10 +100,18 @@ impl BrowserAuthority {
         }
         let ticket = random_token(32).ok()?;
         let expires_at = unix_now().saturating_add(self.ticket_seconds);
-        self.tickets.insert(digest(&ticket), expires_at);
+        let ticket_digest = digest(&ticket);
+        self.tickets.insert(
+            ticket_digest,
+            Ticket {
+                expires_at,
+                live: 0,
+            },
+        );
         Some(Authentication {
             ticket: Some(ticket),
             expires_at,
+            ticket_digest,
             pairing: Some((pairing, pairing_expires_at)),
         })
     }
@@ -102,13 +139,45 @@ impl BrowserAuthority {
         Some(BrowserPairing { code, expires_at })
     }
 
-    pub fn set_max_devices(&mut self, max_devices: usize) -> bool {
+    /// Create a pairing link on behalf of the operator at the terminal running
+    /// the bridge. When the limit is full, devices with no open connection are
+    /// revoked first, since a closed tab can never reuse its per-tab ticket.
+    /// Connected devices are never revoked. Returns the link, if one fits, and
+    /// how many disconnected devices were revoked to make room.
+    pub fn create_operator_pairing(&mut self) -> (Option<BrowserPairing>, usize) {
         self.purge();
+        let mut revoked = 0;
+        if self.tickets.len() + self.pairings.len() >= self.max_devices {
+            let before = self.tickets.len();
+            self.tickets.retain(|_, ticket| ticket.live > 0);
+            revoked = before - self.tickets.len();
+        }
+        (self.create_pairing(), revoked)
+    }
+
+    /// Record an open connection for a ticket. Pair with [`Self::disconnect`].
+    pub fn connect(&mut self, ticket_digest: &[u8; 32]) {
+        if let Some(ticket) = self.tickets.get_mut(ticket_digest) {
+            ticket.live += 1;
+        }
+    }
+
+    pub fn disconnect(&mut self, ticket_digest: &[u8; 32]) {
+        if let Some(ticket) = self.tickets.get_mut(ticket_digest) {
+            ticket.live = ticket.live.saturating_sub(1);
+        }
+    }
+
+    pub fn set_max_devices(&mut self, max_devices: usize) -> Result<(), LimitError> {
+        self.purge();
+        if max_devices > self.ceiling {
+            return Err(LimitError::AboveCeiling);
+        }
         if max_devices < self.tickets.len() + self.pairings.len() {
-            return false;
+            return Err(LimitError::BelowUsed);
         }
         self.max_devices = max_devices;
-        true
+        Ok(())
     }
 
     pub fn status(&mut self) -> BrowserDeviceStatus {
@@ -117,13 +186,14 @@ impl BrowserAuthority {
             paired_devices: self.tickets.len(),
             pending_pairings: self.pairings.len(),
             max_devices: self.max_devices,
+            limit_ceiling: self.ceiling,
         }
     }
 
     fn purge(&mut self) {
         let now = unix_now();
         self.pairings.retain(|_, expires_at| *expires_at > now);
-        self.tickets.retain(|_, expires_at| *expires_at > now);
+        self.tickets.retain(|_, ticket| ticket.expires_at > now);
     }
 }
 
@@ -185,10 +255,87 @@ mod tests {
                 paired_devices: 2,
                 pending_pairings: 0,
                 max_devices: 2,
+                limit_ceiling: 2,
             }
         );
         assert!(authority.create_pairing().is_none());
-        assert!(!authority.set_max_devices(1));
+        assert_eq!(authority.set_max_devices(1), Err(LimitError::BelowUsed));
+    }
+
+    #[test]
+    fn a_valid_ticket_wins_without_spending_a_code_sent_with_it() {
+        let (mut authority, initial) = BrowserAuthority::new(600, 2).unwrap();
+        let device = authority.authenticate(Some(&initial.code), None).unwrap();
+        let spare = authority.create_pairing().unwrap();
+
+        // Reopening a spent link from a tab that still holds its ticket.
+        let again = authority
+            .authenticate(Some(&initial.code), device.ticket.as_deref())
+            .expect("the ticket still authenticates");
+        assert!(again.ticket.is_none(), "no new ticket is issued");
+        assert_eq!(again.ticket_digest, device.ticket_digest);
+
+        // A valid ticket sent with an unspent code leaves that code unspent.
+        authority
+            .authenticate(Some(&spare.code), device.ticket.as_deref())
+            .unwrap();
+        assert!(authority.authenticate(Some(&spare.code), None).is_some());
+    }
+
+    #[test]
+    fn a_browser_may_lower_but_never_raise_the_operator_limit() {
+        let (mut authority, _) = BrowserAuthority::new(600, 3).unwrap();
+        assert_eq!(authority.set_max_devices(4), Err(LimitError::AboveCeiling));
+        assert_eq!(authority.set_max_devices(8), Err(LimitError::AboveCeiling));
+        assert_eq!(authority.set_max_devices(2), Ok(()));
+        assert_eq!(
+            authority.set_max_devices(3),
+            Ok(()),
+            "back up to the ceiling"
+        );
+        assert_eq!(authority.status().limit_ceiling, 3);
+    }
+
+    #[test]
+    fn operator_pairing_reclaims_only_disconnected_devices() {
+        let (mut authority, initial) = BrowserAuthority::new(600, 2).unwrap();
+        let open = authority.authenticate(Some(&initial.code), None).unwrap();
+        authority.connect(&open.ticket_digest);
+        let second = authority.create_pairing().unwrap();
+        let closed = authority.authenticate(Some(&second.code), None).unwrap();
+        authority.connect(&closed.ticket_digest);
+        authority.disconnect(&closed.ticket_digest); // its tab was closed
+        assert!(authority.create_pairing().is_none(), "the limit is full");
+
+        let (pairing, revoked) = authority.create_operator_pairing();
+        assert!(pairing.is_some(), "a slot was reclaimed for the operator");
+        assert_eq!(revoked, 1);
+        assert!(
+            authority
+                .authenticate(None, closed.ticket.as_deref())
+                .is_none(),
+            "the disconnected device lost its access"
+        );
+        assert!(
+            authority
+                .authenticate(None, open.ticket.as_deref())
+                .is_some(),
+            "the connected device kept its access"
+        );
+    }
+
+    #[test]
+    fn operator_pairing_never_revokes_a_connected_device() {
+        let (mut authority, initial) = BrowserAuthority::new(600, 1).unwrap();
+        let open = authority.authenticate(Some(&initial.code), None).unwrap();
+        authority.connect(&open.ticket_digest);
+
+        let (pairing, revoked) = authority.create_operator_pairing();
+        assert!(pairing.is_none(), "no room without revoking a live device");
+        assert_eq!(revoked, 0);
+        assert!(authority
+            .authenticate(None, open.ticket.as_deref())
+            .is_some());
     }
 
     #[test]

@@ -182,6 +182,10 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .empty-state { display: grid; place-items: center; align-content: center; min-height: calc(100dvh - 8rem); padding: 2rem; text-align: center; }
 .empty-state h1 { margin: 1rem 0 .4rem; }
 .empty-state p { max-width: 28rem; margin: 0 0 1.3rem; color: var(--muted); }
+.pair-form { display: flex; gap: .5rem; width: min(28rem, 100%); }
+.pair-input { flex: 1; min-width: 0; padding: .65rem .7rem; color: #d9d7e7; background: var(--bg); border: 1px solid var(--line); border-radius: .6rem; font: .8rem ui-monospace, monospace; }
+.pair-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pair-error { margin: .8rem 0 0; color: #f0a0a0; }
 .pulse { width: 1rem; height: 1rem; background: var(--accent); border-radius: 50%; box-shadow: 0 0 0 0 #ead77866; animation: pulse 1.4s infinite; }
 @keyframes pulse { 70% { box-shadow: 0 0 0 1rem #ead77800; } }
 .toast { position: fixed; z-index: 30; right: 1rem; bottom: calc(1rem + env(safe-area-inset-bottom)); left: 1rem; padding: .9rem 1rem; color: #ffe4e8; background: #4b252d; border: 1px solid #ed8f9e66; border-radius: .8rem; box-shadow: 0 1rem 3rem #0007; }

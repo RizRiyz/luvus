@@ -27,6 +27,11 @@ This command:
 3. creates a one-use browser pairing link; and
 4. opens that link in the default browser.
 
+The pairing link works **once, in one browser tab**, and expires after five
+minutes. The tab it opens keeps its access across reloads. To pair another tab
+or browser, press **Enter** in the terminal running `luvus web`: it prints a new
+one-use link each time.
+
 The default is **read-only**. You can inspect Mission Control and terminal
 output, but the browser cannot send input or change the workspace.
 
@@ -84,7 +89,12 @@ luvus web --control --max-devices 4
 Each paired browser receives its own in-memory ticket. A pairing link works only
 once, while a ticket may reconnect from the same browser tab until it expires or
 the bridge stops. The device limit cannot be reduced below the number of paired
-devices plus unspent pairing links.
+devices plus unspent pairing links, and a browser can never raise it above the
+`--max-devices` value the bridge started with.
+
+Pressing Enter in the bridge's terminal also recovers device slots. When the
+limit is full, it first revokes devices that are no longer connected, such as
+closed tabs, and then prints the new link. It never revokes a connected device.
 
 ## Connect from a phone or another computer
 
@@ -122,8 +132,14 @@ panel. Clear the field to use the address of the current browser again.
 
 The device setting lasts for the current bridge process. Use `--public-url` to
 set its initial value after a restart. Changing the pairing address does not
-create a tunnel, change the loopback listener, or add an allowed origin; configure
-those separately when your provider does not preserve a matching Origin and Host.
+create a tunnel, change the loopback listener, or add an allowed origin or host.
+
+The bridge answers only to its loopback address on the bound port and to the
+hosts of `--public-url` and every `--origin` given at startup. When your tunnel
+forwards the public host name to the bridge, pass that origin with
+`--public-url` or `--origin`; otherwise the bridge refuses the request. This
+check blocks DNS rebinding, where a malicious page points its own domain at your
+computer.
 
 The transport provider owns public reachability and TLS. Luvus remains
 loopback-bound and owns pairing, browser tickets, origin checks, and scoped
@@ -171,11 +187,18 @@ These operations have different effects:
 
 - The browser never receives the owner socket, UHP pairing code, or delegated
   upstream token.
-- Browser pairing links are one-use and tickets stay in that tab's
-  `sessionStorage`.
+- Browser pairing links are one-use, and tickets stay in that tab's
+  `sessionStorage`. Only the terminal running the bridge, or an already paired
+  browser, can create a pairing link.
+- The automatically opened link is passed to the browser through an owner-only
+  file, so the pairing code never appears in the process list where another user
+  on the same computer could read it.
 - Read-only authority is the default; control must be requested explicitly.
-- The bridge enforces exact origins, bounded messages and uploads, connection
-  limits, request-rate limits, and outbound backpressure.
+- The bridge answers only to known host names, enforces exact origins, bounded
+  messages and uploads, separate limits for authenticated and still
+  authenticating connections, request-rate limits, and outbound backpressure.
+- A paired browser can lower the device limit but never raise it above the
+  operator's `--max-devices`.
 - Bridge authority is process-bound. Stopping the bridge revokes it.
 
 For the underlying automation boundary, see [UHP Remote
@@ -189,11 +212,19 @@ Access](/docs/uhp/remote-access/).
 reverse proxy, then supply its exact origin with both `--public-url` and
 `--origin`.
 
-### The page says pairing expired or rejected
+### The page says the tab is not paired or the link was already used
 
-Pairing links are one-use and expire. From a connected browser, create a new
-link in **Devices**. If no browser remains connected, stop the bridge and run
-`luvus web` again to create a fresh initial link.
+Pairing links are one-use, belong to one browser tab, and expire after five
+minutes. Opening the plain address, a bookmark, or a new tab needs a new link.
+Press **Enter** in the terminal running `luvus web` to print one, then open it
+or paste it into the box on that page. A connected browser can also create one
+in **Devices**.
+
+### The page says Luvus Web does not answer to this host name
+
+The request reached the bridge under a host name it was not started with. When
+you use a tunnel or reverse proxy, restart the bridge with that public origin in
+`--public-url` or `--origin`.
 
 ### The WebSocket origin is rejected
 
@@ -210,8 +241,11 @@ luvus web --control
 
 ### A new device cannot pair
 
-Raise the limit in **Devices** or restart with a larger `--max-devices` value.
-The accepted range is 1 through 8.
+Press **Enter** in the bridge's terminal: when the limit is full, it revokes
+devices that are no longer connected and prints a new link. If every device is
+still connected, close one, or restart with a larger `--max-devices` value. The
+accepted range is 1 through 8, and **Devices** can only lower the limit below
+that startup value.
 
 ### Port 4174 is already in use
 
