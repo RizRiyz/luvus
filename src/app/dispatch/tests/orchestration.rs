@@ -82,6 +82,31 @@ fn task_release_api_invalidates_a_running_gate_result() {
 }
 
 #[test]
+fn task_delete_api_cancels_a_blocked_tasks_running_gate() {
+    let (_env, mut app) = app("socket-task-delete-gate");
+    app.orch
+        .add_task("delete".into(), vec![], vec![], Some("true".into()))
+        .unwrap();
+
+    app.dispatch("task.done", &json!({"id":"t1"})).unwrap();
+    let run = app.task_gates_inflight["t1"].run;
+    app.orch
+        .set_status("t1", crate::orch::TaskStatus::Blocked)
+        .unwrap();
+
+    let deleted = app.dispatch("task.delete", &json!({"id":"t1"})).unwrap();
+    assert_eq!(deleted["task"]["id"], "t1");
+    assert!(app.orch.task("t1").is_none());
+    assert!(app.task_gates_inflight["t1"]
+        .cancelled
+        .load(std::sync::atomic::Ordering::Acquire));
+
+    app.task_gate_finished("t1", run, None, "gate cancelled".into());
+    assert!(!app.task_gates_inflight.contains_key("t1"));
+    assert!(app.orch.task("t1").is_none());
+}
+
+#[test]
 fn task_update_and_retry_fence_the_previous_gate_attempt() {
     let (_env, mut app) = app("socket-task-retry-gate");
     app.orch

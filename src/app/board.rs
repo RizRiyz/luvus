@@ -125,6 +125,15 @@ impl App {
         Ok(task)
     }
 
+    pub(crate) fn delete_task_and_gate(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::orch::Task, crate::orch::Reject> {
+        let task = self.orch.delete_task(id)?;
+        self.invalidate_task_gate(id);
+        Ok(task)
+    }
+
     /// Open (or focus, if already open) the orchestration board in the active
     /// workspace. There's one board per workspace; the ledger behind it is global.
     pub fn open_orch_board(&mut self) {
@@ -2714,7 +2723,7 @@ impl App {
         let Some(id) = self.orch_selected_id() else {
             return;
         };
-        match self.orch.delete_task(&id) {
+        match self.delete_task_and_gate(&id) {
             Ok(_) => {
                 self.orch.save();
                 self.emit_event("task.deleted", serde_json::json!({ "id": id }));
@@ -3226,6 +3235,7 @@ fn run_gate_command(
             return (None, format!("failed to contain gate process: {error}"));
         }
     };
+    #[cfg(unix)]
     let pid = child.id();
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -4885,6 +4895,33 @@ mod tests {
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Done
         );
+    }
+
+    #[test]
+    fn deleting_a_blocked_task_cancels_its_running_gate() {
+        let _env = crate::persist::test_env("gate-delete-fence");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("delete".into(), vec![], vec![], Some("true".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let run = app.task_gates_inflight["t1"].run;
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Blocked)
+            .unwrap();
+
+        app.orch_cursor = 0;
+        app.orch_action_delete();
+
+        assert!(app.orch.task("t1").is_none());
+        assert!(app.task_gates_inflight["t1"]
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire));
+        app.task_gate_finished("t1", run, None, "gate cancelled".into());
+        assert!(!app.task_gates_inflight.contains_key("t1"));
+        assert!(app.orch.task("t1").is_none());
     }
 
     #[test]

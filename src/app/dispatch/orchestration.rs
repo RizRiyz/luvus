@@ -686,8 +686,7 @@ impl App {
         let _ = (method, p);
         {
             let id = req_str(p, "id")?.to_string();
-            let task = self.orch.delete_task(&id).map_err(orch_err)?;
-            self.invalidate_task_gate(&id);
+            let task = self.delete_task_and_gate(&id).map_err(orch_err)?;
             self.orch.save();
             self.emit_event("task.deleted", json!({ "id": id }));
             Ok(json!({ "type": "task", "task": task_json(&task) }))
