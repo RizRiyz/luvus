@@ -41,6 +41,10 @@
   },
   "$defs": {
     "emptyParams": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+    "paneListParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "all_tabs": { "type": "boolean", "default": true } }
+    },
     "machineIdParams": {
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[a-z0-9][a-z0-9._-]*$" } }
@@ -391,6 +395,8 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
     { "if": { "properties": { "method": { "const": "machine.list" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+    { "if": { "properties": { "method": { "const": "pane.list" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paneListParams" } } } },
     { "if": { "properties": { "method": { "enum": ["machine.get", "machine.status", "machine.sessions"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/machineIdParams" } } } },
     { "if": { "properties": { "method": { "const": "machine.add" } } },

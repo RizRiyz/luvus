@@ -72,12 +72,40 @@ never follows a moved terminal implicitly for a write.
 | `send_key` | `terminal.backend.send_key` | One documented logical key with terminal-mode-aware navigation |
 | `set_title` | `terminal.backend.set_title` | Bounded Luvus label; does not inject OSC into the child |
 | `notify_terminal` | `terminal.backend.notify` | Terminal-scoped message through the existing notification policy |
-| `create_workspace` / `create_sibling` | `terminal.backend.create` | Explicit cwd and optional argv; returns only after the PTY is live |
+| `create_workspace` / `create_sibling` | `terminal.backend.create` | Explicit cwd, optional argv, and optional restart policy; returns only after the PTY is live |
 | `close` | `terminal.backend.close` | Removes only the fully validated terminal |
 | `snapshot` | `terminal.backend.snapshot` | Inventory plus an event-sequence consistency fence |
 | `events` | `terminal.backend.events.subscribe` | Bounded, sequenced terminal lifecycle and output-ready events |
 | `wait_change` | `terminal.backend.wait_change` | Event-driven wait for a newer terminal content revision |
 | `wait_output` | `terminal.backend.wait_output` | Event-driven wait for bounded literal text after a revision advances |
+
+## Choose who restores a created terminal
+
+By default, a terminal created through UHP participates in normal Luvus
+session restoration. Its bounded Luvus label survives a restart, while native
+agent resume and launch-flag behavior continues to follow the user's existing
+session settings.
+
+An external process manager can instead retain sole responsibility for the
+terminal lifecycle:
+
+```json
+{"id":"create-supervisor","method":"terminal.backend.create","params":{"cwd":"/work/project","command":["claude","--session-id","example"],"label":"hand-supervisor","placement":{"kind":"workspace"},"focus":false,"restore":false}}
+```
+
+With `restore:false`, the terminal remains a normal live pane until it exits,
+is closed, or the server stops. It is omitted from the next restored layout,
+so Luvus does not replace it with a shell or resume its detected agent. Other
+panes in the same layout restore normally and the remaining layout collapses
+around the omitted leaf. Omitting `restore` preserves the default value of
+`true`.
+
+Clients must first check for `create_restore_policy` in `terminal.features`.
+When a request supplies `restore`, the create response echoes its effective
+value, and each inventory entry exposes the current policy so a manager can
+reconcile ownership without guessing from a release number. Requests that omit
+the field keep the original create-response shape. This policy intentionally
+does not persist and replay arbitrary original command arguments.
 
 Capture responses include `content_revision`. To initialize without a race,
 subscribe first, request a snapshot on another connection, discard

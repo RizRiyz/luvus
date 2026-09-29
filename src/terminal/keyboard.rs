@@ -23,7 +23,6 @@ impl KittyKeyboardFlags {
         self.intersects(Self::DISAMBIGUATE_ESCAPE_CODES | Self::REPORT_ALL_KEYS_AS_ESCAPE_CODES)
     }
 
-    #[allow(dead_code)]
     pub fn reports_event_types(self) -> bool {
         self.contains(Self::REPORT_EVENT_TYPES)
     }
@@ -74,7 +73,6 @@ impl KeyboardProtocol {
         self.kitty_flags().disambiguates_escape_codes()
     }
 
-    #[allow(dead_code)]
     pub fn reports_event_types(self) -> bool {
         self.kitty_flags().reports_event_types()
     }

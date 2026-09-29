@@ -280,6 +280,14 @@ pub(crate) const MAX_AGENT_ROW_TITLE_BYTES: usize = 256;
 pub(crate) const MAX_AGENT_ROW_TITLES: usize = 256;
 pub(crate) const MAX_AGENT_ROW_TITLE_AGENT_BYTES: usize = 64;
 
+/// Whether `key` is an enhanced-host auto-repeat. A same-receiver action
+/// (toggle, mutation, external side effect) returns early on a repeat so a held
+/// key runs it once. Legacy hosts send auto-repeat as Press, so this is only
+/// true when the host reports Kitty event types.
+pub(crate) fn is_key_repeat(key: &KeyEvent) -> bool {
+    key.kind == KeyEventKind::Repeat
+}
+
 pub(crate) fn agent_session_title_count(
     titles: &HashMap<String, HashMap<String, AgentRowTitle>>,
 ) -> usize {
@@ -2450,6 +2458,91 @@ struct ActiveTaskGate {
     run: TaskGateRun,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
+/// A Press forwarded to a pane. Later Repeat/Release phases return to this
+/// pane even after focus moves; client teardown releases it synthetically.
+#[derive(Clone, Copy, Debug)]
+struct ForwardedKeyPress {
+    pane: PaneId,
+    press: KeyEvent,
+}
+
+/// How a UI-consumed Press treats its later Repeat phases. A Press that left
+/// its input receiver unchanged may be replayed while that receiver remains;
+/// a Press that transitioned the UI never repeats until its key is released.
+#[derive(Clone, Copy, Debug)]
+enum UiRepeatLease {
+    Reprocess {
+        context: UiRepeatContext,
+        press: KeyEvent,
+    },
+    Suppress,
+}
+
+/// The component that would receive the next key. Opening, closing, or
+/// switching a receiver changes this value, so a held key cannot continue into
+/// whatever surface its Press revealed. Same-receiver actions stay Press-only
+/// through explicit guards in their handlers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UiRepeatContext {
+    PaneNavigate,
+    Commander,
+    BarOverflow,
+    CommandInspect,
+    Help,
+    Changelog,
+    ModuleSetting,
+    Confirm,
+    NamedSessions,
+    NamedSessionPrompt,
+    SessionMenu,
+    Settings { capturing: bool },
+    Search { instance: u64, file_menu: bool },
+    PickerList,
+    PickerText,
+    WorktreePrompt,
+    WorktreeList,
+    TabRename,
+    TabMenu,
+    WorkspaceMenu,
+    PaneMenu,
+    AgentMenu,
+    FilePrompt,
+    FileMenu,
+    DiffMenu,
+    Switcher,
+    PaneRename,
+    WorkspaceRename,
+    OrchForm(OrchFormField),
+    OrchStart(OrchStartStep),
+    OrchDetail,
+    Scroll { pane: PaneId, searching: bool },
+    Copy { pane: PaneId, searching: bool },
+    Resize(PaneId),
+    FilesFilter,
+    Sidebar(SidebarListFocus),
+    Files(crate::diff::FilesMode),
+    // Dashboard tabs carry their tab's layout leaf: another workspace's tab of
+    // the same kind is a different receiver, even without a key transition.
+    GitFilter(PaneId),
+    GitDetail(PaneId),
+    Git(PaneId),
+    Orch(PaneId, OrchView),
+    MissionAnswer(PaneId),
+    MissionDetail(PaneId),
+    Mission(PaneId),
+    Prefix,
+    FileView(PaneId),
+    FileSearch(PaneId),
+    DiffView(PaneId),
+    DiffNoteSelect(PaneId),
+    DiffNoteDraft(PaneId),
+    DiffText(PaneId),
+    DiffAgentPicker(PaneId),
+    Preview(PaneId),
+    PreviewSearch(PaneId),
+    Pane(PaneId),
+    Empty,
+}
 
 pub struct App {
     pub panes: HashMap<PaneId, Pane>,
@@ -2466,6 +2559,9 @@ pub struct App {
     /// Harness-assigned display labels are separate from addressable agent
     /// aliases and from child-controlled OSC titles.
     pub(crate) backend_labels: HashMap<PaneId, String>,
+    /// UHP-created terminals whose lifecycle belongs to an external manager.
+    /// They remain ordinary live panes, but are omitted from restart snapshots.
+    pub(crate) backend_non_restorable: HashSet<PaneId>,
     /// Last terminal content revision announced to backend observers. PTY
     /// readers coalesce wakeups, so the re-arm boundary may need to publish a
     /// newer trailing revision without duplicating the first wake's event.
@@ -2525,6 +2621,18 @@ pub struct App {
     /// Explicit normal-mode shortcuts. Empty by default so pane input remains
     /// authoritative unless the user opts a chord into Luvus handling.
     pub direct_keymap: keys::DirectKeymap,
+    /// Presses forwarded to a pane, keyed by client, semantic key, and keypad
+    /// state. Modifiers are excluded so releasing Ctrl first cannot orphan a
+    /// held key. Local monolithic input uses `None` as the client.
+    forwarded_key_presses: HashMap<(Option<u64>, KeyCode, bool), ForwardedKeyPress>,
+    /// UI-consumed presses and their repeat disposition, client-scoped.
+    ui_repeat_leases: HashMap<(Option<u64>, KeyCode, bool), UiRepeatLease>,
+    /// Transient source for one server-routed input event. Never persisted or
+    /// exposed on the wire; reset immediately after dispatch.
+    input_client_id: Option<u64>,
+    /// Set only while a UI Repeat is replayed. A replay reaches the same
+    /// receiver as its Press and must never become fresh pane input.
+    replaying_ui_repeat: bool,
     /// Process-local pane jump history. Ordinary focus changes append to the
     /// back stack and clear the forward stack, matching browser/Vim jump-list
     /// branch semantics. Entries are bounded and are not persisted.
@@ -3309,6 +3417,7 @@ impl App {
             backend_server_generation,
             backend_terminal_index,
             backend_labels: HashMap::new(),
+            backend_non_restorable: HashSet::new(),
             backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
             last_backend_wait_scan: Instant::now(),
@@ -3348,6 +3457,10 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            forwarded_key_presses: HashMap::new(),
+            ui_repeat_leases: HashMap::new(),
+            input_client_id: None,
+            replaying_ui_repeat: false,
             focus_history_back: Vec::new(),
             focus_history_forward: Vec::new(),
             prefix,
@@ -3692,6 +3805,7 @@ impl App {
         let mut module_panes: HashMap<PaneId, crate::module::ModulePaneRecord> = HashMap::new();
         let mut views: HashMap<PaneId, ViewKind> = HashMap::new();
         let mut restored_names: Vec<(String, PaneId)> = Vec::new();
+        let mut restored_backend_labels: Vec<(PaneId, String)> = Vec::new();
         let mut workspaces = Vec::new();
         for ws in snap.workspaces {
             let mut tabs = Vec::new();
@@ -3949,6 +4063,14 @@ impl App {
                     }
                     panes.insert(id, pane);
                     status.insert(id, st);
+                    if let Some(label) = &ps.backend_label {
+                        if !label.is_empty()
+                            && label.len() <= crate::terminal::backend::MAX_TITLE_BYTES
+                            && !label.chars().any(char::is_control)
+                        {
+                            restored_backend_labels.push((id, label.clone()));
+                        }
+                    }
                     remap.insert(*raw, id);
                 }
                 // A tree that references panes that failed to restore (or is
@@ -4015,6 +4137,10 @@ impl App {
             .into_iter()
             .filter(|(_, id)| panes.contains_key(id))
             .collect();
+        let backend_labels = restored_backend_labels
+            .into_iter()
+            .filter(|(id, _)| panes.contains_key(id))
+            .collect();
 
         let mut app = App {
             pending_pty_exits: HashMap::new(),
@@ -4022,7 +4148,8 @@ impl App {
             panes,
             backend_server_generation,
             backend_terminal_index,
-            backend_labels: HashMap::new(),
+            backend_labels,
+            backend_non_restorable: HashSet::new(),
             backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
             last_backend_wait_scan: Instant::now(),
@@ -4052,6 +4179,10 @@ impl App {
             session_save_inflight: false,
             keymap,
             direct_keymap,
+            forwarded_key_presses: HashMap::new(),
+            ui_repeat_leases: HashMap::new(),
+            input_client_id: None,
+            replaying_ui_repeat: false,
             focus_history_back: Vec::new(),
             focus_history_forward: Vec::new(),
             prefix,
@@ -4659,6 +4790,10 @@ impl App {
 
     /// Keyboard navigation for WORKSPACES, mirroring FILES and DIFF.
     pub fn handle_workspaces_key(&mut self, key: KeyEvent) -> bool {
+        // Filters, scope, and the row menu act once per press.
+        if is_key_repeat(&key) && key.code == KeyCode::Char('a') {
+            return true;
+        }
         let order = self.workspace_display_order();
         let page = (usize::from(self.workspaces_area.height) / 2).max(1) as isize;
         match key.code {
@@ -4712,6 +4847,10 @@ impl App {
     /// Keyboard navigation for AGENTS. `f` changes All/Active and `s` changes
     /// workspace scope; row activation matches the existing mouse behavior.
     pub fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
+        // Filters, scope, and the row menu act once per press.
+        if is_key_repeat(&key) && matches!(key.code, KeyCode::Char('a' | 'f' | 's')) {
+            return true;
+        }
         let rows = self.agent_dock_targets();
         let page = (usize::from(self.agents_area.height) / 2).max(1) as isize;
         match key.code {
@@ -9186,6 +9325,7 @@ impl App {
         self.runtime_cwd_dirty_panes.remove(&id);
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
+        self.backend_non_restorable.remove(&id);
         self.backend_published_revisions.remove(&id);
         self.agent_title_panes.remove(&id);
         self.cancel_backend_revision_waits(id);
@@ -9199,6 +9339,7 @@ impl App {
             self.agent_usage.remove(&key);
             self.usage_mtimes.remove(&key);
         }
+        self.forwarded_key_presses.retain(|_, held| held.pane != id);
         self.panes.remove(&id);
         self.status.remove(&id);
         self.views.remove(&id);
@@ -10387,6 +10528,8 @@ mod tests {
                 placement: crate::terminal::backend::CreatePlacement::Workspace,
                 focus: false,
                 label: None,
+                restore: true,
+                restore_explicit: false,
             },
             Ok(pane),
         );
@@ -10979,6 +11122,132 @@ mod tests {
         assert_eq!(restored.layout().len(), 2);
         assert_eq!(restored.workspaces[0].name, "Luvus website");
         assert!(restored.workspaces[0].pinned);
+    }
+
+    #[test]
+    fn backend_restore_policy_omits_external_panes_and_preserves_live_labels() {
+        let _env = crate::persist::test_env("backend-restore-policy");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let restorable = app.layout().focus;
+        app.backend_labels
+            .insert(restorable, "interactive-shell".into());
+
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_backend_create(ApiRequest {
+            id: "external-supervisor".into(),
+            method: "terminal.backend.create".into(),
+            params: json!({
+                "cwd": std::env::current_dir().unwrap(),
+                "label": "hand-supervisor",
+                "placement": {"kind": "workspace"},
+                "focus": false,
+                "restore": false,
+            }),
+            reply,
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let response = loop {
+            if let Ok(response) = response.try_recv() {
+                break response;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "terminal creation timed out");
+            app.handle_event(
+                rx.recv_timeout(remaining)
+                    .expect("terminal creation publishes an app event"),
+            );
+        };
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["result"]["restore"], false);
+        let external = PaneId(
+            response["result"]["pane_id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+        assert!(app.backend_non_restorable.contains(&external));
+        let (inventory_reply, _inventory_response) = std::sync::mpsc::channel();
+        let inventory: Value = serde_json::from_str(&app.handle_terminal_backend(&ApiRequest {
+            id: "inventory".into(),
+            method: "terminal.backend.inventory".into(),
+            params: json!({}),
+            reply: inventory_reply,
+        }))
+        .unwrap();
+        let pane_id = external.0.to_string();
+        let terminal = inventory["result"]["terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|terminal| terminal["pane_id"].as_str() == Some(pane_id.as_str()))
+            .expect("external terminal is inventoried");
+        assert_eq!(terminal["label"], "hand-supervisor");
+        assert_eq!(terminal["restore"], false);
+
+        let status = app.status.get_mut(&external).unwrap();
+        status.agent = "claude".into();
+        status.agent_session = Some(AgentSession {
+            agent: "claude".into(),
+            session_id: "external-session".into(),
+        });
+
+        let snapshot = persist::snapshot(&app);
+        let saved = snapshot.workspaces[0]
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.panes)
+            .map(|(id, pane)| (*id, pane))
+            .collect::<Vec<_>>();
+        assert_eq!(saved.len(), 1, "external pane is absent from the snapshot");
+        assert_eq!(saved[0].0, restorable.0);
+        assert_eq!(
+            saved[0].1.backend_label.as_deref(),
+            Some("interactive-shell")
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("hand-supervisor"));
+        assert!(!json.contains("external-session"));
+
+        let (restored_tx, _restored_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restored_tx).expect("surviving pane restores");
+        assert_eq!(restored.layout().len(), 1);
+        let restored_pane = restored.layout().focus;
+        assert_eq!(
+            restored
+                .backend_labels
+                .get(&restored_pane)
+                .map(String::as_str),
+            Some("interactive-shell")
+        );
+        assert!(restored.backend_non_restorable.is_empty());
+    }
+
+    #[test]
+    fn snapshot_keeps_the_active_tab_when_an_earlier_external_tab_is_omitted() {
+        let _env = crate::persist::test_env("backend-restore-active-tab");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let external = app.layout().focus;
+        app.backend_non_restorable.insert(external);
+
+        app.new_tab();
+        let expected_tab = app.ws().tabs[1].id.clone();
+        app.new_tab();
+        app.workspaces[0].active_tab = 1;
+
+        let snapshot = persist::snapshot(&app);
+        assert_eq!(snapshot.workspaces[0].tabs.len(), 2);
+        assert_eq!(snapshot.workspaces[0].active_tab, 0);
+        assert_eq!(snapshot.workspaces[0].tabs[0].id, expected_tab);
+
+        let (restored_tx, _restored_rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snapshot, restored_tx).expect("remaining tabs restore");
+        assert_eq!(
+            restored.ws().tabs[restored.ws().active_tab].id,
+            expected_tab
+        );
     }
 
     #[test]
@@ -13995,6 +14264,7 @@ fi
         let old: persist::PaneSnap =
             serde_json::from_str(r#"{"cwd":"/tmp/x","command":"sh"}"#).unwrap();
         assert_eq!(old.agent_launch, None);
+        assert_eq!(old.backend_label, None);
     }
 
     #[test]

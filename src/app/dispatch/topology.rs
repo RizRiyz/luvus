@@ -65,32 +65,55 @@ impl App {
     }
 
     pub(super) fn api_pane_list(&mut self, method: &str, p: &Value) -> DispatchResult {
-        let _ = (method, p);
+        let _ = method;
         {
-            let focus = self.layout().focus;
-            let panes: Vec<Value> = self
-                .layout()
-                .leaves()
-                .iter()
-                .map(|id| {
-                    let (agent, status) = self
-                        .status
-                        .get(id)
-                        .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
-                        .unwrap_or_else(|| (String::new(), "unknown".to_string()));
-                    let cwd = self
-                        .panes
-                        .get(id)
-                        .map(|p| p.cwd.display().to_string())
-                        .unwrap_or_default();
-                    let history = self.panes.get(id).map(|p| p.history_metrics());
-                    let module = self
-                        .module_panes
-                        .get(id)
-                        .map(|r| json!({"id": r.module_id, "entrypoint": r.entrypoint}));
-                    json!({
+            reject_api_fields(p, &["all_tabs"])?;
+            let all_tabs = match p.get("all_tabs") {
+                None => true,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "all_tabs must be a boolean".to_string(),
+                    ))
+                }
+            };
+            let mut panes = Vec::new();
+            for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
+                if !all_tabs && workspace_index != self.active_ws {
+                    continue;
+                }
+                for (tab_index, tab) in workspace.tabs.iter().enumerate() {
+                    if !all_tabs && tab_index != workspace.active_tab {
+                        continue;
+                    }
+                    // Dashboard layouts contain placeholder IDs, not live panes.
+                    if tab.is_git() || tab.is_orch() || tab.is_mission() {
+                        continue;
+                    }
+                    for id in tab.layout.leaves() {
+                        let (agent, status) = self
+                            .status
+                            .get(&id)
+                            .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
+                            .unwrap_or_else(|| (String::new(), "unknown".to_string()));
+                        let cwd = self
+                            .panes
+                            .get(&id)
+                            .map(|p| p.cwd.display().to_string())
+                            .unwrap_or_default();
+                        let history = self.panes.get(&id).map(|p| p.history_metrics());
+                        let module = self
+                            .module_panes
+                            .get(&id)
+                            .map(|r| json!({"id": r.module_id, "entrypoint": r.entrypoint}));
+                        panes.push(json!({
                         "pane": id.0.to_string(), "agent": agent, "status": status,
-                        "focused": *id == focus, "cwd": cwd, "module": module,
+                        "workspace": workspace_index.to_string(), "workspace_id": workspace.id,
+                        "tab": (tab_index + 1).to_string(), "tab_id": tab.id,
+                        "focused": workspace_index == self.active_ws
+                            && tab_index == workspace.active_tab && id == tab.layout.focus,
+                        "cwd": cwd, "module": module,
                         "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
                         "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
                         "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
@@ -107,9 +130,10 @@ impl App {
                         "history_allocation_count": history.and_then(|m| m.allocation_count),
                         "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
                         "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
-                    })
-                })
-                .collect();
+                    }));
+                    }
+                }
+            }
             Ok(json!({
                 "type":"pane_list",
                 "panes":panes,
@@ -272,8 +296,8 @@ impl App {
         }
     }
 
-    // A **global** single-pane status lookup (any workspace) — `pane.list` is
-    // scoped to the active workspace, so `luvus wait agent-status` polls this.
+    // A **global** single-pane status lookup (any workspace). `luvus wait
+    // agent-status` polls this instead of fetching every pane with `pane.list`.
     pub(super) fn api_pane_status(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {

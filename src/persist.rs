@@ -93,6 +93,9 @@ fn new_tab_id() -> String {
 pub struct PaneSnap {
     pub cwd: PathBuf,
     pub command: String,
+    /// UHP terminal label, kept separate from the user-facing agent alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_label: Option<String>,
     /// The pane's live name (`pane name` / `agent name`), so the alias and its
     /// title survive a restart. Re-attached to the pane's new id on restore.
     #[serde(default)]
@@ -593,8 +596,23 @@ fn capture_session_evidence(app: &App) -> SessionEvidence {
     let mut ids: Vec<PaneId> = app.status.keys().copied().collect();
     ids.sort_by_key(|p| p.0);
 
+    // Externally managed panes are omitted from the snapshot, but their precise
+    // session IDs must remain claimed while resolving the panes that do restore.
+    // Otherwise discovery could hand the external conversation to another pane.
+    for id in &ids {
+        if !app.backend_non_restorable.contains(id) {
+            continue;
+        }
+        if let Some(a) = app.status.get(id).and_then(|s| s.agent_session.as_ref()) {
+            claimed.insert((a.agent.clone(), a.session_id.clone()));
+        }
+    }
+
     // Pass 1: precise, hook-reported sessions take their id outright.
     for id in &ids {
+        if app.backend_non_restorable.contains(id) {
+            continue;
+        }
         if let Some(a) = app.status.get(id).and_then(|s| s.agent_session.as_ref()) {
             let key = (a.agent.clone(), a.session_id.clone());
             if claimed.insert(key.clone()) {
@@ -612,6 +630,9 @@ fn capture_session_evidence(app: &App) -> SessionEvidence {
     // Only a one-pane / one-session group can be recovered safely.
     let mut unbound: HashMap<(String, PathBuf), Vec<PaneId>> = HashMap::new();
     for id in ids {
+        if app.backend_non_restorable.contains(&id) {
+            continue;
+        }
         if out.contains_key(&id) {
             continue;
         }
@@ -723,6 +744,9 @@ pub(crate) fn capture_session(app: &App) -> SessionCapture {
     let evidence = capture_session_evidence(app);
     let mut launch_args = HashMap::new();
     for (id, status) in &app.status {
+        if app.backend_non_restorable.contains(id) {
+            continue;
+        }
         let agent = evidence
             .out
             .get(id)
@@ -764,8 +788,10 @@ fn snapshot_layout(
     sessions: &HashMap<PaneId, Option<(String, String)>>,
 ) -> SessionSnapshot {
     let mut workspaces = Vec::new();
+    let active_workspace_id = app.workspaces.get(app.active_ws).map(|ws| ws.id.as_str());
     for ws in &app.workspaces {
         let mut tabs = Vec::new();
+        let active_tab_id = ws.tabs.get(ws.active_tab).map(|tab| tab.id.as_str());
         for tab in &ws.tabs {
             // A git tab (docs/17) has no real panes — record just the flag; it's
             // re-created as the dashboard (and re-fetched) on restore.
@@ -810,11 +836,14 @@ fn snapshot_layout(
                 });
                 continue;
             }
-            let panes = tab
+            let panes: Vec<(u32, PaneSnap)> = tab
                 .layout
                 .leaves()
                 .into_iter()
                 .filter_map(|id| {
+                    if app.backend_non_restorable.contains(&id) {
+                        return None;
+                    }
                     // A file-view leaf (docs/38 FILE-3) is saved by its path and
                     // rebuilt on restore; it has no PTY.
                     if let Some(view) = app.views.get(&id) {
@@ -863,6 +892,7 @@ fn snapshot_layout(
                             PaneSnap {
                                 cwd: PathBuf::new(),
                                 command: String::new(),
+                                backend_label: None,
                                 name: app.agent_name_for(id).map(|s| s.to_string()),
                                 agent_session: None,
                                 agent_launch: None,
@@ -922,6 +952,7 @@ fn snapshot_layout(
                             PaneSnap {
                                 cwd: p.cwd.clone(),
                                 command: p.command.clone(),
+                                backend_label: app.backend_labels.get(&id).cloned(),
                                 name: app.agent_name_for(id).map(|s| s.to_string()),
                                 agent_session,
                                 agent_launch,
@@ -935,6 +966,9 @@ fn snapshot_layout(
                     })
                 })
                 .collect();
+            if panes.is_empty() {
+                continue;
+            }
             tabs.push(TabSnap {
                 id: tab.id.clone(),
                 tree: tab.layout.to_tree(),
@@ -946,18 +980,43 @@ fn snapshot_layout(
                 name: tab.name.clone(),
             });
         }
+        if tabs.is_empty() {
+            continue;
+        }
+        let active_tab = active_tab_id
+            .and_then(|id| tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or_else(|| {
+                let retained_before = ws
+                    .tabs
+                    .iter()
+                    .take(ws.active_tab)
+                    .filter(|source| tabs.iter().any(|saved| saved.id == source.id))
+                    .count();
+                retained_before.min(tabs.len() - 1)
+            });
         workspaces.push(WsSnap {
             id: ws.id.clone(),
             name: ws.name.clone(),
             cwd: ws.cwd.clone(),
-            active_tab: ws.active_tab,
+            active_tab,
             tabs,
             pinned: ws.pinned,
         });
     }
+    let active_ws = active_workspace_id
+        .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
+        .unwrap_or_else(|| {
+            let retained_before = app
+                .workspaces
+                .iter()
+                .take(app.active_ws)
+                .filter(|source| workspaces.iter().any(|saved| saved.id == source.id))
+                .count();
+            retained_before.min(workspaces.len().saturating_sub(1))
+        });
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
-        active_ws: app.active_ws,
+        active_ws,
         workspaces,
         closed_workspace_paths: app.closed_workspace_paths.clone(),
     }
@@ -1150,6 +1209,46 @@ mod tests {
             snapshot_agent(&manifests, None, "zsh"),
             "zsh",
             "without a process scan, retain the existing safe fallback"
+        );
+    }
+
+    #[test]
+    fn external_terminal_sessions_remain_claimed_for_restorable_panes() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let _env = test_env("external-session-claim");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let external = app.layout().focus;
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        )));
+        let restorable = app.layout().focus;
+        assert_ne!(external, restorable);
+
+        app.backend_non_restorable.insert(external);
+        let external_status = app.status.get_mut(&external).unwrap();
+        external_status.agent = "claude".into();
+        external_status.agent_session = Some(crate::app::AgentSession {
+            agent: "claude".into(),
+            session_id: "external-session".into(),
+        });
+        app.status.get_mut(&restorable).unwrap().agent = "claude".into();
+
+        let evidence = capture_session_evidence(&app);
+        assert!(evidence
+            .claimed
+            .contains(&("claude".into(), "external-session".into())));
+        assert!(!evidence.out.contains_key(&external));
+        let cwd = app.panes[&restorable].cwd.clone();
+        assert_eq!(
+            evidence.unbound.get(&("claude".into(), cwd)),
+            Some(&vec![restorable])
         );
     }
 

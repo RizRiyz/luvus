@@ -818,8 +818,14 @@ tabs return `invalid_request` without renaming another tab.
 
 ## Pane history metrics
 
-`pane.list` (for the active tab) and `pane.status` (for any resolved pane) add
-read-only history fields to their existing result rows:
+`pane.list` lists panes across every workspace and tab in the selected named
+session by default, without changing focus. Pass `{"all_tabs":false}` to limit
+the result to the active tab. The CLI follows the same default and accepts
+`luvus pane list --current-tab` for the narrow view. Each row includes a
+zero-based `workspace`, stable `workspace_id`, one-based `tab`, and stable
+`tab_id`; the boolean `focused` is true only for the globally focused pane.
+`all_tabs` must be a boolean. `pane.status` resolves any known pane. Both
+methods include read-only history fields in their result rows:
 
 ```json
 {

@@ -33,7 +33,7 @@ METHOD_FIELDS = {
     "terminal.backend.send_key": {"server_generation", "terminal_id", "pane_id", "expected_root", "key"},
     "terminal.backend.set_title": {"server_generation", "terminal_id", "pane_id", "expected_root", "title"},
     "terminal.backend.notify": {"server_generation", "terminal_id", "pane_id", "expected_root", "title", "body"},
-    "terminal.backend.create": {"cwd", "command", "label", "placement", "focus"},
+    "terminal.backend.create": {"cwd", "command", "label", "placement", "focus", "restore"},
     "terminal.backend.close": {"server_generation", "terminal_id", "pane_id", "expected_root"},
     "terminal.backend.events.subscribe": set(),
     "terminal.backend.wait_change": {"server_generation", "terminal_id", "pane_id", "expected_root", "after_revision", "timeout_ms"},
@@ -89,6 +89,8 @@ def valid_request(value):
     if method == "terminal.backend.create":
         placement = params.get("placement", {})
         if not isinstance(params.get("cwd"), str) or not params["cwd"].startswith("/") or not isinstance(params.get("focus"), bool):
+            return False
+        if "restore" in params and not isinstance(params["restore"], bool):
             return False
         if placement.get("kind") == "workspace":
             return set(placement) == {"kind"}
@@ -280,6 +282,7 @@ def check_reconciliation():
         "content_revision": 2,
         "terminal_title": None,
         "label": None,
+        "restore": True,
     }
     snapshot = {
         "type": "terminal_backend_snapshot",

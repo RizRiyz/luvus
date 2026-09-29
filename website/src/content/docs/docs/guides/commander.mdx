@@ -111,8 +111,10 @@ example `@tab:tests/pane:reviewer:sv`.
 
 ## Slash actions
 
-Type `/` at the start of the draft to use a Luvus action. If Commander still
-contains its initial `@pID` mention, typing `/` replaces that starter text.
+Type `/` at the start of the draft to use a Luvus action. Commander starts with
+an `@pID` target; clear it with `Ctrl+U` before typing a Luvus action. After an
+`@` target, `/` stays part of the message sent to that pane, so `@p17 /status`
+can run an agent's own slash command.
 The picker matches Commander's width and lists matching commands, their
 purpose, and the selected command's usage while you edit the slash name.
 Type more letters to filter. `Up`/`Down`, `PageUp`/`PageDown`, or the mouse

@@ -1605,6 +1605,16 @@ impl App {
             self.orch_scroll = 0;
             return;
         }
+        // Toggle, run, delete, start, done, retry, merge, and release act
+        // on the selected row while the board stays open: once per press.
+        if super::is_key_repeat(&key)
+            && matches!(
+                key.code,
+                KeyCode::Delete | KeyCode::Char('e' | 'r' | 'D' | 's' | 'd' | 'm' | 'x')
+            )
+        {
+            return;
+        }
         if self.orch_view == crate::app::OrchView::Automations {
             let last = self.automation.automations.len().saturating_sub(1);
             match key.code {
@@ -1751,6 +1761,26 @@ impl App {
         let Some(form) = self.orch_form.as_mut() else {
             return;
         };
+        // Choice fields cycle once per press; text fields keep repeating.
+        let choice_field = matches!(
+            form.field,
+            crate::app::OrchFormField::Target
+                | crate::app::OrchFormField::ActiveAgent
+                | crate::app::OrchFormField::Start
+                | crate::app::OrchFormField::Agent
+                | crate::app::OrchFormField::RunIn
+                | crate::app::OrchFormField::Access
+        );
+        if super::is_key_repeat(&key)
+            && (matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+                || (choice_field
+                    && matches!(
+                        key.code,
+                        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                    )))
+        {
+            return;
+        }
         match key.code {
             KeyCode::Tab | KeyCode::BackTab => form.toggle_kind(),
             KeyCode::Down => form.cycle_field(false),
@@ -2507,6 +2537,10 @@ impl App {
             .as_ref()
             .is_some_and(|start| start.step == crate::app::OrchStartStep::Mode)
         {
+            // Two modes: each press flips once; a held key must not oscillate.
+            if super::is_key_repeat(&key) {
+                return;
+            }
             match key.code {
                 KeyCode::Esc => self.orch_start = None,
                 KeyCode::Char('j')

@@ -20,6 +20,7 @@ it conflicts with `SKILL.md`, follow `SKILL.md`.
 - Themes and UI: `luvus theme list`, `luvus bar list`,
   `luvus ui dock list`
 - Layout: `luvus workspace list`, `luvus tab list`, `luvus pane list`
+  (all tabs by default; `--current-tab` narrows the scope)
 - UHP: `luvus uhp capabilities`, `luvus uhp schema`,
   `luvus uhp snapshot`
 

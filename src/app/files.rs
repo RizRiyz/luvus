@@ -1321,6 +1321,18 @@ impl App {
         // Text column width: the scroll clamp needs it to measure how many rows a
         // soft-wrapped line really occupies.
         let text_w = rect.map(|r| view_text_w(v, r.width)).unwrap_or(0);
+        // Case, wrap, and copy toggle or copy in place; a held key runs once.
+        if super::is_key_repeat(&key) {
+            let ctrl = super::keys::is_ctrl_chord(key.modifiers);
+            let action = if v.search.is_some() {
+                ctrl && key.code == KeyCode::Char('i')
+            } else {
+                matches!(key.code, KeyCode::Char('w' | 'y' | 'c'))
+            };
+            if action {
+                return true;
+            }
+        }
         // Active search owns all input. Editing accepts query text; committed
         // search accepts only navigation and search controls. Everything else
         // is swallowed so FILE commands cannot mutate or close the view under
@@ -1392,6 +1404,37 @@ mod tests {
     use crate::app::{DockKind, FileMenu, FileMenuItem, Side};
     use crate::layout::Axis;
     use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn a_held_modified_copy_or_wrap_key_acts_once() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("file-view-modified-copy-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let mut view = crate::files::FileView::new("sample.txt".into());
+        view.apply(crate::files::FileLoad::Text(vec!["text".into()]));
+        app.views.insert(pane, ViewKind::File(view));
+        let phase = |code, kind| {
+            crate::event::AppEvent::Key(KeyEvent::new_with_kind(code, KeyModifiers::CONTROL, kind))
+        };
+
+        app.handle_event(phase(KeyCode::Char('y'), KeyEventKind::Press));
+        assert_eq!(app.pending_clipboard.as_deref(), Some("text"));
+        app.pending_clipboard = None;
+        app.handle_event(phase(KeyCode::Char('y'), KeyEventKind::Repeat));
+        assert!(app.pending_clipboard.is_none(), "one copy per press");
+
+        let wrap = |app: &App| match &app.views[&pane] {
+            ViewKind::File(view) => view.wrap,
+            _ => panic!("file view retained"),
+        };
+        app.handle_event(phase(KeyCode::Char('w'), KeyEventKind::Press));
+        let toggled = wrap(&app);
+        app.handle_event(phase(KeyCode::Char('w'), KeyEventKind::Repeat));
+        assert_eq!(wrap(&app), toggled, "one wrap toggle per press");
+    }
 
     #[test]
     fn file_search_consumes_non_search_shortcuts_before_and_after_commit() {

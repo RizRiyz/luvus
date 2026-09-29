@@ -9,7 +9,7 @@
 {"id":"key-1","method":"terminal.backend.send_key","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","key":"ctrl-c"}}
 {"id":"title-1","method":"terminal.backend.set_title","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","title":"review"}}
 {"id":"notify-1","method":"terminal.backend.notify","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7","title":"Review","body":"Ready"}}
-{"id":"create-1","method":"terminal.backend.create","params":{"cwd":"/work/project","command":["codex"],"label":"review","placement":{"kind":"workspace"},"focus":false}}
+{"id":"create-1","method":"terminal.backend.create","params":{"cwd":"/work/project","command":["codex"],"label":"review","placement":{"kind":"workspace"},"focus":false,"restore":false}}
 {"id":"create-2","method":"terminal.backend.create","params":{"cwd":"/work/project","placement":{"kind":"sibling","of_terminal":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7"}},"focus":false}}
 {"id":"close-1","method":"terminal.backend.close","params":{"server_generation":"11111111111111111111111111111111","terminal_id":"22222222222222222222222222222222","pane_id":"7"}}
 {"id":"snap-1","method":"terminal.backend.snapshot","params":{}}

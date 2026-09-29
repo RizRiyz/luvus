@@ -633,6 +633,11 @@ def valid_global_request(value, methods):
     if value["method"] == "events.subscribe":
         after = value["params"].get("after_sequence", 0)
         return integer(after) and after >= 0
+    if value["method"] == "pane.list":
+        params = value["params"]
+        return set(params) <= {"all_tabs"} and (
+            "all_tabs" not in params or type(params["all_tabs"]) is bool
+        )
     if value["method"] == "agent.wait":
         return valid_agent_wait_params(value["params"])
     if value["method"] == "agent.prompt":

@@ -143,7 +143,8 @@ tabs:
   tab close [<n>]            close a tab (default: active)
 
 panes / agents:
-  pane list                  list panes and read-only history metrics in the current tab
+  pane list [--all-tabs]     list panes across every workspace and tab
+  pane list --current-tab    list panes and read-only history metrics in the current tab
   pane split [<id>] [--auto|--right|--down] [--no-focus]   split a pane (default: auto by size, creates a workspace if empty)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
@@ -3444,7 +3445,12 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("pane.report_event".into(), with_pane(obj))
         }
-        ("pane", "" | "list") => ("pane.list".into(), json!({})),
+        ("pane", "" | "list") => match rest {
+            [] => ("pane.list".into(), json!({"all_tabs": true})),
+            [flag] if flag == "--all-tabs" => ("pane.list".into(), json!({"all_tabs": true})),
+            [flag] if flag == "--current-tab" => ("pane.list".into(), json!({"all_tabs": false})),
+            _ => return Err(anyhow!("usage: luvus pane list [--all-tabs|--current-tab]")),
+        },
         ("pane", other) => {
             return Err(anyhow!(
                 "unknown pane command `{other}`. Try `luvus help pane`."
@@ -4869,8 +4875,18 @@ mod tests {
         let (m, _) = parse(&argv("luvus ping")).unwrap();
         assert_eq!(m, "ping");
 
-        let (m, _) = parse(&argv("luvus pane list")).unwrap();
+        let (m, p) = parse(&argv("luvus pane list")).unwrap();
         assert_eq!(m, "pane.list");
+        assert_eq!(p, json!({"all_tabs": true}));
+        let (m, p) = parse(&argv("luvus pane list --all-tabs")).unwrap();
+        assert_eq!(m, "pane.list");
+        assert_eq!(p, json!({"all_tabs": true}));
+        let (m, p) = parse(&argv("luvus pane list --current-tab")).unwrap();
+        assert_eq!(m, "pane.list");
+        assert_eq!(p, json!({"all_tabs": false}));
+        assert!(parse(&argv("luvus pane list --all-tabs --all-tabs")).is_err());
+        assert!(parse(&argv("luvus pane list --all-tabs --current-tab")).is_err());
+        assert!(parse(&argv("luvus pane list --unknown")).is_err());
 
         let (m, p) = parse(&argv("luvus pane split --down")).unwrap();
         assert_eq!(m, "pane.split");

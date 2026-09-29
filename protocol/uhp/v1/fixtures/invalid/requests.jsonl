@@ -8,6 +8,7 @@
 {"id":"1","method":"events.subscribe","params":{"after_sequence":-1}}
 {"id":"unicode-é","method":"uhp.capabilities","params":{}}
 {"id":"unicode-auth","method":"uhp.capabilities","auth":"luv_tok_é","params":{}}
+{"id":"pane-list-invalid-scope","method":"pane.list","params":{"all_tabs":"true"}}
 {"id":"bad-task-mode","method":"task.start","params":{"id":"t1","mode":"workspace","branch":"feat/t1"}}
 {"id":"bad-task-focus","method":"task.start","params":{"id":"t1","focus":"no"}}
 {"id":"bad-host-confirm","method":"host.update.install","params":{"confirm":false}}

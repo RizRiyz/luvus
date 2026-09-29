@@ -197,6 +197,18 @@ impl App {
         let Some(ViewKind::Preview(view)) = self.views.get_mut(&id) else {
             return false;
         };
+        // Case toggling and copying act in place; a held key runs once.
+        if super::is_key_repeat(&key_event) {
+            let ctrl = super::keys::is_ctrl_chord(key_event.modifiers);
+            let action = if view.search.is_some() {
+                ctrl && key_event.code == KeyCode::Char('i')
+            } else {
+                matches!(key_event.code, KeyCode::Char('y' | 'c'))
+            };
+            if action {
+                return true;
+            }
+        }
         if view.search.is_some() {
             let editing = view.search.as_ref().is_some_and(|search| search.editing);
             match key_event.code {

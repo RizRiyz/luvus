@@ -1432,6 +1432,17 @@ static HELP: &[Translation] = &[
         "현재 탭의 패널과 읽기 전용 기록 지표 나열"
     ),
     tr!(
+        "list panes across every workspace and tab",
+        "listar paneles de todos los espacios de trabajo y pestañas",
+        "listar painéis de todos os espaços de trabalho e abas",
+        "lister les volets de tous les espaces de travail et onglets",
+        "Bereiche aus allen Arbeitsbereichen und Tabs auflisten",
+        "daftar panel di semua ruang kerja dan tab",
+        "列出所有工作区和标签页中的窗格",
+        "すべてのワークスペースとタブのペインを一覧表示",
+        "모든 작업 공간과 탭의 패널 나열"
+    ),
+    tr!(
         "split a pane (default: auto by size, creates a workspace if empty)",
         "dividir un panel (predeterminado: automático según el tamaño, crea un espacio de trabajo si está vacío)",
         "dividir um painel (padrão: automático pelo tamanho, cria um espaço de trabalho se estiver vazio)",

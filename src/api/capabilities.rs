@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(capabilities["limits"]["agent_row_title_agent_bytes"], 64);
         assert_eq!(
             capabilities["terminal"]["features"],
-            json!(["stream_cursor"])
+            json!(["stream_cursor", "create_restore_policy"])
         );
         let terminal_capabilities = capabilities["terminal"]["capabilities"]
             .as_array()

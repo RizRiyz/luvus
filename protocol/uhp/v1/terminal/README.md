@@ -40,7 +40,8 @@ Protocol v1 capabilities are:
 - `type_literal`, `paste_text`, `paste_image`, `submit_text`, `send_key`, and
   bounded `upload_*` control-stream actions
 - `set_title` and `notify_terminal`
-- `create_workspace`, `create_sibling`, and `close`
+- `create_workspace`, `create_sibling`, and `close`, with an optional
+  per-terminal restart policy advertised by `create_restore_policy`
 - `snapshot`, `events`, `wait_change`, and `wait_output`
 - privacy-preserving cached `process_inspection`, returning executable names
   rather than full argument vectors that may contain secrets
@@ -51,6 +52,15 @@ must not infer image or file-upload support from `control_stream`, the protocol
 version, or the Luvus release version. In particular, an older server without
 `paste_image`, `upload_start`, `upload_chunk`, `upload_finish`, or
 `upload_cancel` does not support that action.
+
+When `terminal.features` includes `create_restore_policy`,
+`terminal.backend.create` accepts optional `restore:false`. The terminal stays
+fully live until it exits, is closed, or the server stops, but Luvus omits it
+from the next restored layout. This lets an external manager remain the sole
+owner of restarting that process. Omitted `restore` defaults to `true`. When a
+create request includes `restore`, its response echoes the effective policy.
+Inventory entries always report it for reconciliation. Requests that omit the
+field retain the original strict create-response shape.
 
 The bounded `send_key` vocabulary includes `ctrl-w` and `alt-d` for backward
 and forward word deletion plus `ctrl-u` and `ctrl-k` for deletion toward the

@@ -516,6 +516,17 @@ impl App {
             }
             return;
         }
+        // Scope toggles, closing, forking, agent input, and usage
+        // refresh act on agents while this dashboard stays open. Only list
+        // movement repeats.
+        if super::is_key_repeat(&key)
+            && matches!(
+                key.code,
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('x' | 'f' | 'i' | 'y' | 'r')
+            )
+        {
+            return;
+        }
         let n = self.mission_rows.len();
         match key.code {
             KeyCode::Tab | KeyCode::BackTab => {

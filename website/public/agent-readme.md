@@ -269,6 +269,9 @@ Target a named session without attaching its TUI:
 luvus --session <name> pane list
 ```
 
+`pane list` discovers pane IDs across all workspaces and tabs in that session
+without changing focus. Add `--current-tab` to limit the result to the active tab.
+
 Each named session owns an independent workspace tree and saved-machine
 catalog. A session switch must not copy workspaces or machine profiles from the
 previous session. An explicit selector for another server also discards the

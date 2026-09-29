@@ -78,6 +78,21 @@ mod tests {
     }
 
     #[test]
+    fn pane_list_request_contract_exposes_boolean_all_tabs_scope() {
+        let bundle = schema_bundle();
+        let request = &bundle["request"];
+        let params = &request["$defs"]["paneListParams"];
+        assert_eq!(params["additionalProperties"], false);
+        assert_eq!(params["properties"]["all_tabs"]["type"], "boolean");
+        assert_eq!(params["properties"]["all_tabs"]["default"], true);
+        assert!(params.get("required").is_none());
+        assert!(request["allOf"].as_array().unwrap().iter().any(|branch| {
+            branch["if"]["properties"]["method"]["const"] == "pane.list"
+                && branch["then"]["properties"]["params"]["$ref"] == "#/$defs/paneListParams"
+        }));
+    }
+
+    #[test]
     fn task_start_request_contract_can_preserve_focus() {
         let bundle = schema_bundle();
         let params = &bundle["request"]["$defs"]["taskStartParams"];

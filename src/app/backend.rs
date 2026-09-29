@@ -199,6 +199,7 @@ impl App {
                 "content_revision":pane.content_revision(),
                 "terminal_title":pane.engine.lock().ok().and_then(|engine| engine.title()).map(|title| bounded_text(&title, backend::MAX_TITLE_BYTES)),
                 "label":self.backend_labels.get(&pane_id).map(|label| bounded_text(label, backend::MAX_TITLE_BYTES)),
+                "restore":!self.backend_non_restorable.contains(&pane_id),
             });
             let entry_bytes = serde_json::to_vec(&terminal)
                 .map_err(|_| BackendError::read("internal", "inventory serialization failed"))?
@@ -609,7 +610,7 @@ impl App {
         let parsed = (|| -> Result<_, BackendError> {
             reject_mutation_fields(
                 &req.params,
-                &["cwd", "command", "label", "placement", "focus"],
+                &["cwd", "command", "label", "placement", "focus", "restore"],
             )?;
             let cwd = required_bounded_string(&req.params, "cwd", backend::MAX_CWD_BYTES, true)?;
             if cwd.contains('\0') || !std::path::Path::new(cwd).is_absolute() {
@@ -630,6 +631,18 @@ impl App {
                         DispatchEvidence::NotStarted,
                     )
                 })?;
+            let restore_explicit = req.params.get("restore").is_some();
+            let restore = match req.params.get("restore") {
+                None => true,
+                Some(Value::Bool(restore)) => *restore,
+                _ => {
+                    return Err(BackendError::mutation(
+                        "invalid_params",
+                        "restore must be a boolean",
+                        DispatchEvidence::NotStarted,
+                    ))
+                }
+            };
             let label = match req.params.get("label") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(label))
@@ -763,6 +776,8 @@ impl App {
                     placement,
                     focus,
                     label,
+                    restore,
+                    restore_explicit,
                 },
             ))
         })();
@@ -1000,8 +1015,13 @@ impl App {
         let command = pane.command.clone();
         self.panes.insert(pane_id, pane);
         self.status.insert(pane_id, PaneStatus::new(command));
+        let restore = commit.restore;
+        let restore_explicit = commit.restore_explicit;
         if let Some(label) = commit.label {
             self.backend_labels.insert(pane_id, label);
+        }
+        if !restore {
+            self.backend_non_restorable.insert(pane_id);
         }
         self.session_dirty = true;
         if let Some(workspace) = created_workspace {
@@ -1020,7 +1040,7 @@ impl App {
             backend::CreatePlacement::Workspace => "workspace",
             backend::CreatePlacement::Sibling(_) => "sibling",
         };
-        let response = json!({"id":request_id,"result":{
+        let mut result = json!({
             "type":"terminal_backend_created",
             "state":"succeeded",
             "dispatch":"executed",
@@ -1037,8 +1057,11 @@ impl App {
                 "pid":runtime.pid,
                 "start_marker":runtime.start_marker,
             }
-        }})
-        .to_string();
+        });
+        if restore_explicit {
+            result["restore"] = json!(restore);
+        }
+        let response = json!({"id":request_id,"result":result}).to_string();
         let _ = reply.send(response);
     }
 
@@ -1661,6 +1684,88 @@ fn backend_key_bytes(key: &str, application_cursor: bool) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_create_restore_policy_requires_a_boolean() {
+        let _env = crate::persist::test_env("backend-create-restore-type");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_backend_create(ApiRequest {
+            id: "create-restore-type".into(),
+            method: "terminal.backend.create".into(),
+            params: json!({
+                "cwd": std::env::current_dir().unwrap(),
+                "placement": {"kind": "workspace"},
+                "focus": false,
+                "restore": "false",
+            }),
+            reply,
+        });
+
+        let response: Value = serde_json::from_str(
+            &response
+                .recv_timeout(Duration::from_secs(2))
+                .expect("invalid request replies synchronously"),
+        )
+        .unwrap();
+        assert_eq!(response["error"]["code"], "invalid_params");
+        assert_eq!(response["error"]["dispatch"], "not_started");
+    }
+
+    #[test]
+    fn backend_create_defaults_to_restorable_without_changing_the_response_shape() {
+        let _env = crate::persist::test_env("backend-create-restore-default");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_backend_create(ApiRequest {
+            id: "create-restore-default".into(),
+            method: "terminal.backend.create".into(),
+            params: json!({
+                "cwd": std::env::current_dir().unwrap(),
+                "placement": {"kind": "workspace"},
+                "focus": false,
+            }),
+            reply,
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let response = loop {
+            if let Ok(response) = response.try_recv() {
+                break response;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "terminal creation timed out");
+            app.handle_event(
+                rx.recv_timeout(remaining)
+                    .expect("terminal creation publishes an app event"),
+            );
+        };
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert!(
+            response["result"].get("restore").is_none(),
+            "legacy create requests keep the original strict response shape"
+        );
+        let pane = PaneId(
+            response["result"]["pane_id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        );
+        assert!(!app.backend_non_restorable.contains(&pane));
+        let inventory = app.backend_inventory(&json!({})).unwrap();
+        let pane_id = pane.0.to_string();
+        let terminal = inventory["terminals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|terminal| terminal["pane_id"].as_str() == Some(pane_id.as_str()))
+            .expect("created terminal is inventoried");
+        assert_eq!(terminal["restore"], true);
+        app.close_pane(pane);
+    }
 
     fn locator(app: &App, pane: PaneId) -> Value {
         let runtime = app.panes[&pane].terminal_runtime().unwrap();

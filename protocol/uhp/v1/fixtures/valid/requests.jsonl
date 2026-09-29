@@ -52,3 +52,6 @@
 {"id":"keys-content-fence","method":"agent.keys","params":{"target":"7","keys":["enter"],"if_content_revision":12,"terminal_id":"0123456789abcdef0123456789abcdef"}}
 {"id":"task-retry","method":"task.retry","params":{"id":"t4"}}
 {"id":"worktree-remove-force","method":"worktree.remove","params":{"path":"/workspace/topic","force":true}}
+{"id":"pane-list-all-tabs","method":"pane.list","params":{"all_tabs":true}}
+{"id":"pane-list-current-tab","method":"pane.list","params":{"all_tabs":false}}
+{"id":"pane-list-default","method":"pane.list","params":{}}
