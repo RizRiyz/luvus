@@ -44,6 +44,10 @@ jobs:
       # RUSTFLAGS, which would also fail on harmless dependency warnings.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Validate detached server lifecycle
+        run: |
+          cargo build --locked
+          python3 tests/server_detach_pty.py --luvus target/debug/luvus
       - name: Validate web client and bridge
         run: |
           cargo build --locked
@@ -86,6 +90,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
+      - name: Validate detached server lifecycle
+        run: |
+          cargo build --locked
+          python3 tests/server_detach_pty.py --luvus target/debug/luvus
       - name: Validate terminal backend contract
         run: |
           python3 examples/uhp/terminal/consumer.py --fixtures
@@ -130,6 +138,7 @@ jobs:
             cargo test --locked platform::unix_clipboard::tests
             cargo build --release --locked
             ./target/release/luvus --version
+            python3 tests/server_detach_pty.py --luvus target/release/luvus
             python3 examples/uhp/terminal/consumer.py --fixtures
             python3 examples/uhp/terminal/mock_conformance.py
             python3 examples/uhp/consumer.py

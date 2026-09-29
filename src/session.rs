@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+#[cfg(unix)]
+mod launch;
+
 pub const SESSION_ENV_VAR: &str = "LUVUS_SESSION";
 pub const DEFAULT_SESSION_NAME: &str = "default";
 
@@ -473,25 +476,52 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
     }
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut command = Command::new(executable);
+    #[cfg(unix)]
+    let role = launch::SERVER_ROLE;
+    #[cfg(windows)]
+    let role = "server";
     command
         .arg("--session")
         .arg(name.unwrap_or(DEFAULT_SESSION_NAME))
-        .arg("server")
+        .arg(role)
         .env_remove("LUVUS_SOCKET_PATH")
         .env_remove(SESSION_ENV_VAR)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     detach_server_command(&mut command);
+    #[cfg(unix)]
+    let mut child = launch::PendingServer::spawn(command).map_err(|error| error.to_string())?;
+    #[cfg(windows)]
     let mut child = command.spawn().map_err(|error| error.to_string())?;
 
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
         let info = session_info(name);
-        if info.running {
+        // Binding sockets precedes App initialization and the server PID file.
+        // A Unix launcher must retain cleanup ownership until the app loop can
+        // answer, not merely until a listener accepts a connection.
+        #[cfg(unix)]
+        let ready = info.running
+            && server_identity_for(
+                name,
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(100)),
+            )
+            .is_ok();
+        #[cfg(windows)]
+        let ready = info.running;
+        if ready {
+            #[cfg(unix)]
+            child.accept().map_err(|error| error.to_string())?;
             return Ok(info);
         }
         match child.try_wait() {
+            // A startup-lock loser exits successfully while the winner may
+            // still be initializing. Wait for the winner's readiness proof.
+            #[cfg(unix)]
+            Ok(Some(status)) if status.success() => {}
             Ok(Some(status)) => {
                 return Err(format!(
                     "session {} server exited before startup with {status}",
@@ -500,6 +530,9 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
             }
             Ok(None) => {}
             Err(error) => {
+                #[cfg(unix)]
+                let _ = child.cancel();
+                #[cfg(windows)]
                 let _ = terminate_and_wait(&mut child);
                 return Err(format!(
                     "could not inspect session {} startup: {error}",
@@ -509,6 +542,9 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
         }
         std::thread::sleep(STOP_POLL_INTERVAL);
     }
+    #[cfg(unix)]
+    let cleanup = child.cancel().map_err(|error| error.to_string());
+    #[cfg(windows)]
     let cleanup = terminate_and_wait(&mut child);
     let mut message = format!(
         "session {} did not start within {}ms",
@@ -590,10 +626,18 @@ fn detach_server_command(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     unsafe {
         command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
         });
     }
+}
+
+#[cfg(unix)]
+pub(crate) fn run_server_launch_helper() -> std::io::Result<()> {
+    launch::run_helper()
 }
 
 #[cfg(windows)]

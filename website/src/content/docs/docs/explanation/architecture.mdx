@@ -62,6 +62,18 @@ snapshot, PTY tree, and orchestration ledger. Stopped names consume no CPU or
 memory. Shared preferences, detection manifests, skills, and module installs
 remain at the Luvus root.
 
+On Unix, automatic server startup uses a short-lived detached launcher. It owns
+startup failure and timeout cleanup, then exits before the client attaches, so
+a ready server is no longer a descendant of the client that started it. Closing
+the client or terminating its ordinary process tree leaves the server and PTYs
+running. Explicit server stop/restart and termination signals still work.
+Windows retains its existing detached-process launch behavior.
+
+This is not protection against a supervisor that adopts orphaned processes as a
+subreaper, kills an entire cgroup/job, or explicitly targets the server. Such an
+environment needs supervisor-managed service ownership. Bare `luvus server`
+remains a foreground role, and `--local` remains monolithic.
+
 ## One event loop, pure state
 
 All state mutation happens on a single thread, driven by one event loop. Slow

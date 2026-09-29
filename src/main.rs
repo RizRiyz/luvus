@@ -111,6 +111,15 @@ fn main() -> Result<()> {
     if args.get(1).map(String::as_str) == Some("__automation-worker") {
         std::process::exit(automation::run_worker(&args)?);
     }
+    // A short-lived Unix launcher owns startup cleanup, then exits so a ready
+    // server is no longer a descendant of the client that started it.
+    #[cfg(unix)]
+    if args.get(1).map(String::as_str) == Some("__server-launch-helper") {
+        if args.len() != 2 {
+            return Err(anyhow!("invalid internal server launch invocation"));
+        }
+        return session::run_server_launch_helper().map_err(Into::into);
+    }
     // A server restart initiated inside one of its panes cannot synchronously
     // survive that server closing the pane's PTY. `restart_session_via_helper`
     // launches this private route in a detached process group first.
@@ -986,34 +995,26 @@ fn server_running(sock: &Path) -> bool {
     ipc::transport::endpoint_exists(sock, Duration::from_millis(50))
 }
 
+#[cfg(unix)]
 fn spawn_server() -> Result<()> {
-    let exe = std::env::current_exe()?;
-    let mut cmd = Command::new(exe);
-    cmd.arg("server")
-        // The selector was already resolved into LUVUS_SESSION. A parent pane's
-        // injected API socket must not leak into a newly spawned server.
+    session::start_session(session::active_name().as_deref())
+        .map(|_| ())
+        .map_err(anyhow::Error::msg)
+}
+
+#[cfg(windows)]
+fn spawn_server() -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .arg("server")
         .env_remove("LUVUS_SOCKET_PATH")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Detach so the server survives the client exiting.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — no console, own group.
-        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
-    }
-    cmd.spawn()?;
+        .stderr(Stdio::null())
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP — preserve Windows launch.
+        .creation_flags(0x0000_0008 | 0x0000_0200);
+    command.spawn()?;
     Ok(())
 }
 
@@ -1029,7 +1030,7 @@ fn wait_for_socket(sock: &Path) -> Result<()> {
 
 /// `luvus server <start|stop|restart|status>` — manage the background server.
 /// Bare `luvus server` (no subcommand) is the internal headless role that
-/// `spawn_server` launches via setsid; users go through the subcommands.
+/// `spawn_server` launches via the detached launcher; users use subcommands.
 fn server_cmd(args: &[String]) -> Result<()> {
     let Some(command) = args.get(2).map(String::as_str) else {
         return ipc::server::run(); // internal role: run the server in the foreground
