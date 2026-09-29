@@ -395,17 +395,16 @@ impl Options {
 }
 
 /// Open a local file with the platform's default handler. Only the file's path
-/// reaches the command line; see [`open_browser_privately`].
-/// Hand `path` to the platform opener. Returns whether it could be started.
+/// reaches the command line; see [`open_browser_privately`]. Returns whether
+/// the opener could be started.
 fn open_path(path: &Path) -> bool {
     let path = path.as_os_str();
     #[cfg(target_os = "macos")]
     let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = ("open", vec![path]);
     #[cfg(target_os = "windows")]
-    let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = (
-        "cmd.exe",
-        vec!["/c".as_ref(), "start".as_ref(), "".as_ref(), path],
-    );
+    // Not `cmd /c start`: cmd.exe would parse a `&` in the temp path (for
+    // example from the user name) as a command separator.
+    let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = ("explorer.exe", vec![path]);
     #[cfg(all(unix, not(target_os = "macos")))]
     let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = ("xdg-open", vec![path]);
 

@@ -208,11 +208,15 @@ impl BrowserAuthority {
     }
 
     /// Record an open connection for a ticket. Pair with [`Self::disconnect`].
-    pub fn connect(&mut self, ticket_digest: &[u8; 32]) {
-        if let Some(ticket) = self.tickets.get_mut(ticket_digest) {
-            ticket.live += 1;
-            ticket.idle_since = None;
-        }
+    /// Returns `false` if the ticket was revoked since it authenticated; the
+    /// connection must then be closed.
+    pub fn connect(&mut self, ticket_digest: &[u8; 32]) -> bool {
+        let Some(ticket) = self.tickets.get_mut(ticket_digest) else {
+            return false;
+        };
+        ticket.live += 1;
+        ticket.idle_since = None;
+        true
     }
 
     pub fn disconnect(&mut self, ticket_digest: &[u8; 32]) {
@@ -427,6 +431,24 @@ mod tests {
         assert!(authority
             .authenticate(None, tab.ticket.as_deref())
             .is_some());
+    }
+
+    #[test]
+    fn a_ticket_reclaimed_after_authenticating_cannot_connect() {
+        let (mut authority, initial) = BrowserAuthority::new(600, 1).unwrap();
+        authority.reconnect_grace = 0;
+        let device = authority.authenticate(Some(&initial.code), None).unwrap();
+        authority.connect(&device.ticket_digest);
+        authority.disconnect(&device.ticket_digest);
+
+        // The tab reconnects and authenticates, then the operator presses
+        // Enter before its socket registers the connection.
+        let again = authority
+            .authenticate(None, device.ticket.as_deref())
+            .unwrap();
+        let (_, reclaimed) = authority.create_operator_pairing().unwrap();
+        assert_eq!(reclaimed, Reclaimed::IdleDevice);
+        assert!(!authority.connect(&again.ticket_digest), "must be closed");
     }
 
     #[test]

@@ -97,15 +97,17 @@ struct LiveTicket {
 }
 
 impl LiveTicket {
-    fn open(authority: &Arc<Mutex<BrowserAuthority>>, digest: [u8; 32]) -> Self {
-        authority
+    /// Returns `None` when the ticket no longer exists, for example because
+    /// the operator reclaimed it after this socket authenticated.
+    fn open(authority: &Arc<Mutex<BrowserAuthority>>, digest: [u8; 32]) -> Option<Self> {
+        let connected = authority
             .lock()
             .expect("browser authority poisoned")
             .connect(&digest);
-        Self {
+        connected.then(|| Self {
             authority: Arc::clone(authority),
             digest,
-        }
+        })
     }
 }
 
@@ -372,7 +374,17 @@ async fn client(socket: WebSocket, state: BridgeState, pending: ConnectionGuard)
     };
     // Authenticated: this socket now counts against the client budget instead.
     drop(pending);
-    let _live = LiveTicket::open(&state.authority, authentication.ticket_digest);
+    let Some(_live) = LiveTicket::open(&state.authority, authentication.ticket_digest) else {
+        let _ = sink
+            .send(text_message(json!({
+                "type": "error",
+                "code": "forbidden",
+                "message": "Pairing or ticket was rejected",
+            })))
+            .await;
+        let _ = sink.send(Message::Close(None)).await;
+        return;
+    };
     let authority = state.uhp.authority();
     let mut ready = json!({
         "type": "ready",
