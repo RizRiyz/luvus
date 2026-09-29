@@ -249,11 +249,14 @@ impl Drop for Launcher {
 /// process list, where another local user could read it and redeem it first.
 /// Instead the link goes into an owner-only HTML file that redirects to it, and
 /// only that file's path is passed to the opener. If the file cannot be
-/// written privately, nothing is opened; the terminal still shows the link.
+/// written privately or no opener can be started, this returns `None` and the
+/// caller says so; the terminal still shows the link.
 fn open_browser_privately(url: &str) -> Option<Launcher> {
     let launcher = write_launcher(&std::env::temp_dir(), url).ok()?;
     let file = launcher.0.join("open.html");
-    open_path(&file);
+    if !open_path(&file) {
+        return None; // dropping the launcher removes the file
+    }
     let dir = launcher.0.clone();
     tokio::spawn(async move {
         tokio::time::sleep(LAUNCHER_LIFETIME).await;
@@ -393,7 +396,8 @@ impl Options {
 
 /// Open a local file with the platform's default handler. Only the file's path
 /// reaches the command line; see [`open_browser_privately`].
-fn open_path(path: &Path) {
+/// Hand `path` to the platform opener. Returns whether it could be started.
+fn open_path(path: &Path) -> bool {
     let path = path.as_os_str();
     #[cfg(target_os = "macos")]
     let (program, arguments): (&str, Vec<&std::ffi::OsStr>) = ("open", vec![path]);
@@ -412,7 +416,7 @@ fn open_path(path: &Path) {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     crate::platform::no_window(&mut command);
-    let _ = command.spawn();
+    command.spawn().is_ok()
 }
 
 #[cfg(test)]
