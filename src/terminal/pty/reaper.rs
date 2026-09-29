@@ -7,7 +7,7 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
 
 use crate::event::AppEvent;
@@ -24,29 +24,16 @@ struct PaneCompletion {
     app_tx: Sender<AppEvent>,
 }
 
-type PendingHelper = Arc<Mutex<Option<std::process::Child>>>;
+enum HelperStartup {
+    Starting,
+    Finished(Option<std::process::Child>),
+}
+
+type PendingHelper = Arc<Mutex<HelperStartup>>;
 
 enum Registration {
     Pane(ReaperEntry),
     Helper(PendingHelper),
-}
-
-impl Registration {
-    fn into_entry(self) -> Option<ReaperEntry> {
-        match self {
-            Self::Pane(entry) => Some(entry),
-            Self::Helper(pending) => {
-                let child = pending
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .take()?;
-                Some(ReaperEntry {
-                    child: Box::new(child),
-                    completion: None,
-                })
-            }
-        }
-    }
 }
 
 struct Reaper {
@@ -81,10 +68,9 @@ pub(super) fn register_child_reaper(
         // A panic in the shared reaper must not leave an unreaped child. This
         // fallback is deliberately exceptional; the normal path stays at one
         // waiter thread for the whole server.
-        let mut entry = error
-            .0
-            .into_entry()
-            .expect("pane registration owns a child");
+        let Registration::Pane(mut entry) = error.0 else {
+            unreachable!("pane registration owns a child");
+        };
         let _ = thread::Builder::new()
             .name("luvus-pty-reaper-fallback".to_string())
             .spawn(move || {
@@ -101,7 +87,7 @@ pub(super) fn register_child_reaper(
 /// as with `Command::spawn`; all exit waiting happens on the shared reaper.
 pub(crate) fn spawn_helper_reaped(command: &mut std::process::Command) -> Option<u32> {
     let reaper = get_reaper().ok()?;
-    spawn_helper_reaped_with(command, |pending| {
+    spawn_helper_reaped_with(command, &reaper.wake, |pending| {
         reaper
             .tx
             .send(Registration::Helper(pending))
@@ -113,17 +99,23 @@ pub(crate) fn spawn_helper_reaped(command: &mut std::process::Command) -> Option
 
 fn spawn_helper_reaped_with(
     command: &mut std::process::Command,
+    wake: &ReaperWake,
     register: impl FnOnce(PendingHelper) -> io::Result<()>,
 ) -> Option<u32> {
-    let pending = Arc::new(Mutex::new(None));
-    // The reaper waits for this lock only until command startup finishes, never
-    // until the helper exits. No fallible handoff follows successful startup.
-    let mut pending_child = pending.lock().unwrap_or_else(|error| error.into_inner());
+    let pending = Arc::new(Mutex::new(HelperStartup::Starting));
     register(Arc::clone(&pending)).ok()?;
-    let child = command.spawn().ok()?;
-    let pid = child.id();
-    *pending_child = Some(child);
-    Some(pid)
+    // Slow startup must not hold a lock needed by the shared reaper. Publish
+    // success or failure afterward, with no fallible ownership handoff.
+    let child = command.spawn().ok();
+    let pid = child.as_ref().map(std::process::Child::id);
+    {
+        let mut startup = pending.lock().unwrap_or_else(|error| error.into_inner());
+        *startup = HelperStartup::Finished(child);
+    }
+    // Signal after unlocking, including failed startup. A pending helper keeps
+    // the loop on its wake primitive rather than waiting for another registration.
+    wake.signal();
+    pid
 }
 
 fn get_reaper() -> io::Result<&'static Reaper> {
@@ -196,10 +188,13 @@ fn start_reaper_with(
 
 fn child_reaper_loop(rx: Receiver<Registration>, wake: Arc<ReaperWake>) {
     let mut children = Vec::<ReaperEntry>::new();
+    let mut pending_helpers = Vec::<PendingHelper>::new();
     loop {
-        if children.is_empty() {
+        if children.is_empty() && pending_helpers.is_empty() {
             match rx.recv() {
-                Ok(registration) => children.extend(registration.into_entry()),
+                Ok(registration) => {
+                    accept_registration(registration, &mut children, &mut pending_helpers)
+                }
                 Err(_) => break,
             }
         } else {
@@ -209,14 +204,60 @@ fn child_reaper_loop(rx: Receiver<Registration>, wake: Arc<ReaperWake>) {
                     // The wake primitive failed. Block on the next registration
                     // so this thread cannot spin, then try_wait listed children.
                     match rx.recv() {
-                        Ok(registration) => children.extend(registration.into_entry()),
+                        Ok(registration) => {
+                            accept_registration(registration, &mut children, &mut pending_helpers)
+                        }
                         Err(_) => break,
                     }
                 }
             }
         }
-        children.extend(rx.try_iter().filter_map(Registration::into_entry));
+        for registration in rx.try_iter() {
+            accept_registration(registration, &mut children, &mut pending_helpers);
+        }
+        promote_started_helpers(&mut pending_helpers, &mut children);
         reap_finished(&mut children);
+    }
+}
+
+fn accept_registration(
+    registration: Registration,
+    children: &mut Vec<ReaperEntry>,
+    pending_helpers: &mut Vec<PendingHelper>,
+) {
+    match registration {
+        Registration::Pane(entry) => children.push(entry),
+        Registration::Helper(pending) => pending_helpers.push(pending),
+    }
+}
+
+fn promote_started_helpers(
+    pending_helpers: &mut Vec<PendingHelper>,
+    children: &mut Vec<ReaperEntry>,
+) {
+    let mut index = 0;
+    while index < pending_helpers.len() {
+        let startup = match pending_helpers[index].try_lock() {
+            Ok(startup) => Some(startup),
+            Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        let finished = startup.and_then(|mut startup| match &mut *startup {
+            HelperStartup::Starting => None,
+            HelperStartup::Finished(child) => Some(child.take()),
+        });
+        match finished {
+            Some(child) => {
+                pending_helpers.swap_remove(index);
+                if let Some(child) = child {
+                    children.push(ReaperEntry {
+                        child: Box::new(child),
+                        completion: None,
+                    });
+                }
+            }
+            None => index += 1,
+        }
     }
 }
 
@@ -603,9 +644,10 @@ mod tests {
 
     #[test]
     fn helper_registration_and_spawn_failures_leave_no_child() {
+        let wake = ReaperWake::new().unwrap();
         let mut command = std::process::Command::new("luvus-nonexistent-helper-test");
         let mut registration_called = false;
-        assert!(super::spawn_helper_reaped_with(&mut command, |_| {
+        assert!(super::spawn_helper_reaped_with(&mut command, &wake, |_| {
             registration_called = true;
             Err(std::io::Error::other("injected disconnected reaper"))
         })
@@ -616,14 +658,134 @@ mod tests {
         );
 
         let mut pending = None;
-        assert!(super::spawn_helper_reaped_with(&mut command, |child| {
-            pending = Some(child);
-            Ok(())
-        })
-        .is_none());
-        assert!(super::Registration::Helper(pending.unwrap())
-            .into_entry()
-            .is_none());
+        assert!(
+            super::spawn_helper_reaped_with(&mut command, &wake, |child| {
+                pending = Some(child);
+                Ok(())
+            })
+            .is_none()
+        );
+        let mut pending_helpers = vec![pending.unwrap()];
+        let mut children = Vec::new();
+        super::promote_started_helpers(&mut pending_helpers, &mut children);
+        assert!(children.is_empty());
+        assert!(
+            pending_helpers.is_empty(),
+            "failed startup must not remain pending"
+        );
+    }
+
+    #[test]
+    fn pending_helper_lock_never_blocks_the_reaper() {
+        let pending = Arc::new(std::sync::Mutex::new(super::HelperStartup::Starting));
+        let mut pending_helpers = vec![Arc::clone(&pending)];
+        let mut children = Vec::new();
+        let startup = pending.lock().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            super::promote_started_helpers(&mut pending_helpers, &mut children);
+            let _ = done_tx.send((pending_helpers.len(), children.len()));
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        // Unlock before joining/asserting: a regression should fail, not hang CI.
+        drop(startup);
+        worker.join().unwrap();
+        assert_eq!(result.expect("helper lock blocked reaping"), (1, 0));
+        let mut pending_helpers = vec![Arc::clone(&pending)];
+        let mut children = Vec::new();
+        *pending.lock().unwrap() = super::HelperStartup::Finished(None);
+        super::promote_started_helpers(&mut pending_helpers, &mut children);
+        assert!(pending_helpers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_helper_startup_does_not_delay_pane_exit() {
+        use crate::event::AppEvent;
+        use crate::ids::PaneId;
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::pty::Pane;
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+        use std::sync::atomic::Ordering;
+        use std::time::Instant;
+
+        let _env = crate::persist::test_env("reaper-slow-helper");
+        let (app_tx, app_rx) = mpsc::channel();
+        let id = PaneId::alloc();
+        let pane = Pane::spawn(
+            id,
+            80,
+            24,
+            std::env::current_dir().unwrap(),
+            app_tx,
+            None,
+            "/bin/sh",
+            500,
+            PaneAppearance::default(),
+        )
+        .unwrap();
+        let (child_gate, mut release) = UnixStream::pair().unwrap();
+        child_gate
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        release
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut command = std::process::Command::new("true");
+        // SAFETY: the post-fork closure uses only async-signal-safe read/write.
+        // It reports that spawn is in progress, then blocks until the parent
+        // writes a release byte. No allocation or Rust synchronization occurs here.
+        unsafe {
+            command.pre_exec(move || {
+                let fd = child_gate.as_raw_fd();
+                let mut byte = [1u8];
+                if libc::write(fd, byte.as_ptr().cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                loop {
+                    if libc::read(fd, byte.as_mut_ptr().cast(), 1) >= 0 {
+                        return Ok(());
+                    }
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+            });
+        }
+        let helper = thread::spawn(move || super::spawn_helper_reaped(&mut command));
+        let mut ready = [0u8];
+        let startup_reached = release.read_exact(&mut ready).is_ok();
+        pane.send(b"exit\r");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut reaped_while_starting = false;
+        while startup_reached && Instant::now() < deadline {
+            match app_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(AppEvent::PtyReaped(exited, _)) if exited == id => {
+                    reaped_while_starting = pane.child_exited.load(Ordering::SeqCst);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        // Release startup before asserting so failure cannot strand the helper.
+        let _ = release.write_all(&[0]);
+        drop(release);
+        let helper_pid = helper.join().unwrap().expect("helper starts after release");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(helper_pid as libc::pid_t, 0) } == 0 {
+            assert!(Instant::now() < deadline, "released helper was not reaped");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(startup_reached, "helper never entered delayed startup");
+        assert!(
+            reaped_while_starting,
+            "slow helper startup blocked pane exit notification"
+        );
     }
 
     #[cfg(unix)]
