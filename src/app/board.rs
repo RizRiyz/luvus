@@ -4904,6 +4904,80 @@ mod tests {
         );
     }
 
+    /// Issue #429, cause 2: a second `task done` while the first gate is still
+    /// running must not start another gate for the same task.
+    #[test]
+    fn a_second_done_while_a_gate_runs_is_refused() {
+        let _env = crate::persist::test_env("gate-429-second-done");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("gate race".into(), vec![], vec![], Some("true".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let first_run = app.task_gates_inflight["t1"].run;
+        assert_eq!(
+            app.complete_task("t1"),
+            Err((
+                "gate_running".into(),
+                "quality gate is already running for t1".into()
+            ))
+        );
+        assert_eq!(
+            app.task_gates_inflight["t1"].run, first_run,
+            "the refused call must not replace the running gate"
+        );
+
+        app.task_gate_finished("t1", first_run, Some(0), String::new());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Done
+        );
+        assert!(app.task_gates_inflight.is_empty());
+    }
+
+    /// Issue #429, cause 1: a gate result that lands after its task merged must
+    /// leave the task merged. A failing result used to reopen it for review,
+    /// and a passing one must not re-complete it either. Neither may add a
+    /// "gate failed" note to a task that was integrated.
+    #[test]
+    fn a_gate_result_after_merge_leaves_the_task_merged() {
+        for (code, outcome) in [(Some(1), "failing"), (Some(0), "passing")] {
+            let _env = crate::persist::test_env("gate-429-after-merge");
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            app.orch
+                .add_task("gate race".into(), vec![], vec![], Some("true".into()))
+                .unwrap();
+            assert_eq!(app.complete_task("t1"), Ok(true));
+            let run = app.task_gates_inflight["t1"].run;
+            let outputs_before = app.orch.task("t1").unwrap().outputs.len();
+
+            // The task is integrated while this gate is still in flight.
+            app.orch
+                .set_status("t1", crate::orch::TaskStatus::Merged)
+                .unwrap();
+            app.task_gate_finished("t1", run, code, "late gate output".into());
+
+            let task = app.orch.task("t1").unwrap();
+            assert_eq!(
+                task.status,
+                crate::orch::TaskStatus::Merged,
+                "a late {outcome} gate changed a merged task"
+            );
+            assert_eq!(
+                task.outputs.len(),
+                outputs_before,
+                "a late {outcome} gate annotated a merged task"
+            );
+            assert!(
+                app.task_gates_inflight.is_empty(),
+                "the finished gate must not stay registered"
+            );
+        }
+    }
+
     #[test]
     fn releasing_a_task_invalidates_its_running_gate() {
         let _env = crate::persist::test_env("gate-release-fence");
