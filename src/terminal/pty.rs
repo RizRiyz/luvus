@@ -29,6 +29,7 @@ pub(crate) mod input;
 mod io;
 mod reaper;
 pub(crate) use input::InputSender;
+pub(crate) use reaper::spawn_helper_reaped;
 
 /// Keep each pane's read working set small. Unix amortizes synchronization by
 /// draining several of these chunks under one bounded engine lock.
