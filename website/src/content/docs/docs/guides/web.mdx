@@ -92,9 +92,12 @@ the bridge stops. The device limit cannot be reduced below the number of paired
 devices plus unspent pairing links, and a browser can never raise it above the
 `--max-devices` value the bridge started with.
 
-Pressing Enter in the bridge's terminal also recovers device slots. When the
-limit is full, it first revokes devices that are no longer connected, such as
-closed tabs, and then prints the new link. It never revokes a connected device.
+Pressing Enter in the bridge's terminal also recovers a device slot. When the
+limit is full, the new link replaces the oldest link nobody has used yet. If
+every slot belongs to a paired device, it revokes the one that has been
+disconnected longest, such as a closed tab. It never revokes a connected device,
+or one that disconnected within the last 30 seconds and may be an open tab
+reconnecting.
 
 ## Connect from a phone or another computer
 
@@ -103,7 +106,35 @@ The native bridge deliberately listens on loopback only. A phone cannot open
 listener. Put a trusted private tunnel or reverse proxy with TLS/WSS in front of
 the loopback bridge, and keep access limited to devices you trust.
 
-Tell Luvus the public origin used by that provider:
+### Use a tunnel address known only after start
+
+Tunnels such as ngrok print their HTTPS address after they start, often a new
+one each time. Start the bridge, start the tunnel to its port, then paste the
+tunnel's address into the terminal running `luvus web` and press Enter:
+
+```sh
+luvus web --control --no-open
+# in another terminal:
+ngrok http 4174
+```
+
+```text
+https://abc-123.ngrok-free.app
+Remote access allowed for https://abc-123.ngrok-free.app.
+New one-use link (expires in 5 minutes):
+https://abc-123.ngrok-free.app/#pair=...
+```
+
+The bridge now answers to that exact host name and browser origin, uses it as
+the pairing address, and prints a one-use link to open on your phone. Press
+Enter again later for another link on the same address. Only a complete
+`https://` origin without a path is accepted, and the change lasts until the
+bridge stops. Only the terminal running the bridge can do this; a paired
+browser cannot widen what the bridge answers to.
+
+### Set the address at startup
+
+When the public origin is known in advance, pass it at startup instead:
 
 ```sh
 luvus web --control \
@@ -134,10 +165,11 @@ The device setting lasts for the current bridge process. Use `--public-url` to
 set its initial value after a restart. Changing the pairing address does not
 create a tunnel, change the loopback listener, or add an allowed origin or host.
 
-The bridge answers only to its loopback address on the bound port and to the
-hosts of `--public-url` and every `--origin` given at startup. When your tunnel
-forwards the public host name to the bridge, pass that origin with
-`--public-url` or `--origin`; otherwise the bridge refuses the request. This
+The bridge answers only to its loopback address on the bound port, to the
+hosts of `--public-url` and every `--origin` given at startup, and to addresses
+pasted into its terminal. When your tunnel forwards the public host name to the
+bridge, pass that origin at startup or paste it into the terminal; otherwise
+the bridge refuses the request. This
 check blocks DNS rebinding, where a malicious page points its own domain at your
 computer.
 
@@ -187,6 +219,8 @@ These operations have different effects:
 
 - The browser never receives the owner socket, UHP pairing code, or delegated
   upstream token.
+- Only the terminal running the bridge can add a remote address; a paired
+  browser can change the pairing address but not what the bridge answers to.
 - Browser pairing links are one-use, and tickets stay in that tab's
   `sessionStorage`. Only the terminal running the bridge, or an already paired
   browser, can create a pairing link.
@@ -209,8 +243,8 @@ Access](/docs/uhp/remote-access/).
 ### The phone cannot open the local link
 
 `127.0.0.1` on the phone refers to the phone itself. Use a trusted TLS tunnel or
-reverse proxy, then supply its exact origin with both `--public-url` and
-`--origin`.
+reverse proxy, then paste its HTTPS address into the terminal running
+`luvus web`, or supply it with both `--public-url` and `--origin` at startup.
 
 ### The page says the tab is not paired or the link was already used
 
@@ -222,9 +256,10 @@ in **Devices**.
 
 ### The page says Luvus Web does not answer to this host name
 
-The request reached the bridge under a host name it was not started with. When
-you use a tunnel or reverse proxy, restart the bridge with that public origin in
-`--public-url` or `--origin`.
+The request reached the bridge under a host name it does not know. When you use
+a tunnel or reverse proxy, paste its HTTPS address into the terminal running
+`luvus web`, or restart the bridge with that origin in `--public-url` or
+`--origin`.
 
 ### The WebSocket origin is rejected
 
@@ -241,9 +276,11 @@ luvus web --control
 
 ### A new device cannot pair
 
-Press **Enter** in the bridge's terminal: when the limit is full, it revokes
-devices that are no longer connected and prints a new link. If every device is
-still connected, close one, or restart with a larger `--max-devices` value. The
+Press **Enter** in the bridge's terminal: when the limit is full, it replaces an
+unused link or revokes a device that is no longer connected, then prints a new
+link. If a device disconnected moments ago, wait 30 seconds and press Enter
+again. If every device is still connected, close one, or restart with a larger
+`--max-devices` value. The
 accepted range is 1 through 8, and **Devices** can only lower the limit below
 that startup value.
 

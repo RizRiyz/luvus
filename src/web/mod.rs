@@ -29,6 +29,9 @@ its PTYs, or attached TUI clients.
 
 Each pairing link works once, in one browser tab, and expires after five
 minutes. Press Enter in this terminal while the bridge runs to print a new one.
+To reach the bridge through a tunnel such as ngrok, paste the tunnel's HTTPS
+address here instead: the bridge then answers to it and prints a link that
+uses it.
 
 Options:
   --control             allow bounded terminal and workspace control
@@ -105,6 +108,9 @@ async fn run(session: String, options: Options) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
     if interactive {
         println!("Press Enter here for a new one-use link.");
+        println!(
+            "To use it remotely, paste your tunnel's HTTPS address here, such as one from ngrok."
+        );
     }
     println!("Press Ctrl+C to stop the web bridge. Luvus and its panes will keep running.");
     let _launcher = if options.no_open {
@@ -130,46 +136,96 @@ async fn run(session: String, options: Options) -> Result<()> {
     Ok(())
 }
 
-/// Print a fresh one-use pairing link each time the operator presses Enter in
-/// the terminal running the bridge. Only whoever controls that terminal can
-/// do this, which is the same trust as reading the initial link.
-async fn operator_links(state: BridgeState, base: String) {
-    let (lines, mut entered) = tokio::sync::mpsc::unbounded_channel::<()>();
+/// Handle what the operator types into the terminal running the bridge: Enter
+/// prints a fresh one-use pairing link, and a pasted HTTPS address allows it
+/// for remote access and prints a link that uses it. Only whoever controls
+/// that terminal can do either, which is the same trust as reading the initial
+/// link, so no browser can widen what the bridge answers to.
+async fn operator_links(state: BridgeState, mut base: String) {
+    let (lines, mut entered) = tokio::sync::mpsc::unbounded_channel::<String>();
     // Blocking stdin read on its own thread; it ends with the process.
     std::thread::spawn(move || {
         let mut line = String::new();
         while matches!(std::io::stdin().read_line(&mut line), Ok(read) if read > 0) {
-            line.clear();
-            if lines.send(()).is_err() {
+            if lines.send(std::mem::take(&mut line)).is_err() {
                 break;
             }
         }
     });
-    while entered.recv().await.is_some() {
-        let (pairing, revoked) = state.operator_pairing();
-        println!(
-            "{}",
-            operator_link_message(&base, pairing.as_ref(), revoked)
+    while let Some(line) = entered.recv().await {
+        match parse_operator_input(&line) {
+            OperatorInput::NewLink => {}
+            OperatorInput::RemoteOrigin(origin) => {
+                state.allow_remote_origin(&origin);
+                println!("Remote access allowed for {origin}.");
+                base = origin;
+            }
+            OperatorInput::Invalid(reason) => {
+                println!("{reason}");
+                continue;
+            }
+        }
+        println!("{}", operator_link_message(&base, state.operator_pairing()));
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum OperatorInput {
+    /// Enter on an empty line: print a new link for the current address.
+    NewLink,
+    /// A normalized HTTPS origin to allow for remote access.
+    RemoteOrigin(String),
+    /// Something else, with what to say about it.
+    Invalid(&'static str),
+}
+
+fn parse_operator_input(line: &str) -> OperatorInput {
+    let text = line.trim();
+    if text.is_empty() {
+        return OperatorInput::NewLink;
+    }
+    // Require the full address a tunnel prints, so a stray keystroke can never
+    // become an allowed host name.
+    if let Some(origin) = normalize_public_origin(text) {
+        return OperatorInput::RemoteOrigin(origin);
+    }
+    if normalize_origin(text).is_some() {
+        return OperatorInput::Invalid(
+            "Remote addresses must use HTTPS. Paste the https:// address your tunnel shows.",
         );
     }
+    OperatorInput::Invalid(
+        "Press Enter for a new link, or paste an HTTPS address without a path, such as \
+         https://example.ngrok-free.app.",
+    )
 }
 
 fn operator_link_message(
     base: &str,
-    pairing: Option<&auth::BrowserPairing>,
-    revoked: usize,
+    result: Result<(auth::BrowserPairing, auth::Reclaimed), auth::Full>,
 ) -> String {
-    let Some(pairing) = pairing else {
-        return "No room for another device: every allowed device is still connected. \
-                Close a Luvus Web tab, or restart with a larger --max-devices."
-            .to_string();
+    let (pairing, reclaimed) = match result {
+        Ok(created) => created,
+        Err(auth::Full { reconnecting: 0 }) => {
+            return "No room for another device: every allowed device is still connected. \
+                    Close a Luvus Web tab, or restart with a larger --max-devices."
+                .to_string()
+        }
+        Err(auth::Full { .. }) => {
+            return "No room for another device yet: a device disconnected moments ago and \
+                    may be reconnecting. Press Enter again in 30 seconds to replace it."
+                .to_string()
+        }
     };
     let mut message = String::new();
-    if revoked > 0 {
-        let noun = if revoked == 1 { "device" } else { "devices" };
-        message.push_str(&format!(
-            "Revoked {revoked} disconnected {noun} to make room.\n"
-        ));
+    match reclaimed {
+        auth::Reclaimed::Nothing => {}
+        auth::Reclaimed::UnusedLink => {
+            message.push_str("Replaced the oldest unused link to make room.\n")
+        }
+        auth::Reclaimed::IdleDevice => {
+            message.push_str("Revoked the device disconnected longest to make room.\n")
+        }
     }
     message.push_str(&format!(
         "New one-use link (expires in 5 minutes):\n{base}/#pair={}",
@@ -213,6 +269,7 @@ fn write_launcher(parent: &Path, url: &str) -> std::io::Result<Launcher> {
     getrandom::fill(&mut suffix).map_err(|error| std::io::Error::other(error.to_string()))?;
     let name: String = suffix.iter().map(|byte| format!("{byte:02x}")).collect();
     let dir = parent.join(format!("luvus-web-{name}"));
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -404,15 +461,20 @@ mod tests {
             code: "CODE".into(),
             expires_at: 0,
         };
-        let fresh = operator_link_message("http://127.0.0.1:4174", Some(&pairing), 0);
+        let base = "http://127.0.0.1:4174";
+        let fresh = operator_link_message(base, Ok((pairing.clone(), auth::Reclaimed::Nothing)));
         assert_eq!(
             fresh,
             "New one-use link (expires in 5 minutes):\nhttp://127.0.0.1:4174/#pair=CODE"
         );
-        let reclaimed = operator_link_message("http://127.0.0.1:4174", Some(&pairing), 2);
-        assert!(reclaimed.starts_with("Revoked 2 disconnected devices to make room.\n"));
-        let full = operator_link_message("http://127.0.0.1:4174", None, 0);
+        let link = operator_link_message(base, Ok((pairing.clone(), auth::Reclaimed::UnusedLink)));
+        assert!(link.starts_with("Replaced the oldest unused link to make room.\n"));
+        let device = operator_link_message(base, Ok((pairing, auth::Reclaimed::IdleDevice)));
+        assert!(device.starts_with("Revoked the device disconnected longest"));
+        let full = operator_link_message(base, Err(auth::Full { reconnecting: 0 }));
         assert!(full.contains("every allowed device is still connected"));
+        let waiting = operator_link_message(base, Err(auth::Full { reconnecting: 1 }));
+        assert!(waiting.contains("may be reconnecting"));
     }
 
     #[test]
@@ -422,6 +484,37 @@ mod tests {
         assert_eq!(options.port, 4174);
         assert_eq!(options.max_devices, 2);
         assert!(options.origins.is_empty());
+    }
+
+    /// Only a complete HTTPS origin typed by the operator widens what the
+    /// bridge answers to; anything else leaves it unchanged.
+    #[test]
+    fn operator_input_accepts_only_complete_https_origins() {
+        assert_eq!(parse_operator_input("\n"), OperatorInput::NewLink);
+        assert_eq!(parse_operator_input("  \r\n"), OperatorInput::NewLink);
+        assert_eq!(
+            parse_operator_input("https://Abc-12.ngrok-free.app/\n"),
+            OperatorInput::RemoteOrigin("https://abc-12.ngrok-free.app".to_string())
+        );
+        assert_eq!(
+            parse_operator_input("https://tunnel.example:8443"),
+            OperatorInput::RemoteOrigin("https://tunnel.example:8443".to_string())
+        );
+        for rejected in [
+            "q",
+            "abc.ngrok-free.app",
+            "http://abc.ngrok-free.app",
+            "https://abc.ngrok-free.app/luvus",
+            "https://abc.ngrok-free.app/?x=1",
+            "https://user@abc.ngrok-free.app",
+            "https://abc.ngrok-free.app/#pair=abcdefghijklmnop",
+            "ftp://abc.ngrok-free.app",
+        ] {
+            assert!(
+                matches!(parse_operator_input(rejected), OperatorInput::Invalid(_)),
+                "{rejected} must not be allowed"
+            );
+        }
     }
 
     #[test]

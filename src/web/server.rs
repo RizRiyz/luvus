@@ -76,10 +76,13 @@ impl Outbound {
 pub(super) struct BridgeState {
     authority: Arc<Mutex<BrowserAuthority>>,
     uhp: Arc<UhpAccess>,
-    origins: Arc<Vec<String>>,
-    /// Host header values this bridge answers to, fixed at startup. See
-    /// [`allowed_hosts`]. Changing the pairing address never widens it.
-    hosts: Arc<Vec<String>>,
+    /// Exact WebSocket origins allowed besides the page's own host.
+    origins: Arc<Mutex<Vec<String>>>,
+    /// Host header values this bridge answers to. See [`allowed_hosts`]. Only
+    /// the operator can extend it, from the command line or by pasting a remote
+    /// origin into the bridge's terminal ([`Self::allow_remote_origin`]). A
+    /// browser changing the pairing address never widens it.
+    hosts: Arc<Mutex<Vec<String>>>,
     public_url: Arc<Mutex<Option<String>>>,
     devices: broadcast::Sender<Value>,
     connected: Arc<std::sync::atomic::AtomicUsize>,
@@ -147,8 +150,8 @@ impl BridgeState {
         Self {
             authority: Arc::new(Mutex::new(authority)),
             uhp,
-            origins: Arc::new(origins),
-            hosts: Arc::new(hosts),
+            origins: Arc::new(Mutex::new(origins)),
+            hosts: Arc::new(Mutex::new(hosts)),
             public_url: Arc::new(Mutex::new(public_url)),
             devices,
             connected: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -157,8 +160,10 @@ impl BridgeState {
     }
 
     /// Create a one-use pairing link for the operator at the bridge's
-    /// terminal, reclaiming disconnected device slots if the limit is full.
-    pub fn operator_pairing(&self) -> (Option<super::auth::BrowserPairing>, usize) {
+    /// terminal, freeing one unused or idle slot if the limit is full.
+    pub fn operator_pairing(
+        &self,
+    ) -> Result<(super::auth::BrowserPairing, super::auth::Reclaimed), super::auth::Full> {
         let result = self
             .authority
             .lock()
@@ -166,6 +171,24 @@ impl BridgeState {
             .create_operator_pairing();
         self.broadcast_devices();
         result
+    }
+
+    /// Allow a remote HTTPS origin, such as a tunnel address that is only known
+    /// after the bridge started, and make it the pairing address.
+    ///
+    /// Only the operator can call this, by pasting the origin into the terminal
+    /// running the bridge. That terminal already holds full authority, so it is
+    /// the right place to widen what the bridge answers to; a paired browser
+    /// cannot. `origin` must already be normalized by
+    /// [`normalize_public_origin`].
+    pub fn allow_remote_origin(&self, origin: &str) {
+        allow_origin(
+            &mut self.origins.lock().expect("web origins poisoned"),
+            &mut self.hosts.lock().expect("web hosts poisoned"),
+            origin,
+        );
+        *self.public_url.lock().expect("browser public URL poisoned") = Some(origin.to_string());
+        self.broadcast_devices();
     }
 
     fn device_status(&self) -> Value {
@@ -217,14 +240,16 @@ async fn require_known_host(
         .headers()
         .get(HOST)
         .and_then(|value| value.to_str().ok());
-    if host.is_some_and(|host| host_allowed(host, &state.hosts)) {
+    let known = host
+        .is_some_and(|host| host_allowed(host, &state.hosts.lock().expect("web hosts poisoned")));
+    if known {
         return next.run(request).await;
     }
     let mut response = (
         StatusCode::FORBIDDEN,
         "Luvus Web does not answer to this host name. To reach it through a \
-         tunnel or proxy, restart it with that public origin in --public-url or \
-         --origin.\n",
+         tunnel or proxy, paste that HTTPS address into the terminal running \
+         luvus web, or restart it with the address in --public-url or --origin.\n",
     )
         .into_response();
     set_security_headers(response.headers_mut());
@@ -272,7 +297,11 @@ async fn websocket(
     State(state): State<BridgeState>,
     headers: HeaderMap,
 ) -> Response {
-    if !origin_allowed(&headers, &state.origins) {
+    let allowed = origin_allowed(
+        &headers,
+        &state.origins.lock().expect("web origins poisoned"),
+    );
+    if !allowed {
         return StatusCode::FORBIDDEN.into_response();
     }
     // Held through the authentication window and released once the socket
@@ -1018,7 +1047,11 @@ pub(super) fn allowed_hosts(
     public_url: Option<&str>,
     origins: &[String],
 ) -> Vec<String> {
-    let mut hosts = vec![format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    // Canonical like the incoming Host, so ports 80 and 443 match too.
+    let mut hosts = vec![
+        canonical_host(&format!("127.0.0.1:{port}")),
+        canonical_host(&format!("localhost:{port}")),
+    ];
     for origin in public_url
         .into_iter()
         .chain(origins.iter().map(String::as_str))
@@ -1034,6 +1067,19 @@ pub(super) fn allowed_hosts(
 
 /// Exact, case-insensitive Host match. Default ports are dropped on both sides
 /// because a browser omits them from Host while an origin may spell them out.
+/// Add one exact origin and its host name, without duplicates.
+fn allow_origin(origins: &mut Vec<String>, hosts: &mut Vec<String>, origin: &str) {
+    if !origins.iter().any(|allowed| allowed == origin) {
+        origins.push(origin.to_string());
+    }
+    if let Some((_, authority)) = origin.split_once("://") {
+        let host = canonical_host(authority);
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+}
+
 pub(super) fn host_allowed(host: &str, allowed: &[String]) -> bool {
     let host = canonical_host(host.trim());
     !host.is_empty() && allowed.contains(&host)
@@ -1067,6 +1113,10 @@ fn origin_allowed(headers: &HeaderMap, configured: &[String]) -> bool {
 }
 
 pub(super) fn normalize_origin(value: &str) -> Option<String> {
+    // The URI parser silently drops a fragment; an origin never has one.
+    if value.contains('#') {
+        return None;
+    }
     let uri = value.parse::<axum::http::Uri>().ok()?;
     let scheme = uri.scheme_str()?;
     if !matches!(scheme, "http" | "https") || uri.query().is_some() {
@@ -1151,6 +1201,47 @@ mod tests {
             "exact match only"
         );
         assert!(!host_allowed("sub.phone.example", &hosts), "no subdomains");
+    }
+
+    /// A tunnel address pasted by the operator is answered exactly, both as a
+    /// host name and as a WebSocket origin, and only once in each list.
+    #[test]
+    fn a_pasted_remote_origin_is_answered_exactly() {
+        let mut origins = Vec::new();
+        let mut hosts = allowed_hosts(4174, None, &origins);
+        assert!(!host_allowed("abc.ngrok-free.app", &hosts));
+
+        allow_origin(&mut origins, &mut hosts, "https://abc.ngrok-free.app");
+        allow_origin(&mut origins, &mut hosts, "https://abc.ngrok-free.app");
+        assert_eq!(origins, vec!["https://abc.ngrok-free.app".to_string()]);
+        assert_eq!(hosts.len(), 3, "loopback pair plus the tunnel host");
+        assert!(host_allowed("abc.ngrok-free.app", &hosts));
+        assert!(host_allowed("abc.ngrok-free.app:443", &hosts));
+        assert!(!host_allowed("abc.ngrok-free.app:8443", &hosts));
+        assert!(!host_allowed("x.abc.ngrok-free.app", &hosts));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "origin",
+            HeaderValue::from_static("https://abc.ngrok-free.app"),
+        );
+        assert!(origin_allowed(&headers, &origins));
+        headers.insert(
+            "origin",
+            HeaderValue::from_static("http://abc.ngrok-free.app"),
+        );
+        assert!(!origin_allowed(&headers, &origins), "scheme must match");
+    }
+
+    #[test]
+    fn loopback_on_a_default_port_is_answered() {
+        for port in [80, 443] {
+            let hosts = allowed_hosts(port, None, &[]);
+            assert!(host_allowed("127.0.0.1", &hosts), "port {port} omitted");
+            assert!(host_allowed(&format!("127.0.0.1:{port}"), &hosts));
+            assert!(host_allowed(&format!("localhost:{port}"), &hosts));
+            assert!(!host_allowed("127.0.0.1:4174", &hosts));
+        }
     }
 
     #[test]
