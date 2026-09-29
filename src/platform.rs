@@ -1522,20 +1522,64 @@ pub fn open_url(url: &str) {
     }
 }
 
-/// Start a fire-and-forget helper without blocking the caller, and wait for it
-/// on a short-lived thread. Dropping a `Child` never waits for it, so on Unix
-/// every helper that exits would stay a zombie until this process exits.
-/// Returns the child's process id if it started.
+const MAX_HELPER_WAITERS: usize = 16;
+static ACTIVE_HELPER_WAITERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct HelperWaiterSlot(&'static std::sync::atomic::AtomicUsize);
+
+impl Drop for HelperWaiterSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Start a fire-and-forget helper and collect its exit status off the caller
+/// thread. At most 16 helpers can be waiting in this process. Reserve capacity
+/// and start the waiter before spawning the child, so thread startup failure
+/// cannot leave an unowned child. Returns `None` without launching a helper if
+/// capacity or thread startup fails, or if the command itself cannot start.
 pub fn spawn_reaped(command: &mut std::process::Command) -> Option<u32> {
-    let mut child = command.spawn().ok()?;
-    let pid = child.id();
-    // If no thread can be started, the child is left unreaped, exactly as
-    // before; the helper itself still runs.
-    let _ = std::thread::Builder::new()
-        .name("luvus-reap".into())
-        .spawn(move || {
+    spawn_reaped_with(command, &ACTIVE_HELPER_WAITERS, |waiter| {
+        std::thread::Builder::new()
+            .name("luvus-reap".into())
+            .spawn(waiter)
+            .map(|_| ())
+    })
+}
+
+fn spawn_reaped_with(
+    command: &mut std::process::Command,
+    active: &'static std::sync::atomic::AtomicUsize,
+    start_waiter: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
+) -> Option<u32> {
+    use std::sync::{atomic::Ordering, Arc, Mutex};
+
+    active
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            (count < MAX_HELPER_WAITERS).then_some(count + 1)
+        })
+        .ok()?;
+    let slot = HelperWaiterSlot(active);
+    let pending = Arc::new(Mutex::new(None::<std::process::Child>));
+    // The waiter cannot take ownership until spawn succeeds (or fails). No
+    // fallible channel handoff occurs after a child has started.
+    let mut pending_child = pending.lock().unwrap_or_else(|error| error.into_inner());
+    let waiter_pending = Arc::clone(&pending);
+    start_waiter(Box::new(move || {
+        let _slot = slot;
+        let child = waiter_pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(mut child) = child {
             let _ = child.wait();
-        });
+        }
+    }))
+    .ok()?;
+    let child = command.spawn().ok()?;
+    let pid = child.id();
+    *pending_child = Some(child);
     Some(pid)
 }
 
@@ -1683,6 +1727,64 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn helper_waiter_limits_and_startup_failure_do_not_launch_a_child() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A separate counter keeps this deterministic alongside other helpers.
+        static ACTIVE: AtomicUsize = AtomicUsize::new(super::MAX_HELPER_WAITERS);
+        let marker = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "helper-must-not-start-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "printf started > \"$1\"", "helper"])
+            .arg(&marker);
+        assert!(super::spawn_reaped_with(&mut command, &ACTIVE, |_| {
+            panic!("capacity must be reserved before starting a waiter")
+        })
+        .is_none());
+        assert_eq!(ACTIVE.load(Ordering::Relaxed), super::MAX_HELPER_WAITERS);
+
+        ACTIVE.store(0, Ordering::Relaxed);
+        assert!(super::spawn_reaped_with(&mut command, &ACTIVE, |_| {
+            assert_eq!(ACTIVE.load(Ordering::Relaxed), 1);
+            Err(std::io::Error::other("injected thread startup failure"))
+        })
+        .is_none());
+        assert_eq!(
+            ACTIVE.load(Ordering::Relaxed),
+            0,
+            "failed waiter releases capacity"
+        );
+        assert!(!marker.exists(), "helper ran without a waiter");
+    }
+
+    #[test]
+    fn helper_spawn_failure_releases_waiter_capacity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+        let mut waiter = None;
+        let mut command = std::process::Command::new("luvus-nonexistent-helper-test");
+        assert!(super::spawn_reaped_with(&mut command, &ACTIVE, |job| {
+            waiter = Some(job);
+            Ok(())
+        })
+        .is_none());
+        waiter.expect("waiter starts before the command")();
+        assert_eq!(ACTIVE.load(Ordering::Relaxed), 0);
     }
 
     /// The hidden-window flag must not break output capture: a command routed
