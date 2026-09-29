@@ -203,7 +203,7 @@ impl App {
             let action = if view.search.is_some() {
                 ctrl && key_event.code == KeyCode::Char('i')
             } else {
-                !ctrl && matches!(key_event.code, KeyCode::Char('y' | 'c'))
+                matches!(key_event.code, KeyCode::Char('y' | 'c'))
             };
             if action {
                 return true;

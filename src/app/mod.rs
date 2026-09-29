@@ -2441,6 +2441,7 @@ enum UiRepeatContext {
     FileSearch(PaneId),
     DiffView(PaneId),
     DiffNoteSelect(PaneId),
+    DiffNoteDraft(PaneId),
     DiffText(PaneId),
     DiffAgentPicker(PaneId),
     Preview(PaneId),

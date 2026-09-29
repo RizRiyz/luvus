@@ -1076,8 +1076,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let home = crate::platform::home_dir().expect("test home");
-        let elsewhere = std::env::temp_dir().join("luvus-picker-home-repeat");
-        std::fs::create_dir_all(&elsewhere).unwrap();
+        let elsewhere = complete_fixture("home-repeat");
         app.open_folder_picker_at(elsewhere.clone());
         let event = |kind| {
             crate::event::AppEvent::Key(KeyEvent::new_with_kind(

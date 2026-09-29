@@ -294,6 +294,11 @@ impl App {
         // (Esc cancels). This must intercept before the normal handling so keys
         // like Tab / digits can themselves be bound.
         if capturing {
+            // Capture waits for a fresh Press. A held candidate must not
+            // confirm itself as the prefix or rebind a command.
+            if super::is_key_repeat(&key) {
+                return;
+            }
             if cursor == KEYS_PREFIX_ROW {
                 if key.code == KeyCode::Esc {
                     if let Some(ui) = self.settings.as_mut() {
@@ -351,8 +356,6 @@ impl App {
                         Some(
                             LayoutRow::SidebarWidth
                                 | LayoutRow::RightWidth
-                                | LayoutRow::ColGap
-                                | LayoutRow::RowGap
                                 | LayoutRow::Scrollback
                                 | LayoutRow::MobileWidth
                                 | LayoutRow::DiffContext
@@ -1431,6 +1434,80 @@ fn lang_cursor(code: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::AppEvent;
+    use ratatui::crossterm::event::KeyEventKind;
+
+    fn phase(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> AppEvent {
+        AppEvent::Key(KeyEvent::new_with_kind(code, modifiers, kind))
+    }
+
+    #[test]
+    fn a_held_prefix_candidate_never_confirms_itself() {
+        let _env = crate::persist::test_env("settings-prefix-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let original = app.config.prefix.clone();
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::Keys;
+            ui.cursor = KEYS_PREFIX_ROW;
+            ui.capturing = true;
+        }
+
+        app.handle_event(phase(
+            KeyCode::F(12),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
+        assert_eq!(
+            app.settings.as_ref().unwrap().prefix_candidate.as_deref(),
+            Some("f12"),
+            "the first Press only proposes the candidate"
+        );
+        app.handle_event(phase(
+            KeyCode::F(12),
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        assert_eq!(app.config.prefix, original, "a held key cannot confirm it");
+        assert!(app.settings.as_ref().unwrap().capturing);
+    }
+
+    #[test]
+    fn a_held_arrow_flips_a_layout_gap_once() {
+        let _env = crate::persist::test_env("settings-gap-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_settings();
+        let row = app
+            .layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::ColGap))
+            .expect("column gap row");
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::Layout;
+            ui.cursor = row;
+        }
+        let before = app.config.layout.col_gap;
+
+        app.handle_event(phase(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
+        let flipped = app.config.layout.col_gap;
+        assert_ne!(flipped, before, "the Press toggles the gap");
+        // One Repeat is enough: an XOR toggle flipped twice would hide the bug.
+        app.handle_event(phase(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        assert_eq!(
+            app.config.layout.col_gap, flipped,
+            "a Repeat never flips it back"
+        );
+    }
 
     #[test]
     fn prefix_capture_accepts_safe_non_ctrl_keys_and_exact_modifiers() {

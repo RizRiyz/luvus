@@ -4555,7 +4555,7 @@ impl App {
             // never act.
             return false;
         };
-        if self.ui_repeat_context() != context || replay_is_ui_action(press) {
+        if self.ui_repeat_context() != context || replay_is_ui_action(press, context) {
             self.ui_repeat_leases
                 .insert(identity, UiRepeatLease::Suppress);
             return false;
@@ -4773,9 +4773,9 @@ impl App {
                 C::DiffAgentPicker(focus)
             }
             Some(ViewKind::Diff(view)) => {
-                if view.note_draft.is_some()
-                    || view.search.as_ref().is_some_and(|search| search.editing)
-                {
+                if view.note_draft.is_some() {
+                    C::DiffNoteDraft(focus)
+                } else if view.search.as_ref().is_some_and(|search| search.editing) {
                     C::DiffText(focus)
                 } else if view.note_selecting {
                     C::DiffNoteSelect(focus)
@@ -5348,14 +5348,26 @@ fn mouse_wheel_seq(up: bool, col: u16, row: u16, sgr: bool) -> Vec<u8> {
 }
 
 /// Plain Enter and Esc activate, submit, confirm, cancel, or close in every
-/// Luvus receiver; none is continuous input. Shift/Alt+Enter inserts a newline
-/// in multiline editors and still repeats.
-fn replay_is_ui_action(press: KeyEvent) -> bool {
-    press.code == KeyCode::Esc
-        || (press.code == KeyCode::Enter
-            && !press
-                .modifiers
-                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT))
+/// Luvus receiver; none is continuous input. Shift/Alt+Enter is continuous only
+/// in the multiline editors that insert a newline for it. Elsewhere a modified
+/// Enter still reaches the receiver's activation branch, so it never replays.
+fn replay_is_ui_action(press: KeyEvent, context: UiRepeatContext) -> bool {
+    if press.code == KeyCode::Esc {
+        return true;
+    }
+    if press.code != KeyCode::Enter {
+        return false;
+    }
+    let inserts_newline = press
+        .modifiers
+        .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+        && matches!(
+            context,
+            UiRepeatContext::Commander
+                | UiRepeatContext::DiffNoteDraft(_)
+                | UiRepeatContext::OrchForm(OrchFormField::Prompt)
+        );
+    !inserts_newline
 }
 
 fn forwarded_key_phase(press: KeyEvent, kind: KeyEventKind) -> KeyEvent {
@@ -6025,6 +6037,40 @@ mod tests {
             KeyEventKind::Repeat,
         ));
         assert!(app.active_is_git(), "its held Repeat does not close Git");
+    }
+
+    #[test]
+    fn modified_enter_repeats_only_where_it_inserts_a_newline() {
+        let pane = PaneId::alloc();
+        let press = |modifiers| KeyEvent::new(KeyCode::Enter, modifiers);
+        for context in [
+            UiRepeatContext::Commander,
+            UiRepeatContext::DiffNoteDraft(pane),
+            UiRepeatContext::OrchForm(OrchFormField::Prompt),
+        ] {
+            assert!(!replay_is_ui_action(press(KeyModifiers::SHIFT), context));
+            assert!(!replay_is_ui_action(press(KeyModifiers::ALT), context));
+            assert!(replay_is_ui_action(press(KeyModifiers::NONE), context));
+        }
+        // Lists, dashboards, and single-line fields route a modified Enter to
+        // their activation branch (Git checks out a branch), so it never repeats.
+        for context in [
+            UiRepeatContext::Git,
+            UiRepeatContext::DiffText(pane),
+            UiRepeatContext::OrchForm(OrchFormField::Title),
+            UiRepeatContext::Sidebar(SidebarListFocus::Workspaces),
+        ] {
+            assert!(replay_is_ui_action(press(KeyModifiers::SHIFT), context));
+            assert!(replay_is_ui_action(press(KeyModifiers::ALT), context));
+        }
+        assert!(replay_is_ui_action(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            UiRepeatContext::Commander
+        ));
+        assert!(!replay_is_ui_action(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            UiRepeatContext::Git
+        ));
     }
 
     #[test]
