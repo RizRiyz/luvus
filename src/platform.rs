@@ -328,7 +328,13 @@ impl ChildTreeGuard {
             // they escaped it with setsid(2) or setpgid(2). The group ID is the
             // root PID, so do not signal it after that PID belongs to another
             // process lifetime.
-            if root_is_current {
+            let root_is_current = self.root_is_current();
+            let process_group_is_live = process_group_exists(self.root_pid);
+            self.terminated = true;
+
+            // The original process group remains valid while any late
+            // background child is still alive, even after the root exits.
+            if root_is_current || process_group_is_live {
                 unsafe {
                     let _ = libc::kill(-(self.root_pid as libc::pid_t), libc::SIGKILL);
                 }
