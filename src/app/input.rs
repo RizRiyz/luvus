@@ -4735,28 +4735,28 @@ impl App {
         }
         if self.mode == Mode::Normal && self.active_is_git() {
             return match self.active_git() {
-                Some(git) if git.filtering => C::GitFilter,
+                Some(git) if git.filtering => C::GitFilter(focus),
                 Some(git)
                     if git.open_pr.is_some()
                         || git.open_commit.is_some()
                         || git.open_issue.is_some() =>
                 {
-                    C::GitDetail
+                    C::GitDetail(focus)
                 }
-                _ => C::Git,
+                _ => C::Git(focus),
             };
         }
         if self.mode == Mode::Normal && self.active_is_orch() {
-            return C::Orch(self.orch_view);
+            return C::Orch(focus, self.orch_view);
         }
         if self.mode == Mode::Normal && self.active_is_mission() {
             if self.mission_answer.is_some() {
-                return C::MissionAnswer;
+                return C::MissionAnswer(focus);
             }
             if self.mission_detail.is_some() {
-                return C::MissionDetail;
+                return C::MissionDetail(focus);
             }
-            return C::Mission;
+            return C::Mission(focus);
         }
         if self.mode == Mode::Prefix {
             return C::Prefix;
@@ -6055,7 +6055,7 @@ mod tests {
         // Lists, dashboards, and single-line fields route a modified Enter to
         // their activation branch (Git checks out a branch), so it never repeats.
         for context in [
-            UiRepeatContext::Git,
+            UiRepeatContext::Git(pane),
             UiRepeatContext::DiffText(pane),
             UiRepeatContext::OrchForm(OrchFormField::Title),
             UiRepeatContext::Sidebar(SidebarListFocus::Workspaces),
@@ -6069,7 +6069,7 @@ mod tests {
         ));
         assert!(!replay_is_ui_action(
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            UiRepeatContext::Git
+            UiRepeatContext::Git(pane)
         ));
     }
 

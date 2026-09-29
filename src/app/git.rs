@@ -1766,6 +1766,70 @@ mod tests {
         );
     }
 
+    /// A held key belongs to the dashboard tab that received its Press. An API
+    /// or another client can switch to a different workspace's Git tab without
+    /// any key transition; the held key must not scroll that other tab.
+    #[test]
+    fn a_held_key_stays_with_its_git_tab_across_workspace_switches() {
+        use crate::event::AppEvent;
+        use crate::git::model::{FileChange, RepoStatus};
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("git-repeat-tab-instance");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 12, tx).unwrap();
+        app.create_workspace_at(std::env::temp_dir().join("luvus-git-repeat-other"));
+        for workspace in 0..2 {
+            let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
+            view.status = Load::Loaded(RepoStatus {
+                unstaged: (0..20)
+                    .map(|i| FileChange {
+                        code: 'M',
+                        path: format!("f{i}.rs"),
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+            view.section = Section::Status;
+            app.workspaces[workspace].tabs.push(Tab {
+                id: crate::ids::public_id("tab"),
+                layout: TileLayout::new(PaneId::alloc()),
+                git: Some(Box::new(view)),
+                orch: false,
+                mission: false,
+                name: None,
+            });
+            app.workspaces[workspace].active_tab = app.workspaces[workspace].tabs.len() - 1;
+        }
+        let scroll = |app: &App, workspace: usize| {
+            let tab = app.workspaces[workspace].active_tab;
+            app.workspaces[workspace].tabs[tab]
+                .git
+                .as_ref()
+                .unwrap()
+                .scroll
+        };
+        let j = |kind| {
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                kind,
+            ))
+        };
+
+        app.active_ws = 0;
+        app.handle_event(j(KeyEventKind::Press));
+        app.handle_event(j(KeyEventKind::Repeat));
+        assert_eq!(scroll(&app, 0), 2, "the held key repeats in its own tab");
+
+        // Focus moves without any key transition, as an API call or another
+        // client would move it.
+        app.active_ws = 1;
+        app.handle_event(j(KeyEventKind::Repeat));
+        assert_eq!(scroll(&app, 1), 0, "it never scrolls the other Git tab");
+        assert_eq!(scroll(&app, 0), 2);
+    }
+
     #[test]
     fn scroll_routes_to_block_or_cursor_and_clamps() {
         use crate::git::model::{Commit, FileChange, RepoStatus};
