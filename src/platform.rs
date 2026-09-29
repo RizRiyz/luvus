@@ -224,6 +224,8 @@ pub struct ChildTreeGuard {
     handle: Option<windows_sys::Win32::Foundation::HANDLE>,
     #[cfg(unix)]
     root_pid: u32,
+    #[cfg(unix)]
+    root_marker: Option<String>,
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     descendants: std::collections::HashMap<u32, String>,
     #[cfg(unix)]
@@ -267,8 +269,10 @@ impl ChildTreeGuard {
         }
         #[cfg(unix)]
         {
+            let root_pid = child.id();
             let mut guard = Self {
-                root_pid: child.id(),
+                root_pid,
+                root_marker: process_start_marker(root_pid),
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
                 descendants: std::collections::HashMap::new(),
                 terminated: false,
@@ -288,9 +292,15 @@ impl ChildTreeGuard {
     /// terminated without relying on the original process group.
     pub fn refresh_descendants(&mut self) {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
-        if !self.terminated {
-            for pid in unix_descendant_pids(self.root_pid) {
-                if let Some(marker) = process_start_marker(pid) {
+        if !self.terminated && self.root_is_current() {
+            let discovered: Vec<_> = unix_descendant_pids(self.root_pid)
+                .into_iter()
+                .filter_map(|pid| process_start_marker(pid).map(|marker| (pid, marker)))
+                .collect();
+            // The root can exit while its tree is being scanned. Do not retain
+            // anything observed through a PID that changed owners mid-scan.
+            if self.root_is_current() {
+                for (pid, marker) in discovered {
                     self.descendants.entry(pid).or_insert(marker);
                 }
             }
@@ -307,14 +317,21 @@ impl ChildTreeGuard {
             if self.terminated {
                 return;
             }
-            self.refresh_descendants();
+            if self.root_is_current() {
+                self.refresh_descendants();
+            }
+            let root_is_current = self.root_is_current();
             self.terminated = true;
 
             // The direct child is created as its own process group. Kill that
             // group first, then any PID-reuse-safe descendants observed before
-            // they escaped it with setsid(2) or setpgid(2).
-            unsafe {
-                let _ = libc::kill(-(self.root_pid as libc::pid_t), libc::SIGKILL);
+            // they escaped it with setsid(2) or setpgid(2). The group ID is the
+            // root PID, so do not signal it after that PID belongs to another
+            // process lifetime.
+            if root_is_current {
+                unsafe {
+                    let _ = libc::kill(-(self.root_pid as libc::pid_t), libc::SIGKILL);
+                }
             }
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
             for (&pid, marker) in &self.descendants {
@@ -326,41 +343,40 @@ impl ChildTreeGuard {
             }
         }
     }
+
+    #[cfg(unix)]
+    fn root_is_current(&self) -> bool {
+        self.root_marker
+            .as_deref()
+            .is_some_and(|marker| process_start_marker(self.root_pid).as_deref() == Some(marker))
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn unix_descendant_pids(root: u32) -> Vec<u32> {
-    use std::collections::HashSet;
-
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-    let mut stack = vec![root];
-    while let Some(pid) = stack.pop() {
-        if !seen.insert(pid) || found.len() >= 64 {
-            continue;
-        }
-        found.push(pid);
+    collect_descendant_pids(root, |pid| {
+        let mut found = Vec::new();
         let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
-            continue;
+            return found;
         };
         for task in tasks.flatten() {
             let path = task.path().join("children");
             let Ok(children) = std::fs::read_to_string(path) else {
                 continue;
             };
-            stack.extend(
+            found.extend(
                 children
                     .split_whitespace()
                     .filter_map(|pid| pid.parse::<u32>().ok()),
             );
         }
-    }
-    found
+        found
+    })
 }
 
 #[cfg(target_os = "freebsd")]
 fn unix_descendant_pids(root: u32) -> Vec<u32> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     let Some(processes) = freebsd_processes() else {
         return vec![root];
@@ -369,52 +385,67 @@ fn unix_descendant_pids(root: u32) -> Vec<u32> {
     for (pid, ppid) in processes {
         children.entry(ppid).or_default().push(pid);
     }
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-    let mut stack = vec![root];
-    while let Some(pid) = stack.pop() {
-        if !seen.insert(pid) || found.len() >= 64 {
-            continue;
-        }
-        found.push(pid);
-        if let Some(child_pids) = children.get(&pid) {
-            stack.extend(child_pids.iter().copied());
-        }
-    }
-    found
+    collect_descendant_pids(root, |pid| children.get(&pid).cloned().unwrap_or_default())
 }
 
 #[cfg(target_os = "macos")]
 fn unix_descendant_pids(root: u32) -> Vec<u32> {
+    collect_descendant_pids(root, macos_child_pids)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+fn collect_descendant_pids(root: u32, mut children_for: impl FnMut(u32) -> Vec<u32>) -> Vec<u32> {
     use std::collections::HashSet;
 
     let mut found = Vec::new();
     let mut seen = HashSet::new();
     let mut stack = vec![root];
     while let Some(pid) = stack.pop() {
-        if !seen.insert(pid) || found.len() >= 64 {
+        if !seen.insert(pid) {
             continue;
         }
         found.push(pid);
-        let mut children = [0 as libc::pid_t; 64];
+        stack.extend(children_for(pid));
+    }
+    found
+}
+
+#[cfg(target_os = "macos")]
+fn macos_child_pids(pid: u32) -> Vec<u32> {
+    let required = unsafe { libc::proc_listchildpids(pid as libc::pid_t, std::ptr::null_mut(), 0) };
+    if required <= 0 {
+        return Vec::new();
+    }
+
+    // The child count may grow between sizing and reading. Retry whenever the
+    // buffer fills so cleanup never silently drops the tail of the process
+    // list. The kernel's process limit bounds the resulting allocation.
+    let mut capacity = required as usize;
+    loop {
+        let mut children = vec![0 as libc::pid_t; capacity];
         let child_count = unsafe {
             libc::proc_listchildpids(
                 pid as libc::pid_t,
                 children.as_mut_ptr().cast(),
-                std::mem::size_of_val(&children) as libc::c_int,
+                std::mem::size_of_val(children.as_slice()) as libc::c_int,
             )
         };
         if child_count <= 0 {
-            continue;
+            return Vec::new();
         }
-        let count = (child_count as usize).min(children.len());
-        stack.extend(
-            children[..count]
-                .iter()
-                .filter_map(|&pid| u32::try_from(pid).ok()),
-        );
+        let count = child_count as usize;
+        if count < children.len() {
+            children.truncate(count);
+            return children
+                .into_iter()
+                .filter_map(|pid| u32::try_from(pid).ok())
+                .collect();
+        }
+        capacity = capacity.saturating_mul(2);
+        if capacity == children.len() {
+            return Vec::new();
+        }
     }
-    found
 }
 
 impl Drop for ChildTreeGuard {
@@ -1453,6 +1484,53 @@ mod tests {
         let second = super::process_start_marker(pid).expect("same live process marker");
         assert_eq!(first, second);
         assert!(!first.is_empty());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn child_tree_guard_rejects_a_stale_root_identity() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().expect("spawn isolated child");
+        let pid = child.id();
+        let mut guard = super::ChildTreeGuard::attach(&mut child).expect("attach guard");
+
+        guard.root_marker = Some("stale-process-lifetime".into());
+        guard.descendants.clear();
+        guard.refresh_descendants();
+        assert!(guard.descendants.is_empty(), "stale root was scanned");
+        guard.terminate();
+        assert!(
+            child.try_wait().expect("query child").is_none(),
+            "stale root identity was signalled"
+        );
+
+        unsafe {
+            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+        child.wait().expect("reap child");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn descendant_walk_does_not_truncate_after_sixty_four_processes() {
+        let descendants = super::collect_descendant_pids(1, |pid| {
+            if pid == 1 {
+                (2..=71).collect()
+            } else {
+                Vec::new()
+            }
+        });
+        assert_eq!(descendants.len(), 71);
+        assert!((1..=71).all(|pid| descendants.contains(&pid)));
     }
 
     /// The hidden-window flag must not break output capture: a command routed
