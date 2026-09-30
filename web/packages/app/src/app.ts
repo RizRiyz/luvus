@@ -6,7 +6,7 @@ import { pairingQrDataUrl } from "./pairing-qr.js";
 import { RenderScheduler } from "./render-scheduler.js";
 import { supportsFileUpload } from "./terminal-capabilities.js";
 import { TerminalView, type TerminalPaneOption } from "./terminal-view.js";
-import { rebuildPreservingView } from "./view-state.js";
+import { markFieldSaved, rebuildPreservingView } from "./view-state.js";
 
 const TICKET_KEY = "luvus.web.ticket";
 
@@ -373,7 +373,7 @@ export class WebApp {
       // carrying the typed spelling into the rebuilt field. Text typed after
       // this save was sent is newer than the save, so it is kept.
       const field = this.root.querySelector<HTMLInputElement>(".device-url-input");
-      if (field && field.value === rawUrl) field.value = field.defaultValue;
+      if (field) markFieldSaved(field, rawUrl);
       this.#render();
     } catch (error) {
       failure = error;

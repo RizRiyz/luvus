@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { rebuildPreservingView } from "../dist/test/view-state.js";
+import { markFieldSaved, rebuildPreservingView } from "../dist/test/view-state.js";
 
 // Just enough DOM for rebuildPreservingView: a flat list of elements under a
 // root, the selectors it uses, focus, selection, and scroll offsets.
@@ -77,9 +77,9 @@ test("a saved field shows the saved value, but newer typing is never erased", ()
   address.focus();
   address.value = "https://Phone.Example/";
 
-  // The save completed: the page resets the field it submitted, and the
+  // The save completed: the page marks the field it submitted, and the
   // rebuilt field shows the address the bridge normalized and stored.
-  address.value = address.defaultValue;
+  markFieldSaved(address, "https://Phone.Example/");
   rebuildPreservingView(dom.root, () => dom.replace(page(dom, { savedAddress: "https://phone.example" })));
   [address] = dom.root.querySelectorAll("INPUT");
   assert.equal(address.value, "https://phone.example");
@@ -88,9 +88,38 @@ test("a saved field shows the saved value, but newer typing is never erased", ()
   // Typing continued while a later save was in flight, so the page did not
   // reset the field: the newer text survives even though the saved value moved.
   address.value = "https://newer.example";
+  markFieldSaved(address, "https://other.example");
   rebuildPreservingView(dom.root, () => dom.replace(page(dom, { savedAddress: "https://other.example" })));
   [address] = dom.root.querySelectorAll("INPUT");
   assert.equal(address.value, "https://newer.example");
+});
+
+test("clearing an initially empty address during a save survives completion and later redraws", () => {
+  const dom = fakeDom();
+  dom.replace(page(dom));
+  let [address] = dom.root.querySelectorAll("INPUT");
+  address.focus();
+  address.value = "https://Phone.Example/";
+  const submittedValue = address.value;
+
+  // The person clears the field while the save is pending, returning to its
+  // original default. This is still a newer edit than the submitted address.
+  address.value = "";
+  address.setSelectionRange(0, 0);
+  assert.equal(address.value, address.defaultValue);
+
+  markFieldSaved(address, submittedValue);
+  const redraw = () => dom.replace(page(dom, { savedAddress: "https://phone.example" }));
+  rebuildPreservingView(dom.root, redraw);
+  [address] = dom.root.querySelectorAll("INPUT");
+  assert.equal(address.value, "");
+  assert.equal(address.defaultValue, "https://phone.example");
+  assert.equal(dom.document.activeElement, address);
+  assert.deepEqual([address.selectionStart, address.selectionEnd], [0, 0]);
+
+  rebuildPreservingView(dom.root, redraw);
+  [address] = dom.root.querySelectorAll("INPUT");
+  assert.equal(address.value, "", "the following redraw also keeps the cleared input");
 });
 
 test("a focused card keeps focus by its key even when cards reorder and retitle", () => {

@@ -3,8 +3,8 @@
  * text field, text typed but not yet submitted, and the scroll position of
  * containers marked with `data-scroll-key` all carry over to the new elements.
  * Text still being typed always wins over a value the page redraws, since it
- * is newer; a caller that has just saved a field resets it first (sets its
- * value back to its default) so the saved value is shown instead.
+ * is newer; a caller that has just saved a field calls `markFieldSaved` first
+ * so only text that differs from the submitted value carries over.
  *
  * Elements are matched by `data-view-key` when present, otherwise by tag,
  * class, accessible label, and (for buttons) text, then by their order among
@@ -98,4 +98,12 @@ function writeCaret(field: TextField, [start, end, direction]: Caret): void {
   } catch {
     // Not every input type supports a selection.
   }
+}
+
+/** Use the submitted text as the baseline, keeping any newer edit for rebuild. */
+export function markFieldSaved(field: TextField, submittedValue: string): void {
+  const currentValue = field.value;
+  // Updating the default can also change the value of a clean input.
+  field.defaultValue = submittedValue;
+  field.value = currentValue;
 }
