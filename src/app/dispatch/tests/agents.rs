@@ -2833,6 +2833,28 @@ fn a_session_report_from_outside_the_pane_is_refused() {
         Some("019a-inside")
     );
 
+    // A reporter that cannot be checked, here because the pane has no process
+    // yet, is refused instead of binding unproven.
+    let root_handle = app.panes[&pane].child_pid.clone();
+    root_handle.store(0, std::sync::atomic::Ordering::Relaxed);
+    let unchecked = app
+        .dispatch(
+            "pane.report_session",
+            &json!({"pane": pane.0.to_string(), "agent": "codex",
+                    "session_id": "019a-unchecked", "reporter_pid": std::process::id()}),
+        )
+        .unwrap_err();
+    assert_eq!(unchecked.0, "reporter_unverified");
+    assert_eq!(
+        app.status[&pane]
+            .agent_session
+            .as_ref()
+            .map(|s| s.session_id.as_str()),
+        Some("019a-inside"),
+        "the earlier proven binding is untouched"
+    );
+    root_handle.store(root, std::sync::atomic::Ordering::Relaxed);
+
     // A claim without a reporter still binds, as before, but unproven.
     let plain = app
         .dispatch(

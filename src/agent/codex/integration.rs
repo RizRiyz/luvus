@@ -357,6 +357,13 @@ mod tests {
             ReportOutcome::Unverified
         );
         assert_eq!(
+            classify_reply(&error(
+                "reporter_unverified",
+                "the reporting process could not be checked against that pane"
+            )),
+            ReportOutcome::Unverified
+        );
+        assert_eq!(
             classify_reply(&error("not_found", "no such pane")),
             ReportOutcome::Unverified
         );

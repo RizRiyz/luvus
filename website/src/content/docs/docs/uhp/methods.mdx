@@ -184,7 +184,9 @@ pane owns that exact session.
 
 A reporter may add `reporter_pid`, its own process ID. The session then binds
 only if that process runs inside the named pane, and otherwise fails with
-`reporter_outside_pane`. The result's `verified` is `true` when the binding was
+`reporter_outside_pane`. If the server cannot check it (the pane has not
+started its process, or the platform cannot read process trees), the report
+fails with `reporter_unverified` and binds nothing. The result's `verified` is `true` when the binding was
 proven, by `reporter_pid` or by `evidence`; an older server omits it. Codex uses this because its shared background server
 runs every session's hooks with the environment of whichever pane first
 started it.

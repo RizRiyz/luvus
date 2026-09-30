@@ -447,13 +447,27 @@ impl App {
                         let within = (root != 0)
                             .then(|| crate::platform::process_is_within(root, reporter))
                             .flatten();
-                        if within == Some(false) {
-                            return Err((
-                                "reporter_outside_pane".to_string(),
-                                "the reporting process does not run in that pane".to_string(),
-                            ));
+                        // Only a proven reporter binds. When the pane has no
+                        // process yet, or this platform cannot read process
+                        // trees, the claim is refused rather than bound unproven:
+                        // a reporter that names itself expects that check, and a
+                        // wrong binding would block the correct pane later.
+                        match within {
+                            Some(true) => reporter_verified = true,
+                            Some(false) => {
+                                return Err((
+                                    "reporter_outside_pane".to_string(),
+                                    "the reporting process does not run in that pane".to_string(),
+                                ))
+                            }
+                            None => {
+                                return Err((
+                                    "reporter_unverified".to_string(),
+                                    "the reporting process could not be checked against that pane"
+                                        .to_string(),
+                                ))
+                            }
                         }
-                        reporter_verified = within == Some(true);
                     }
                     id
                 }
