@@ -214,7 +214,17 @@ recorded when Luvus resumes a session. Luvus never guesses the newest Codex
 rollout in a shared folder, because that could fork another pane's active
 conversation. Install or refresh the Codex hook with
 `luvus integration install codex`; its SessionStart and prompt hooks bind new
-and resumed Codex panes to their exact rollout.
+and resumed Codex panes to their exact rollout. Refresh it after upgrading
+Luvus so the hook script matches the installed binary.
+
+Recent Codex versions run sessions in a shared background server, which runs
+every session's hooks with the environment of whichever pane first started it.
+The Codex hook therefore proves that it runs inside the pane it reports for.
+When it does not, as with a session in that shared server, it finds the pane
+by its working directory and the prompt just submitted, and binds only when
+exactly one Codex pane shows that prompt. A Codex session is bound from its
+first prompt, since that is when Codex creates it. After a restart, Luvus
+resumes the session in the same pane and keeps it bound there.
 
 Kilo Code also requires an exact session ID for resume or fork. Luvus detects
 the `kilo` and `kilocode` executables natively, but it does not scan Kilo's

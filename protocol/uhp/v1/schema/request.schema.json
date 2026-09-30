@@ -209,8 +209,21 @@
             "cost": { "type": ["number", "null"], "minimum": 0, "maximum": 1000000000000 },
             "updated_at": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
           }
-        }
-      }
+        },
+        "reporter_pid": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "evidence": {
+          "type": "object", "additionalProperties": false, "required": ["cwd", "prompt"],
+          "properties": {
+            "cwd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "prompt": { "type": "string", "maxLength": 16384 }
+          }
+        },
+        "dry_run": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "required": ["evidence"] }, "then": { "not": { "anyOf": [ { "required": ["pane"] }, { "required": ["reporter_pid"] } ] } } },
+        { "if": { "required": ["dry_run"], "properties": { "dry_run": { "const": true } } }, "then": { "required": ["evidence"] } }
+      ]
     },
     "paneReleaseSessionParams": {
       "type": "object", "additionalProperties": false, "required": ["agent", "session_id"],

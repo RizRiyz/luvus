@@ -458,6 +458,67 @@ fn collect_descendant_pids(root: u32, mut children_for: impl FnMut(u32) -> Vec<u
     found
 }
 
+/// Command lines of `pid`'s ancestors, nearest first, excluding `pid` itself.
+/// Empty when this platform cannot read the process table.
+#[cfg(unix)]
+pub fn ancestor_commands(pid: u32) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+    let Some((commands, children)) = ps_table() else {
+        return Vec::new();
+    };
+    let parents: HashMap<u32, u32> = children
+        .iter()
+        .flat_map(|(parent, kids)| kids.iter().map(move |kid| (*kid, *parent)))
+        .collect();
+    let mut ancestors = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = pid;
+    while let Some(&parent) = parents.get(&current) {
+        if !seen.insert(parent) || ancestors.len() >= 64 {
+            break;
+        }
+        if let Some(command) = commands.get(&parent) {
+            ancestors.push(command.clone());
+        }
+        current = parent;
+    }
+    ancestors
+}
+
+#[cfg(not(unix))]
+pub fn ancestor_commands(_pid: u32) -> Vec<String> {
+    Vec::new()
+}
+
+/// Whether process `pid` runs inside the process tree rooted at `root`, the
+/// root included. `None` when this platform cannot inspect process trees.
+pub fn process_is_within(root: u32, pid: u32) -> Option<bool> {
+    if pid == root {
+        return Some(true);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    {
+        Some(unix_descendant_pids(root).contains(&pid))
+    }
+    #[cfg(windows)]
+    {
+        Some(
+            windows::process_tree(root)
+                .iter()
+                .any(|info| info.pid == pid),
+        )
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        windows
+    )))]
+    {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn macos_child_pids(pid: u32) -> Vec<u32> {
     let required = unsafe { libc::proc_listchildpids(pid as libc::pid_t, std::ptr::null_mut(), 0) };

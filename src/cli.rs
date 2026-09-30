@@ -2435,9 +2435,17 @@ pub fn request_attach(pane: &str) -> Result<()> {
 
 /// One request/response over the control socket.
 pub(crate) fn send_request(method: &str, params: Value) -> Result<Value> {
-    let path = crate::persist::cli_socket_path();
-    let mut stream = crate::ipc::transport::connect(&path)
-        .map_err(|error| server_connect_error(&path, error))?;
+    send_request_to(&crate::persist::cli_socket_path(), method, params)
+}
+
+/// One request/response over a specific server's control socket.
+pub(crate) fn send_request_to(
+    path: &std::path::Path,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let mut stream =
+        crate::ipc::transport::connect(path).map_err(|error| server_connect_error(path, error))?;
     let req = json!({ "id": "1", "method": method, "params": params });
     writeln!(stream, "{req}")?;
     let mut reader = BufReader::new(stream);

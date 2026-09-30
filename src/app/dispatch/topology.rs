@@ -351,8 +351,18 @@ impl App {
     pub(super) fn api_pane_report_session(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
-            reject_api_fields(p, &["pane", "agent", "session_id", "usage"])?;
-            let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
+            reject_api_fields(
+                p,
+                &[
+                    "pane",
+                    "agent",
+                    "session_id",
+                    "usage",
+                    "reporter_pid",
+                    "evidence",
+                    "dry_run",
+                ],
+            )?;
             let raw_agent = required_bounded_string(p, "agent", 64)?;
             let agent = crate::agent::canonical_builtin(&raw_agent).ok_or_else(|| {
                 (
@@ -367,6 +377,87 @@ impl App {
                     "session_id must contain only safe identifier characters".to_string(),
                 ));
             }
+            let dry_run = match p.get("dry_run") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "dry_run must be a boolean".to_string(),
+                    ))
+                }
+            };
+            // Whether this binding was proven: by the reporter's own process,
+            // or by one exact evidence match.
+            let mut reporter_verified = true;
+            let id = match p.get("evidence") {
+                // A hook that cannot name its pane (for example one run by an
+                // agent's shared background server) describes the session
+                // instead. Only one exact match may claim it.
+                Some(evidence) => {
+                    if p.get("pane").is_some() || p.get("reporter_pid").is_some() {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "evidence replaces pane and reporter_pid".to_string(),
+                        ));
+                    }
+                    let (cwd, prompt) = parse_session_evidence(evidence)?;
+                    let matches = self.panes_showing_agent_prompt(agent, &cwd, &prompt);
+                    if dry_run {
+                        return Ok(json!({
+                            "type": "session_match",
+                            "pane": (matches.len() == 1).then(|| matches[0].0.to_string()),
+                            "matches": matches.len(),
+                            // Lets a caller that probes several sockets tell one
+                            // server reached twice from two servers.
+                            "server_generation": self.backend_server_generation,
+                        }));
+                    }
+                    match matches.as_slice() {
+                        [only] => *only,
+                        [] => return Err(not_found()),
+                        _ => {
+                            return Err((
+                                "conflict".to_string(),
+                                "more than one pane matches the session evidence".to_string(),
+                            ))
+                        }
+                    }
+                }
+                None => {
+                    if dry_run {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "dry_run requires evidence".to_string(),
+                        ));
+                    }
+                    let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
+                    reporter_verified = false;
+                    // A reporter that names its own process must run inside the
+                    // pane it claims. A shared agent server keeps the
+                    // environment of whichever pane started it, so its reports
+                    // would otherwise bind sessions to that unrelated pane.
+                    if let Some(reporter) = p.get("reporter_pid") {
+                        let reporter = parse_u32_value(reporter, "reporter_pid")?;
+                        let root = self
+                            .panes
+                            .get(&id)
+                            .map(|pane| pane.child_pid.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(0);
+                        let within = (root != 0)
+                            .then(|| crate::platform::process_is_within(root, reporter))
+                            .flatten();
+                        if within == Some(false) {
+                            return Err((
+                                "reporter_outside_pane".to_string(),
+                                "the reporting process does not run in that pane".to_string(),
+                            ));
+                        }
+                        reporter_verified = within == Some(true);
+                    }
+                    id
+                }
+            };
 
             let key = crate::mission::UsageKey::new(agent, &session_id);
             let usage = p.get("usage").map(parse_reported_usage).transpose()?;
@@ -455,8 +546,46 @@ impl App {
             }
             self.session_dirty = true;
             self.confirm_durable_active_target(id);
-            Ok(json!({"type":"ok"}))
+            // `verified` is false only for a pane claim without a provable
+            // `reporter_pid`, so a careful reporter can tell a proven binding
+            // from one an older server would also have accepted.
+            let verified = reporter_verified
+                && (p.get("evidence").is_some() || p.get("reporter_pid").is_some());
+            Ok(json!({"type":"ok", "verified": verified}))
         }
+    }
+
+    /// Panes running `agent` in `cwd` whose visible screen shows `prompt`: the
+    /// evidence a hook without a trustworthy pane uses to find its session.
+    fn panes_showing_agent_prompt(&self, agent: &str, cwd: &Path, prompt: &str) -> Vec<PaneId> {
+        let Some(needle) = prompt_evidence_needle(prompt) else {
+            return Vec::new();
+        };
+        let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let mut ids: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(id, pane)| {
+                let runs_agent =
+                    self.status
+                        .get(id)
+                        .is_some_and(|status| status.agent.eq_ignore_ascii_case(agent))
+                        || self.proc_commands.get(id).is_some_and(|commands| {
+                            self.manifests.process_has_agent(commands, agent)
+                        });
+                runs_agent
+                    && std::fs::canonicalize(&pane.cwd).unwrap_or_else(|_| pane.cwd.clone()) == cwd
+            })
+            .filter(|(_, pane)| {
+                let Ok(engine) = pane.engine.lock() else {
+                    return false;
+                };
+                collapse_whitespace(&engine.detection_text(u16::MAX)).contains(&needle)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
     }
 
     /// Release only the exact native session identity previously reported by
@@ -1650,6 +1779,44 @@ impl App {
             })
             .collect())
     }
+}
+
+/// `{cwd, prompt}` from a session report that cannot name its pane.
+fn parse_session_evidence(value: &Value) -> Result<(std::path::PathBuf, String), (String, String)> {
+    let invalid = |message: &str| ("invalid_request".to_string(), message.to_string());
+    let Some(object) = value.as_object() else {
+        return Err(invalid("evidence must be an object"));
+    };
+    if object.keys().any(|key| key != "cwd" && key != "prompt") {
+        return Err(invalid("evidence accepts only cwd and prompt"));
+    }
+    let cwd = object
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty() && cwd.len() <= 4096)
+        .ok_or_else(|| invalid("evidence.cwd must be a non-empty path of at most 4096 bytes"))?;
+    if !Path::new(cwd).is_absolute() {
+        return Err(invalid("evidence.cwd must be absolute"));
+    }
+    let prompt = object
+        .get("prompt")
+        .and_then(Value::as_str)
+        .filter(|prompt| prompt.len() <= 16 * 1024)
+        .ok_or_else(|| invalid("evidence.prompt must be a string of at most 16 KiB"))?;
+    Ok((std::path::PathBuf::from(cwd), prompt.to_string()))
+}
+
+/// The part of a submitted prompt that must appear on screen: its first 80
+/// characters with whitespace collapsed, since the terminal wraps and indents
+/// long prompts. `None` when too short to tell panes apart.
+fn prompt_evidence_needle(prompt: &str) -> Option<String> {
+    let collapsed = collapse_whitespace(prompt);
+    let needle: String = collapsed.chars().take(80).collect();
+    (needle.chars().count() >= 4).then_some(needle)
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

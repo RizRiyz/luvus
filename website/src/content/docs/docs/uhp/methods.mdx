@@ -182,6 +182,31 @@ pane owns that exact session.
 {"id":"usage","method":"pane.report_session","params":{"pane":"9","agent":"opencode","session_id":"ses_123","usage":{"model":"anthropic/claude-sonnet-4","tokens_in":1200,"tokens_out":340,"cache_read":800,"cache_write":40,"cost":0.42,"updated_at":1788330000000}}}
 ```
 
+A reporter may add `reporter_pid`, its own process ID. The session then binds
+only if that process runs inside the named pane, and otherwise fails with
+`reporter_outside_pane`. The result's `verified` is `true` when the binding was
+proven, by `reporter_pid` or by `evidence`; an older server omits it. Codex uses this because its shared background server
+runs every session's hooks with the environment of whichever pane first
+started it.
+
+A reporter that cannot name a trustworthy pane can describe the session
+instead with `evidence`: its absolute working directory and the prompt just
+submitted. The session binds to the one pane running that agent in that
+directory whose screen shows the prompt (the first 80 characters, whitespace
+collapsed, and at least 4 characters). No match fails with `not_found`, and
+several fail with `conflict`. With `dry_run: true`, nothing is bound and the
+result reports the match, so a caller can check several servers first:
+
+```json
+{"id":"probe","method":"pane.report_session","params":{"agent":"codex","session_id":"019a4f3e-7c21-7d10-b2c5-9f3e8a1d4c77","evidence":{"cwd":"/work/app","prompt":"Fix the login redirect"},"dry_run":true}}
+```
+
+```json
+{"id":"probe","result":{"type":"session_match","pane":"9","matches":1,"server_generation":"4a1901e79c0122b31e6525b40b362c55"}}
+```
+
+`evidence` cannot be combined with `pane` or `reporter_pid`.
+
 `pane.release_session` removes only an exact `{pane, agent, session_id}`
 binding. Repeating an already completed release is harmless. A delayed release
 for an older session fails with `ownership_conflict` instead of clearing the

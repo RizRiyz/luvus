@@ -2791,3 +2791,160 @@ fn reading_agent_titles_does_not_consume_or_publish_title_events() {
     assert!(!app.agent_session_title_changed(pane));
     assert_eq!(events_after(&app, floor).len(), 1, "no duplicate events");
 }
+
+/// A session report that names its reporting process binds only when that
+/// process runs in the claimed pane. A shared agent server keeps the
+/// environment of whichever pane started it, so its reports would otherwise
+/// bind sessions to an unrelated pane.
+#[test]
+fn a_session_report_from_outside_the_pane_is_refused() {
+    let _env = crate::persist::test_env("report-session-reporter");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    let pane = app.layout().focus;
+    let root = app.panes[&pane]
+        .child_pid
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_ne!(root, 0, "the pane runs a real shell");
+
+    let outside = app
+        .dispatch(
+            "pane.report_session",
+            &json!({"pane": pane.0.to_string(), "agent": "codex",
+                    "session_id": "019a-outside", "reporter_pid": std::process::id()}),
+        )
+        .unwrap_err();
+    assert_eq!(outside.0, "reporter_outside_pane");
+    assert!(app.status[&pane].agent_session.is_none());
+
+    let inside = app
+        .dispatch(
+            "pane.report_session",
+            &json!({"pane": pane.0.to_string(), "agent": "codex",
+                    "session_id": "019a-inside", "reporter_pid": root}),
+        )
+        .expect("the pane's own process may report");
+    assert_eq!(inside["verified"], true);
+    assert_eq!(
+        app.status[&pane]
+            .agent_session
+            .as_ref()
+            .map(|s| s.session_id.as_str()),
+        Some("019a-inside")
+    );
+
+    // A claim without a reporter still binds, as before, but unproven.
+    let plain = app
+        .dispatch(
+            "pane.report_session",
+            &json!({"pane": pane.0.to_string(), "agent": "codex", "session_id": "019a-plain"}),
+        )
+        .unwrap();
+    assert_eq!(plain["verified"], false);
+}
+
+/// Without a trustworthy pane, a report may describe the session instead: the
+/// one pane running the agent in that directory and showing the submitted
+/// prompt claims it. No match, or more than one, binds nothing.
+#[test]
+fn session_evidence_binds_only_one_matching_pane() {
+    let _env = crate::persist::test_env("report-session-evidence");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    let dir = std::env::temp_dir().join(format!("luvus-evidence-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cwd = dir.to_string_lossy().to_string();
+
+    let first = app.layout().focus;
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let second = app.layout().focus;
+    for (pane, screen) in [
+        (
+            first,
+            "› Fix the login redirect after sign-in\n\n• Working (3s)",
+        ),
+        (second, "› Write release notes for 0.15\n"),
+    ] {
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        app.panes.get_mut(&pane).unwrap().cwd = dir.clone();
+        title_engine(&mut app, pane)
+            .lock()
+            .unwrap()
+            .advance(screen.replace('\n', "\r\n").as_bytes());
+    }
+    let evidence = |prompt: &str, dry_run: bool| {
+        json!({"agent": "codex", "session_id": "019a-evidence",
+               "evidence": {"cwd": cwd, "prompt": prompt}, "dry_run": dry_run})
+    };
+
+    let probe = app
+        .dispatch(
+            "pane.report_session",
+            &evidence("Fix the  login redirect\nafter sign-in", true),
+        )
+        .unwrap();
+    assert_eq!(probe["type"], "session_match");
+    assert_eq!(probe["pane"], first.0.to_string());
+    assert_eq!(probe["matches"], 1);
+    assert!(probe["server_generation"].is_string());
+    assert!(
+        app.status[&first].agent_session.is_none(),
+        "a dry run binds nothing"
+    );
+
+    app.dispatch(
+        "pane.report_session",
+        &evidence("Fix the login redirect after sign-in", false),
+    )
+    .unwrap();
+    assert_eq!(
+        app.status[&first]
+            .agent_session
+            .as_ref()
+            .map(|s| s.session_id.as_str()),
+        Some("019a-evidence")
+    );
+    assert!(app.status[&second].agent_session.is_none());
+
+    // A prompt both panes show is ambiguous; one neither shows matches nothing.
+    title_engine(&mut app, second)
+        .lock()
+        .unwrap()
+        .advance("› Fix the login redirect after sign-in\r\n".as_bytes());
+    let both = json!({"agent": "codex", "session_id": "019a-other",
+                      "evidence": {"cwd": cwd, "prompt": "Fix the login redirect after sign-in"}});
+    assert_eq!(
+        app.dispatch("pane.report_session", &both).unwrap_err().0,
+        "conflict"
+    );
+    let none = app
+        .dispatch(
+            "pane.report_session",
+            &evidence("Something nobody typed", true),
+        )
+        .unwrap();
+    assert_eq!(
+        (none["pane"].clone(), none["matches"].clone()),
+        (Value::Null, json!(0))
+    );
+    // Too short to tell panes apart.
+    assert_eq!(
+        app.dispatch("pane.report_session", &evidence("ok", true))
+            .unwrap()["matches"],
+        0
+    );
+
+    // Evidence replaces a pane claim, and a dry run needs evidence.
+    for invalid in [
+        json!({"pane": first.0.to_string(), "agent": "codex", "session_id": "x",
+               "evidence": {"cwd": cwd, "prompt": "Fix the login"}}),
+        json!({"pane": first.0.to_string(), "agent": "codex", "session_id": "x", "dry_run": true}),
+        json!({"agent": "codex", "session_id": "x", "evidence": {"cwd": "relative", "prompt": "Fix it now"}}),
+    ] {
+        assert_eq!(
+            app.dispatch("pane.report_session", &invalid).unwrap_err().0,
+            "invalid_request"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

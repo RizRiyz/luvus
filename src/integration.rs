@@ -729,7 +729,10 @@ mod tests {
         install("codex").unwrap(); // idempotent
 
         let script = fs::read_to_string(tmp.join("luvus-agent-hook.sh")).unwrap();
-        assert!(script.contains("--agent codex"), "reports as codex");
+        assert!(
+            script.contains("integration hook codex"),
+            "the Codex adapter handles the payload"
+        );
         // Codex writes `hooks.json` (not settings.json). Keep SessionStart for
         // immediate binding and UserPromptSubmit for Code mode fallbacks.
         let hooks: Value =
@@ -750,9 +753,11 @@ mod tests {
             Some(5),
             "prompt reporting has a bounded hook timeout"
         );
+        let binary = std::env::current_exe().unwrap();
         assert!(
-            script.contains("LUVUS_BIN_PATH"),
-            "the hook uses the exact server binary even when PATH is stale"
+            script.contains(binary.to_str().unwrap()),
+            "the hook calls the installing binary, not an inherited path that a \
+             shared Codex server may have taken from another pane"
         );
         assert!(is_installed("codex"));
 
