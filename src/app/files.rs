@@ -886,7 +886,6 @@ impl App {
             }
             FileMenuItem::CopyPath => {
                 self.pending_clipboard = Some(menu.path.to_string_lossy().into_owned());
-                self.show_toast("copied path");
             }
             FileMenuItem::InsertPath => {
                 match self.insert_path(&menu.path) {

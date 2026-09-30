@@ -422,7 +422,6 @@ impl App {
             }
             DiffMenuItem::CopyPath => {
                 self.pending_clipboard = Some(menu.key.display_path().to_string());
-                self.show_toast("path copied".to_string());
             }
         }
     }

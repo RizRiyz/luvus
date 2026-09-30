@@ -6900,13 +6900,11 @@ impl App {
             WsMenuItem::CopyPath => {
                 if let Some(cwd) = cwd {
                     self.pending_clipboard = Some(cwd.to_string_lossy().into_owned());
-                    self.show_toast(self.catalog.copied);
                 }
             }
             WsMenuItem::CopyBranch => {
                 if let Some(branch) = branch.filter(|branch| !branch.is_empty()) {
                     self.pending_clipboard = Some(branch);
-                    self.show_toast(self.catalog.copied);
                 }
             }
             WsMenuItem::Rename => self.open_ws_rename(index),
