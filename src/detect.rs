@@ -849,7 +849,11 @@ fn builtin_rules() -> Vec<Rule> {
             State::Blocked,
             310,
             Region::Screen,
-            vec![all(&["trust this folder?", "trust and continue"])],
+            vec![all(&[
+                "trust this folder?",
+                "trust and continue",
+                "enter continue",
+            ])],
         ),
     ]
 }
@@ -3579,6 +3583,14 @@ For security, devin.exe should not be run in directories with untrusted content.
             )
             .state,
             State::Blocked
+        );
+        assert_eq!(
+            detect(
+                "• The prompt asks \"Trust this folder?\" and offers \"Trust and continue\".\n\n\
+                 › Summarize recent commits\n\n  100% context left"
+            )
+            .state,
+            State::Idle
         );
     }
 }
