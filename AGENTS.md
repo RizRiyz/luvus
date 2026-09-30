@@ -466,8 +466,8 @@ The CI matrix currently covers formatting and Clippy on Ubuntu and Windows,
 locked tests on Ubuntu and macOS, targeted Windows protocol/ConPTY boundaries,
 UHP fixtures and live conformance, web client/bridge checks, patched terminal
 crates, packageability, RustSec audit, and Nix flake evaluation/build. FreeBSD
-amd64 is built and packaged by the release workflow rather than pull-request
-CI.
+amd64 is focused-tested, built, and packaged by the release workflow rather
+than pull-request CI.
 
 ## Repository and contribution conventions
 
