@@ -396,6 +396,10 @@ Each rule holds when all of the conditions you list are true:
 | `not` | none of the listed substrings are present |
 | `spinner` | a running braille spinner glyph is visible on a line |
 
+While Claude Code shows its input box, `screen` covers only its live activity
+line, the input box, and the footer below it. Conversation text above them,
+such as a quoted prompt footer, cannot change Claude's state.
+
 Priorities follow the built-ins: blocked prompts sit around 300, working hints
 around 100 to 200. Give a rule a higher number than the built-in you want it to
 beat. A file that fails to parse is skipped with a warning, so a typo never

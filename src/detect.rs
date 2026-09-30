@@ -295,12 +295,20 @@ impl Manifests {
     }
 
     fn evaluate(&self, agent: &str, regions: &Regions) -> Option<RuleMatch> {
+        let screen = if agent == "claude" {
+            claude_live_screen(&regions.screen)
+        } else {
+            &regions.screen
+        };
         let mut best: Option<RuleMatch> = None;
         for r in &self.rules {
             if !(r.agent.is_empty() || r.agent == agent) {
                 continue;
             }
-            let text = regions.get(r.region);
+            let text = match r.region {
+                Region::Title => &regions.title,
+                Region::Screen => screen,
+            };
             if r.conds.iter().all(|c| c.holds(text))
                 && best
                     .as_ref()
@@ -321,6 +329,27 @@ struct RuleMatch {
     state: State,
     priority: i32,
     region: Region,
+}
+
+fn claude_live_screen(screen: &str) -> &str {
+    let is_rail = |row: &str| !row.is_empty() && row.chars().all(|c| c == '─');
+    let is_prompt = |row: &str| row.chars().take(3).any(|c| matches!(c, '❯' | '>'));
+    let mut start = 0;
+    let mut activity = None;
+    let mut rail = None;
+    let mut offset = 0;
+    for line in screen.split_inclusive('\n') {
+        let row = line.trim_end();
+        if let Some(top) = rail.filter(|_| is_prompt(row)) {
+            start = activity.unwrap_or(top);
+        }
+        rail = is_rail(row).then_some(offset);
+        if rail.is_none() && !row.is_empty() && !row.starts_with(' ') {
+            activity = (!row.starts_with(['●', '⏺', '❯', '>'])).then_some(offset);
+        }
+        offset += line.len();
+    }
+    &screen[start..]
 }
 
 fn any(subs: &[&str]) -> Cond {
@@ -1073,15 +1102,6 @@ struct Regions {
     title: String,
 }
 
-impl Regions {
-    fn get(&self, r: Region) -> &str {
-        match r {
-            Region::Title => &self.title,
-            Region::Screen => &self.screen,
-        }
-    }
-}
-
 /// Classify a pane from its title, bottom-buffer text, whether it produced
 /// output recently, whether the user typed into it recently, and the active
 /// rule set. `base_command` is the spawned program, used as a fallback label.
@@ -1625,6 +1645,63 @@ Would you like to proceed?
   2. Yes, auto-accept edits
 ❯ 3. Yes, manually approve edits
   4. No, keep planning"#;
+
+    const CLAUDE_IDLE_WITH_FOOTER_IN_HISTORY_SCREEN: &str = r#"❯ Reply with only this line, verbatim, no tools: Worker 2 is blocked: Enter to
+  confirm · Esc to cancel
+
+● Worker 2 is blocked: Enter to confirm · Esc to cancel
+
+✻ Sautéed for 4s · done 11:42 AM
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  Opus 5.5 (1M context) | xhigh
+  45.9K | ~/project
+  ⏵⏵ auto mode on (shift+tab to cycle)"#;
+
+    const CLAUDE_TRUST_SCREEN: &str = r#"────────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ /home/user/project
+
+ Quick safety check: Is this a project you created or one you trust? (Like your
+ own code, a well-known open source project, or work from your team). If not,
+ take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel"#;
+
+    const CLAUDE_BASH_PERMISSION_SCREEN: &str = r#"❯ Use the Bash tool to run exactly: touch notes.txt
+
+● Creating empty notes file
+  ⎿  $ touch notes.txt
+
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode"
+ below
+
+   touch notes.txt
+   Create empty notes file
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to project/ from this project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend"#;
 
     fn detection_from_claude_screen(screen: &str) -> Detection {
         let manifests = Manifests::builtin();
@@ -2661,6 +2738,63 @@ Would you like to proceed?
             ),
             State::Idle
         );
+    }
+
+    fn claude_pane(screen: &str) -> (String, Detection) {
+        let manifests = Manifests::builtin();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, 1024 * 1024);
+        let terminal_screen = screen.replace('\n', "\r\n");
+        engine.advance(format!("\x1b[2J\x1b[H{terminal_screen}").as_bytes());
+        let bottom = engine.detection_text_non_empty(screen_rows("claude", &[], &manifests));
+        let detection = classify(
+            Some("claude"),
+            &bottom,
+            false,
+            false,
+            "claude",
+            "claude",
+            &[],
+            &manifests,
+        );
+        (bottom, detection)
+    }
+
+    #[test]
+    fn claude_footer_text_in_history_does_not_block_a_live_composer() {
+        let (bottom, idle) = claude_pane(CLAUDE_IDLE_WITH_FOOTER_IN_HISTORY_SCREEN);
+        assert!(bottom.contains("Worker 2 is blocked: Enter to confirm · Esc to cancel"));
+        assert_eq!(idle.state, State::Idle);
+        assert_eq!(idle.prompt_evidence, PromptEvidence::Unknown);
+        assert_eq!(
+            prompt_evidence(Some("claude"), &bottom, "claude", &Manifests::builtin()),
+            PromptEvidence::Unknown
+        );
+
+        let thinking = CLAUDE_IDLE_WITH_FOOTER_IN_HISTORY_SCREEN.replace(
+            "✻ Sautéed for 4s · done 11:42 AM",
+            "✢ Inferring… (12s · ↓ 3.2k tokens)\n  ⎿  Tip: Use /focus to see just your prompt",
+        );
+        assert_eq!(claude_pane(&thinking).1.state, State::Working);
+    }
+
+    #[test]
+    fn claude_trust_dialog_is_blocked_with_its_footer_hint() {
+        let (bottom, detection) = claude_pane(CLAUDE_TRUST_SCREEN);
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+        assert_eq!(detection.rule_priority, Some(320));
+        assert_eq!(
+            bottom.lines().last(),
+            Some(" Enter to confirm · Esc to cancel")
+        );
+    }
+
+    #[test]
+    fn claude_bash_permission_dialog_is_blocked() {
+        let (_, detection) = claude_pane(CLAUDE_BASH_PERMISSION_SCREEN);
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
     }
 
     #[test]
