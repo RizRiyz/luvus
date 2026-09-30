@@ -34,6 +34,17 @@ export function terminalFrameParts(text: string, cursorOffset?: number, cursorPa
 /** Keep unchanged text nodes (and selections) alive as terminal frames arrive. */
 export function updateTerminalFrame(content: HTMLElement, parts: TerminalPart[]): void {
   const document = content.ownerDocument;
+  const selection = document.getSelection();
+  let selected: { text: string; anchor: number; focus: number } | undefined;
+  if (selection && !selection.isCollapsed && selection.anchorNode && selection.focusNode
+    && content.contains(selection.anchorNode) && content.contains(selection.focusNode)) {
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    range.setEnd(selection.anchorNode, selection.anchorOffset);
+    const anchor = range.toString().length;
+    range.setEnd(selection.focusNode, selection.focusOffset);
+    selected = { text: content.textContent ?? "", anchor, focus: range.toString().length };
+  }
   let current = content.firstChild;
   for (const part of parts) {
     const className = part.kind === "cursor" ? "terminal-caret" : part.style ? "terminal-run" : undefined;
@@ -69,6 +80,53 @@ export function updateTerminalFrame(content: HTMLElement, parts: TerminalPart[])
     const next = current.nextSibling;
     content.removeChild(current);
     current = next;
+  }
+  if (selected && selection) {
+    const backward = selected.anchor > selected.focus;
+    const mapped = retainedTerminalSelection(selected.text, content.textContent ?? "",
+      Math.min(selected.anchor, selected.focus), Math.max(selected.anchor, selected.focus));
+    const start = mapped && terminalTextPoint(content, mapped[0]);
+    const end = mapped && terminalTextPoint(content, mapped[1]);
+    if (start && end) {
+      const anchor = backward ? end : start;
+      const focus = backward ? start : end;
+      if (selection.anchorNode !== anchor.node || selection.anchorOffset !== anchor.offset
+        || selection.focusNode !== focus.node || selection.focusOffset !== focus.offset) {
+        selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+      }
+    } else selection.removeAllRanges();
+  }
+}
+
+/** Map unchanged selected text, never stale offsets after a capture drops lines. */
+export function retainedTerminalSelection(previous: string, text: string, start: number, end: number): [number, number] | undefined {
+  if (start < 0 || end > previous.length || start >= end) return;
+  let prefix = 0;
+  while (prefix < previous.length && prefix < text.length && previous[prefix] === text[prefix]) prefix += 1;
+  if (end <= prefix) return [start, end];
+  let suffix = 0;
+  while (suffix < previous.length - prefix && suffix < text.length - prefix
+    && previous[previous.length - suffix - 1] === text[text.length - suffix - 1]) suffix += 1;
+  if (start >= previous.length - suffix) return [start + text.length - previous.length, end + text.length - previous.length];
+  const selected = previous.slice(start, end);
+  const index = text.indexOf(selected);
+  if (index < 0) return;
+  if (text.indexOf(selected, index + 1) < 0 && previous.indexOf(selected) === start
+    && previous.indexOf(selected, start + 1) < 0) return [index, index + selected.length];
+  const contextStart = Math.max(0, start - 32);
+  const context = previous.slice(contextStart, end + 32);
+  const contextIndex = text.indexOf(context);
+  if (contextIndex < 0 || text.indexOf(context, contextIndex + 1) >= 0) return;
+  const mappedStart = contextIndex + start - contextStart;
+  return [mappedStart, mappedStart + selected.length];
+}
+
+function terminalTextPoint(content: HTMLElement, offset: number): { node: Text; offset: number } | undefined {
+  const walker = content.ownerDocument.createTreeWalker(content, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    if (offset <= node.length) return { node, offset };
+    offset -= node.length;
   }
 }
 

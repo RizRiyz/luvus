@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { terminalFrameParts } from "../dist/test/terminal-output.js";
+import { retainedTerminalSelection, terminalFrameParts } from "../dist/test/terminal-output.js";
 
 const plain = (parts) => parts.filter(({ kind }) => kind === "text").map(({ text }) => text).join("");
 const beforeCursor = (parts) => plain(parts.slice(0, parts.findIndex(({ kind }) => kind === "cursor")));
@@ -35,4 +35,27 @@ test("ANSI styles remain scoped to their original text without turning output in
   assert.equal(plain(parts), "plain working <script> done");
   assert.deepEqual(parts[1].style, { color: "rgb(224, 161, 84)", fontWeight: "700" });
   assert.equal(parts[2].style, undefined);
+});
+
+test("selection offsets follow retained text after leading output disappears", () => {
+  const previous = "old output\nselected text\ntail";
+  assert.deepEqual(retainedTerminalSelection(previous, "selected text\ntail", 11, 24), [0, 13]);
+  assert.deepEqual(retainedTerminalSelection(previous, "selected text\nnew tail", 11, 24), [0, 13]);
+});
+
+test("an appended frame preserves the selected prefix and uses UTF-16 DOM offsets", () => {
+  const text = "🧭 selected 界";
+  assert.deepEqual(retainedTerminalSelection(text, `${text}\nnew output`, 3, 11), [3, 11]);
+});
+
+test("repeated selected text needs retained context rather than jumping to another occurrence", () => {
+  assert.equal(retainedTerminalSelection("first=ready\nsecond=ready\n", "second=ready\n", 6, 11), undefined);
+  const previous = "removed\n" + "A".repeat(40) + "selected" + "B".repeat(40) + "selected\nold tail";
+  const next = "A".repeat(40) + "selected" + "B".repeat(40) + "selected\nnew tail";
+  assert.deepEqual(retainedTerminalSelection(previous, next, 48, 56), [40, 48]);
+});
+
+test("removed or edited selected text is not restored at unrelated offsets", () => {
+  assert.equal(retainedTerminalSelection("before selected after", "before replaced after", 7, 15), undefined);
+  assert.equal(retainedTerminalSelection("text", "text", 2, 2), undefined);
 });

@@ -20,6 +20,7 @@
   --status-done: #b8cf6a;
   --status-blocked: #cf5a44;
   --status-unknown: #6e738d;
+  --status-unknown-text: #989db5;
   --shell-width: 82rem;
 }
 
@@ -183,6 +184,7 @@ button.pane-tile:hover, button.pane-tile:focus-visible { background: #252631; bo
 .pane-copy strong, .pane-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pane-copy strong { font-size: .68rem; font-weight: 570; }
 .pane-copy small { margin-top: .16rem; color: var(--pane-status-color); font: .52rem ui-monospace, monospace; text-transform: uppercase; letter-spacing: .04em; }
+.agent-state.terminal, .pane-tile.terminal .pane-copy small, .pane-tile.view .pane-copy small { color: var(--status-unknown-text); }
 .pane-tile > .mission-icon { width: .8rem; height: .8rem; flex: none; color: #777587; }
 .pane-tile.view { color: var(--muted); }
 .workspace-empty { margin: 0; padding: 1rem; color: var(--muted); font-size: .7rem; text-align: center; }
