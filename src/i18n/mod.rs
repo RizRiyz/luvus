@@ -454,6 +454,8 @@ pub struct Catalog {
     pub menu_show_all_workspaces: &'static str,
     pub menu_show_path: &'static str,
     pub menu_hide_path: &'static str,
+    pub menu_copy_path: &'static str,
+    pub menu_copy_branch: &'static str,
     pub menu_split_vertical: &'static str,
     pub menu_move_to_tab: &'static str,
     pub menu_new_tab: &'static str,
@@ -899,6 +901,8 @@ pub static EN: Catalog = Catalog {
     menu_show_all_workspaces: "Show All Workspaces",
     menu_show_path: "Show Path",
     menu_hide_path: "Hide Path",
+    menu_copy_path: "Copy Path",
+    menu_copy_branch: "Copy Branch",
     menu_split_vertical: "Split Vertical",
     menu_move_to_tab: "Move to Tab",
     menu_new_tab: "New Tab",
@@ -1344,6 +1348,8 @@ static ES: Catalog = Catalog {
     menu_show_all_workspaces: "Mostrar todos los espacios",
     menu_show_path: "Mostrar ruta",
     menu_hide_path: "Ocultar ruta",
+    menu_copy_path: "Copiar ruta",
+    menu_copy_branch: "Copiar rama",
     menu_split_vertical: "Dividir vertical",
     menu_move_to_tab: "Mover a pestaña",
     menu_new_tab: "Nueva pestaña",
@@ -1789,6 +1795,8 @@ static PT: Catalog = Catalog {
     menu_show_all_workspaces: "Mostrar todos os espaços",
     menu_show_path: "Mostrar caminho",
     menu_hide_path: "Ocultar caminho",
+    menu_copy_path: "Copiar caminho",
+    menu_copy_branch: "Copiar ramo",
     menu_split_vertical: "Dividir vertical",
     menu_move_to_tab: "Mover para aba",
     menu_new_tab: "Nova aba",
@@ -2234,6 +2242,8 @@ static FR: Catalog = Catalog {
     menu_show_all_workspaces: "Afficher tous les espaces",
     menu_show_path: "Afficher le chemin",
     menu_hide_path: "Masquer le chemin",
+    menu_copy_path: "Copier le chemin",
+    menu_copy_branch: "Copier la branche",
     menu_split_vertical: "Diviser verticalement",
     menu_move_to_tab: "Déplacer vers un onglet",
     menu_new_tab: "Nouvel onglet",
@@ -2679,6 +2689,8 @@ static DE: Catalog = Catalog {
     menu_show_all_workspaces: "Alle Arbeitsbereiche anzeigen",
     menu_show_path: "Pfad anzeigen",
     menu_hide_path: "Pfad ausblenden",
+    menu_copy_path: "Pfad kopieren",
+    menu_copy_branch: "Branch kopieren",
     menu_split_vertical: "Vertikal teilen",
     menu_move_to_tab: "In Tab verschieben",
     menu_new_tab: "Neuer Tab",
@@ -3123,6 +3135,8 @@ static ID: Catalog = Catalog {
     menu_show_all_workspaces: "Tampilkan semua ruang kerja",
     menu_show_path: "Tampilkan path",
     menu_hide_path: "Sembunyikan path",
+    menu_copy_path: "Salin path",
+    menu_copy_branch: "Salin branch",
     menu_split_vertical: "Bagi vertikal",
     menu_move_to_tab: "Pindah ke tab",
     menu_new_tab: "Tab baru",
@@ -3567,6 +3581,8 @@ static ZH: Catalog = Catalog {
     menu_show_all_workspaces: "显示所有工作区",
     menu_show_path: "显示路径",
     menu_hide_path: "隐藏路径",
+    menu_copy_path: "复制路径",
+    menu_copy_branch: "复制分支",
     menu_split_vertical: "垂直拆分",
     menu_move_to_tab: "移动到标签页",
     menu_new_tab: "新标签页",
@@ -4011,6 +4027,8 @@ static JA: Catalog = Catalog {
     menu_show_all_workspaces: "すべてのワークスペースを表示",
     menu_show_path: "パスを表示",
     menu_hide_path: "パスを隠す",
+    menu_copy_path: "パスをコピー",
+    menu_copy_branch: "ブランチをコピー",
     menu_split_vertical: "垂直分割",
     menu_move_to_tab: "タブへ移動",
     menu_new_tab: "新しいタブ",
@@ -4455,6 +4473,8 @@ static KO: Catalog = Catalog {
     menu_show_all_workspaces: "모든 작업 공간 표시",
     menu_show_path: "경로 표시",
     menu_hide_path: "경로 숨기기",
+    menu_copy_path: "경로 복사",
+    menu_copy_branch: "브랜치 복사",
     menu_split_vertical: "세로 분할",
     menu_move_to_tab: "탭으로 이동",
     menu_new_tab: "새 탭",
@@ -4571,6 +4591,15 @@ mod tests {
                 !catalog.menu_hide_path.trim().is_empty(),
                 "{code} has a hide-path action"
             );
+            for (label, english, name) in [
+                (catalog.menu_copy_path, EN.menu_copy_path, "copy-path"),
+                (catalog.menu_copy_branch, EN.menu_copy_branch, "copy-branch"),
+            ] {
+                assert!(!label.trim().is_empty(), "{code} has a {name} action");
+                if code != "en" {
+                    assert_ne!(label, english, "{code} translates the {name} action");
+                }
+            }
             assert_eq!(
                 catalog.blocked_elsewhere.matches("{n}").count(),
                 1,

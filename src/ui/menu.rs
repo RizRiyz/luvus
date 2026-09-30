@@ -581,6 +581,8 @@ fn ws_label(
             cat.menu_show_path
         }
         .to_string(),
+        WsMenuItem::CopyPath => cat.menu_copy_path.to_string(),
+        WsMenuItem::CopyBranch => cat.menu_copy_branch.to_string(),
         WsMenuItem::Close => cap_first(cat.act_close),
         WsMenuItem::Rename => cat.menu_rename.to_string(),
         WsMenuItem::DeleteWorktree => cat.menu_delete_worktree.to_string(),
@@ -908,6 +910,8 @@ mod label_case_tests {
             WsMenuItem::Close,
             WsMenuItem::Rename,
             WsMenuItem::TogglePath,
+            WsMenuItem::CopyPath,
+            WsMenuItem::CopyBranch,
             WsMenuItem::DeleteWorktree,
             WsMenuItem::NewWorktree,
             WsMenuItem::OpenWorktree,

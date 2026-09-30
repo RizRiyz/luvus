@@ -2792,11 +2792,25 @@ mod tests {
         };
 
         // Right-click the first workspace → its context menu opens.
+        app.workspaces[0].branch = Some("feature/demo".into());
         render(&mut app);
         let row = ws_row(&app);
         mouse(&mut app, MouseButton::Right, row.x + 1, row.y);
         assert!(app.ws_menu.is_some(), "right-click opens the menu");
         render(&mut app); // populates item rects
+
+        // Copy Path renders as a clickable row directly below the path toggle.
+        let copy_row = item_rect(&app, WsMenuItem::CopyPath);
+        let path_row = item_rect(&app, WsMenuItem::TogglePath);
+        assert!(
+            copy_row.y > path_row.y,
+            "Copy Path sits below the path toggle"
+        );
+        let branch_row = item_rect(&app, WsMenuItem::CopyBranch);
+        assert!(
+            branch_row.y > copy_row.y,
+            "Copy Branch sits below Copy Path"
+        );
 
         // Pick Rename → the modal opens pre-filled with the current label.
         let rn = item_rect(&app, WsMenuItem::Rename);

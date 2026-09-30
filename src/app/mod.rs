@@ -740,6 +740,10 @@ pub enum WsMenuItem {
     Unpin,
     /// Toggle the persisted cwd line for every WORKSPACES row.
     TogglePath,
+    /// Copy the right-clicked node's cwd to the client clipboard.
+    CopyPath,
+    /// Copy the right-clicked node's git branch. Only offered when it has one.
+    CopyBranch,
     Close,
     Rename,
     /// Delete a **linked worktree** and its files (git worktree remove + folder).
@@ -6711,6 +6715,11 @@ impl App {
         let is_worktree = ws
             .and_then(|w| w.worktree.as_ref())
             .is_some_and(|m| m.linked);
+        // No subprocess: `branch` is already refreshed from `.git/HEAD`, and a
+        // detached HEAD stores a short SHA, so any value is worth copying.
+        let has_branch = ws
+            .and_then(|w| w.branch.as_deref())
+            .is_some_and(|branch| !branch.is_empty());
         let pin = if ws.is_some_and(|w| w.pinned) {
             WsMenuItem::Unpin
         } else {
@@ -6721,7 +6730,12 @@ impl App {
             WsMenuItem::Rename,
             pin,
             WsMenuItem::TogglePath,
+            WsMenuItem::CopyPath,
         ];
+        // The branch line the sidebar shows, so this row is never a dead click.
+        if has_branch {
+            items.push(WsMenuItem::CopyBranch);
+        }
         if is_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
@@ -6858,6 +6872,7 @@ impl App {
             return;
         };
         let cwd = self.workspaces.get(index).map(|w| w.cwd.clone());
+        let branch = self.workspaces.get(index).and_then(|w| w.branch.clone());
         match item {
             WsMenuItem::Divider => {}
             // Pin/Unpin the right-clicked node: float it to the top of the list
@@ -6880,6 +6895,18 @@ impl App {
             WsMenuItem::Module(i) => {
                 if let Some(a) = actions.get(i).cloned() {
                     self.run_module_menu_action("workspace", a, Target::workspace(index));
+                }
+            }
+            WsMenuItem::CopyPath => {
+                if let Some(cwd) = cwd {
+                    self.pending_clipboard = Some(cwd.to_string_lossy().into_owned());
+                    self.show_toast(self.catalog.copied);
+                }
+            }
+            WsMenuItem::CopyBranch => {
+                if let Some(branch) = branch.filter(|branch| !branch.is_empty()) {
+                    self.pending_clipboard = Some(branch);
+                    self.show_toast(self.catalog.copied);
                 }
             }
             WsMenuItem::Rename => self.open_ws_rename(index),
@@ -14068,6 +14095,52 @@ fi
         let restarted = App::new(80, 24, tx).unwrap();
         assert!(!restarted.config.layout.workspace_paths);
         assert!(!restarted.config.layout.agent_paths);
+    }
+
+    #[test]
+    fn ws_menu_copy_path_queues_the_target_cwd() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        // The row sits directly below the path toggle.
+        let items = app.ws_menu_items(0);
+        let toggle = items.iter().position(|i| *i == WsMenuItem::TogglePath);
+        let copy = items.iter().position(|i| *i == WsMenuItem::CopyPath);
+        assert_eq!(copy, toggle.map(|i| i + 1), "Copy Path follows the toggle");
+
+        app.open_ws_menu(0, 0, 0);
+        app.workspaces[0].cwd = PathBuf::from("/tmp/luvus-copy-path-target");
+        app.ws_menu_action(WsMenuItem::CopyPath);
+        assert_eq!(
+            app.pending_clipboard.as_deref(),
+            Some("/tmp/luvus-copy-path-target")
+        );
+    }
+
+    #[test]
+    fn ws_menu_copy_branch_follows_copy_path_and_needs_a_branch() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[0].branch = Some("feature/demo".into());
+        let items = app.ws_menu_items(0);
+        let copy_path = items.iter().position(|i| *i == WsMenuItem::CopyPath);
+        let copy_branch = items.iter().position(|i| *i == WsMenuItem::CopyBranch);
+        assert_eq!(
+            copy_branch,
+            copy_path.map(|i| i + 1),
+            "Copy Branch follows Copy Path"
+        );
+
+        app.open_ws_menu(0, 0, 0);
+        app.ws_menu_action(WsMenuItem::CopyBranch);
+        assert_eq!(app.pending_clipboard.as_deref(), Some("feature/demo"));
+
+        // A node without a branch drops the row, so the action stays inert.
+        app.pending_clipboard = None;
+        app.workspaces[0].branch = None;
+        assert!(!app.ws_menu_items(0).contains(&WsMenuItem::CopyBranch));
+        app.open_ws_menu(0, 0, 0);
+        app.ws_menu_action(WsMenuItem::CopyBranch);
+        assert_eq!(app.pending_clipboard, None);
     }
 
     #[test]
