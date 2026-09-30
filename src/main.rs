@@ -1017,13 +1017,36 @@ fn spawn_server() -> Result<()> {
 }
 
 fn wait_for_socket(sock: &Path) -> Result<()> {
-    for _ in 0..100 {
+    wait_for_socket_with_timeout(sock, Duration::from_secs(5))
+}
+
+/// Bound startup readiness without stopping a server that may still restore.
+fn wait_for_socket_with_timeout(sock: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
         if server_running(sock) {
+            #[cfg(unix)]
+            if server_version_with_timeout(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(100)),
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
+            #[cfg(windows)]
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(50)),
+        );
     }
-    Err(anyhow!("luvus server did not start in time"))
+    Err(anyhow!(
+        "luvus server did not become ready in time; it may still be starting, retry when ready"
+    ))
 }
 
 /// `luvus server <start|stop|restart|status>` — manage the background server.
@@ -1157,6 +1180,8 @@ fn update_manifest(context: i18n::cli::Context) -> Result<()> {
 fn server_start(context: i18n::cli::Context) -> Result<()> {
     let sock = persist::client_socket_path();
     if server_running(&sock) {
+        #[cfg(unix)]
+        wait_for_socket(&sock)?;
         print_server_card(context, context.text("running"), None, &sock);
         return Ok(());
     }
@@ -1893,6 +1918,28 @@ mod tests {
         assert!(
             result.is_err(),
             "fail closed rather than attach to a mute loop: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_wait_rejects_bound_endpoints_without_an_app_response() {
+        let _env = crate::persist::test_env("startup-mute-accept");
+        crate::persist::ensure_session_dir();
+        let client = crate::persist::client_socket_path();
+        let api = crate::persist::socket_path();
+        let _client_listener = crate::ipc::transport::bind(&client).unwrap();
+        let _api_listener = crate::ipc::transport::bind(&api).unwrap();
+        let started = Instant::now();
+        let result = wait_for_socket_with_timeout(&client, Duration::from_millis(120));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("did not become ready"));
+        assert!(
+            server_running(&client),
+            "readiness timeout must not stop the server"
         );
     }
 

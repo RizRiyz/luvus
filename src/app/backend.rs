@@ -1966,6 +1966,53 @@ mod tests {
         assert_eq!(events[1]["data"]["title"], "Done");
     }
 
+    #[test]
+    fn an_animated_title_icon_is_not_announced_as_a_title_change() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+
+        let _env = crate::persist::test_env("backend-agent-title-spinner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        let floor = crate::ipc::api::current_sequence(&app.events);
+
+        // A spinner redraws the terminal title many times a second.
+        for frame in ["⠂", "⠐", "✳", "⠂", "⠐", "✳"] {
+            engine
+                .lock()
+                .unwrap()
+                .advance(format!("\x1b]2;{frame} Ship the release\x07").as_bytes());
+            assert!(
+                app.agent_session_title_changed(pane),
+                "the TUI still sees each title generation"
+            );
+        }
+        let events = backend_events_after(&app, floor, "agent.title_changed");
+        assert_eq!(events.len(), 1, "one announcement for one displayed title");
+        assert_eq!(events[0]["data"]["title"], "Ship the release");
+
+        engine
+            .lock()
+            .unwrap()
+            .advance("\x1b]2;⠂ Ship the next release\x07".as_bytes());
+        app.agent_session_title_changed(pane);
+        let events = backend_events_after(&app, floor, "agent.title_changed");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["data"]["title"], "Ship the next release");
+    }
+
     fn assert_capture_succeeds(app: &mut App, mut params: Value) {
         params["mode"] = json!("visible");
         params["lines"] = json!(24);

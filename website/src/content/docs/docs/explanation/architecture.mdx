@@ -65,11 +65,12 @@ remain at the Luvus root.
 On Unix, automatic server startup uses a short-lived detached launcher. It exits
 before the client attaches, so the server is no longer a descendant of the
 client that started it. Slow startup and restoration may continue after a
-client's bounded readiness wait expires. Managed session startup cleans up
-failed launches that have not bound an endpoint, but leaves bound servers to
-finish restoring. Closing the client or terminating its ordinary process tree
-leaves the server and PTYs running. Explicit server stop/restart and termination
-signals still work.
+client's bounded readiness wait expires. Startup reports success only after the
+app loop answers a control request. A readiness timeout reports an error and
+leaves a bound server running so it can finish restoring; managed startup still
+cleans up failed launches that have not bound an endpoint. Closing the client or
+terminating its ordinary process tree leaves the server and PTYs running.
+Explicit server stop/restart and termination signals still work.
 Windows retains its existing detached-process launch behavior.
 
 This is not protection against a supervisor that adopts orphaned processes as a

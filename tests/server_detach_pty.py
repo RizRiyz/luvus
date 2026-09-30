@@ -307,34 +307,47 @@ class DetachedServerTests(unittest.TestCase):
                 self.assertEqual(process.returncode, 0, (output, error))
             self.assertEqual(len(self.inventory(name)), 1)
 
-    def test_slow_automatic_restore_survives_and_can_attach_later(self):
-        for name in ("default", "slow-restore"):
+    def test_slow_automatic_restore_times_out_and_can_attach_later(self):
+        for name, action in (("default", "start"), ("slow-restore", "restart")):
             with self.subTest(session=name):
-                with self.stalled_restore(name, ["server", "start"]) as (process, pid):
+                with self.stalled_restore(name, ["server", action]) as (process, pid):
                     output, error = process.communicate(timeout=TIMEOUT)
-                    self.assertEqual(process.returncode, 0, (output, error))
-                    # Deliberately exceed the five-second readiness deadline
-                    # while the real server remains blocked in snapshot I/O.
-                    time.sleep(6)
+                    self.assertNotEqual(process.returncode, 0, (output, error))
+                    self.assertIn(b"did not become ready", error)
+                    self.assertFalse(output, "unready startup printed a success card")
                     self.assertIn(pid, process_table(), "slow automatic startup was killed")
+                    if action == "start":
+                        # An existing but still-restoring endpoint must not
+                        # make a second start report success either.
+                        output, error = self.cli(["--session", name, "server", "start"], success=False)
+                        self.assertIn(b"did not become ready", error)
+                        self.assertFalse(output)
+                        self.assertIn(pid, process_table())
                 before = self.inventory(name)
                 self.assertEqual(self.server_pid(name), pid)
+                self.cli(["--session", name, "server", "start"])
                 client, master = self.client(name)
                 self.assertEqual(self.inventory(name), before)
                 os.write(master, b"\x00q")
                 self.drain(master)
                 self.assertEqual(client.wait(timeout=TIMEOUT), 0)
 
-    def test_slow_managed_restore_keeps_its_bound_server(self):
+    def test_slow_managed_restore_reports_timeout_and_keeps_its_bound_server(self):
         name = "slow-managed"
         with self.stalled_restore(name, ["web", "--no-open", "--port", "0"]) as (process, pid):
-            time.sleep(6)
+            output, error = process.communicate(timeout=TIMEOUT)
+            self.assertNotEqual(process.returncode, 0, (output, error))
+            self.assertIn(b"did not become ready", error)
+            self.assertFalse(output, "web advertised an unready server")
             table = process_table()
             self.assertIn(pid, table, "managed readiness timeout killed a bound server")
             self.assertNotIn(pid, descendants(process.pid, table))
-            if process.poll() is None:
-                process.terminate()
-            process.communicate(timeout=TIMEOUT)
+            # The reuse path must also check readiness rather than accept a
+            # listener left behind by the first managed startup attempt.
+            output, error = self.cli(["--session", name, "web", "--no-open", "--port", "0"], success=False)
+            self.assertIn(b"is present but not ready", error)
+            self.assertFalse(output)
+            self.assertIn(pid, process_table())
         self.assertTrue(self.inventory(name))
         self.assertEqual(self.server_pid(name), pid)
 

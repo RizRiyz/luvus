@@ -472,6 +472,13 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
     }
     let info = session_info(name);
     if info.running {
+        #[cfg(unix)]
+        server_identity_for(name, START_TIMEOUT).map_err(|error| {
+            format!(
+                "session {} is present but not ready: {error}; no restart was attempted",
+                name.unwrap_or(DEFAULT_SESSION_NAME)
+            )
+        })?;
         return Ok(info);
     }
     #[cfg(unix)]
@@ -486,8 +493,9 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
     while Instant::now() < deadline {
         let info = session_info(name);
         // Binding sockets precedes App initialization and the server PID file.
-        // Prefer app-loop readiness, but a slow restore behind bound listeners
-        // must be allowed to finish after this caller's bounded wait expires.
+        // A bound listener alone cannot prove app-loop readiness. Keep the
+        // caller's wait bounded without treating slow restoration as failure
+        // of the server itself.
         #[cfg(unix)]
         let ready = info.running
             && server_identity_for(
@@ -534,7 +542,11 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
         let info = session_info(name);
         if info.running {
             child.accept().map_err(|error| error.to_string())?;
-            return Ok(info);
+            return Err(format!(
+                "session {} did not become ready within {}ms; server was left running, retry when ready",
+                name.unwrap_or(DEFAULT_SESSION_NAME),
+                START_TIMEOUT.as_millis(),
+            ));
         }
     }
     #[cfg(unix)]

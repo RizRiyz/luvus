@@ -433,9 +433,11 @@ export class BridgeServer {
     }
     setSecurityHeaders(response);
     response.setHeader("content-type", contentType(file));
+    // Hashed assets never change; everything else (the page itself) must
+    // never be kept, so an upgrade is never served from a stale copy.
     response.setHeader("cache-control", normalized.startsWith(`assets${path.sep}`)
       ? "public, max-age=31536000, immutable"
-      : "no-cache");
+      : "no-store");
     response.statusCode = 200;
     if (request.method === "HEAD") {
       response.end();

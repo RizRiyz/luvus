@@ -29,3 +29,13 @@ test("dashboard filters agents and shells while keeping live counts and routes",
     { context: "Shell · web", title: "Pane 4", state: "shell", available: false },
   ]);
 });
+
+test("in-place title updates use the same text as a full render", async () => {
+  const { agentCardTitle } = await import("../dist/test/dashboard-agents.js");
+  const agent = { pane_id: "7", kind: "terminal", is_agent: true, agent_session_title: "  Ship it  " };
+  assert.deepEqual(agentCardTitle(agent), { title: "Ship it", titleAbsent: false });
+  assert.deepEqual(agentCardTitle({ ...agent, agent_session_title: null }), { title: "Untitled session", titleAbsent: true });
+  assert.deepEqual(agentCardTitle({ ...agent, is_agent: false }), { title: "Pane 7", titleAbsent: false });
+  const [card] = dashboardAgents({ workspaces: [{ name: "w", tabs: [{ panes: [agent] }] }] }, false).cards;
+  assert.equal(card.title, agentCardTitle(agent).title);
+});

@@ -485,8 +485,11 @@ It also includes nullable `agent_session_title`: the bounded, single-line title
 used by the AGENTS sidebar for a live agent pane (OSC title first, then a
 module-provided pane or session title). It is `null` when no title is available
 or the pane is not an agent. Native `kind:"view"` rows omit it.
-OSC and module title changes emit `agent.title_changed`. OSC events carry
-`pane` and nullable `title` so clients can update that row directly; module
+OSC and module title changes emit `agent.title_changed`. An OSC event is sent
+only when `agent_session_title` itself changes, so an agent that animates a
+leading status icon in its terminal title does not repeat an unchanged title.
+OSC events carry `pane` and nullable `title` so clients can update that row
+directly; module
 title events have no per-pane payload and require a snapshot refresh. Neither
 requires polling terminal output.
 `agent_name` is the operator alias set by `agent.name` or `pane.rename`; a terminal-backend title

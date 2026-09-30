@@ -1,10 +1,12 @@
 import { BridgeClient, BridgeError, LiveSession, type PaneSnapshot, type SessionSnapshot } from "@luvus/uhp-client";
 import { button, element } from "./dom.js";
-import { dashboardAgents, displayText } from "./dashboard-agents.js";
+import { agentCardTitle, dashboardAgents, displayText } from "./dashboard-agents.js";
 import { accessProblem, pairingCredential, parsePairingInput, type SentCredential } from "./pairing.js";
 import { pairingQrDataUrl } from "./pairing-qr.js";
+import { RenderScheduler } from "./render-scheduler.js";
 import { supportsFileUpload } from "./terminal-capabilities.js";
 import { TerminalView, type TerminalPaneOption } from "./terminal-view.js";
+import { markFieldSaved, rebuildPreservingView } from "./view-state.js";
 
 const TICKET_KEY = "luvus.web.ticket";
 
@@ -50,8 +52,25 @@ export class WebApp {
   /** What this tab last presented, so a rejection can be explained truthfully. */
   #sent: SentCredential = { ticket: false, code: false };
   #pairError: string | undefined;
+  /** Redraws caused by live updates, as opposed to the person's own actions. */
+  readonly #renders = new RenderScheduler(() => this.#renderNow());
 
   constructor(private readonly root: HTMLElement) {
+    // Hold live redraws while a pointer is pressed, so the pressed element
+    // is still there when it is released and the click is delivered.
+    root.addEventListener("pointerdown", (event) => this.#renders.hold(event.pointerId), true);
+    for (const type of ["pointerup", "pointercancel"] as const) {
+      window.addEventListener(type, (event) => this.#renders.release(event.pointerId), true);
+    }
+    // A mouse that moves with no button pressed was released where this page
+    // could not see it, for example outside the window.
+    window.addEventListener("pointermove", (event) => {
+      if (event.buttons === 0) this.#renders.release(event.pointerId);
+    }, true);
+    window.addEventListener("blur", () => this.#renders.releaseAll());
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) this.#renders.releaseAll();
+    });
     this.#tabCode = consumePairingFragment();
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     this.#bridge = new BridgeClient(`${scheme}//${location.host}/bridge`, () => {
@@ -67,7 +86,7 @@ export class WebApp {
       try {
         this.#devices = asDeviceStatus((event as CustomEvent).detail);
         if (this.#pairingCode) this.#pairingUrl = this.#pairingLink(this.#pairingCode);
-        this.#render();
+        this.#renders.request();
       } catch (error) {
         this.#showError(error);
       }
@@ -81,14 +100,15 @@ export class WebApp {
         this.#terminal.destroy();
         this.#terminal = undefined;
       }
-      this.#render();
+      this.#renders.request();
       if (this.#session.state === "ready" && !this.#devices) void this.#refreshDevices();
     });
     this.#session.addEventListener("snapshot", () => {
       const snapshot = this.#session.snapshot;
       if (snapshot) this.#terminal?.updateSnapshot(snapshot);
-      this.#render();
+      this.#renders.request();
     });
+    this.#session.addEventListener("titles", (event) => this.#updateTitles((event as CustomEvent<string[]>).detail));
   }
 
   async start(): Promise<void> {
@@ -101,13 +121,23 @@ export class WebApp {
     }
   }
 
+  /**
+   * Redraw now, unless a pointer is pressed on the page: then the redraw is
+   * queued until release, so a request that completes mid-press (device or
+   * session lists, for example) cannot replace the pressed element.
+   */
   #render(): void {
+    if (this.#renders.holding) this.#renders.request();
+    else this.#renderNow();
+  }
+
+  #renderNow(): void {
     if (this.#terminal) return;
     const snapshot = this.#session.snapshot;
     // Without authority nothing on the dashboard can act, so show the access
     // screen instead of a stale dashboard or a loading state that never ends.
     const expired = this.#session.state === "expired";
-    this.root.replaceChildren(
+    rebuildPreservingView(this.root, () => this.root.replaceChildren(
       element("div", { className: "shell" },
         expired
           ? element("div", { className: "dashboard loading-dashboard" }, this.#accessScreen())
@@ -116,7 +146,25 @@ export class WebApp {
             : element("div", { className: "dashboard loading-dashboard" }, this.#missionDock(false), this.#connecting()),
         !expired && snapshot && this.#devicePanelOpen ? this.#devicePanel() : undefined,
       ),
-    );
+    ));
+  }
+
+  /** Update changed agent titles in place, leaving every other element as it is. */
+  #updateTitles(paneIds: string[]): void {
+    const snapshot = this.#session.snapshot;
+    if (!snapshot || this.#terminal) return;
+    for (const paneId of paneIds) {
+      const pane = snapshot.workspaces
+        .flatMap((workspace) => workspace.tabs)
+        .flatMap((tab) => tab.panes)
+        .find((candidate) => candidate.pane_id === paneId);
+      if (!pane) continue;
+      const { title, titleAbsent } = agentCardTitle(pane);
+      for (const node of this.root.querySelectorAll<HTMLElement>(`[data-pane-title="${CSS.escape(paneId)}"]`)) {
+        if (node.textContent !== title) node.textContent = title;
+        node.classList.toggle("absent", titleAbsent);
+      }
+    }
   }
 
   #connecting(): HTMLElement {
@@ -321,6 +369,11 @@ export class WebApp {
       const url = rawUrl.trim();
       this.#devices = asDeviceStatus(await this.#bridge.request("web.devices.set_public_url", { url: url || null }));
       if (this.#pairingCode) this.#pairingUrl = this.#pairingLink(this.#pairingCode);
+      // The bridge may normalize the address; show what it saved rather than
+      // carrying the typed spelling into the rebuilt field. Text typed after
+      // this save was sent is newer than the save, so it is kept.
+      const field = this.root.querySelector<HTMLInputElement>(".device-url-input");
+      if (field) markFieldSaved(field, rawUrl);
       this.#render();
     } catch (error) {
       failure = error;
@@ -431,7 +484,7 @@ export class WebApp {
       ),
       this.#sessionLoading || !this.#sessions
         ? element("p", { className: "session-menu-empty", text: "Loading sessions…" })
-        : element("div", { className: "session-menu-list" }, ...this.#sessions.map((session) => {
+        : element("div", { className: "session-menu-list", attrs: { "data-scroll-key": "sessions" } }, ...this.#sessions.map((session) => {
           const active = session.name === current;
           const disabled = active || (!session.running && !canStart);
           const option = element("button", {
@@ -563,12 +616,12 @@ export class WebApp {
         ),
         element("div", { className: "agent-grid" }, ...cards.map(({ pane, context, title, state, titleAbsent, available }) => element("button", {
           className: "agent-card",
-          attrs: { type: "button", ...(available ? {} : { disabled: "", title: "Terminal unavailable" }) },
+          attrs: { type: "button", "data-view-key": `agent:${pane.pane_id}`, ...(available ? {} : { disabled: "", title: "Terminal unavailable" }) },
           on: { click: () => { if (available) this.#openTerminal(snapshot, pane); } },
         },
         element("div", { className: "agent-copy" },
           element("small", { className: "agent-context", text: context }),
-          element("strong", { className: `agent-session-title${titleAbsent ? " absent" : ""}`, text: title }),
+          element("strong", { className: `agent-session-title${titleAbsent ? " absent" : ""}`, text: title, attrs: { "data-pane-title": pane.pane_id } }),
         ),
         element("span", { className: "agent-state", text: available ? state : "Terminal unavailable" }),
         available ? missionIcon("arrow") : undefined,
@@ -598,7 +651,7 @@ export class WebApp {
     const stateClass = paneStateClass(state);
     return element("button", {
       className: `pane-tile ${stateClass}${pane.focused ? " focused" : ""}`,
-      attrs: { type: "button" },
+      attrs: { type: "button", "data-view-key": `pane:${pane.pane_id}` },
       on: { click: () => this.#openTerminal(snapshot, pane) },
     },
     element("span", { className: "pane-presence" }),
