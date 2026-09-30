@@ -197,6 +197,11 @@ On mobile, the terminal follows the visible viewport above the software
 keyboard. Submitting input resumes follow-tail so streaming output stays in
 view. Scrolling intentionally pauses follow-tail while you read history.
 
+Output wraps to the browser width without resizing the shared PTY. Expand the
+bottom controls and select **Wrap** to switch to **Original** layout for tables
+or other fixed-width output; select **Original** to enable wrapping again.
+Output scrolls behind the floating top controls.
+
 The `+` button, clipboard file paste, and drag and drop upload files up to 32
 MiB in bounded chunks. Luvus stores the bytes on the selected server and pastes
 the resulting server-side path into the terminal. The browser never inserts its

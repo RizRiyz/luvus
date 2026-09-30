@@ -5,7 +5,8 @@ import { accessProblem, pairingCredential, parsePairingInput, type SentCredentia
 import { pairingQrDataUrl } from "./pairing-qr.js";
 import { RenderScheduler } from "./render-scheduler.js";
 import { supportsFileUpload } from "./terminal-capabilities.js";
-import { TerminalView, type TerminalPaneOption } from "./terminal-view.js";
+import { terminalPaneOptions, type TerminalPaneOption } from "./terminal-pane-options.js";
+import { TerminalView } from "./terminal-view.js";
 import { markFieldSaved, rebuildPreservingView } from "./view-state.js";
 
 const TICKET_KEY = "luvus.web.ticket";
@@ -152,7 +153,11 @@ export class WebApp {
   /** Update changed agent titles in place, leaving every other element as it is. */
   #updateTitles(paneIds: string[]): void {
     const snapshot = this.#session.snapshot;
-    if (!snapshot || this.#terminal) return;
+    if (!snapshot) return;
+    if (this.#terminal) {
+      this.#terminal.updateTitles(paneIds);
+      return;
+    }
     for (const paneId of paneIds) {
       const pane = snapshot.workspaces
         .flatMap((workspace) => workspace.tabs)
@@ -623,7 +628,7 @@ export class WebApp {
           element("small", { className: "agent-context", text: context }),
           element("strong", { className: `agent-session-title${titleAbsent ? " absent" : ""}`, text: title, attrs: { "data-pane-title": pane.pane_id } }),
         ),
-        element("span", { className: "agent-state", text: available ? state : "Terminal unavailable" }),
+        element("span", { className: `agent-state ${available ? paneStateClass(state) : "terminal"}`, text: available ? state : "Terminal unavailable" }),
         available ? missionIcon("arrow") : undefined,
         ))),
         cards.length === 0 ? element("p", { className: "workspace-empty", text: this.#showShells ? "No terminal panes in this session." : "No active agents. Choose All panes to show shells." }) : undefined,
@@ -697,23 +702,7 @@ export class WebApp {
 
   #terminalPaneOptions(): TerminalPaneOption[] {
     const snapshot = this.#session.snapshot;
-    if (!snapshot) return [];
-    return snapshot.workspaces.flatMap((workspace, workspaceIndex) => {
-      const workspaceName = displayText(workspace.name, `Workspace ${workspaceIndex + 1}`);
-      return workspace.tabs.flatMap((tab, tabIndex) => {
-        const tabName = displayText(tab.name, `Tab ${tabIndex + 1}`);
-        return tab.panes.flatMap((pane, paneIndex) => {
-          if (pane.kind !== "terminal" || !pane.terminal_id) return [];
-          const agent = displayText(pane.agent_name, displayText(pane.agent, ""));
-          return [{
-            pane,
-            title: agent || `Terminal ${paneIndex + 1}`,
-            context: `${workspaceName} / ${tabName}`,
-            path: displayText(pane.cwd, displayText(workspace.cwd, "Terminal")),
-          }];
-        });
-      });
-    });
+    return snapshot ? terminalPaneOptions(snapshot) : [];
   }
 
   #showError(error: unknown): void {

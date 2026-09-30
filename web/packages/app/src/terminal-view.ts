@@ -1,16 +1,10 @@
 import { BridgeError, type BridgeClient, type PaneSnapshot, type SessionSnapshot, type StreamHandle, type TerminalFrame } from "@luvus/uhp-client";
-import { parseAnsi } from "./ansi.js";
 import { button, element } from "./dom.js";
 import { uploadTerminalFile } from "./file-upload.js";
 import { NativeTerminalInput, type TerminalAction } from "./native-input.js";
+import { terminalPaneLabel, type TerminalPaneOption } from "./terminal-pane-options.js";
+import { captureTerminalScroll, restoreTerminalScroll, terminalFrameParts, updateTerminalFrame } from "./terminal-output.js";
 import { TerminalTargetTracker, type TerminalTarget } from "./terminal-target.js";
-
-export interface TerminalPaneOption {
-  pane: PaneSnapshot;
-  title: string;
-  context: string;
-  path: string;
-}
 
 export class TerminalView {
   readonly root = element("section", { className: "terminal-screen" });
@@ -29,12 +23,14 @@ export class TerminalView {
     reject: (reason: unknown) => void;
   }> = [];
   #status: HTMLElement | undefined;
+  #content = element("div", { className: "terminal-content" });
   #output = element("div", {
     className: "terminal-output",
     attrs: { role: "log", tabindex: "0", "aria-label": "Terminal output" },
-  });
+  }, this.#content);
   #paintFrame: number | undefined;
   #pendingPaint: { text: string; cursorOffset: number | undefined; cursorPadding: number } | undefined;
+  #renderedPaint: { text: string; cursorOffset: number | undefined; cursorPadding: number } | undefined;
   #input: NativeTerminalInput | undefined;
   #inputHint = element("span", { className: "terminal-input-hint", text: "Tap terminal to type" });
   #attach: HTMLButtonElement | undefined;
@@ -71,7 +67,6 @@ export class TerminalView {
   ) {
     this.#targetTracker = new TerminalTargetTracker(snapshot, pane);
     this.#target = this.#targetTracker.resolve(snapshot);
-    const title = pane.agent_name || pane.agent || `Pane ${pane.pane_id}`;
     if (control) {
       this.#input = new NativeTerminalInput(
         (action, params) => this.#action(action, params),
@@ -157,7 +152,21 @@ export class TerminalView {
       controlButton.addEventListener("pointerdown", (event) => event.preventDefault());
       return controlButton;
     });
-    const tools = element("div", { className: "terminal-tools" }, attach, keyboard, ...keys);
+    const wrapToggle = button("Wrap", "terminal-tool terminal-wrap-toggle", () => {
+      const anchor = this.#followTail ? undefined : captureTerminalScroll(this.#output, this.#content);
+      const wrapping = !this.root.classList.toggle("terminal-no-wrap");
+      wrapToggle.textContent = wrapping ? "Wrap" : "Original";
+      wrapToggle.setAttribute("aria-pressed", String(wrapping));
+      wrapToggle.setAttribute("aria-label", wrapping ? "Show original terminal layout" : "Wrap terminal output to screen width");
+      wrapToggle.title = wrapping ? "Show original terminal layout" : "Wrap terminal output to screen width";
+      if (anchor) restoreTerminalScroll(this.#output, this.#content, anchor);
+      else this.#scrollToLatest();
+    });
+    wrapToggle.setAttribute("aria-pressed", "true");
+    wrapToggle.setAttribute("aria-label", "Show original terminal layout");
+    wrapToggle.title = "Show original terminal layout";
+    wrapToggle.addEventListener("pointerdown", (event) => event.preventDefault());
+    const tools = element("div", { className: "terminal-tools" }, wrapToggle, attach, keyboard, ...keys);
     const controlsToggle = button("", "terminal-controls-toggle", () => {
       const expanded = this.root.classList.toggle("controls-expanded");
       controlsToggle.setAttribute("aria-expanded", String(expanded));
@@ -171,14 +180,10 @@ export class TerminalView {
 
     this.#paneSelector = element("button", {
       className: "terminal-pane-selector",
-      attrs: { type: "button", "aria-haspopup": "menu", "aria-expanded": "false" },
+      attrs: { type: "button", "aria-label": "Switch terminal pane", title: "Switch terminal pane", "aria-haspopup": "menu", "aria-expanded": "false" },
       on: { click: () => this.#togglePaneMenu() },
     },
-    element("span", { className: "terminal-pane-copy" },
-      element("strong", { text: title }),
-      element("small", { text: pane.cwd || "Terminal" }),
-    ),
-    element("span", { className: "terminal-pane-chevron", attrs: { "aria-hidden": "true" } }),
+    element("span", { className: "terminal-pane-dot", attrs: { "aria-hidden": "true" } }),
     );
     this.#paneSwitcher = element("div", { className: "terminal-pane-switcher" }, this.#paneSelector, this.#paneMenu);
 
@@ -335,6 +340,25 @@ export class TerminalView {
     else this.#closePaneMenu(true);
   }
 
+  updateTitles(paneIds: string[]): void {
+    if (this.#destroyed || this.#paneMenu.hidden) return;
+    const changed = new Set(paneIds);
+    for (const option of this.paneOptions()) {
+      if (!changed.has(option.pane.pane_id)) continue;
+      const row = this.#paneMenu.querySelector<HTMLElement>(`[data-menu-pane="${CSS.escape(option.pane.pane_id)}"]`);
+      if (!row) continue;
+      const title = row.querySelector<HTMLElement>(".terminal-pane-option-title");
+      if (title) {
+        title.textContent = option.title;
+        title.hidden = !option.title;
+      }
+      const agent = row.querySelector<HTMLElement>(".terminal-pane-option-agent");
+      if (agent) agent.textContent = `${option.title ? "- " : ""}${option.agentName}`;
+      row.title = terminalPaneLabel(option);
+      row.setAttribute("aria-label", `${terminalPaneLabel(option)}, ${option.context}, ${option.path}`);
+    }
+  }
+
   #openPaneMenu(): void {
     const options = this.paneOptions();
     this.#paneMenu.replaceChildren(...options.map((option) => {
@@ -342,7 +366,12 @@ export class TerminalView {
         && option.pane.terminal_id === this.#target?.pane.terminal_id;
       return element("button", {
         className: `terminal-pane-option${active ? " active" : ""}`,
-        attrs: { type: "button", role: "menuitem", ...(active ? { "aria-current": "true" } : {}) },
+        attrs: {
+          type: "button", role: "menuitem", "data-menu-pane": option.pane.pane_id,
+          title: terminalPaneLabel(option),
+          "aria-label": `${terminalPaneLabel(option)}, ${option.context}, ${option.path}`,
+          ...(active ? { "aria-current": "true" } : {}),
+        },
         on: { click: () => {
           if (active) {
             this.#closePaneMenu(true);
@@ -354,8 +383,10 @@ export class TerminalView {
       },
       element("span", { className: "terminal-pane-option-dot", attrs: { "aria-hidden": "true" } }),
       element("span", { className: "terminal-pane-option-copy" },
-        element("strong", { text: option.title }),
-        element("small", { text: option.context }),
+        element("strong", { className: "terminal-pane-option-heading" },
+          element("span", { className: "terminal-pane-option-title", text: option.title, attrs: option.title ? {} : { hidden: "" } }),
+          element("span", { className: "terminal-pane-option-agent", text: `${option.title ? "- " : ""}${option.agentName}` }),
+        ),
         element("small", { className: "terminal-pane-option-path", text: option.path }),
       ),
       );
@@ -402,10 +433,15 @@ export class TerminalView {
       const pending = this.#pendingPaint;
       this.#pendingPaint = undefined;
       if (pending === undefined) return;
+      if (pending.text === this.#renderedPaint?.text
+        && pending.cursorOffset === this.#renderedPaint.cursorOffset
+        && pending.cursorPadding === this.#renderedPaint.cursorPadding) return;
       const followTail = this.#followTail;
-      const fragment = renderTerminalFrame(pending.text, pending.cursorOffset, pending.cursorPadding);
-      this.#output.replaceChildren(fragment);
+      const anchor = followTail ? undefined : captureTerminalScroll(this.#output, this.#content);
+      updateTerminalFrame(this.#content, terminalFrameParts(pending.text, pending.cursorOffset, pending.cursorPadding));
+      this.#renderedPaint = pending;
       if (followTail) this.#scrollToLatest();
+      else if (anchor) restoreTerminalScroll(this.#output, this.#content, anchor);
     });
   }
 
@@ -569,44 +605,4 @@ function headerBackButton(onBack: () => void): HTMLButtonElement {
   back.setAttribute("aria-label", "Back");
   back.title = "Back";
   return back;
-}
-
-function renderTerminalFrame(text: string, cursorOffset: number | undefined, cursorPadding: number): DocumentFragment {
-  const fragment = document.createDocumentFragment();
-  let remaining = cursorOffset;
-  let placed = false;
-  for (const run of parseAnsi(text)) {
-    const characters = Array.from(run.text);
-    if (!placed && remaining !== undefined && remaining <= characters.length) {
-      appendStyledText(fragment, characters.slice(0, remaining).join(""), run.style);
-      if (cursorPadding > 0) fragment.append(document.createTextNode(" ".repeat(cursorPadding)));
-      fragment.append(element("span", { className: "terminal-caret", attrs: { "aria-hidden": "true" } }));
-      appendStyledText(fragment, characters.slice(remaining).join(""), run.style);
-      placed = true;
-      continue;
-    }
-    appendStyledText(fragment, run.text, run.style);
-    if (!placed && remaining !== undefined) remaining -= characters.length;
-  }
-  if (!placed && remaining === 0) {
-    if (cursorPadding > 0) fragment.append(document.createTextNode(" ".repeat(cursorPadding)));
-    fragment.append(element("span", { className: "terminal-caret", attrs: { "aria-hidden": "true" } }));
-  }
-  return fragment;
-}
-
-function appendStyledText(
-  fragment: DocumentFragment,
-  text: string,
-  style: Partial<CSSStyleDeclaration> | undefined,
-): void {
-  if (!text) return;
-  if (!style) {
-    fragment.append(document.createTextNode(text));
-    return;
-  }
-  const span = document.createElement("span");
-  span.textContent = text;
-  Object.assign(span.style, style);
-  fragment.append(span);
 }
