@@ -171,15 +171,16 @@ class KeyboardForwardingTests(unittest.TestCase):
              b"\x1b[200~hello\nworld\x1b[201~"),
         ]
         expected = b""
+        # A paste fence uses the same client/PTY input stream without creating
+        # held-key ownership. Its capture proves preceding input was processed,
+        # including releases that should produce no bytes.
+        fence = b"\x1b[200~KEYBOARD_INPUT_FENCE\x1b[201~"
         for name, sent, received in cases:
             with self.subTest(key=name, flags=flags):
-                os.write(self.master, sent)
-                expected += received
-                if received:
-                    self.wait_until(lambda: len(self.output.read_bytes()) >= len(expected),
-                                    f"{name} was not delivered")
-                else:
-                    self.drain(0.15)
+                os.write(self.master, sent + fence)
+                expected += received + fence
+                self.wait_until(lambda: len(self.output.read_bytes()) >= len(expected),
+                                f"{name} input fence was not delivered")
                 self.assertEqual(self.output.read_bytes(), expected, f"{name}, flags={flags}")
 
     def test_disambiguation(self):
