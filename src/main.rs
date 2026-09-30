@@ -2799,18 +2799,25 @@ mod tests {
         assert!(app.ws_menu.is_some(), "right-click opens the menu");
         render(&mut app); // populates item rects
 
-        // Copy Path renders as a clickable row directly below the path toggle.
-        let copy_row = item_rect(&app, WsMenuItem::CopyPath);
-        let path_row = item_rect(&app, WsMenuItem::TogglePath);
-        assert!(
-            copy_row.y > path_row.y,
-            "Copy Path sits below the path toggle"
+        // The copy rows live one level down. Hovering the Quick Actions row opens
+        // its submenu, which lists Copy Path then Copy Branch.
+        let parent = item_rect(&app, WsMenuItem::QuickActions);
+        app.hover = Some((parent.x + 1, parent.y));
+        render(&mut app);
+        let quick: Vec<WsMenuItem> = app
+            .ws_menu
+            .as_ref()
+            .expect("menu open")
+            .quick_rects
+            .iter()
+            .map(|(item, _)| *item)
+            .collect();
+        assert_eq!(
+            quick,
+            vec![WsMenuItem::CopyPath, WsMenuItem::CopyBranch],
+            "Quick Actions lists Copy Path then Copy Branch"
         );
-        let branch_row = item_rect(&app, WsMenuItem::CopyBranch);
-        assert!(
-            branch_row.y > copy_row.y,
-            "Copy Branch sits below Copy Path"
-        );
+        app.hover = None;
 
         // Pick Rename → the modal opens pre-filled with the current label.
         let rn = item_rect(&app, WsMenuItem::Rename);

@@ -190,8 +190,13 @@ pub(super) fn draw_ws_menu(
     };
     let anchor = menu.anchor;
     let selected = menu.selected;
-    let items = app.ws_menu_items(index);
+    let quick_selected = menu.quick_selected;
     let extras = menu.module_actions.clone();
+    // Submenu rects from the *previous* frame, so hovering the submenu itself
+    // keeps it open (this frame's rects are not computed yet).
+    let previous_quick_rects = menu.quick_rects.clone();
+    let quick = app.ws_quick_actions(index);
+    let items = app.ws_menu_items(index);
     let rows: Vec<MenuRow> = items
         .iter()
         .map(|it| MenuRow {
@@ -214,8 +219,75 @@ pub(super) fn draw_ws_menu(
             scroll: &mut app.menu_scroll,
         },
     );
+    let quick_rect = items
+        .iter()
+        .zip(&rects)
+        .find(|(it, _)| **it == WsMenuItem::QuickActions)
+        .map(|(_, rect)| *rect)
+        // A parent row that scrolled out of view has no rect to hang a submenu
+        // off, and an empty one would anchor it at the origin.
+        .filter(|rect: &Rect| rect.height > 0);
     if let Some(menu) = app.ws_menu.as_mut() {
-        menu.items = items.into_iter().zip(rects).collect();
+        menu.items = items.iter().copied().zip(rects.iter().copied()).collect();
+    }
+
+    // Sticky open/close of the submenu based on where the cursor is: over the
+    // Quick Actions row or the submenu opens it; over another main row closes it;
+    // over the border gap between them leaves it unchanged (so it doesn't flicker).
+    if let (Some(parent), Some(hover)) = (quick_rect, app.hover) {
+        let in_rect = |rect: &Rect| {
+            hover.0 >= rect.x
+                && hover.0 < rect.right()
+                && hover.1 >= rect.y
+                && hover.1 < rect.bottom()
+        };
+        let over_parent = in_rect(&parent);
+        let over_submenu = previous_quick_rects.iter().any(|(_, rect)| in_rect(rect));
+        let over_other = items.iter().zip(&rects).any(|(item, rect)| {
+            !matches!(item, WsMenuItem::QuickActions | WsMenuItem::Divider) && in_rect(rect)
+        });
+        if let Some(menu) = app.ws_menu.as_mut() {
+            if over_parent || over_submenu {
+                menu.quick_open = true;
+            } else if over_other {
+                menu.quick_open = false;
+                menu.quick_selected = None;
+            }
+        }
+    }
+
+    let open = app.ws_menu.as_ref().is_some_and(|menu| menu.quick_open);
+    if let (Some(parent), false) = (open.then_some(()).and(quick_rect), quick.is_empty()) {
+        let sub_rows: Vec<MenuRow> = quick
+            .iter()
+            .map(|it| MenuRow {
+                text: ws_label(*it, cat, &extras, app.config.layout.workspace_paths),
+                divider: false,
+                destructive: false,
+            })
+            .collect();
+        // Beside the main popup, first row aligned with the Quick Actions row.
+        let sub_anchor = (parent.right() + 1, parent.y.saturating_sub(1));
+        let sub_rects = render_popup(
+            f,
+            area,
+            sub_anchor,
+            &sub_rows,
+            t,
+            PopupCtx {
+                hover: app.hover,
+                selected: quick_selected,
+                mobile: app.compact,
+                id: PopupId::WsQuick,
+                scroll: &mut app.menu_scroll,
+            },
+        );
+        if let Some(menu) = app.ws_menu.as_mut() {
+            menu.quick_rects = quick.iter().copied().zip(sub_rects).collect();
+        }
+    } else if let Some(menu) = app.ws_menu.as_mut() {
+        menu.quick_rects.clear();
+        menu.quick_selected = None;
     }
 }
 
@@ -581,6 +653,8 @@ fn ws_label(
             cat.menu_show_path
         }
         .to_string(),
+        // A trailing ▸ marks the row that opens the Quick Actions submenu.
+        WsMenuItem::QuickActions => format!("{} ▸", cat.menu_quick_actions),
         WsMenuItem::CopyPath => cat.menu_copy_path.to_string(),
         WsMenuItem::CopyBranch => cat.menu_copy_branch.to_string(),
         WsMenuItem::Close => cap_first(cat.act_close),
@@ -910,6 +984,7 @@ mod label_case_tests {
             WsMenuItem::Close,
             WsMenuItem::Rename,
             WsMenuItem::TogglePath,
+            WsMenuItem::QuickActions,
             WsMenuItem::CopyPath,
             WsMenuItem::CopyBranch,
             WsMenuItem::DeleteWorktree,

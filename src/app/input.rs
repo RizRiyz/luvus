@@ -1841,6 +1841,7 @@ impl App {
                 .items
                 .iter()
                 .map(|(_, rect)| *rect)
+                .chain(menu.quick_rects.iter().map(|(_, rect)| *rect))
                 .find(|rect| hit(*rect));
         }
         if let Some(menu) = &self.file_menu {

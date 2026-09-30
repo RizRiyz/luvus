@@ -728,18 +728,28 @@ pub struct WsMenu {
     /// Module actions offered here, snapshotted when the menu opened (docs/13
     /// §3.8) so a registry change mid-menu can't shift what a click runs.
     pub module_actions: Vec<ModuleMenuAction>,
+    /// Whether the Quick Actions submenu is open. Hovering its parent row, or
+    /// pressing the key that opens it, sets this.
+    pub quick_open: bool,
+    /// The Quick Actions rows + their clickable rects, filled in by the renderer.
+    pub quick_rects: Vec<(WsMenuItem, Rect)>,
+    /// Keyboard cursor inside the Quick Actions submenu, while it is open.
+    pub quick_selected: Option<usize>,
 }
 
 /// An action offered by the workspace context menu. Worktree / git actions only
 /// appear for nodes inside a git repo. `Divider` is a non-interactive separator.
 /// `Module(i)` is the `i`-th module action declaring `contexts = ["workspace"]`
 /// (docs/13 §3.8), resolved against the live registry when clicked.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WsMenuItem {
     Pin,
     Unpin,
     /// Toggle the persisted cwd line for every WORKSPACES row.
     TogglePath,
+    /// Parent row of the Quick Actions submenu, which holds the copy rows so the
+    /// top level stays compact.
+    QuickActions,
     /// Copy the right-clicked node's cwd to the client clipboard.
     CopyPath,
     /// Copy the right-clicked node's git branch. Only offered when it has one.
@@ -2213,6 +2223,7 @@ impl CopyMode {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum PopupId {
     Ws,
+    WsQuick,
     Tab,
     TabSwap,
     Pane,
@@ -6691,13 +6702,18 @@ impl App {
                 items: Vec::new(),
                 selected: None,
                 module_actions: self.module_menu_actions("workspace"),
+                quick_open: false,
+                quick_rects: Vec::new(),
+                quick_selected: None,
             });
         }
     }
 
     /// The items shown for workspace `index`, in render order: node actions
     /// (close / rename / worktrees) above a divider, then the open-tab actions
-    /// (git / orch). Worktree + git actions only appear for nodes in a git repo.
+    /// (git / orch). The copy rows live one level down, under `QuickActions`, so
+    /// the top level stays short. Worktree + git actions only appear for nodes in
+    /// a git repo.
     pub fn ws_menu_items(&self, index: usize) -> Vec<WsMenuItem> {
         let ws = self.workspaces.get(index);
         let is_repo = self
@@ -6715,11 +6731,6 @@ impl App {
         let is_worktree = ws
             .and_then(|w| w.worktree.as_ref())
             .is_some_and(|m| m.linked);
-        // No subprocess: `branch` is already refreshed from `.git/HEAD`, and a
-        // detached HEAD stores a short SHA, so any value is worth copying.
-        let has_branch = ws
-            .and_then(|w| w.branch.as_deref())
-            .is_some_and(|branch| !branch.is_empty());
         let pin = if ws.is_some_and(|w| w.pinned) {
             WsMenuItem::Unpin
         } else {
@@ -6730,12 +6741,8 @@ impl App {
             WsMenuItem::Rename,
             pin,
             WsMenuItem::TogglePath,
-            WsMenuItem::CopyPath,
+            WsMenuItem::QuickActions,
         ];
-        // The branch line the sidebar shows, so this row is never a dead click.
-        if has_branch {
-            items.push(WsMenuItem::CopyBranch);
-        }
         if is_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
@@ -6754,6 +6761,24 @@ impl App {
         if extras > 0 {
             items.push(WsMenuItem::Divider);
             items.extend((0..extras).map(WsMenuItem::Module));
+        }
+        items
+    }
+
+    /// The rows inside the Quick Actions submenu for workspace `index`, in render
+    /// order. Copy Branch only appears when the node has a value to copy, so the
+    /// submenu never offers a dead click.
+    pub fn ws_quick_actions(&self, index: usize) -> Vec<WsMenuItem> {
+        let mut items = vec![WsMenuItem::CopyPath];
+        // No subprocess: `branch` is already refreshed from `.git/HEAD`, and a
+        // detached HEAD stores a short SHA, so any value is worth copying.
+        if self
+            .workspaces
+            .get(index)
+            .and_then(|w| w.branch.as_deref())
+            .is_some_and(|branch| !branch.is_empty())
+        {
+            items.push(WsMenuItem::CopyBranch);
         }
         items
     }
@@ -6839,15 +6864,30 @@ impl App {
         items
     }
 
-    /// A click inside the open context menu: run the hit item, else dismiss.
+    /// A click inside the open context menu: run the hit row, else dismiss. The
+    /// Quick Actions submenu is tested first because it overlaps the parent.
     pub fn ws_menu_click(&mut self, col: u16, row: u16) {
-        let hit = self.ws_menu.as_ref().and_then(|m| {
-            m.items
+        let in_rect = |r: &Rect| col >= r.x && col < r.right() && row >= r.y && row < r.bottom();
+        let quick_hit = self.ws_menu.as_ref().and_then(|m| {
+            m.quick_rects
                 .iter()
-                .find(|(_, r)| col >= r.x && col < r.right() && row >= r.y && row < r.bottom())
+                .find(|(_, r)| in_rect(r))
                 .map(|(it, _)| *it)
         });
+        if let Some(it) = quick_hit {
+            self.ws_menu_action(it);
+            return;
+        }
+        let hit = self
+            .ws_menu
+            .as_ref()
+            .and_then(|m| m.items.iter().find(|(_, r)| in_rect(r)).map(|(it, _)| *it));
         match hit {
+            Some(WsMenuItem::QuickActions) => {
+                if let Some(menu) = self.ws_menu.as_mut() {
+                    menu.quick_open = true;
+                }
+            }
             Some(WsMenuItem::Divider) => {} // non-interactive; keep the menu open
             Some(it) => self.ws_menu_action(it),
             None => self.ws_menu = None, // click outside dismisses
@@ -6874,7 +6914,9 @@ impl App {
         let cwd = self.workspaces.get(index).map(|w| w.cwd.clone());
         let branch = self.workspaces.get(index).and_then(|w| w.branch.clone());
         match item {
-            WsMenuItem::Divider => {}
+            // A parent row only opens its submenu, which the click and key paths
+            // handle; nothing to run here.
+            WsMenuItem::QuickActions | WsMenuItem::Divider => {}
             // Pin/Unpin the right-clicked node: float it to the top of the list
             // (docs), persisted across restarts.
             WsMenuItem::Pin | WsMenuItem::Unpin => {
@@ -7408,6 +7450,50 @@ impl App {
             return;
         };
         let items = self.ws_menu_items(index);
+        let quick = self.ws_quick_actions(index);
+        // While the submenu is open it owns the navigation keys, so a keyboard
+        // user can reach the copy rows the mouse opens by hovering.
+        if self.ws_menu.as_ref().is_some_and(|menu| menu.quick_open) && !quick.is_empty() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+                    if let Some(menu) = self.ws_menu.as_mut() {
+                        menu.quick_open = false;
+                        menu.quick_selected = None;
+                    }
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                    let current = self.ws_menu.as_ref().and_then(|menu| menu.quick_selected);
+                    let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                        current
+                            .map(|position| position.checked_sub(1).unwrap_or(quick.len() - 1))
+                            .unwrap_or(quick.len() - 1)
+                    } else {
+                        current.map_or(0, |position| (position + 1) % quick.len())
+                    };
+                    if let Some(menu) = self.ws_menu.as_mut() {
+                        menu.quick_selected = Some(next);
+                    }
+                    return;
+                }
+                KeyCode::Enter => {
+                    if let Some(item) = self
+                        .ws_menu
+                        .as_ref()
+                        .and_then(|menu| menu.quick_selected)
+                        .and_then(|position| quick.get(position))
+                        .copied()
+                    {
+                        self.ws_menu_action(item);
+                    }
+                    return;
+                }
+                // Already open, so the "open the submenu" keys must not fall
+                // through and reset the cursor to the first row.
+                KeyCode::Right | KeyCode::Char('l') => return,
+                _ => {}
+            }
+        }
         let selectable: Vec<usize> = items
             .iter()
             .enumerate()
@@ -7437,8 +7523,31 @@ impl App {
             }
             KeyCode::Enter => {
                 let selected = self.ws_menu.as_ref().and_then(|menu| menu.selected);
-                if let Some(item) = selected.and_then(|index| items.get(index)).copied() {
-                    self.ws_menu_action(item);
+                match selected.and_then(|index| items.get(index)).copied() {
+                    Some(WsMenuItem::QuickActions) if !quick.is_empty() => {
+                        if let Some(menu) = self.ws_menu.as_mut() {
+                            menu.quick_open = true;
+                            menu.quick_selected = Some(0);
+                        }
+                    }
+                    Some(item) => self.ws_menu_action(item),
+                    None => {}
+                }
+            }
+            // Right / `l` only opens the submenu; other rows ignore it, so a
+            // stray `l` can never run an action.
+            KeyCode::Right | KeyCode::Char('l') => {
+                let on_parent = self
+                    .ws_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|index| items.get(index))
+                    .is_some_and(|item| *item == WsMenuItem::QuickActions);
+                if on_parent && !quick.is_empty() {
+                    if let Some(menu) = self.ws_menu.as_mut() {
+                        menu.quick_open = true;
+                        menu.quick_selected = Some(0);
+                    }
                 }
             }
             _ => {}
@@ -14096,14 +14205,34 @@ fi
     }
 
     #[test]
-    fn ws_menu_copy_path_queues_the_target_cwd() {
+    fn ws_menu_quick_actions_holds_the_copy_rows_and_queues_their_values() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
-        // The row sits directly below the path toggle.
+        app.workspaces[0].branch = Some("feature/demo".into());
+
+        // The top level keeps one compact parent row; the contents moved down.
         let items = app.ws_menu_items(0);
-        let toggle = items.iter().position(|i| *i == WsMenuItem::TogglePath);
-        let copy = items.iter().position(|i| *i == WsMenuItem::CopyPath);
-        assert_eq!(copy, toggle.map(|i| i + 1), "Copy Path follows the toggle");
+        assert_eq!(
+            items.iter().position(|i| *i == WsMenuItem::QuickActions),
+            items
+                .iter()
+                .position(|i| *i == WsMenuItem::TogglePath)
+                .map(|i| i + 1),
+            "Quick Actions follows the path toggle"
+        );
+        assert!(
+            !items.contains(&WsMenuItem::CopyPath),
+            "path row moved down"
+        );
+        assert!(
+            !items.contains(&WsMenuItem::CopyBranch),
+            "branch row moved down"
+        );
+        assert_eq!(
+            app.ws_quick_actions(0),
+            vec![WsMenuItem::CopyPath, WsMenuItem::CopyBranch],
+            "Copy Path then Copy Branch"
+        );
 
         app.open_ws_menu(0, 0, 0);
         app.workspaces[0].cwd = PathBuf::from("/tmp/luvus-copy-path-target");
@@ -14112,33 +14241,112 @@ fi
             app.pending_clipboard.as_deref(),
             Some("/tmp/luvus-copy-path-target")
         );
-    }
-
-    #[test]
-    fn ws_menu_copy_branch_follows_copy_path_and_needs_a_branch() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut app = App::new(80, 24, tx).unwrap();
-        app.workspaces[0].branch = Some("feature/demo".into());
-        let items = app.ws_menu_items(0);
-        let copy_path = items.iter().position(|i| *i == WsMenuItem::CopyPath);
-        let copy_branch = items.iter().position(|i| *i == WsMenuItem::CopyBranch);
-        assert_eq!(
-            copy_branch,
-            copy_path.map(|i| i + 1),
-            "Copy Branch follows Copy Path"
-        );
 
         app.open_ws_menu(0, 0, 0);
         app.ws_menu_action(WsMenuItem::CopyBranch);
         assert_eq!(app.pending_clipboard.as_deref(), Some("feature/demo"));
+    }
+
+    #[test]
+    fn ws_quick_actions_drop_copy_branch_without_a_branch() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
 
         // A node without a branch drops the row, so the action stays inert.
-        app.pending_clipboard = None;
         app.workspaces[0].branch = None;
-        assert!(!app.ws_menu_items(0).contains(&WsMenuItem::CopyBranch));
+        assert_eq!(app.ws_quick_actions(0), vec![WsMenuItem::CopyPath]);
         app.open_ws_menu(0, 0, 0);
         app.ws_menu_action(WsMenuItem::CopyBranch);
         assert_eq!(app.pending_clipboard, None);
+    }
+
+    #[test]
+    fn ws_quick_actions_submenu_hover_click_and_keyboard() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].branch = Some("feature/demo".into());
+        app.workspaces[0].cwd = PathBuf::from("/tmp/luvus-quick-actions");
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        // Hovering the parent row opens the submenu on the next render.
+        app.open_ws_menu(0, 6, 6);
+        app.hover = None;
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let parent = app
+            .ws_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(it, _)| *it == WsMenuItem::QuickActions)
+            .map(|(_, rect)| *rect)
+            .expect("Quick Actions row is present");
+        app.hover = Some((parent.x + 1, parent.y));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            app.ws_menu.as_ref().unwrap().quick_open,
+            "submenu opened on hover"
+        );
+        let quick_rects = app.ws_menu.as_ref().unwrap().quick_rects.clone();
+        assert_eq!(
+            quick_rects.iter().map(|(it, _)| *it).collect::<Vec<_>>(),
+            vec![WsMenuItem::CopyPath, WsMenuItem::CopyBranch],
+            "submenu lists both copy rows"
+        );
+
+        // Clicking a submenu row runs it and closes the menu.
+        let (_, copy_path) = quick_rects
+            .iter()
+            .find(|(it, _)| *it == WsMenuItem::CopyPath)
+            .expect("Copy Path offered");
+        app.ws_menu_click(copy_path.x + 1, copy_path.y);
+        assert!(app.ws_menu.is_none(), "menu closed after a copy");
+        assert_eq!(
+            app.pending_clipboard.as_deref(),
+            Some("/tmp/luvus-quick-actions")
+        );
+
+        // The keyboard reaches the same rows: select the parent with `j`, open
+        // it with Enter, then move down and run Copy Branch.
+        app.open_ws_menu(0, 6, 6);
+        app.pending_clipboard = None;
+        while app.ws_menu.as_ref().and_then(|menu| menu.selected)
+            != Some(
+                app.ws_menu_items(0)
+                    .iter()
+                    .position(|it| *it == WsMenuItem::QuickActions)
+                    .unwrap(),
+            )
+        {
+            app.handle_ws_menu_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.ws_menu.as_ref().unwrap().quick_open,
+            "Enter opened the submenu"
+        );
+        assert_eq!(
+            app.ws_menu.as_ref().unwrap().quick_selected,
+            Some(0),
+            "the first row is selected"
+        );
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(app.ws_menu.as_ref().unwrap().quick_selected, Some(1));
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.ws_menu.is_none(), "menu closed after a copy");
+        assert_eq!(app.pending_clipboard.as_deref(), Some("feature/demo"));
+
+        // Esc closes the submenu first and keeps the menu open.
+        app.open_ws_menu(0, 6, 6);
+        app.ws_menu.as_mut().unwrap().quick_open = true;
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let menu = app.ws_menu.as_ref().expect("menu stays open");
+        assert!(!menu.quick_open, "Esc closed only the submenu");
+        app.handle_ws_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.ws_menu.is_none(), "the second Esc closes the menu");
     }
 
     #[test]
@@ -14156,6 +14364,9 @@ fi
             items: Vec::new(),
             selected: None,
             module_actions: Vec::new(),
+            quick_open: false,
+            quick_rects: Vec::new(),
+            quick_selected: None,
         });
 
         assert!(app.ws_menu_items(0).contains(&WsMenuItem::OpenGit));
