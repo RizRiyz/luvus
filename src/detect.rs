@@ -844,6 +844,13 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![any(&["esc again to interrupt", "esc twice to interrupt"])],
         ),
+        per(
+            "codex",
+            State::Blocked,
+            310,
+            Region::Screen,
+            vec![all(&["trust this folder?", "trust and continue"])],
+        ),
     ]
 }
 
@@ -3523,5 +3530,55 @@ For security, devin.exe should not be run in directories with untrusted content.
         );
         assert_eq!(detection.state, State::Blocked);
         assert_eq!(detection.state_source, "manifest_rule");
+    }
+
+    const CODEX_FOLDER_TRUST_SCREEN: &str = r#"
+  Folder access
+  /home/user/project
+
+  Trust this folder? Codex can read, edit, and run files here, subject to your
+  permission settings. Folder settings can run code automatically, even
+  without a model request. Continue only if you trust these files. Your trust
+  decision will be saved.
+
+› 1. Trust and continue
+  2. Back to Agent Command Center
+
+  enter continue · esc back"#;
+
+    #[test]
+    fn codex_folder_trust_screen_is_blocked() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/local/bin/codex".to_string()];
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, 1024 * 1024);
+        let screen = CODEX_FOLDER_TRUST_SCREEN.replace('\n', "\r\n");
+        engine.advance(format!("\x1b[2J\x1b[H{screen}").as_bytes());
+        let detect = |bottom: &str| {
+            classify(
+                Some("codex"),
+                bottom,
+                false,
+                false,
+                "codex",
+                "codex",
+                &running,
+                &manifests,
+            )
+        };
+
+        let bottom = engine.detection_text_non_empty(screen_rows("codex", &running, &manifests));
+        let detection = detect(&bottom);
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+        assert_eq!(detection.rule_priority, Some(310));
+        assert_eq!(
+            detect(
+                "Trust this folder? Codex can read, edit, and run files here … \
+                 › 1. Trust and continue  2. Quit · enter continue · esc quit"
+            )
+            .state,
+            State::Blocked
+        );
     }
 }
