@@ -16147,9 +16147,9 @@ fi
 
         app.sidebars.left.docks = vec![DockKind::Workspaces, DockKind::Agents];
         app.sidebars.left.weights = Vec::new();
-        // Stand in for a frame: a 30-row sidebar whose chrome row sits above
-        // the dock body. The pair owns 28 rows (chrome plus the divider itself
-        // take the rest); the rule sits at row 15.
+        // Stand in for a frame: a 30-row sidebar whose chrome and blank row sit
+        // above the dock body. The pair owns 27 rows (chrome plus the divider
+        // itself take the rest); the rule sits at row 15.
         app.left_seam = Some(Rect::new(29, 0, 1, 30));
         app.dock_dividers = vec![(Side::Left, 0, 15)];
 

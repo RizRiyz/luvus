@@ -48,19 +48,14 @@ pub(super) type SidebarHits = (
 type WorkspaceHits = (Vec<(usize, Rect)>, Option<Rect>);
 type AgentHits = (Vec<(PaneId, Rect)>, Vec<(String, Rect)>, Vec<(usize, Rect)>);
 
-/// Rows of sidebar chrome above the dock stack: the brand/menu row alone. The
-/// dock body, and therefore dock-height measurement during a divider drag,
-/// starts this many rows below the sidebar origin. The first dock's title sits
-/// directly under the chrome so it reads as the top of the sidebar rather than
-/// floating in the middle; the breathing room moved below it
-/// (`DOCK_HEADER_ROWS`), between the title and its rows.
-pub(crate) const SIDEBAR_CHROME_ROWS: u16 = 1;
+/// Rows of sidebar chrome above the dock stack: the session/menu row plus one
+/// blank separator row. Dock layout and divider-drag measurement share this
+/// offset on both sides so titles never touch the top chrome.
+pub(crate) const SIDEBAR_CHROME_ROWS: u16 = 2;
 
-/// Rows every dock spends on its header: the title row plus one blank row that
-/// separates the title from the list. Dock renderers start their content this
-/// far below the slot origin and drop the same count from their row capacity,
-/// so a title never sits flush against the rows it labels.
-pub(crate) const DOCK_HEADER_ROWS: u16 = 2;
+/// Rows every dock spends on its title. Content follows immediately below it;
+/// the blank separator belongs above the dock stack, not inside each dock.
+pub(crate) const DOCK_HEADER_ROWS: u16 = 1;
 
 /// Rows an expanded list item occupies: two content rows, drawn back-to-back.
 const EXPANDED_ROW_STRIDE: u16 = 2;
@@ -1260,6 +1255,72 @@ mod tests {
                 .collect::<String>()
                 .contains(needle)
         })
+    }
+
+    #[test]
+    fn sidebar_chrome_keeps_one_blank_row_above_dock_titles() {
+        let _env = crate::persist::test_env("sidebar-chrome-spacing");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.server_mode = true;
+        app.sidebars.left.docks = vec![crate::app::DockKind::Workspaces];
+        app.sidebars.right.docks = vec![crate::app::DockKind::Files];
+        app.sidebars.right.visible = true;
+        app.file_tree.apply_dir(
+            app.file_tree.root().to_path_buf(),
+            vec![crate::files::Entry {
+                name: "spacing.rs".into(),
+                is_dir: false,
+            }],
+        );
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        for width in [crate::app::SIDEBAR_WIDTH_MIN, 35] {
+            app.sidebars.left.width = width;
+            app.sidebars.right.width = width;
+            for left_visible in [true, false] {
+                app.sidebars.left.visible = left_visible;
+                for client_owned in [false, true] {
+                    app.client_machine_capable = client_owned;
+                    app.client_shell_owns_workspaces = client_owned;
+                    term.draw(|frame| crate::ui::render(frame, &mut app))
+                        .unwrap();
+                    let chrome_y = app.last_main_area.y;
+                    let buf = term.backend().buffer();
+                    let mut docks = vec![app.files_area];
+                    if left_visible {
+                        if client_owned {
+                            assert_eq!(app.client_shell_dock_rect, Some(app.workspaces_area));
+                            docks.push(app.client_shell_dock_rect.unwrap());
+                        } else {
+                            assert_eq!(app.ws_rects[0].1.y, chrome_y + 3);
+                            docks.push(Rect::new(
+                                app.workspaces_area.x,
+                                app.new_ws_rect.unwrap().y,
+                                app.workspaces_area.width,
+                                1,
+                            ));
+                        }
+                    }
+                    for dock in docks {
+                        assert_eq!(
+                            dock.y,
+                            chrome_y + 2,
+                            "the title follows the chrome and exactly one blank row"
+                        );
+                        assert!(
+                            (dock.x + 1..dock.right().saturating_sub(1))
+                                .all(|x| { buf.cell((x, chrome_y + 1)).unwrap().symbol() == " " }),
+                            "the separator stays blank on either sidebar"
+                        );
+                    }
+                    assert_eq!(app.files_mode_rects[0].1.y, chrome_y + 2);
+                    assert_eq!(app.file_tree_rects[0].1.y, chrome_y + 3);
+                    assert_eq!(app.settings_icon_rect.unwrap().y, chrome_y);
+                    assert_eq!(app.named_session_button_rect.unwrap().y, chrome_y);
+                }
+            }
+        }
     }
 
     #[test]

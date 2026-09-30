@@ -4217,13 +4217,13 @@ fn paint_dock_content(
         );
         dock.hits.push((DockHit::AddWorkspace, add));
     }
-    let list_height = rect.height.saturating_sub(1);
+    let list_height = rect.height.saturating_sub(crate::ui::DOCK_HEADER_ROWS);
     let rows = visible_dock_rows(machines, active, dock);
     reveal_workspace(&rows, active, dock, list_height, rect.show_paths);
     dock.scroll = dock
         .scroll
         .min(dock_max_scroll(&rows, list_height, rect.show_paths));
-    let mut next_row = 1;
+    let mut next_row = crate::ui::DOCK_HEADER_ROWS;
     let total_rows = rows.len();
     let mut visible_rows = 0;
     for (row_index, projected) in rows.into_iter().enumerate().skip(dock.scroll) {
