@@ -3323,7 +3323,11 @@ mod tests {
             ServerMessage::ShellDock(Some(slot)) => slot,
             _ => panic!("machine-aware clients receive dock geometry before their frame"),
         };
-        assert_eq!(slot.height, 14);
+        // The desktop status row and sidebar chrome are outside the two
+        // equally weighted dock slots.
+        let body_rows = interactive_size.1 - 1 - crate::ui::SIDEBAR_CHROME_ROWS;
+        assert_eq!(slot.y, crate::ui::SIDEBAR_CHROME_ROWS);
+        assert_eq!(slot.height, body_rows / 2);
         assert!(slot.show_paths);
         assert!(matches!(
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),

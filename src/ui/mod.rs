@@ -2651,7 +2651,9 @@ mod dock_projection_tests {
         let slot = projection
             .shell_dock
             .expect("machine-aware client owns the right Workspaces dock");
-        assert_eq!(slot.height, 38);
+        let expected_height = area.height - 1 - SIDEBAR_CHROME_ROWS;
+        assert_eq!(slot.y, area.y + SIDEBAR_CHROME_ROWS);
+        assert_eq!(slot.height, expected_height);
         assert!(slot.x > area.width / 2);
         assert_eq!(app.panes[&pane].size(), pty_size);
         assert!(app.client_shell_dock_rect.is_none());
@@ -2665,7 +2667,7 @@ mod dock_projection_tests {
                 .shell_dock
                 .expect("hidden paths retain the client-owned Workspaces dock")
                 .height,
-            38
+            expected_height
         );
 
         let mut remote = Buffer::empty(area);
@@ -2674,7 +2676,7 @@ mod dock_projection_tests {
         let dock = projection
             .shell_dock
             .expect("projection keeps the complete client-owned dock");
-        assert_eq!(dock.height, 38);
+        assert_eq!(dock.height, expected_height);
         assert_eq!(remote[(dock.x + 2, dock.y)].symbol(), " ");
         assert_eq!(app.panes[&pane].size(), pty_size);
     }
