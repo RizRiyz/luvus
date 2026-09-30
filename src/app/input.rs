@@ -5636,10 +5636,10 @@ fn encode_key_with_modes(
             }
         }
         // Preserve modified Enter identities after the child negotiates Kitty
-        // disambiguation. Some agents assign Shift+Enter and Alt+Enter distinct
-        // actions, so collapsing both to the configured newline would lose an
-        // identity the protocol explicitly preserves.
-        KeyCode::Enter if disambiguate && (shift || alt) => {
+        // disambiguation. Some agents assign Ctrl+Enter, Shift+Enter and
+        // Alt+Enter distinct actions, so collapsing them to legacy input would
+        // lose an identity the protocol explicitly preserves.
+        KeyCode::Enter if disambiguate && (ctrl || shift || alt) => {
             csi_u_code(13, key.modifiers, key.kind, report_events)
         }
         KeyCode::Enter if report_all => csi_u_code(13, key.modifiers, key.kind, report_events),
@@ -5831,7 +5831,8 @@ fn kitty_key_supports_event_types(
                             )))
         }
         KeyCode::Enter => {
-            report_all || disambiguate && (key.modifiers.contains(KeyModifiers::SHIFT) || alt)
+            report_all
+                || disambiguate && (ctrl || key.modifiers.contains(KeyModifiers::SHIFT) || alt)
         }
         KeyCode::Tab | KeyCode::BackTab | KeyCode::Backspace => report_all,
         KeyCode::Esc => true,
@@ -6593,6 +6594,52 @@ mod tests {
             bytes.extend(part);
         }
         assert_eq!(bytes, b"\x1b[1;5A\x1b[1;1:2A\x1b[1;1:3A");
+        assert!(app.forwarded_key_presses.is_empty());
+    }
+
+    #[test]
+    fn ctrl_enter_repeat_and_release_stay_with_the_original_pane() {
+        let _env = crate::persist::test_env("ctrl-enter-routing");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        let original = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        let pane = app.panes.get_mut(&original).unwrap();
+        pane.replace_input_sender_for_test(input_tx);
+        pane.engine.lock().expect("engine").advance(b"\x1b[=3u");
+
+        let key = |kind| {
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Enter,
+                KeyModifiers::CONTROL,
+                kind,
+            ))
+        };
+        app.handle_client_event(7, key(KeyEventKind::Press));
+        app.run_cmd(crate::app::keys::Cmd::SplitRight);
+        let other = app.layout().focus;
+        assert_ne!(other, original);
+        let (other_tx, other_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&other)
+            .unwrap()
+            .replace_input_sender_for_test(other_tx);
+
+        app.handle_client_event(7, key(KeyEventKind::Repeat));
+        app.handle_client_event(7, key(KeyEventKind::Release));
+        for expected in [
+            b"\x1b[13;5u".as_slice(),
+            b"\x1b[13;5:2u".as_slice(),
+            b"\x1b[13;5:3u".as_slice(),
+        ] {
+            let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.try_recv().unwrap()
+            else {
+                panic!("Ctrl+Enter phases must use ordinary PTY bytes");
+            };
+            assert_eq!(bytes, expected);
+        }
+        assert!(input_rx.try_recv().is_err());
+        assert!(other_rx.try_recv().is_err());
         assert!(app.forwarded_key_presses.is_empty());
     }
 
@@ -8026,6 +8073,23 @@ mod tests {
                 encode(KeyModifiers::SHIFT | KeyModifiers::ALT, protocol),
                 Some(b"\x1b[13;4u".to_vec())
             );
+            for (modifiers, expected) in [
+                (KeyModifiers::CONTROL, b"\x1b[13;5u".as_slice()),
+                (
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                    b"\x1b[13;6u".as_slice(),
+                ),
+                (
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    b"\x1b[13;7u".as_slice(),
+                ),
+                (
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+                    b"\x1b[13;8u".as_slice(),
+                ),
+            ] {
+                assert_eq!(encode(modifiers, protocol), Some(expected.to_vec()));
+            }
         }
         assert_eq!(
             encode(
@@ -8045,6 +8109,67 @@ mod tests {
             ),
             Some(b"\x1b[13u".to_vec())
         );
+    }
+
+    #[test]
+    fn ctrl_enter_phases_follow_the_negotiated_keyboard_protocol() {
+        for flags in [
+            KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES,
+            KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+        ] {
+            for report_events in [false, true] {
+                let protocol = KeyboardProtocol::Kitty {
+                    flags: flags
+                        | if report_events {
+                            KittyKeyboardFlags::REPORT_EVENT_TYPES
+                        } else {
+                            KittyKeyboardFlags::empty()
+                        },
+                };
+                for (kind, expected) in [
+                    (KeyEventKind::Press, Some(b"\x1b[13;5u".as_slice())),
+                    (
+                        KeyEventKind::Repeat,
+                        Some(if report_events {
+                            b"\x1b[13;5:2u".as_slice()
+                        } else {
+                            b"\x1b[13;5u".as_slice()
+                        }),
+                    ),
+                    (
+                        KeyEventKind::Release,
+                        report_events.then_some(b"\x1b[13;5:3u".as_slice()),
+                    ),
+                ] {
+                    let key = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::CONTROL, kind);
+                    assert_eq!(
+                        encode_key_with_modes(&key, b"\x1b\r", false, protocol),
+                        expected.map(<[u8]>::to_vec),
+                        "{protocol:?} {kind:?}"
+                    );
+                }
+            }
+        }
+
+        // Event reporting alone does not opt legacy Enter into CSI-u encoding.
+        for protocol in [
+            KeyboardProtocol::Legacy,
+            KeyboardProtocol::Kitty {
+                flags: KittyKeyboardFlags::REPORT_EVENT_TYPES,
+            },
+        ] {
+            for (kind, expected) in [
+                (KeyEventKind::Press, Some(b"\r".as_slice())),
+                (KeyEventKind::Repeat, Some(b"\r".as_slice())),
+                (KeyEventKind::Release, None),
+            ] {
+                let key = KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::CONTROL, kind);
+                assert_eq!(
+                    encode_key_with_modes(&key, b"\x1b\r", false, protocol),
+                    expected.map(<[u8]>::to_vec)
+                );
+            }
+        }
     }
 
     /// AltGr must type its character, not a control byte. The Windows console

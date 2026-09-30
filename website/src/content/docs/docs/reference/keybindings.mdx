@@ -77,6 +77,15 @@ bottom composer for prompting an exact agent pane or sending a command to an
 exact shell pane without changing the selected pane. The composer initially
 takes keyboard focus.
 
+## Keys inside terminal panes
+
+When a pane's application enables extended keyboard disambiguation, Luvus
+preserves `Ctrl+Enter`, `Shift+Enter`, and `Alt+Enter` as distinct keys. For
+example, Claude Code can use `Ctrl+Enter` to send queued messages immediately.
+The host terminal must also report the modified key; Luvus cannot recover a
+modifier that the host already turned into plain `Enter`. Legacy pane input
+keeps its existing Enter and configured Shift/Alt+Enter behavior.
+
 ## The jump palette
 
 `M` (or `w` under the tmux preset) opens the palette: every **tab**, every
