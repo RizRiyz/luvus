@@ -588,6 +588,9 @@ struct SessionEvidence {
     out: HashMap<PaneId, Option<(String, String)>>,
     claimed: HashSet<(String, String)>,
     unbound: HashMap<(String, PathBuf), Vec<PaneId>>,
+    /// The live terminal title of each unbound agent pane. An agent that
+    /// names its conversation there can be resolved per pane.
+    titles: HashMap<PaneId, String>,
 }
 
 fn capture_session_evidence(app: &App) -> SessionEvidence {
@@ -629,6 +632,7 @@ fn capture_session_evidence(app: &App) -> SessionEvidence {
     // `(agent, cwd)` identifies a set of possible conversations, not a pane.
     // Only a one-pane / one-session group can be recovered safely.
     let mut unbound: HashMap<(String, PathBuf), Vec<PaneId>> = HashMap::new();
+    let mut titles: HashMap<PaneId, String> = HashMap::new();
     for id in ids {
         if app.backend_non_restorable.contains(&id) {
             continue;
@@ -657,12 +661,16 @@ fn capture_session_evidence(app: &App) -> SessionEvidence {
                 .entry((agent, pane.cwd.clone()))
                 .or_default()
                 .push(id);
+            if let Some(title) = app.agent_session_title(id) {
+                titles.insert(id, title);
+            }
         }
     }
     SessionEvidence {
         out,
         claimed,
         unbound,
+        titles,
     }
 }
 
@@ -671,8 +679,42 @@ fn resolve_pane_sessions(evidence: SessionEvidence) -> HashMap<PaneId, Option<(S
         mut out,
         mut claimed,
         unbound,
+        titles,
     } = evidence;
+    // A pane whose title names its conversation resolves on its own, even
+    // beside other panes of the same agent in the same directory. A session
+    // two panes name, or one already claimed, binds neither.
+    let mut named: HashMap<(String, String), Vec<PaneId>> = HashMap::new();
+    for ((agent, cwd), pane_ids) in &unbound {
+        for id in pane_ids {
+            let session = titles
+                .get(id)
+                .and_then(|title| crate::agent::session_for_title(agent, cwd, title));
+            if let Some(session) = session {
+                named.entry((agent.clone(), session)).or_default().push(*id);
+            }
+        }
+    }
+    for (key, pane_ids) in named {
+        if claimed.contains(&key) {
+            continue;
+        }
+        let [id] = pane_ids[..] else {
+            continue;
+        };
+        claimed.insert(key.clone());
+        out.insert(id, Some(key));
+    }
     for ((agent, cwd), pane_ids) in unbound {
+        // A group keeps its size after title matches: the pane left beside a
+        // named one is still one of several, so the directory's only other
+        // session is not evidence that it belongs to that pane.
+        if pane_ids.iter().any(|id| out.contains_key(id)) {
+            for id in pane_ids {
+                out.entry(id).or_insert(None);
+            }
+            continue;
+        }
         let sessions: Vec<String> = crate::agent::sessions_for(&agent, &cwd)
             .into_iter()
             .filter(|sid| !claimed.contains(&(agent.clone(), sid.clone())))
@@ -1334,5 +1376,87 @@ mod tests {
         let _listener = crate::ipc::transport::bind(&sock).unwrap();
         let mode = fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "socket is chmod 0600, got {mode:o}");
+    }
+}
+
+#[cfg(test)]
+mod title_resolution_tests {
+    use super::*;
+
+    /// Two Codex panes share a directory, so the directory alone cannot say
+    /// which conversation is whose. A pane whose title names its thread still
+    /// resolves, even one resumed from the picker before any new prompt; the
+    /// pane beside it stays unbound rather than taking a guess.
+    #[test]
+    fn a_titled_codex_pane_resolves_beside_another_in_its_directory() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let codex = std::env::temp_dir().join(format!("luvus-titled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&codex);
+        let work = codex.join("work");
+        let sessions = codex.join("sessions/2026/09/30");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for id in ["01a0-named", "01a0-other"] {
+            let meta =
+                serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": work}});
+            std::fs::write(
+                sessions.join(format!("rollout-2026-09-30T10-00-00-{id}.jsonl")),
+                format!("{meta}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            codex.join("session_index.jsonl"),
+            r#"{"id":"01a0-named","thread_name":"core-luvus"}"#,
+        )
+        .unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", &codex);
+
+        let resolve = |titles: &[(u32, &str)], claimed: &[&str]| {
+            resolve_pane_sessions(SessionEvidence {
+                out: HashMap::new(),
+                claimed: claimed
+                    .iter()
+                    .map(|id| ("codex".to_string(), id.to_string()))
+                    .collect(),
+                unbound: HashMap::from([(
+                    ("codex".to_string(), work.clone()),
+                    vec![PaneId(1), PaneId(2)],
+                )]),
+                titles: titles
+                    .iter()
+                    .map(|(id, title)| (PaneId(*id), title.to_string()))
+                    .collect(),
+            })
+        };
+        let named = Some(("codex".to_string(), "01a0-named".to_string()));
+
+        let out = resolve(&[(1, "core-luvus | work"), (2, "work")], &[]);
+        assert_eq!(out[&PaneId(1)], named);
+        assert_eq!(
+            out[&PaneId(2)],
+            None,
+            "the other pane does not inherit the directory's remaining session"
+        );
+
+        let out = resolve(&[(1, "core-luvus | work"), (2, "core-luvus | work")], &[]);
+        assert_eq!(
+            (&out[&PaneId(1)], &out[&PaneId(2)]),
+            (&None, &None),
+            "two panes name it"
+        );
+
+        let out = resolve(&[(1, "core-luvus | work")], &["01a0-named"]);
+        assert_eq!(
+            out[&PaneId(1)],
+            None,
+            "a hook already bound it to another pane"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&codex);
     }
 }

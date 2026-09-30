@@ -109,6 +109,14 @@ pub fn sessions_for(agent: &str, cwd: &Path) -> Vec<String> {
     }
 }
 
+/// The session a pane's terminal title names, for an agent that shows its
+/// conversation name there, provided exactly one session in `cwd` has it.
+pub fn session_for_title(agent: &str, cwd: &Path, title: &str) -> Option<String> {
+    let d = source(agent).and_then(|s| s.discovery.as_ref())?;
+    let titled = d.titled?;
+    titled(&(d.base)(), cwd, title).filter(|session| safe_session_id(session))
+}
+
 /// The shell command that resumes an agent's native session, if supported.
 /// Returns `None` for unknown agents or unsafe ids.
 pub fn resume_command(agent: &str, session_id: &str) -> Option<String> {

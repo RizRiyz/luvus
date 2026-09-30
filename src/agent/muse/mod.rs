@@ -61,6 +61,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
             recent,
             latest,
             list: Some(list),
+            titled: None,
         }),
         resume: |session| format!("muse resume {session}\r"),
         // Muse's /fork is internal to its live TUI and cannot safely create a

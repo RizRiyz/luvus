@@ -52,6 +52,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
             recent,
             latest,
             list: Some(super::shared::pi_store::list),
+            titled: None,
         }),
         resume: |session| format!("omp --resume {session}\r"),
         fork: Some(|session| format!("omp --fork {session}\r")),

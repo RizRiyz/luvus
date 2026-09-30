@@ -226,6 +226,15 @@ exactly one Codex pane shows that prompt. A Codex session is bound from its
 first prompt, since that is when Codex creates it. After a restart, Luvus
 resumes the session in the same pane and keeps it bound there.
 
+Codex runs no hook when a conversation is resumed, so a pane resumed from the
+`codex resume` picker has no report until its next prompt. When Luvus saves
+its restart snapshot, such a pane is still resolved from its terminal title:
+Codex titles the pane with the conversation's name, and Luvus resumes the one
+conversation in that directory with that name. This needs a name no other
+conversation in the directory uses and Codex's default terminal title, which
+puts the name first. Otherwise the pane restores as a shell, unless it is the
+only Codex pane in its directory and that directory has only one conversation.
+
 Kilo Code also requires an exact session ID for resume or fork. Luvus detects
 the `kilo` and `kilocode` executables natively, but it does not scan Kilo's
 current database or guess which session belongs to a pane.
