@@ -66,8 +66,8 @@ impl PendingServer {
         }
     }
 
-    /// Release only after the selected server's app loop has answered a ping.
-    /// Reaping the launcher fences reparenting before the TUI can attach.
+    /// Release startup ownership without imposing a deadline on restoration.
+    /// Callers own readiness checks; reaping fences reparenting before attach.
     pub(super) fn accept(mut self) -> io::Result<()> {
         #[cfg(unix)]
         {

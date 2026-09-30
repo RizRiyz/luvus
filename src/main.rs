@@ -997,9 +997,7 @@ fn server_running(sock: &Path) -> bool {
 
 #[cfg(unix)]
 fn spawn_server() -> Result<()> {
-    session::start_session(session::active_name().as_deref())
-        .map(|_| ())
-        .map_err(anyhow::Error::msg)
+    session::spawn_session_server(session::active_name().as_deref()).map_err(anyhow::Error::msg)
 }
 
 #[cfg(windows)]

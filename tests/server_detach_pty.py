@@ -6,6 +6,8 @@ No installed Luvus binary, production session or real agent is used.
 """
 
 import argparse
+from contextlib import contextmanager
+import errno
 import fcntl
 import json
 import os
@@ -22,6 +24,7 @@ import tempfile
 import termios
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,8 +34,10 @@ BINARY = ROOT / "target/debug/luvus"
 
 
 def process_table():
-    output = subprocess.check_output(["ps", "-axo", "pid=,ppid="], text=True)
-    return {int(pid): int(parent) for pid, parent in (line.split() for line in output.splitlines())}
+    # FreeBSD treats everything after '=' as the heading, including commas.
+    output = subprocess.check_output(["ps", "-ax", "-o", "pid=", "-o", "ppid="], text=True)
+    return {int(pid): int(parent) for pid, parent in
+            (line.split() for line in output.splitlines() if line.strip())}
 
 
 def descendants(root, table):
@@ -60,6 +65,18 @@ def receive_reply(control):
     value, error = struct.unpack("<ii", data)
     assert error == 0, (value, error)
     return value
+
+
+class ProcessTableTests(unittest.TestCase):
+    def test_separate_headerless_columns_are_portable(self):
+        with mock.patch.object(subprocess, "check_output", return_value="\n 11 1\n 22 11\n") as ps:
+            self.assertEqual(process_table(), {11: 1, 22: 11})
+        ps.assert_called_once_with(["ps", "-ax", "-o", "pid=", "-o", "ppid="], text=True)
+
+    def test_missing_parent_column_is_not_silently_ignored(self):
+        with mock.patch.object(subprocess, "check_output", return_value="11\n"):
+            with self.assertRaises(ValueError):
+                process_table()
 
 
 class DetachedServerTests(unittest.TestCase):
@@ -160,6 +177,41 @@ class DetachedServerTests(unittest.TestCase):
         self.helpers.append((process, control))
         return process, control, receive_reply(control)
 
+    @contextmanager
+    def stalled_restore(self, name, args):
+        """Block the real snapshot reader after socket binding, without a test-only binary hook."""
+        folder = self.session_dir(name)
+        folder.mkdir(parents=True, exist_ok=True)
+        snapshot = folder / "session.json"
+        os.mkfifo(snapshot)
+        process = self.command(["--session", name, *args],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        writers = []
+
+        def reader_started():
+            try:
+                writers.append(os.open(snapshot, os.O_WRONLY | os.O_NONBLOCK))
+                return True
+            except OSError as error:
+                if error.errno == errno.ENXIO:
+                    return False
+                raise
+
+        try:
+            wait_until(reader_started, "server did not enter snapshot restoration")
+            records = [json.loads(line) for line in (folder / "logs/server.log").read_text().splitlines()]
+            pid = next(record["pid"] for record in records if record["event"] == "server.start")
+            yield process, pid
+        finally:
+            for writer in writers:
+                try:
+                    os.write(writer, b"{}")
+                except BrokenPipeError:
+                    pass
+                finally:
+                    os.close(writer)
+            snapshot.unlink(missing_ok=True)
+
     def tearDown(self):
         for process, control in self.helpers:
             control.close()
@@ -229,6 +281,7 @@ class DetachedServerTests(unittest.TestCase):
             self.cli(["--session", name, "workspace", "rename", "0", name + "-only"])
         self.cli(["session", "stop", "stopped"])
         self.cli(["--session", "alpha", "server", "restart"])
+        self.assertTrue(self.inventory("alpha"))
         before = {name: self.server_pid(name) for name in ("alpha", "beta")}
         self.cli(["--session", "alpha", "server", "restart", "--all"])
         for name in before:
@@ -253,6 +306,37 @@ class DetachedServerTests(unittest.TestCase):
                 output, error = process.communicate(timeout=TIMEOUT)
                 self.assertEqual(process.returncode, 0, (output, error))
             self.assertEqual(len(self.inventory(name)), 1)
+
+    def test_slow_automatic_restore_survives_and_can_attach_later(self):
+        for name in ("default", "slow-restore"):
+            with self.subTest(session=name):
+                with self.stalled_restore(name, ["server", "start"]) as (process, pid):
+                    output, error = process.communicate(timeout=TIMEOUT)
+                    self.assertEqual(process.returncode, 0, (output, error))
+                    # Deliberately exceed the five-second readiness deadline
+                    # while the real server remains blocked in snapshot I/O.
+                    time.sleep(6)
+                    self.assertIn(pid, process_table(), "slow automatic startup was killed")
+                before = self.inventory(name)
+                self.assertEqual(self.server_pid(name), pid)
+                client, master = self.client(name)
+                self.assertEqual(self.inventory(name), before)
+                os.write(master, b"\x00q")
+                self.drain(master)
+                self.assertEqual(client.wait(timeout=TIMEOUT), 0)
+
+    def test_slow_managed_restore_keeps_its_bound_server(self):
+        name = "slow-managed"
+        with self.stalled_restore(name, ["web", "--no-open", "--port", "0"]) as (process, pid):
+            time.sleep(6)
+            table = process_table()
+            self.assertIn(pid, table, "managed readiness timeout killed a bound server")
+            self.assertNotIn(pid, descendants(process.pid, table))
+            if process.poll() is None:
+                process.terminate()
+            process.communicate(timeout=TIMEOUT)
+        self.assertTrue(self.inventory(name))
+        self.assertEqual(self.server_pid(name), pid)
 
     def test_named_selector_creates_an_independent_detached_server(self):
         client, master = self.client("source")
@@ -328,7 +412,7 @@ class DetachedServerTests(unittest.TestCase):
         folder = self.session_dir("failure")
         folder.mkdir(parents=True)
         (folder / "luvus.sock").write_text("do not replace a regular file")
-        _, error = self.cli(["--session", "failure", "server", "start"], success=False)
+        _, error = self.cli(["--session", "failure", "web", "--no-open", "--port", "0"], success=False)
         self.assertIn(b"exited before startup", error)
         self.assertEqual((folder / "luvus.sock").read_text(), "do not replace a regular file")
 
@@ -337,7 +421,7 @@ class DetachedServerTests(unittest.TestCase):
         folder.mkdir(parents=True)
         with (folder / "server.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            process = self.command(["--session", "timeout", "server", "start"],
+            process = self.command(["--session", "timeout", "web", "--no-open", "--port", "0"],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             tree = []
 

@@ -474,33 +474,20 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
     if info.running {
         return Ok(info);
     }
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    let mut command = Command::new(executable);
     #[cfg(unix)]
-    let role = launch::SERVER_ROLE;
+    let mut child = launch::PendingServer::spawn(server_start_command(name)?)
+        .map_err(|error| error.to_string())?;
     #[cfg(windows)]
-    let role = "server";
-    command
-        .arg("--session")
-        .arg(name.unwrap_or(DEFAULT_SESSION_NAME))
-        .arg(role)
-        .env_remove("LUVUS_SOCKET_PATH")
-        .env_remove(SESSION_ENV_VAR)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    detach_server_command(&mut command);
-    #[cfg(unix)]
-    let mut child = launch::PendingServer::spawn(command).map_err(|error| error.to_string())?;
-    #[cfg(windows)]
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut child = server_start_command(name)?
+        .spawn()
+        .map_err(|error| error.to_string())?;
 
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
         let info = session_info(name);
         // Binding sockets precedes App initialization and the server PID file.
-        // A Unix launcher must retain cleanup ownership until the app loop can
-        // answer, not merely until a listener accepts a connection.
+        // Prefer app-loop readiness, but a slow restore behind bound listeners
+        // must be allowed to finish after this caller's bounded wait expires.
         #[cfg(unix)]
         let ready = info.running
             && server_identity_for(
@@ -543,6 +530,14 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
         std::thread::sleep(STOP_POLL_INTERVAL);
     }
     #[cfg(unix)]
+    {
+        let info = session_info(name);
+        if info.running {
+            child.accept().map_err(|error| error.to_string())?;
+            return Ok(info);
+        }
+    }
+    #[cfg(unix)]
     let cleanup = child.cancel().map_err(|error| error.to_string());
     #[cfg(windows)]
     let cleanup = terminate_and_wait(&mut child);
@@ -555,6 +550,38 @@ pub fn start_session(name: Option<&str>) -> Result<SessionInfo, String> {
         message.push_str(&format!("; could not reap timed-out server: {error}"));
     }
     Err(message)
+}
+
+/// Preserve automatic startup's detached lifetime independently of the caller's
+/// readiness deadline. Slow startup may continue after an attach times out.
+#[cfg(unix)]
+pub(crate) fn spawn_session_server(name: Option<&str>) -> Result<(), String> {
+    let child = launch::PendingServer::spawn(server_start_command(name)?)
+        .map_err(|error| error.to_string())?;
+    child.accept().map_err(|error| error.to_string())
+}
+
+fn server_start_command(name: Option<&str>) -> Result<Command, String> {
+    if let Some(name) = name {
+        validate_name(name)?;
+    }
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = Command::new(executable);
+    #[cfg(unix)]
+    let role = launch::SERVER_ROLE;
+    #[cfg(windows)]
+    let role = "server";
+    command
+        .arg("--session")
+        .arg(name.unwrap_or(DEFAULT_SESSION_NAME))
+        .arg(role)
+        .env_remove("LUVUS_SOCKET_PATH")
+        .env_remove(SESSION_ENV_VAR)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    detach_server_command(&mut command);
+    Ok(command)
 }
 
 pub fn restart_session(name: Option<&str>) -> Result<SessionInfo, String> {
