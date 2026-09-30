@@ -169,6 +169,7 @@ enum Cond {
     /// is a spinner. Some agents keep their brand before the live state glyph
     /// in the OSC title, so the generic start-of-line spinner rule cannot see it.
     SpinnerAfterPrefix(Vec<String>),
+    LastLine(Vec<String>),
 }
 
 impl Cond {
@@ -189,6 +190,11 @@ impl Cond {
                         .is_some_and(is_spinner_glyph)
                 })
             }),
+            Cond::LastLine(subs) => low
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .is_some_and(|line| subs.iter().any(|s| line.contains(s))),
         }
     }
 }
@@ -849,11 +855,10 @@ fn builtin_rules() -> Vec<Rule> {
             State::Blocked,
             310,
             Region::Screen,
-            vec![all(&[
-                "trust this folder?",
-                "trust and continue",
-                "enter continue",
-            ])],
+            vec![
+                all(&["trust this folder?", "trust and continue"]),
+                Cond::LastLine(vec!["enter continue".to_string()]),
+            ],
         ),
     ]
 }
@@ -3586,7 +3591,8 @@ For security, devin.exe should not be run in directories with untrusted content.
         );
         assert_eq!(
             detect(
-                "• The prompt asks \"Trust this folder?\" and offers \"Trust and continue\".\n\n\
+                "• The prompt asks \"Trust this folder?\", offers \"Trust and continue\", \
+                 and ends with \"enter continue · esc quit\".\n\n\
                  › Summarize recent commits\n\n  100% context left"
             )
             .state,
