@@ -1900,6 +1900,23 @@ mod tests {
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
         let revision = app.panes[&pane].content_revision_handle();
+        // The pane runs a real shell. Let its startup output (slow under
+        // Windows ConPTY) finish first, so only this test moves the revision.
+        let mut settled = revision.load(std::sync::atomic::Ordering::Acquire);
+        let mut quiet_since = std::time::Instant::now();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while quiet_since.elapsed() < std::time::Duration::from_millis(300)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let now = revision.load(std::sync::atomic::Ordering::Acquire);
+            if now != settled {
+                settled = now;
+                quiet_since = std::time::Instant::now();
+            }
+        }
+        app.panes[&pane].take_data_pending();
+        let base = revision.load(std::sync::atomic::Ordering::Acquire);
 
         revision.fetch_add(1, std::sync::atomic::Ordering::Release);
         app.panes[&pane].mark_data_pending_for_test();
@@ -1920,7 +1937,7 @@ mod tests {
         app.rearm_pty_notify_by_visibility();
         let events = backend_events_after(&app, floor, "terminal.output_ready");
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["data"]["content_revision"], 2);
+        assert_eq!(events[0]["data"]["content_revision"], base + 2);
     }
 
     #[test]
