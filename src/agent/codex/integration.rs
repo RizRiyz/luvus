@@ -213,16 +213,30 @@ fn candidate_servers() -> Vec<PathBuf> {
     servers
 }
 
-/// From dry-run replies `(socket, reply)`, the one socket to commit to: the
-/// single server that has exactly one matching pane. The same server reached
-/// through two sockets counts once.
-fn single_match(replies: &[(PathBuf, Value)]) -> Option<PathBuf> {
+/// What the dry-run replies from every reachable server say together.
+#[derive(Debug, PartialEq)]
+enum EvidenceMatch {
+    /// Exactly one server has exactly one matching pane: commit there.
+    One(PathBuf),
+    /// Nothing matches yet; the pane may not have drawn the prompt.
+    Nothing,
+    /// Several panes match, on one server or across servers: bind nothing.
+    Ambiguous,
+}
+
+/// Combine dry-run replies `(socket, reply)`. The same server reached through
+/// two sockets counts once, and a server that predates evidence (an error
+/// reply) is ignored. Any server reporting several matching panes makes the
+/// whole result ambiguous, even if another server has a unique match.
+fn combine_matches(replies: &[(PathBuf, Value)]) -> EvidenceMatch {
     let mut matched: Vec<(&str, &PathBuf)> = Vec::new();
     for (path, reply) in replies {
-        // A server that predates evidence replies with an error; skip it.
         let Some(result) = reply.get("result") else {
             continue;
         };
+        if result.get("matches").and_then(Value::as_u64).unwrap_or(0) > 1 {
+            return EvidenceMatch::Ambiguous;
+        }
         if result.get("pane").and_then(Value::as_str).is_none() {
             continue;
         }
@@ -235,8 +249,9 @@ fn single_match(replies: &[(PathBuf, Value)]) -> Option<PathBuf> {
         }
     }
     match matched.as_slice() {
-        [(_, path)] => Some((*path).clone()),
-        _ => None,
+        [] => EvidenceMatch::Nothing,
+        [(_, path)] => EvidenceMatch::One((*path).clone()),
+        _ => EvidenceMatch::Ambiguous,
     }
 }
 
@@ -269,15 +284,13 @@ fn report_from_evidence(report: &HookReport) {
                     .map(|reply| (path.clone(), reply))
             })
             .collect();
-        let any_match = replies.iter().any(|(_, reply)| {
-            reply["result"]["pane"].is_string() || reply["result"]["matches"].as_u64() > Some(1)
-        });
-        if let Some(path) = single_match(&replies) {
-            let _ = crate::cli::send_request_to(&path, "pane.report_session", params(false));
-            return;
-        }
-        if any_match {
-            return; // ambiguous: several panes or servers match
+        match combine_matches(&replies) {
+            EvidenceMatch::One(path) => {
+                let _ = crate::cli::send_request_to(&path, "pane.report_session", params(false));
+                return;
+            }
+            EvidenceMatch::Ambiguous => return,
+            EvidenceMatch::Nothing => {}
         }
     }
 }
@@ -402,37 +415,61 @@ mod tests {
         let a = PathBuf::from("/tmp/a.sock");
         let b = PathBuf::from("/tmp/b.sock");
         assert_eq!(
-            single_match(&[
+            combine_matches(&[
                 (a.clone(), reply(Some("3"), 1, "gen-a")),
                 (b.clone(), reply(None, 0, "gen-b"))
             ]),
-            Some(a.clone())
+            EvidenceMatch::One(a.clone())
         );
         assert_eq!(
-            single_match(&[
+            combine_matches(&[
                 (a.clone(), reply(Some("3"), 1, "gen-a")),
                 (b.clone(), reply(Some("3"), 1, "gen-a"))
             ]),
-            Some(a.clone()),
+            EvidenceMatch::One(a.clone()),
             "one server reached through two sockets counts once"
         );
         assert_eq!(
-            single_match(&[
+            combine_matches(&[
                 (a.clone(), reply(Some("3"), 1, "gen-a")),
                 (b.clone(), reply(Some("5"), 1, "gen-b"))
             ]),
-            None,
-            "two servers match: ambiguous"
+            EvidenceMatch::Ambiguous,
+            "two servers match"
         );
-        assert_eq!(single_match(&[(a.clone(), reply(None, 2, "gen-a"))]), None);
-        assert_eq!(single_match(&[]), None);
+        assert_eq!(
+            combine_matches(&[(a.clone(), reply(None, 2, "gen-a"))]),
+            EvidenceMatch::Ambiguous,
+            "several panes on one server"
+        );
+        for order in [
+            [
+                (a.clone(), reply(Some("3"), 1, "gen-a")),
+                (b.clone(), reply(None, 2, "gen-b")),
+            ],
+            [
+                (b.clone(), reply(None, 2, "gen-b")),
+                (a.clone(), reply(Some("3"), 1, "gen-a")),
+            ],
+        ] {
+            assert_eq!(
+                combine_matches(&order),
+                EvidenceMatch::Ambiguous,
+                "an ambiguous server blocks another server's unique match"
+            );
+        }
+        assert_eq!(combine_matches(&[]), EvidenceMatch::Nothing);
+        assert_eq!(
+            combine_matches(&[(a.clone(), reply(None, 0, "gen-a"))]),
+            EvidenceMatch::Nothing
+        );
         let older = json!({"id": "1", "error": {"code": "invalid_request", "message": "unknown field: evidence"}});
         assert_eq!(
-            single_match(&[
+            combine_matches(&[
                 (b.clone(), older),
                 (a.clone(), reply(Some("3"), 1, "gen-a"))
             ]),
-            Some(a.clone()),
+            EvidenceMatch::One(a.clone()),
             "an older server's error reply does not hide a match elsewhere"
         );
     }
