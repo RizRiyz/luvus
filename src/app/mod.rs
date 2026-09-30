@@ -1742,16 +1742,9 @@ fn default_schedule(start: OrchFormStart, timezone: &str) -> String {
 #[derive(Clone, Copy)]
 pub struct MouseGrab {
     pub pane: PaneId,
-    /// Physical button that opened this gesture. A second button must not move
-    /// or release it, or the child can be left with a permanently held button.
-    pub button: ratatui::crossterm::event::MouseButton,
     pub btn: u16,
     pub drag: bool,
     pub sgr: bool,
-    /// Pane-local cell of the last event forwarded for this gesture. The
-    /// release is sent here if the pane is no longer on screen, so the child
-    /// still learns that the button came up.
-    pub last: (u16, u16),
 }
 
 /// The board's **start-worker picker**: choose which agent to launch in the
@@ -2940,10 +2933,6 @@ pub struct App {
     /// drags and releases touch no engine lock (the PTY reader holds that mutex
     /// during output bursts).
     pub mouse_grab: Option<MouseGrab>,
-    /// Buttons whose presses were captured by a forwarded mouse gesture. Their
-    /// drags and matching releases remain swallowed after that gesture or pane
-    /// disappears, or unmatched events can mutate a Luvus selection.
-    suppressed_mouse_buttons: u8,
     /// Text to copy to the client's system clipboard (via OSC 52) — set when a
     /// selection finishes, drained + broadcast by the loop.
     pub pending_clipboard: Option<String>,
@@ -3599,7 +3588,6 @@ impl App {
             selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
-            suppressed_mouse_buttons: 0,
             pending_clipboard: None,
             pending_open_url: None,
             link_scan_at: None,
@@ -4327,7 +4315,6 @@ impl App {
             selection_clear_at: None,
             copy_mode: None,
             mouse_grab: None,
-            suppressed_mouse_buttons: 0,
             pending_clipboard: None,
             pending_open_url: None,
             link_scan_at: None,
@@ -15372,11 +15359,10 @@ fi
     }
 
     #[test]
-    fn mouse_tracking_owns_semantic_selection_and_right_click_copy() {
+    fn clicks_forward_to_a_mouse_tracking_app_instead_of_selecting() {
         // A pane app that requested mouse tracking (a TUI agent) receives
-        // clicks — including a right-click copy action — instead of luvus
-        // reconstructing its semantic transcript from display cells. Shift
-        // restores luvus selection and its pane menu.
+        // clicks — e.g. clicking a collapsed tool result expands it — instead
+        // of luvus starting a text selection. Shift restores selection.
         let _env = crate::persist::test_env("mouse-forward");
         use crate::event::AppEvent;
         use ratatui::backend::TestBackend;
@@ -15386,11 +15372,6 @@ fi
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         let id = app.layout().focus;
-        let (input_tx, input_rx) = std::sync::mpsc::channel();
-        app.panes
-            .get_mut(&id)
-            .unwrap()
-            .replace_input_sender_for_test(input_tx);
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let content = app
@@ -15424,30 +15405,10 @@ fi
         )));
         let g = app.mouse_grab.expect("press grabbed for the app");
         assert_eq!(g.pane, id);
-        assert_eq!(g.button, MouseButton::Left);
         assert_eq!(g.btn, 0);
         assert!(g.drag, "1002: drag tracking cached at press");
         assert!(g.sgr, "1006: SGR encoding cached at press");
         assert!(app.selection.is_none(), "no selection while forwarding");
-
-        // A second button cannot replace or release the active left grab. The
-        // child must still receive the matching left release below.
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Down(MouseButton::Right),
-            content.x + 5,
-            content.y + 2,
-            KeyModifiers::NONE,
-        )));
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Up(MouseButton::Right),
-            content.x + 5,
-            content.y + 2,
-            KeyModifiers::NONE,
-        )));
-        let g = app.mouse_grab.expect("secondary button preserves the grab");
-        assert_eq!(g.button, MouseButton::Left);
-        assert!(app.pane_menu.is_none());
-
         // Drag + release route to the app and close out the grab.
         app.handle_event(AppEvent::Mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
@@ -15463,50 +15424,6 @@ fi
             KeyModifiers::NONE,
         )));
         assert!(app.mouse_grab.is_none(), "release ends the grab");
-
-        let recv_bytes = || match input_rx.try_recv().unwrap() {
-            crate::terminal::pty::InputAction::Bytes(bytes) => bytes,
-            crate::terminal::pty::InputAction::Submit { .. } => {
-                panic!("mouse input must use raw bytes")
-            }
-        };
-        assert_eq!(recv_bytes(), b"\x1b[<0;5;3M");
-        assert_eq!(recv_bytes(), b"\x1b[<32;7;3M");
-        assert_eq!(recv_bytes(), b"\x1b[<0;7;3m");
-
-        // A mouse-aware app also owns plain right-click. Codex uses this to
-        // copy its logical transcript selection without display-wrap newlines.
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Down(MouseButton::Right),
-            content.x + 4,
-            content.y + 2,
-            KeyModifiers::NONE,
-        )));
-        assert!(
-            app.pane_menu.is_none(),
-            "plain right-click stays in the app"
-        );
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Up(MouseButton::Right),
-            content.x + 4,
-            content.y + 2,
-            KeyModifiers::NONE,
-        )));
-        assert!(app.mouse_grab.is_none(), "right release ends the grab");
-        assert_eq!(recv_bytes(), b"\x1b[<2;5;3M");
-        assert_eq!(recv_bytes(), b"\x1b[<2;5;3m");
-
-        // Shift keeps the Luvus menu reachable without stealing the
-        // application's unmodified gesture.
-        app.handle_event(AppEvent::Mouse(mouse(
-            MouseEventKind::Down(MouseButton::Right),
-            content.x + 4,
-            content.y + 2,
-            KeyModifiers::SHIFT,
-        )));
-        assert!(app.pane_menu.is_some(), "shift+right-click opens pane menu");
-        assert!(input_rx.try_recv().is_err());
-        app.pane_menu = None;
 
         // Shift+click bypasses forwarding: luvus's own selection begins.
         app.handle_event(AppEvent::Mouse(mouse(
