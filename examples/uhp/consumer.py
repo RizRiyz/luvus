@@ -846,9 +846,9 @@ def valid_global_response(value):
 def main():
     assert not agent_key("\ud800"), "Unicode surrogates are not valid key scalars"
     assert not agent_key("ctrl+K"), "Ctrl aliases accept ASCII letters only"
-    manifest = json.loads((PACKAGE / "fixtures" / "manifest.json").read_text())
+    manifest = json.loads((PACKAGE / "fixtures" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["protocol"] == {"name": "luvus-uhp", "major": 1, "minor": 0}
-    request_schema = json.loads((PACKAGE / "schema" / "request.schema.json").read_text())
+    request_schema = json.loads((PACKAGE / "schema" / "request.schema.json").read_text(encoding="utf-8"))
     machine_id = request_schema["$defs"]["machineIdParams"]
     machine_mutation = request_schema["$defs"]["machineMutationParams"]
     assert set(machine_id["required"]) == {"id"}
@@ -858,7 +858,7 @@ def main():
     methods = set(request_schema["properties"]["method"]["enum"])
     checked = 0
     for entry in manifest["files"]:
-        lines = (PACKAGE / "fixtures" / entry["path"]).read_text().splitlines()
+        lines = (PACKAGE / "fixtures" / entry["path"]).read_text(encoding="utf-8").splitlines()
         assert len(lines) == entry["count"], entry["path"]
         validator = {
             "request": lambda value: valid_global_request(value, methods),
@@ -873,7 +873,7 @@ def main():
             assert valid == (entry["expect"] == "valid"), line
             checked += 1
     for path in (PACKAGE / "schema").rglob("*.json"):
-        json.loads(path.read_text())
+        json.loads(path.read_text(encoding="utf-8"))
     print(f"validated {checked} UHP fixtures and all JSON schema documents")
     return 0
 
