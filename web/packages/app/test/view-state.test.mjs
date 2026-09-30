@@ -70,19 +70,27 @@ test("focus, caret, typed text, and scroll carry over to the rebuilt page", () =
   assert.equal(dom.root.querySelectorAll("INPUT")[1].value, "https://link", "read-only fields are left alone");
 });
 
-test("a newer saved value replaces text typed before it was saved", () => {
+test("a saved field shows the saved value, but newer typing is never erased", () => {
   const dom = fakeDom();
   dom.replace(page(dom));
-  const [address] = dom.root.querySelectorAll("INPUT");
+  let [address] = dom.root.querySelectorAll("INPUT");
   address.focus();
   address.value = "https://Phone.Example/";
 
-  // The bridge saved and normalized it; the rebuilt field starts from that.
+  // The save completed: the page resets the field it submitted, and the
+  // rebuilt field shows the address the bridge normalized and stored.
+  address.value = address.defaultValue;
   rebuildPreservingView(dom.root, () => dom.replace(page(dom, { savedAddress: "https://phone.example" })));
+  [address] = dom.root.querySelectorAll("INPUT");
+  assert.equal(address.value, "https://phone.example");
+  assert.equal(dom.document.activeElement, address, "focus still carries over");
 
-  const [rebuilt] = dom.root.querySelectorAll("INPUT");
-  assert.equal(rebuilt.value, "https://phone.example");
-  assert.equal(dom.document.activeElement, rebuilt, "focus still carries over");
+  // Typing continued while a later save was in flight, so the page did not
+  // reset the field: the newer text survives even though the saved value moved.
+  address.value = "https://newer.example";
+  rebuildPreservingView(dom.root, () => dom.replace(page(dom, { savedAddress: "https://other.example" })));
+  [address] = dom.root.querySelectorAll("INPUT");
+  assert.equal(address.value, "https://newer.example");
 });
 
 test("a focused card keeps focus by its key even when cards reorder and retitle", () => {

@@ -370,9 +370,10 @@ export class WebApp {
       this.#devices = asDeviceStatus(await this.#bridge.request("web.devices.set_public_url", { url: url || null }));
       if (this.#pairingCode) this.#pairingUrl = this.#pairingLink(this.#pairingCode);
       // The bridge may normalize the address; show what it saved rather than
-      // carrying the typed spelling into the rebuilt field.
+      // carrying the typed spelling into the rebuilt field. Text typed after
+      // this save was sent is newer than the save, so it is kept.
       const field = this.root.querySelector<HTMLInputElement>(".device-url-input");
-      if (field) field.value = field.defaultValue;
+      if (field && field.value === rawUrl) field.value = field.defaultValue;
       this.#render();
     } catch (error) {
       failure = error;

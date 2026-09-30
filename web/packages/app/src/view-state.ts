@@ -2,8 +2,9 @@
  * Rebuild `root` without disturbing the person using it: focus, the caret in a
  * text field, text typed but not yet submitted, and the scroll position of
  * containers marked with `data-scroll-key` all carry over to the new elements.
- * Typed text is kept only while the field's saved value is unchanged; once the
- * page has a newer value, for example after a save, that value is shown.
+ * Text still being typed always wins over a value the page redraws, since it
+ * is newer; a caller that has just saved a field resets it first (sets its
+ * value back to its default) so the saved value is shown instead.
  *
  * Elements are matched by `data-view-key` when present, otherwise by tag,
  * class, accessible label, and (for buttons) text, then by their order among
@@ -16,11 +17,11 @@ export function rebuildPreservingView(root: HTMLElement, rebuild: () => void): v
     : undefined;
   const caret = focused && isTextField(active) ? readCaret(active) : undefined;
 
-  const edits = new Map<string, { value: string; saved: string }>();
+  const edits = new Map<string, string>();
   for (const field of textFields(root)) {
     if (!field.readOnly && field.value !== field.defaultValue) {
       const place = locate(root, field);
-      edits.set(`${place.key}#${place.index}`, { value: field.value, saved: field.defaultValue });
+      edits.set(`${place.key}#${place.index}`, field.value);
     }
   }
   const scrolls = new Map<string, [number, number]>();
@@ -36,7 +37,7 @@ export function rebuildPreservingView(root: HTMLElement, rebuild: () => void): v
     for (const field of textFields(root)) {
       const place = locate(root, field);
       const edit = edits.get(`${place.key}#${place.index}`);
-      if (edit && !field.readOnly && field.defaultValue === edit.saved) field.value = edit.value;
+      if (edit !== undefined && !field.readOnly) field.value = edit;
     }
   }
   for (const container of Array.from(root.querySelectorAll<HTMLElement>("[data-scroll-key]"))) {
