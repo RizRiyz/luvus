@@ -1915,6 +1915,10 @@ mod tests {
                 quiet_since = std::time::Instant::now();
             }
         }
+        assert!(
+            quiet_since.elapsed() >= std::time::Duration::from_millis(300),
+            "the shell's startup output did not settle within five seconds"
+        );
         app.panes[&pane].take_data_pending();
         let base = revision.load(std::sync::atomic::Ordering::Acquire);
 
