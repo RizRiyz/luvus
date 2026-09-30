@@ -149,7 +149,7 @@ pub(in crate::agent) fn titled(base: &Path, cwd: &Path, title: &str) -> Option<S
     let mut in_cwd = candidates.into_iter().filter(|id| {
         session_path(base, id)
             .and_then(|path| read_session(&path))
-            .is_some_and(|(_, directory)| directory == cwd)
+            .is_some_and(|(_, directory)| crate::platform::same_path(&directory, cwd))
     });
     let only = in_cwd.next()?;
     in_cwd.next().is_none().then_some(only)
