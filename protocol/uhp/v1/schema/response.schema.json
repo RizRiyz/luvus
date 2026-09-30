@@ -62,6 +62,20 @@
     },
     {
       "if": {
+        "required": ["result"],
+        "properties": { "result": { "required": ["type"], "properties": { "type": { "const": "agent_list" } } } }
+      },
+      "then": { "properties": { "result": { "$ref": "#/$defs/agentListTitles" } } }
+    },
+    {
+      "if": {
+        "required": ["result"],
+        "properties": { "result": { "required": ["type"], "properties": { "type": { "const": "agent" } } } }
+      },
+      "then": { "properties": { "result": { "properties": { "agent_session_title": { "$ref": "#/$defs/agentSessionTitle" } } } } }
+    },
+    {
+      "if": {
         "required": ["error"],
         "properties": { "error": {
           "required": ["code", "data"],
@@ -72,6 +86,27 @@
     }
   ],
   "$defs": {
+    "agentSessionTitle": {
+      "description": "Live agent session display title: a single line of at most 160 Unicode scalar values, or null when unavailable. Display data only, never an identifier; older servers omit it.",
+      "anyOf": [
+        { "type": "null" },
+        { "type": "string", "minLength": 1, "maxLength": 160 }
+      ]
+    },
+    "agentListTitles": {
+      "description": "Each agent.list row may carry the same bounded session title as the snapshot. Other row fields remain extensible.",
+      "type": "object",
+      "required": ["agents"],
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "agent_session_title": { "$ref": "#/$defs/agentSessionTitle" } }
+          }
+        }
+      }
+    },
     "snapshotAliases": {
       "description": "Operator aliases and bounded live agent session titles are separate fields. Other snapshot fields remain extensible.",
       "type": "object",
@@ -109,10 +144,7 @@
         {
           "if": { "properties": { "kind": { "const": "terminal" } }, "required": ["kind"] },
           "then": {
-            "properties": { "is_agent": { "type": "boolean" }, "agent_session_title": { "anyOf": [
-              { "type": "null" },
-              { "type": "string", "minLength": 1, "maxLength": 160 }
-            ] }, "agent_name": { "anyOf": [
+            "properties": { "is_agent": { "type": "boolean" }, "agent_session_title": { "$ref": "#/$defs/agentSessionTitle" }, "agent_name": { "anyOf": [
               { "type": "null" },
               { "type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z]", "not": { "pattern": "[^a-z0-9_-]" } }
             ] } }

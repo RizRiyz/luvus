@@ -289,6 +289,10 @@ luvus agent explain <target>
 luvus agent read <target> --lines 100
 ```
 
+`agent list` and `agent get` include `agent_session_title`, the agent's live
+conversation title or `null`. It is for display only: target agents by pane ID
+or alias, never by title. Older servers omit the field.
+
 Examples of explicit mutations, only when requested:
 
 ```sh

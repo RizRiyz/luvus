@@ -38,6 +38,8 @@ RESULT_TYPES = {
     "agent_start",
     "agent_prompt",
     "agent_wait",
+    "agent_list",
+    "agent",
     "subscription_started",
 }
 RESULT_FIELDS = {
@@ -60,6 +62,8 @@ RESULT_FIELDS = {
         "content_revision", "evidence",
     },
     "agent_wait": {"matched", "pane", "status"},
+    "agent_list": {"agents"},
+    "agent": {"pane", "agent", "status"},
     "subscription_started": {"sequence", "queue_capacity", "loss_behavior"},
 }
 FIELDS = {
@@ -457,6 +461,18 @@ def valid_effective_access(result):
     )
 
 
+def valid_agent_session_title(container):
+    """An optional live session title: display text of 1-160 characters, or null.
+
+    Older servers omit the field, so a missing title is valid. A title is never
+    an identifier; target agents by pane, terminal ID, or alias instead.
+    """
+    if "agent_session_title" not in container:
+        return True
+    title = container["agent_session_title"]
+    return title is None or bounded_string(title, 160, allow_empty=False)
+
+
 def valid_snapshot_alias_rows(result):
     """Validate alias projection while preserving unknown additive row fields."""
     workspaces = result.get("workspaces")
@@ -476,7 +492,9 @@ def valid_snapshot_alias_rows(result):
                     alias = row.get("agent_name")
                     if alias is not None and (not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", alias) is None):
                         return False
-                elif row["kind"] == "view" and "agent_name" in row:
+                    if not valid_agent_session_title(row):
+                        return False
+                elif row["kind"] == "view" and ("agent_name" in row or "agent_session_title" in row):
                     return False
     return True
 
@@ -512,6 +530,13 @@ def valid_response(value):
                 bounded_string(result["server_generation"], 512, allow_empty=False)
                 and valid_snapshot_alias_rows(result)
             )
+        if kind == "agent_list":
+            return isinstance(result["agents"], list) and all(
+                isinstance(row, dict) and pane(row.get("pane")) and valid_agent_session_title(row)
+                for row in result["agents"]
+            )
+        if kind == "agent":
+            return pane(result["pane"]) and valid_agent_session_title(result)
         if kind == "pane_processes":
             return (
                 pane(result["pane"])
@@ -813,7 +838,7 @@ def valid_global_response(value):
         )
     if isinstance(result, dict) and result.get("type") == "session_snapshot":
         return valid_response(value)
-    if isinstance(result, dict) and result.get("type") == "agent_wait":
+    if isinstance(result, dict) and result.get("type") in ("agent_wait", "agent_list", "agent"):
         return valid_response(value)
     return True
 

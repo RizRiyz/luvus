@@ -5215,7 +5215,7 @@ impl App {
         if !self.is_agent_pane(id) || !pane.take_title_change() {
             return false;
         }
-        let title = self.web_agent_session_title(id);
+        let title = self.agent_session_title(id);
         if pane.note_published_title(&title) {
             crate::ipc::api::publish_event(
                 &self.events,
@@ -5226,7 +5226,12 @@ impl App {
         true
     }
 
-    pub(crate) fn web_agent_session_title(&self, id: PaneId) -> Option<String> {
+    /// The live agent session title every public projection shares: the
+    /// session snapshot, `agent.list`, `agent.get`, and `agent.title_changed`.
+    /// A single line of at most 160 characters with leading status icons
+    /// removed, or `None` when the pane is not an agent or has no title.
+    /// Reading it never consumes a pending title change or publishes an event.
+    pub(crate) fn agent_session_title(&self, id: PaneId) -> Option<String> {
         self.is_agent_pane(id)
             .then(|| self.pane_title(id))
             .flatten()

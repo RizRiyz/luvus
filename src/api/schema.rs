@@ -106,6 +106,42 @@ mod tests {
             .any(|field| field == "focus"));
     }
 
+    /// `agent.list`, `agent.get`, and snapshot rows share one bounded,
+    /// nullable, optional title definition in the embedded schema.
+    #[test]
+    fn agent_session_title_contract_is_shared_by_every_projection() {
+        let response = &schema_bundle()["response"];
+        let title = &response["$defs"]["agentSessionTitle"];
+        assert_eq!(
+            title["anyOf"],
+            json!([
+                { "type": "null" },
+                { "type": "string", "minLength": 1, "maxLength": 160 }
+            ])
+        );
+        let reference = json!({ "$ref": "#/$defs/agentSessionTitle" });
+        let terminal_row = &response["$defs"]["snapshotAliasRow"]["allOf"][0]["then"];
+        assert_eq!(terminal_row["properties"]["agent_session_title"], reference);
+        let list_row = &response["$defs"]["agentListTitles"]["properties"]["agents"]["items"];
+        assert_eq!(list_row["properties"]["agent_session_title"], reference);
+        assert!(
+            list_row.get("required").is_none() && list_row.get("additionalProperties").is_none(),
+            "older servers may omit the field, and rows stay extensible"
+        );
+        let get = response["allOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|branch| {
+                branch["if"]["properties"]["result"]["properties"]["type"]["const"] == "agent"
+            })
+            .expect("agent result branch");
+        assert_eq!(
+            get["then"]["properties"]["result"]["properties"]["agent_session_title"],
+            reference
+        );
+    }
+
     #[test]
     fn schema_bundle_publishes_one_uhp_contract_with_terminal_components() {
         let bundle = schema_bundle();

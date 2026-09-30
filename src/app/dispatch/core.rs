@@ -170,7 +170,7 @@ impl App {
                         if let Some(pane) = self.panes.get(&pane_id) {
                             let runtime = pane.terminal_runtime();
                             let status = self.status.get(&pane_id);
-                            let agent_session_title = self.web_agent_session_title(pane_id);
+                            let agent_session_title = self.agent_session_title(pane_id);
                             json!({
                                 "pane_id":pane_id.0.to_string(),
                                 "kind":"terminal",

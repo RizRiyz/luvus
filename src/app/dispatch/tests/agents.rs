@@ -2531,3 +2531,263 @@ fn agent_read_visible_reports_the_live_screen_not_the_scrollback_viewport() {
         "visible read never returns the scrolled-back frame, got:\n{text}"
     );
 }
+
+/// Give `pane` a VT engine the test can write OSC titles into directly.
+fn title_engine(
+    app: &mut App,
+    pane: PaneId,
+) -> std::sync::Arc<std::sync::Mutex<dyn crate::terminal::vt::VtEngine>> {
+    use crate::terminal::appearance::PaneAppearance;
+    use crate::terminal::vt::{create_engine, VtEngineKind};
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let engine = create_engine(
+        VtEngineKind::Alacritty,
+        80,
+        24,
+        tx,
+        1024 * 1024,
+        PaneAppearance::default(),
+    );
+    app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+    engine
+}
+
+/// The title each public projection reports for `pane`: its `agent.list`
+/// row, `agent.get`, and its `session.snapshot` row.
+fn title_projections(app: &mut App, pane: PaneId) -> (Option<Value>, Value, Value) {
+    let id = pane.0.to_string();
+    let list = app.dispatch("agent.list", &json!({})).unwrap();
+    let listed = list["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["pane"] == id)
+        .map(|row| {
+            assert!(
+                row.as_object().unwrap().contains_key("agent_session_title"),
+                "updated servers always emit the field"
+            );
+            row["agent_session_title"].clone()
+        });
+    let get = app
+        .dispatch("agent.get", &json!({"target": id}))
+        .map(|result| {
+            assert!(result
+                .as_object()
+                .unwrap()
+                .contains_key("agent_session_title"));
+            result["agent_session_title"].clone()
+        })
+        .unwrap_or(Value::Null);
+    let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+    let row = snapshot["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|workspace| workspace["tabs"].as_array().unwrap())
+        .flat_map(|tab| tab["panes"].as_array().unwrap())
+        .find(|row| row["pane_id"] == id)
+        .expect("snapshot row")
+        .clone();
+    (listed, get, row["agent_session_title"].clone())
+}
+
+/// `agent.list`, `agent.get`, and the snapshot report the same title for the
+/// same pane: from its OSC title, a module pane title, or a module title for
+/// its bound session, whether or not its tab is active and whether or not the
+/// sidebar shows titles. Aliases and native session IDs are unchanged.
+#[test]
+fn agent_list_get_and_snapshot_report_the_same_session_title() {
+    let _env = crate::persist::test_env("agent-session-title-parity");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    app.config.layout.agent_title = false; // metadata ignores the sidebar setting
+
+    // Tab 1: an OSC title with an animated status icon.
+    let osc = app.layout().focus;
+    app.status.get_mut(&osc).unwrap().agent = "claude".into();
+    let osc_engine = title_engine(&mut app, osc);
+    osc_engine
+        .lock()
+        .unwrap()
+        .advance("\x1b]2;✳ Ship the release\x07".as_bytes());
+    app.dispatch(
+        "agent.name",
+        &json!({"pane": osc.0.to_string(), "name": "shipper"}),
+    )
+    .unwrap();
+
+    // Tab 2: no OSC title, a module pane title with raw whitespace.
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let module = app.layout().focus;
+    app.status.get_mut(&module).unwrap().agent = "codex".into();
+    title_engine(&mut app, module);
+    crate::app::set_owned_agent_row_title(
+        &mut app.agent_title_panes,
+        module,
+        Some("  Review\tthe\nPR  ".into()),
+        None,
+    )
+    .unwrap();
+
+    // Tab 3: no pane title, a module title for its exact bound session.
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let session = app.layout().focus;
+    title_engine(&mut app, session);
+    {
+        let status = app.status.get_mut(&session).unwrap();
+        status.agent = "claude".into();
+        status.agent_session = Some(crate::app::AgentSession {
+            agent: "claude".into(),
+            session_id: "sess-7".into(),
+        });
+    }
+    crate::app::set_owned_agent_session_title(
+        &mut app.agent_title_sessions,
+        "claude".into(),
+        "sess-7".into(),
+        Some("Nightly triage".into()),
+        None,
+    )
+    .unwrap();
+
+    // Tab 4: a plain shell with an OSC title is still not an agent.
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let shell = app.layout().focus;
+    app.status.get_mut(&shell).unwrap().agent = "zsh".into();
+    title_engine(&mut app, shell)
+        .lock()
+        .unwrap()
+        .advance(b"\x1b]2;riz@host: ~/work\x07");
+
+    app.switch_tab(0); // tabs 2 and 3 are now inactive
+
+    let title = |text: &str| Some(json!(text));
+    for (pane, expected) in [
+        (osc, "Ship the release"),
+        (module, "Review the PR"),
+        (session, "Nightly triage"),
+    ] {
+        let (listed, got, snapshot) = title_projections(&mut app, pane);
+        assert_eq!(listed, title(expected), "agent.list for {pane:?}");
+        assert_eq!(got, json!(expected), "agent.get for {pane:?}");
+        assert_eq!(snapshot, json!(expected), "snapshot for {pane:?}");
+    }
+
+    let list = app.dispatch("agent.list", &json!({})).unwrap();
+    let shell_id = shell.0.to_string();
+    assert!(
+        !list["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["pane"] == shell_id.as_str()),
+        "a titled shell does not join agent.list"
+    );
+    let (_, _, shell_snapshot) = title_projections(&mut app, shell);
+    assert_eq!(shell_snapshot, Value::Null);
+
+    // Existing fields keep their meaning: the alias is `name`, the native
+    // session ID is `session`, and neither is replaced by the title.
+    let got = app
+        .dispatch("agent.get", &json!({"target": "shipper"}))
+        .unwrap();
+    assert_eq!(got["name"], "shipper");
+    assert_eq!(got["session"], Value::Null);
+    let got = app
+        .dispatch("agent.get", &json!({"target": session.0.to_string()}))
+        .unwrap();
+    assert_eq!(got["session"], "sess-7");
+}
+
+/// Clearing an OSC title reveals a module fallback, a missing title is
+/// `null` (never a substitute), and long Unicode titles keep the same bound
+/// as the snapshot.
+#[test]
+fn agent_session_title_falls_back_clears_and_bounds_like_the_snapshot() {
+    let _env = crate::persist::test_env("agent-session-title-fallback");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let engine = title_engine(&mut app, pane);
+
+    let (listed, got, snapshot) = title_projections(&mut app, pane);
+    assert_eq!(
+        (listed, got, snapshot),
+        (Some(Value::Null), Value::Null, Value::Null)
+    );
+
+    crate::app::set_owned_agent_row_title(
+        &mut app.agent_title_panes,
+        pane,
+        Some("Module title".into()),
+        None,
+    )
+    .unwrap();
+    engine
+        .lock()
+        .unwrap()
+        .advance("\x1b]2;OSC title\x07".as_bytes());
+    assert_eq!(title_projections(&mut app, pane).1, "OSC title", "OSC wins");
+    engine.lock().unwrap().advance(b"\x1b]2;\x07");
+    assert_eq!(
+        title_projections(&mut app, pane).1,
+        "Module title",
+        "clearing the OSC title reveals the module title"
+    );
+
+    let long = "界".repeat(170);
+    engine
+        .lock()
+        .unwrap()
+        .advance(format!("\x1b]2;{long}\x07").as_bytes());
+    let (listed, got, snapshot) = title_projections(&mut app, pane);
+    assert_eq!(got.as_str().unwrap().chars().count(), 160);
+    assert_eq!(listed, Some(got.clone()));
+    assert_eq!(snapshot, got);
+}
+
+/// Reading titles through `agent.list` / `agent.get` must not consume a
+/// pending OSC title change: subscribers still get `agent.title_changed` once,
+/// and further reads of an unchanged title publish nothing.
+#[test]
+fn reading_agent_titles_does_not_consume_or_publish_title_events() {
+    let _env = crate::persist::test_env("agent-session-title-events");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let engine = title_engine(&mut app, pane);
+    let events_after = |app: &App, floor: u64| {
+        crate::ipc::api::replayed_events_after(&app.events, floor)
+            .into_iter()
+            .filter(|event| event["event"] == "agent.title_changed")
+            .collect::<Vec<_>>()
+    };
+
+    let floor = crate::ipc::api::current_sequence(&app.events);
+    engine
+        .lock()
+        .unwrap()
+        .advance("\x1b]2;⠂ Pending title\x07".as_bytes());
+    assert_eq!(title_projections(&mut app, pane).1, "Pending title");
+    assert!(
+        events_after(&app, floor).is_empty(),
+        "reads publish nothing"
+    );
+
+    assert!(
+        app.agent_session_title_changed(pane),
+        "the change is still pending"
+    );
+    let events = events_after(&app, floor);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["data"]["title"], "Pending title");
+
+    for _ in 0..3 {
+        title_projections(&mut app, pane);
+    }
+    assert!(!app.agent_session_title_changed(pane));
+    assert_eq!(events_after(&app, floor).len(), 1, "no duplicate events");
+}

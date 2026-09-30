@@ -56,6 +56,8 @@ impl App {
                             "pane": id.0.to_string(), "agent": s.agent,
                             "terminal_id": terminal_id,
                             "name": self.agent_name_for(id),
+                            // Display text only; target panes by id or alias.
+                            "agent_session_title": self.agent_session_title(id),
                             "status": state_str(s.state),
                             "authority":s.identity_source,
                             "state_source":s.state_source,
@@ -366,6 +368,7 @@ impl App {
             let session = s.and_then(|s| s.agent_session.as_ref().map(|a| a.session_id.clone()));
             Ok(json!({"type":"agent","pane": id.0.to_string(),
                       "name": self.agent_name_for(id), "agent": agent,
+                      "agent_session_title": self.agent_session_title(id),
                       "status": status, "authority":authority,
                       "state_source":state_source, "session": session, "cwd": cwd}))
         }
