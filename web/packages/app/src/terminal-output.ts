@@ -116,7 +116,9 @@ export function retainedTerminalSelection(previous: string, text: string, start:
   const contextStart = Math.max(0, start - 32);
   const context = previous.slice(contextStart, end + 32);
   const contextIndex = text.indexOf(context);
-  if (contextIndex < 0 || text.indexOf(context, contextIndex + 1) >= 0) return;
+  if (contextIndex < 0 || text.indexOf(context, contextIndex + 1) >= 0
+    || previous.indexOf(context) !== contextStart
+    || previous.indexOf(context, contextStart + 1) >= 0) return;
   const mappedStart = contextIndex + start - contextStart;
   return [mappedStart, mappedStart + selected.length];
 }
