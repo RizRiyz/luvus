@@ -132,3 +132,23 @@ test("a focused card keeps focus by its key even when cards reorder and retitle"
 
   assert.equal(dom.document.activeElement.dataset.viewKey, "agent:2");
 });
+
+test("dashboard sidebar focus and independent list scroll survive live redraws", () => {
+  const dom = fakeDom();
+  const rows = (state) => [
+    dom.make("NAV", { attrs: { "data-scroll-key": "workspace-sidebar" } }),
+    dom.make("NAV", { attrs: { "data-scroll-key": "pane-sidebar" } }),
+    dom.make("BUTTON", { className: `terminal-sidebar-pane ${state}`, attrs: { "data-view-key": "sidebar-pane:p7" }, text: `${state} codex · Updated title` }),
+  ];
+  dom.replace(rows("working"));
+  const [workspaces, panes] = dom.root.querySelectorAll("NAV");
+  workspaces.scrollTop = 80;
+  panes.scrollTop = 180;
+  dom.root.querySelectorAll("BUTTON")[0].focus();
+
+  rebuildPreservingView(dom.root, () => dom.replace(rows("done")));
+
+  assert.equal(dom.document.activeElement.dataset.viewKey, "sidebar-pane:p7");
+  assert.equal(dom.document.activeElement.className, "terminal-sidebar-pane done");
+  assert.deepEqual(dom.root.querySelectorAll("NAV").map((nav) => nav.scrollTop), [80, 180]);
+});

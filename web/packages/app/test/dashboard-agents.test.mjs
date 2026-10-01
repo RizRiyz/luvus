@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dashboardAgents } from "../dist/test/dashboard-agents.js";
+import { dashboardAgents, paneStateClass } from "../dist/test/dashboard-agents.js";
 
 test("dashboard filters agents and shells while keeping live counts and routes", () => {
   const panes = [
@@ -38,4 +38,9 @@ test("in-place title updates use the same text as a full render", async () => {
   assert.deepEqual(agentCardTitle({ ...agent, is_agent: false }), { title: "Pane 7", titleAbsent: false });
   const [card] = dashboardAgents({ workspaces: [{ name: "w", tabs: [{ panes: [agent] }] }] }, false).cards;
   assert.equal(card.title, agentCardTitle(agent).title);
+});
+
+test("dashboard and terminal sidebar share the same native status classes", () => {
+  assert.deepEqual(["idle", "working", "done", "blocked", "WORKING", "shell", "unknown"].map(paneStateClass),
+    ["idle", "working", "done", "blocked", "working", "terminal", "terminal"]);
 });

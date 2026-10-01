@@ -2,7 +2,10 @@ import { BridgeError, type BridgeClient, type PaneSnapshot, type SessionSnapshot
 import { button, element } from "./dom.js";
 import { uploadTerminalFile } from "./file-upload.js";
 import { NativeTerminalInput, type TerminalAction } from "./native-input.js";
-import { terminalPaneLabel, type TerminalPaneOption } from "./terminal-pane-options.js";
+import { navigationBrand, trapNavigationFocus, type SidebarControls } from "./sidebar-controls.js";
+import { terminalWorkspaceOptions, type TerminalPaneOption } from "./terminal-pane-options.js";
+import { TerminalPaneSidebar, type TerminalPaneFilter } from "./terminal-pane-sidebar.js";
+import { TerminalWorkspaceSidebar } from "./terminal-workspace-sidebar.js";
 import { captureTerminalScroll, restoreTerminalScroll, terminalFrameParts, updateTerminalFrame } from "./terminal-output.js";
 import { TerminalTargetTracker, type TerminalTarget } from "./terminal-target.js";
 
@@ -11,6 +14,7 @@ export class TerminalView {
   #stream: StreamHandle | undefined;
   #target: TerminalTarget | undefined;
   #targetTracker: TerminalTargetTracker;
+  #snapshot: SessionSnapshot;
   #streamAttempt = 0;
   #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   #reconnectRetry = 0;
@@ -38,20 +42,24 @@ export class TerminalView {
   #followTail = true;
   #viewportFrame: number | undefined;
   #viewportChanged = () => this.#syncViewport();
-  #paneMenu = element("div", {
-    className: "terminal-pane-menu",
-    attrs: { role: "menu", "aria-label": "Switch terminal pane", hidden: "" },
-  });
+  #main: HTMLElement;
+  #navigation = element("div", { className: "terminal-navigation", attrs: { id: "terminal-navigation", "aria-label": "Workspaces and panes" } });
+  #navigationOpen = false;
   #paneSelector: HTMLButtonElement | undefined;
-  #paneSwitcher: HTMLElement | undefined;
-  #outsidePaneMenu = (event: PointerEvent) => {
-    if (this.#paneMenu.hidden || this.#paneSwitcher?.contains(event.target as Node)) return;
-    this.#closePaneMenu();
+  #sidebar: TerminalPaneSidebar;
+  #workspaces: TerminalWorkspaceSidebar;
+  #desktopNavigation = matchMedia("(min-width: 1024px)");
+  #navigationChanged = () => {
+    if (this.#desktopNavigation.matches) this.#closeNavigation();
+    this.#updateSidebar();
+    this.#updateWorkspaces();
   };
-  #paneMenuKeydown = (event: KeyboardEvent) => {
-    if (event.key !== "Escape" || this.#paneMenu.hidden) return;
-    event.preventDefault();
-    this.#closePaneMenu(true);
+  #navigationKeydown = (event: KeyboardEvent) => {
+    if (!this.#navigationOpen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.#closeNavigation(true);
+    } else trapNavigationFocus(event, this.#navigation);
   };
 
   constructor(
@@ -64,7 +72,10 @@ export class TerminalView {
     private readonly paneOptions: () => TerminalPaneOption[],
     private readonly onSelectPane: (pane: PaneSnapshot) => void,
     onBack: () => void,
+    paneFilter: TerminalPaneFilter,
+    private readonly sidebarControls: SidebarControls,
   ) {
+    this.#snapshot = snapshot;
     this.#targetTracker = new TerminalTargetTracker(snapshot, pane);
     this.#target = this.#targetTracker.resolve(snapshot);
     if (control) {
@@ -180,15 +191,36 @@ export class TerminalView {
 
     this.#paneSelector = element("button", {
       className: "terminal-pane-selector",
-      attrs: { type: "button", "aria-label": "Switch terminal pane", title: "Switch terminal pane", "aria-haspopup": "menu", "aria-expanded": "false" },
-      on: { click: () => this.#togglePaneMenu() },
+      attrs: { type: "button", "aria-label": "Open navigation", title: "Open navigation", "aria-haspopup": "dialog", "aria-expanded": "false", "aria-controls": "terminal-navigation" },
+      on: { click: () => this.#openNavigation() },
     },
     element("span", { className: "terminal-pane-dot", attrs: { "aria-hidden": "true" } }),
     );
-    this.#paneSwitcher = element("div", { className: "terminal-pane-switcher" }, this.#paneSelector, this.#paneMenu);
+    const paneSwitcher = element("div", { className: "terminal-pane-switcher" }, this.#paneSelector);
+    const selectPane = (selected: PaneSnapshot) => {
+      const wasOpen = this.#navigationOpen;
+      this.#closeNavigation(wasOpen);
+      if (selected.pane_id === this.#target?.pane.pane_id && selected.terminal_id === this.#target?.pane.terminal_id) {
+        if (!wasOpen) this.#input?.focus();
+      } else this.onSelectPane(selected);
+    };
+    this.#sidebar = new TerminalPaneSidebar(selectPane, paneFilter, () => this.#closeNavigation(true), () => sidebarControls.toggle("panes"));
+    this.#sidebar.closeButton.setAttribute("aria-label", "Close navigation");
+    this.#sidebar.closeButton.setAttribute("aria-controls", "terminal-navigation");
+    this.#sidebar.closeButton.title = "Close navigation";
+    this.#workspaces = new TerminalWorkspaceSidebar(selectPane, onBack, () => sidebarControls.toggle("workspaces"));
+    this.#workspaces.setFooter(sidebarControls.footer());
+    this.#navigation.append(
+      element("header", { className: "terminal-navigation-header" }, navigationBrand(onBack), this.#sidebar.closeButton),
+      this.#workspaces.root,
+      this.#sidebar.root,
+    );
+    this.updateSidebarLayout();
+    this.#updateSidebar();
+    this.#updateWorkspaces();
 
-    this.root.append(
-      element("header", { className: "terminal-header" }, headerBackButton(onBack), this.#paneSwitcher),
+    this.#main = element("div", { className: "terminal-main" },
+      element("header", { className: "terminal-header" }, navigationBrand(onBack), paneSwitcher),
       this.#output,
       element("div", { className: "terminal-controls-wrap" },
         element("div", { className: "terminal-controls" },
@@ -197,6 +229,10 @@ export class TerminalView {
           controlsToggle,
         ),
       ),
+    );
+    this.root.append(
+      this.#navigation,
+      this.#main,
       fileInput,
       ...(this.#input ? [this.#input.element] : []),
     );
@@ -207,15 +243,15 @@ export class TerminalView {
     window.visualViewport?.addEventListener("resize", this.#viewportChanged);
     window.visualViewport?.addEventListener("scroll", this.#viewportChanged);
     window.addEventListener("resize", this.#viewportChanged);
-    document.addEventListener("pointerdown", this.#outsidePaneMenu);
-    document.addEventListener("keydown", this.#paneMenuKeydown);
+    document.addEventListener("keydown", this.#navigationKeydown);
+    this.#desktopNavigation.addEventListener("change", this.#navigationChanged);
     this.#syncViewport();
   }
 
   async start(): Promise<void> {
     if (!this.#target) throw new Error("Pane has no live terminal identity");
     await this.#connectStream(true);
-    if (this.control && matchMedia("(pointer: fine)").matches) this.#input?.focus();
+    if (this.control && !this.#navigationOpen && matchMedia("(pointer: fine)").matches) this.#input?.focus();
   }
 
   async #connectStream(initial = false): Promise<void> {
@@ -277,13 +313,17 @@ export class TerminalView {
     window.visualViewport?.removeEventListener("resize", this.#viewportChanged);
     window.visualViewport?.removeEventListener("scroll", this.#viewportChanged);
     window.removeEventListener("resize", this.#viewportChanged);
-    document.removeEventListener("pointerdown", this.#outsidePaneMenu);
-    document.removeEventListener("keydown", this.#paneMenuKeydown);
+    document.removeEventListener("keydown", this.#navigationKeydown);
+    this.#desktopNavigation.removeEventListener("change", this.#navigationChanged);
   }
 
   updateSnapshot(snapshot: SessionSnapshot): void {
     if (this.#destroyed) return;
     if (snapshot.session !== this.#targetTracker.session) {
+      this.#closeNavigation();
+      this.#sidebar.update([], undefined);
+      this.#workspaces.update([]);
+      this.#snapshot = snapshot;
       this.#target = undefined;
       if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = undefined;
@@ -297,9 +337,12 @@ export class TerminalView {
       return;
     }
     const previous = this.#target;
+    this.#snapshot = snapshot;
     const generationChanged = snapshot.server_generation !== this.#targetTracker.serverGeneration;
     const target = this.#targetTracker.resolve(snapshot);
     this.#target = target;
+    this.#updateSidebar();
+    this.#updateWorkspaces();
     if (!target) {
       if (this.#reconnectTimer) clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = undefined;
@@ -335,71 +378,61 @@ export class TerminalView {
     }
   }
 
-  #togglePaneMenu(): void {
-    if (this.#paneMenu.hidden) this.#openPaneMenu();
-    else this.#closePaneMenu(true);
+  updateTitles(_paneIds: string[]): void {
+    if (this.#destroyed) return;
+    if (!this.#desktopNavigation.matches && !this.#navigationOpen) return;
+    this.#updateSidebar();
   }
 
-  updateTitles(paneIds: string[]): void {
-    if (this.#destroyed || this.#paneMenu.hidden) return;
-    const changed = new Set(paneIds);
-    for (const option of this.paneOptions()) {
-      if (!changed.has(option.pane.pane_id)) continue;
-      const row = this.#paneMenu.querySelector<HTMLElement>(`[data-menu-pane="${CSS.escape(option.pane.pane_id)}"]`);
-      if (!row) continue;
-      const title = row.querySelector<HTMLElement>(".terminal-pane-option-title");
-      if (title) {
-        title.textContent = option.title;
-        title.hidden = !option.title;
-      }
-      const agent = row.querySelector<HTMLElement>(".terminal-pane-option-agent");
-      if (agent) agent.textContent = `${option.title ? "- " : ""}${option.agentName}`;
-      row.title = terminalPaneLabel(option);
-      row.setAttribute("aria-label", `${terminalPaneLabel(option)}, ${option.context}, ${option.path}`);
-    }
+  updateSidebarLayout(): void {
+    const { workspaces, panes } = this.sidebarControls.collapsed;
+    this.root.classList.toggle("workspaces-collapsed", workspaces);
+    this.root.classList.toggle("panes-collapsed", panes);
+    this.#workspaces.setCollapsed(workspaces);
+    this.#sidebar.setCollapsed(panes);
   }
 
-  #openPaneMenu(): void {
-    const options = this.paneOptions();
-    this.#paneMenu.replaceChildren(...options.map((option) => {
-      const active = option.pane.pane_id === this.#target?.pane.pane_id
-        && option.pane.terminal_id === this.#target?.pane.terminal_id;
-      return element("button", {
-        className: `terminal-pane-option${active ? " active" : ""}`,
-        attrs: {
-          type: "button", role: "menuitem", "data-menu-pane": option.pane.pane_id,
-          title: terminalPaneLabel(option),
-          "aria-label": `${terminalPaneLabel(option)}, ${option.context}, ${option.path}`,
-          ...(active ? { "aria-current": "true" } : {}),
-        },
-        on: { click: () => {
-          if (active) {
-            this.#closePaneMenu(true);
-            return;
-          }
-          this.#closePaneMenu();
-          this.onSelectPane(option.pane);
-        } },
-      },
-      element("span", { className: "terminal-pane-option-dot", attrs: { "aria-hidden": "true" } }),
-      element("span", { className: "terminal-pane-option-copy" },
-        element("strong", { className: "terminal-pane-option-heading" },
-          element("span", { className: "terminal-pane-option-title", text: option.title, attrs: option.title ? {} : { hidden: "" } }),
-          element("span", { className: "terminal-pane-option-agent", text: `${option.title ? "- " : ""}${option.agentName}` }),
-        ),
-        element("small", { className: "terminal-pane-option-path", text: option.path }),
-      ),
-      );
-    }));
-    if (options.length === 0) this.#paneMenu.append(element("p", { className: "terminal-pane-menu-empty", text: "No terminal panes available" }));
-    this.#paneMenu.hidden = false;
+  closeNavigation(): void {
+    this.#closeNavigation();
+  }
+
+  #updateSidebar(options?: TerminalPaneOption[]): void {
+    this.#sidebar.update(this.#desktopNavigation.matches || this.#navigationOpen ? options ?? this.paneOptions() : [], this.#target?.pane);
+  }
+
+  #updateWorkspaces(): void {
+    this.#workspaces.update((this.#desktopNavigation.matches || this.#navigationOpen) && this.#snapshot.session === this.#targetTracker.session
+      ? terminalWorkspaceOptions(this.#snapshot, this.#target?.pane)
+      : []);
+  }
+
+  #openNavigation(): void {
+    if (this.#destroyed || this.#desktopNavigation.matches) return;
+    this.#navigationOpen = true;
+    this.#input?.blur();
+    this.#main.inert = true;
+    if (this.#input) this.#input.element.inert = true;
+    this.root.classList.add("pane-navigation-open");
+    this.#navigation.setAttribute("role", "dialog");
+    this.#navigation.setAttribute("aria-modal", "true");
     this.#paneSelector?.setAttribute("aria-expanded", "true");
+    this.#updateSidebar();
+    this.#updateWorkspaces();
+    this.#sidebar.closeButton.focus({ preventScroll: true });
   }
 
-  #closePaneMenu(restoreFocus = false): void {
-    this.#paneMenu.hidden = true;
+  #closeNavigation(restoreFocus = false): void {
+    if (!this.#navigationOpen) return;
+    this.#navigationOpen = false;
+    this.root.classList.remove("pane-navigation-open");
+    this.#navigation.removeAttribute("role");
+    this.#navigation.removeAttribute("aria-modal");
+    this.#main.inert = false;
+    if (this.#input) this.#input.element.inert = false;
     this.#paneSelector?.setAttribute("aria-expanded", "false");
-    if (restoreFocus) this.#paneSelector?.focus();
+    this.#updateSidebar();
+    this.#updateWorkspaces();
+    if (restoreFocus && !this.#desktopNavigation.matches) this.#paneSelector?.focus({ preventScroll: true });
   }
 
   #frame(raw: Record<string, unknown>, attempt: number): void {
@@ -598,11 +631,4 @@ export class TerminalView {
 function recoverableConnectionError(error: unknown): boolean {
   if (!(error instanceof BridgeError)) return true;
   return new Set(["bridge_error", "closed", "disconnected", "stale_server", "stale_stream", "timeout", "unavailable"]).has(error.code);
-}
-
-function headerBackButton(onBack: () => void): HTMLButtonElement {
-  const back = button("", "header-back", onBack);
-  back.setAttribute("aria-label", "Back");
-  back.title = "Back";
-  return back;
 }

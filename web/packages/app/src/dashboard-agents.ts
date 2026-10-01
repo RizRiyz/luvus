@@ -48,6 +48,12 @@ export function agentCardTitle(pane: PaneSnapshot): { title: string; titleAbsent
   };
 }
 
+/** Shared status classes keep dashboard and terminal navigation colors aligned. */
+export function paneStateClass(state: string): string {
+  const normalized = state.toLowerCase();
+  return ["working", "blocked", "done", "idle"].includes(normalized) ? normalized : "terminal";
+}
+
 export function displayText(value: unknown, fallback: string): string {
   if (typeof value !== "string") return fallback;
   const text = value.trim();

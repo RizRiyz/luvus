@@ -67,8 +67,24 @@ running session moves the bridge to it without detaching its other clients. In
 control mode, selecting a known stopped session may start it. A read-only bridge
 can switch only to an already-running session.
 
-Agent cards show the agent and workspace above the live agent session title.
-When the agent has not supplied a title, the card shows **Untitled session**.
+On desktop, the dashboard uses the same compact navigation as the terminal:
+workspaces on the left, filtered agents and panes on the right. Each desktop
+sidebar can be collapsed independently; tab names stay with the pane rows
+rather than appearing as extra workspace buttons.
+Live stats sit in the middle of the screen without duplicate agent or
+workspace cards. The Luvus logo and name sit above Workspaces; the **Devices**
+icon and connection indicator sit at the bottom-left without a surrounding
+card. The refresh icon is there too; the same footer controls are available
+in terminal sidebars. Workspace rows show the name and Git branch above the
+path. There is no refresh button in the hero.
+The **Active agents** / **All panes** filter stays in sync across the
+dashboard and terminal. The agent/pane sidebar lists only terminals from the
+workspace selected in the Web UI; TUI focus changes do not change that
+selection. Panes opened on the Web appear most-recent-first within that list.
+
+Smaller screens show live stats without duplicate agent/workspace cards or
+the old navigation bar. Use the dot beside the Luvus logo to open the
+full-screen workspace and agent/pane drawer from the dashboard or terminal.
 
 One bridge has one selected upstream session, so a session switch moves every
 browser device paired with that bridge. TUI and CLI clients keep their own
@@ -201,6 +217,20 @@ Output wraps to the browser width without resizing the shared PTY. Expand the
 bottom controls and select **Wrap** to switch to **Original** layout for tables
 or other fixed-width output; select **Original** to enable wrapping again.
 Output scrolls behind the floating top controls.
+
+On desktop, matching sidebars keep terminal output centered. The left sidebar
+lists workspaces; selecting one opens one of its live terminals without
+changing TUI focus. The right sidebar switches between live terminal panes.
+Its **Active agents** and **All panes** filters match the dashboard, with compact
+rows showing a colored status dot, plain status text, and agent name on the
+first row. Session titles and workspace/tab context appear on the second row.
+Panes you open on the Web appear most-recent-first while browsing; background
+updates and TUI focus changes do not reorder them. On smaller screens, use the
+circular dot button at the top to open a full-screen drawer with workspace
+selection and the workspace-scoped agent/pane list. Select a workspace or pane
+to return to its terminal, or use the dot at the top right to close the drawer.
+Click the **Luvus** logo to return to the dashboard; there is no separate back
+button over terminal output.
 
 The `+` button, clipboard file paste, and drag and drop upload files up to 32
 MiB in bounded chunks. Luvus stores the bytes on the selected server and pastes
