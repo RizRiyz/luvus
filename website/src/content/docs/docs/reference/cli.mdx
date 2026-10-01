@@ -89,7 +89,7 @@ tabs:
 panes / agents:
   pane list [--all-tabs]     list panes across every workspace and tab
   pane list --current-tab    list panes and read-only history metrics in the current tab
-  pane split [<id>] [--auto|--right|--down] [--no-focus]   split a pane (default: auto by size, creates a workspace if empty)
+  pane split [<id>] [--auto|--right|--down] [--no-focus] [--cwd <path>]   split a pane (default: auto by size, creates a workspace if empty)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
@@ -333,6 +333,12 @@ treating cells as about twice as tall as they are wide. `--auto`, `--right`, and
 direction. It starts in the target pane's live working directory; with
 `layout.new_pane_to_workspace_root = true`, it starts at the target workspace
 root instead. `--no-focus` preserves the caller's current view.
+
+`--cwd <path>` overrides the starting directory for the new pane, including
+root-first mode. Relative paths resolve against the CLI caller's current directory.
+The server requires a non-empty absolute path of at most 4096 bytes that names
+an existing directory. If it disappears before spawning, Luvus retries the target
+workspace root and then the home directory.
 
 `luvus uhp capabilities` on the owner endpoint reports supported methods. The same RPC through paired `luvus uhp access` adds `access.mode`, `access.allowed_methods`, and gateway connection/request limits; use that effective set for permission-aware clients.
 

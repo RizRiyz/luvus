@@ -145,7 +145,7 @@ tabs:
 panes / agents:
   pane list [--all-tabs]     list panes across every workspace and tab
   pane list --current-tab    list panes and read-only history metrics in the current tab
-  pane split [<id>] [--auto|--right|--down] [--no-focus]   split a pane (default: auto by size, creates a workspace if empty)
+  pane split [<id>] [--auto|--right|--down] [--no-focus] [--cwd <path>]   split a pane (default: auto by size, creates a workspace if empty)
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
@@ -3324,6 +3324,27 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             if args.iter().any(|a| a == "--no-focus") {
                 obj.insert("focus".to_string(), json!(false));
             }
+            for (i, arg) in rest.iter().enumerate() {
+                if arg == "--cwd" {
+                    let raw = rest
+                        .get(i + 1)
+                        .filter(|v| !v.is_empty() && !v.starts_with("--"))
+                        .ok_or_else(|| anyhow!("usage: luvus pane split [<id>] [--cwd <path>]"))?;
+                    if obj.contains_key("cwd") {
+                        return Err(anyhow!("--cwd may be passed only once"));
+                    }
+                    let path = std::path::PathBuf::from(raw);
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        std::env::current_dir()?.join(path)
+                    };
+                    let path = path
+                        .to_str()
+                        .ok_or_else(|| anyhow!("--cwd must be valid UTF-8"))?;
+                    obj.insert("cwd".to_string(), json!(path));
+                }
+            }
             ("pane.split".into(), with_pane(obj))
         }
         ("pane", "focus") => ("pane.focus".into(), with_pane(serde_json::Map::new())),
@@ -4927,6 +4948,83 @@ mod tests {
         assert_eq!(m, "tab.new");
         let (m, _) = parse(&argv("luvus agent list")).unwrap();
         assert_eq!(m, "agent.list");
+    }
+
+    #[test]
+    fn pane_split_cwd_resolves_paths_and_keeps_existing_options() {
+        let absolute = std::env::current_dir().unwrap();
+        let args = vec![
+            "luvus".into(),
+            "pane".into(),
+            "split".into(),
+            "3".into(),
+            "--cwd".into(),
+            absolute.to_string_lossy().into_owned(),
+            "--right".into(),
+            "--no-focus".into(),
+        ];
+        let (method, params) = parse(&args).unwrap();
+        assert_eq!(method, "pane.split");
+        assert_eq!(
+            params,
+            json!({
+                "pane": "3", "cwd": absolute, "direction": "right", "focus": false,
+            })
+        );
+
+        let (_, params) = parse(&argv("luvus pane split --cwd nested --auto")).unwrap();
+        assert_eq!(params["cwd"], json!(absolute.join("nested")));
+        assert_eq!(params["direction"], "auto");
+        for command in ["luvus pane split --cwd", "luvus pane split --cwd --down"] {
+            assert!(parse(&argv(command))
+                .unwrap_err()
+                .to_string()
+                .contains("usage:"));
+        }
+        assert!(parse(&argv("luvus pane split --cwd one --cwd two")).is_err());
+        let empty = vec![
+            "luvus".into(),
+            "pane".into(),
+            "split".into(),
+            "--cwd".into(),
+            String::new(),
+        ];
+        assert!(parse(&empty).unwrap_err().to_string().contains("usage:"));
+    }
+
+    // This filesystem fixture needs non-UTF-8 filenames, which APFS rejects.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pane_split_cwd_reports_non_utf8_working_directory() {
+        use std::os::unix::ffi::OsStringExt;
+
+        const CHILD: &str = "LUVUS_TEST_SPLIT_NON_UTF8_CWD";
+        if std::env::var_os(CHILD).is_some() {
+            let error = parse(&argv("luvus pane split --cwd nested")).unwrap_err();
+            assert_eq!(error.to_string(), "--cwd must be valid UTF-8");
+            return;
+        }
+
+        // A subprocess exercises current_dir without changing the test suite's cwd.
+        let _env = crate::persist::test_env("split-non-utf8-cwd");
+        let cwd =
+            crate::persist::config_dir().join(std::ffi::OsString::from_vec(b"cwd-\xff".to_vec()));
+        fs::create_dir_all(&cwd).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "cli::tests::pane_split_cwd_reports_non_utf8_working_directory",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
