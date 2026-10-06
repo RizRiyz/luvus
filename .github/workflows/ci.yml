@@ -17,6 +17,25 @@ env:
   CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
+  npm:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            website/package-lock.json
+      - name: Audit web dependencies
+        run: npm --prefix web audit --package-lock-only --ignore-scripts
+      - name: Audit website dependencies
+        run: npm --prefix website audit --package-lock-only --ignore-scripts
+
   test:
     name: fmt · clippy · test
     runs-on: ubuntu-latest
