@@ -6,6 +6,7 @@ import { navigationBrand, trapNavigationFocus, type SidebarControls } from "./si
 import { terminalWorkspaceOptions, type TerminalPaneOption } from "./terminal-pane-options.js";
 import { TerminalPaneSidebar, type TerminalPaneFilter } from "./terminal-pane-sidebar.js";
 import { TerminalWorkspaceSidebar } from "./terminal-workspace-sidebar.js";
+import { recoverableConnectionError } from "./terminal-reconnect.js";
 import { captureTerminalScroll, restoreTerminalScroll, terminalFrameParts, updateTerminalFrame } from "./terminal-output.js";
 import { TerminalTargetTracker, type TerminalTarget } from "./terminal-target.js";
 
@@ -43,6 +44,8 @@ export class TerminalView {
   #viewportFrame: number | undefined;
   #viewportChanged = () => this.#syncViewport();
   #main: HTMLElement;
+  #header: HTMLElement;
+  #contentFrame = element("div", { className: "web-content-frame" });
   #navigation = element("div", { className: "terminal-navigation", attrs: { id: "terminal-navigation", "aria-label": "Workspaces and panes" } });
   #navigationOpen = false;
   #paneSelector: HTMLButtonElement | undefined;
@@ -51,6 +54,7 @@ export class TerminalView {
   #desktopNavigation = matchMedia("(min-width: 1024px)");
   #navigationChanged = () => {
     if (this.#desktopNavigation.matches) this.#closeNavigation();
+    this.#placePaneSidebar();
     this.#updateSidebar();
     this.#updateWorkspaces();
   };
@@ -163,21 +167,7 @@ export class TerminalView {
       controlButton.addEventListener("pointerdown", (event) => event.preventDefault());
       return controlButton;
     });
-    const wrapToggle = button("Wrap", "terminal-tool terminal-wrap-toggle", () => {
-      const anchor = this.#followTail ? undefined : captureTerminalScroll(this.#output, this.#content);
-      const wrapping = !this.root.classList.toggle("terminal-no-wrap");
-      wrapToggle.textContent = wrapping ? "Wrap" : "Original";
-      wrapToggle.setAttribute("aria-pressed", String(wrapping));
-      wrapToggle.setAttribute("aria-label", wrapping ? "Show original terminal layout" : "Wrap terminal output to screen width");
-      wrapToggle.title = wrapping ? "Show original terminal layout" : "Wrap terminal output to screen width";
-      if (anchor) restoreTerminalScroll(this.#output, this.#content, anchor);
-      else this.#scrollToLatest();
-    });
-    wrapToggle.setAttribute("aria-pressed", "true");
-    wrapToggle.setAttribute("aria-label", "Show original terminal layout");
-    wrapToggle.title = "Show original terminal layout";
-    wrapToggle.addEventListener("pointerdown", (event) => event.preventDefault());
-    const tools = element("div", { className: "terminal-tools" }, wrapToggle, attach, keyboard, ...keys);
+    const tools = element("div", { className: "terminal-tools" }, attach, keyboard, ...keys);
     const controlsToggle = button("", "terminal-controls-toggle", () => {
       const expanded = this.root.classList.toggle("controls-expanded");
       controlsToggle.setAttribute("aria-expanded", String(expanded));
@@ -219,8 +209,8 @@ export class TerminalView {
     this.#updateSidebar();
     this.#updateWorkspaces();
 
+    this.#header = element("header", { className: "terminal-header" }, navigationBrand(onBack), paneSwitcher);
     this.#main = element("div", { className: "terminal-main" },
-      element("header", { className: "terminal-header" }, navigationBrand(onBack), paneSwitcher),
       this.#output,
       element("div", { className: "terminal-controls-wrap" },
         element("div", { className: "terminal-controls" },
@@ -230,12 +220,14 @@ export class TerminalView {
         ),
       ),
     );
+    this.#contentFrame.append(this.#header, this.#main);
     this.root.append(
       this.#navigation,
-      this.#main,
+      this.#contentFrame,
       fileInput,
       ...(this.#input ? [this.#input.element] : []),
     );
+    this.#placePaneSidebar();
     this.#output.addEventListener("scroll", () => {
       const distance = this.#output.scrollHeight - this.#output.scrollTop - this.#output.clientHeight;
       this.#followTail = distance < 80;
@@ -288,13 +280,15 @@ export class TerminalView {
     } catch (error) {
       if (this.#destroyed || attempt !== this.#streamAttempt) return;
       this.#stream = undefined;
-      if (!recoverableConnectionError(error)) {
+      if (!recoverableConnectionError(error, this.#reconnectRetry)) {
         this.#failQueuedActions(error);
         if (initial) throw error;
         this.#showStatus(error instanceof Error ? error.message : "Terminal connection failed");
         return;
       }
-      this.#showStatus("Connection interrupted — reconnecting…");
+      this.#showStatus(error instanceof BridgeError && error.code === "control_conflict"
+        ? "Waiting for terminal control…"
+        : "Connection interrupted — reconnecting…");
       this.#scheduleReconnect();
     }
   }
@@ -396,6 +390,11 @@ export class TerminalView {
     this.#closeNavigation();
   }
 
+  #placePaneSidebar(): void {
+    const parent = this.#desktopNavigation.matches ? this.root : this.#navigation;
+    if (this.#sidebar.root.parentElement !== parent) parent.append(this.#sidebar.root);
+  }
+
   #updateSidebar(options?: TerminalPaneOption[]): void {
     this.#sidebar.update(this.#desktopNavigation.matches || this.#navigationOpen ? options ?? this.paneOptions() : [], this.#target?.pane);
   }
@@ -410,6 +409,7 @@ export class TerminalView {
     if (this.#destroyed || this.#desktopNavigation.matches) return;
     this.#navigationOpen = true;
     this.#input?.blur();
+    this.#header.inert = true;
     this.#main.inert = true;
     if (this.#input) this.#input.element.inert = true;
     this.root.classList.add("pane-navigation-open");
@@ -427,6 +427,7 @@ export class TerminalView {
     this.root.classList.remove("pane-navigation-open");
     this.#navigation.removeAttribute("role");
     this.#navigation.removeAttribute("aria-modal");
+    this.#header.inert = false;
     this.#main.inert = false;
     if (this.#input) this.#input.element.inert = false;
     this.#paneSelector?.setAttribute("aria-expanded", "false");
@@ -626,9 +627,4 @@ export class TerminalView {
     }
   }
 
-}
-
-function recoverableConnectionError(error: unknown): boolean {
-  if (!(error instanceof BridgeError)) return true;
-  return new Set(["bridge_error", "closed", "disconnected", "stale_server", "stale_stream", "timeout", "unavailable"]).has(error.code);
 }

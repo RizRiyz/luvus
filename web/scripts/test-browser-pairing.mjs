@@ -6,12 +6,14 @@ import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { checkBrowserLayout } from "./check-browser-layout.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const executable = path.resolve(process.env.LUVUS_BIN || path.join(root, "target/debug", process.platform === "win32" ? "luvus.exe" : "luvus"));
 const browserBin = process.env.LUVUS_BROWSER_BIN;
 assert.ok(browserBin, "Set LUVUS_BROWSER_BIN to an installed Chromium headless binary");
 await mkdir(path.join(root, "target"), { recursive: true });
+const screenshots = process.env.LUVUS_WEB_SCREENSHOTS === "1" ? await mkdtemp(path.join(root, "target", "web-layout-qa-")) : undefined;
 const home = await mkdtemp(path.join(root, "target", "web-browser-"));
 const workspace = path.join(home, "workspace");
 const profile = path.join(home, "browser");
@@ -21,6 +23,9 @@ const env = { ...process.env, LUVUS_HOME: home };
 delete env.LUVUS_SOCKET_PATH;
 delete env.LUVUS_SESSION;
 delete env.LUVUS_BIN_PATH;
+// npm's harness prefix must not leak into the interactive test shell (nvm).
+delete env.npm_config_prefix;
+delete env.NPM_CONFIG_PREFIX;
 let bridge, browser, cdp;
 const exceptions = [];
 
@@ -40,6 +45,8 @@ try {
   await ready(first);
   assert.equal(await evaluate(first.sessionId, "location.hash"), "");
   assert.equal(await evaluate(first.sessionId, "!!localStorage.getItem('luvus.web.ticket') && sessionStorage.getItem('luvus.web.ticket') === null"), true);
+  await checkBrowserLayout({ cdp, sessionId: first.sessionId, evaluate, until, screenshots });
+  if (screenshots) console.log(`Layout screenshots: ${screenshots}`);
   const second = await page(pairing.origin);
   await ready(second);
   await evaluate(second.sessionId, "document.querySelector('[aria-label=Devices]').click()");
@@ -72,16 +79,29 @@ try {
   await ready(phone);
   await evaluate(phone.sessionId, "document.querySelector('[aria-label=Devices]').click()");
   await until(() => evaluate(phone.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('2 authorized')"));
+  assert.equal(await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect')?.textContent"), "Disconnect this browser");
+  let acceptDisconnect = false;
+  const disconnectDialogs = [];
   cdp.events.on("Page.javascriptDialogOpening", (event) => {
-    if (event.sessionId === restarted.sessionId) void cdp.call("Page.handleJavaScriptDialog", { accept: true }, event.sessionId);
+    if (event.sessionId !== restarted.sessionId) return;
+    disconnectDialogs.push(event.params.message);
+    void cdp.call("Page.handleJavaScriptDialog", { accept: acceptDisconnect }, event.sessionId);
   });
-  await evaluate(restarted.sessionId, "document.querySelector('.device-forget').click()");
+  await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect').click()");
+  assert.equal(disconnectDialogs.length, 1);
+  assert.match(disconnectDialogs[0], /every tab.*new QR\/code to reconnect.*Other browsers and running terminals are not affected/);
+  await ready(restarted);
+  await ready(sibling);
+  assert.equal(await evaluate(restarted.sessionId, "!!localStorage.getItem('luvus.web.ticket') && document.querySelector('.device-copy')?.textContent?.startsWith('2 authorized')"), true, "canceling disconnect preserves the pairing");
+  acceptDisconnect = true;
+  await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect').click()");
+  assert.equal(disconnectDialogs.length, 2);
   await until(() => evaluate(restarted.sessionId, "!!document.querySelector('.access-problem') && localStorage.getItem('luvus.web.ticket') === null"));
   await until(() => evaluate(sibling.sessionId, "!!document.querySelector('.access-problem') && localStorage.getItem('luvus.web.ticket') === null"));
   await ready(phone);
   await until(() => evaluate(phone.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('1 authorized')"));
   assert.equal(exceptions.length, 0, `Unexpected browser exceptions: ${exceptions.length}`);
-  console.log("real Chromium browser passed: one QR/code pairing across eight tabs, close/reopen tabs, browser restart, separate profile, and cross-tab revocation");
+  console.log("real Chromium browser passed: one QR/code pairing across eight tabs, close/reopen tabs, browser restart, separate profile, disconnect cancellation, and cross-tab revocation");
 } finally {
   await closeBrowser().catch(() => browser?.kill("SIGKILL"));
   if (bridge?.exitCode === null) { bridge.kill("SIGINT"); await exited(bridge).catch(() => bridge.kill("SIGKILL")); }

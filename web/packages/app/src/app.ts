@@ -85,11 +85,12 @@ export class WebApp {
       const snapshot = this.#session.snapshot;
       if (snapshot) this.#openTerminal(snapshot, pane);
     };
-    this.#dashboardWorkspaces = new TerminalWorkspaceSidebar(openPane, () => window.scrollTo({ top: 0, behavior: "smooth" }), () => this.#sidebarControls.toggle("workspaces"));
     const overview = () => {
       this.#closeDashboardNavigation(true);
+      this.root.querySelector<HTMLElement>(".dashboard")?.scrollTo({ top: 0, behavior: "smooth" });
       window.scrollTo({ top: 0, behavior: "smooth" });
     };
+    this.#dashboardWorkspaces = new TerminalWorkspaceSidebar(openPane, overview, () => this.#sidebarControls.toggle("workspaces"));
     this.#dashboardPanes = new TerminalPaneSidebar(openPane, {
       showShells: this.#showShells,
       onChange: (showShells) => { this.#showShells = showShells; this.#render(); },
@@ -349,6 +350,8 @@ export class WebApp {
     });
     const savePublicUrl = button("Save address", "ghost device-url-save", () => void this.#setPublicUrl(publicUrl.value));
     savePublicUrl.disabled = this.#deviceLoading || !status;
+    const disconnectButton = button("Disconnect this browser", "ghost device-disconnect", () => void this.#disconnectBrowser());
+    disconnectButton.disabled = this.#deviceLoading || !status;
     const panel = element("section", { className: "device-panel", attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "device-title" } },
       element("div", { className: "device-panel-head" },
         element("div", {},
@@ -378,7 +381,7 @@ export class WebApp {
           : "Access lasts until the bridge stops or this browser is revoked. ")
         + "Pairing links expire after five minutes." }),
       this.#pairingUrl ? this.#pairingCard(this.#pairingUrl) : pairButton,
-      button("Forget this browser", "ghost device-forget", () => void this.#forgetBrowser()),
+      disconnectButton,
     );
     const overlay = element("div", {
       className: "device-overlay",
@@ -432,8 +435,8 @@ export class WebApp {
     if (failure) this.#showError(failure);
   }
 
-  async #forgetBrowser(): Promise<void> {
-    if (this.#deviceLoading || !confirm("Revoke this browser's access in every tab? Other devices will stay connected.")) return;
+  async #disconnectBrowser(): Promise<void> {
+    if (this.#deviceLoading || !confirm("Disconnect this browser in every tab? You'll need a new QR/code to reconnect. Other browsers and running terminals are not affected.")) return;
     this.#deviceLoading = true;
     const ticket = this.#sentTicket;
     try {
@@ -668,8 +671,12 @@ export class WebApp {
     this.#dashboardHeader.inert = this.#dashboardNavigationOpen;
     const dashboard = this.#dashboard(snapshot);
     dashboard.inert = this.#dashboardNavigationOpen;
+    const frame = element("div", { className: "web-content-frame" }, this.#dashboardHeader, dashboard);
+    // Reuse the same sidebar nodes beside the desktop frame and in the mobile drawer.
+    // Moving them preserves row identity, focus, and independent scroll state.
+    if (!desktop && this.#dashboardPanes.root.parentElement !== this.#dashboardNavigation) this.#dashboardNavigation.append(this.#dashboardPanes.root);
     return element("div", { className: `dashboard-layout${workspaces ? " workspaces-collapsed" : ""}${panes ? " panes-collapsed" : ""}${this.#dashboardNavigationOpen ? " pane-navigation-open" : ""}` },
-      this.#dashboardHeader, this.#dashboardNavigation, dashboard,
+      this.#dashboardNavigation, frame, desktop ? this.#dashboardPanes.root : undefined,
     );
   }
 
@@ -681,7 +688,7 @@ export class WebApp {
     const tabCount = snapshot.workspaces.reduce((total, workspace) => total + workspace.tabs.length, 0);
     const paneCount = snapshot.workspaces.reduce((total, workspace) => total
       + workspace.tabs.reduce((tabTotal, tab) => tabTotal + tab.panes.length, 0), 0);
-    return element("div", { className: "dashboard" },
+    return element("div", { className: "dashboard", attrs: { "data-scroll-key": "dashboard-main" } },
       element("section", { className: "mission-hero", attrs: { id: "mission-overview" } },
         element("div", { className: "hero-layout" },
           element("div", { className: "hero-stat-column stats-left" },

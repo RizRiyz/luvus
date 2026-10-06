@@ -72,6 +72,11 @@ On desktop, the dashboard uses the same compact navigation as the terminal:
 workspaces on the left, filtered agents and panes on the right. Each desktop
 sidebar can be collapsed independently; tab names stay with the pane rows
 rather than appearing as extra workspace buttons.
+Both sidebar rails sit beside the rounded center frame at the same height.
+There is no separate desktop header bar; content fills the frame. The workspace
+rail stays compact on wide screens. Dashboard and terminal views share that
+layout; their content and navigation lists scroll independently. Mobile keeps
+its top navigation controls and full-screen drawer.
 Live stats sit in the middle of the screen without duplicate agent or
 workspace cards. The Luvus logo and name sit above Workspaces; the **Devices**
 icon and connection indicator sit at the bottom-left without a surrounding
@@ -124,10 +129,12 @@ luvus web --control --ticket-ttl 3600
 ```
 
 The lifetime starts when a browser pairs; reconnecting does not extend it.
-**Devices → Forget this browser** revokes that ticket and disconnects every tab
-using it, without revoking other devices. Use this on a shared computer. After a
-bridge restart, pair again; remembered browser tickets do not restore revoked
-authority or survive the bridge's shutdown.
+**Devices → Disconnect this browser** revokes that ticket, disconnects every tab
+using it, and frees its pairing slot. Other browsers, the server, and running
+terminals are not affected. Confirm the action, then use a new QR/code to pair
+again when you want to reconnect. Use this on a shared computer. After a bridge
+restart, pair again; remembered browser tickets do not restore revoked authority
+or survive the bridge's shutdown.
 
 The device limit cannot be reduced below the number of paired
 devices plus unspent pairing links, and a browser can never raise it above the
@@ -237,10 +244,10 @@ On mobile, the terminal follows the visible viewport above the software
 keyboard. Submitting input resumes follow-tail so streaming output stays in
 view. Scrolling intentionally pauses follow-tail while you read history.
 
-Output wraps to the browser width without resizing the shared PTY. Expand the
-bottom controls and select **Wrap** to switch to **Original** layout for tables
-or other fixed-width output; select **Original** to enable wrapping again.
-Output scrolls behind the floating top controls.
+Output wraps to the browser width without resizing the shared PTY. The bottom
+action bar provides file attachment, keyboard, and terminal key controls;
+there is no separate Wrap/Original toggle. Output scrolls behind the floating
+top controls.
 
 On desktop, matching sidebars keep terminal output centered. The left sidebar
 lists workspaces; selecting one opens one of its live terminals without
@@ -267,12 +274,16 @@ The TUI and browser can be attached at the same time. Each client keeps its own
 viewport and render state; a phone-sized browser does not resize or replace the
 desktop TUI layout.
 
+Quickly reopening a terminal can briefly wait for its previous control stream
+to close. The browser retries that handoff a bounded number of times; it never
+disconnects or overrides another client's control stream.
+
 These operations have different effects:
 
 | Action | Result |
 |---|---|
 | Close a browser tab | Disconnects only that browser client |
-| Forget this browser in Devices | Revokes its remembered ticket and disconnects all tabs using it |
+| Disconnect this browser in Devices | Revokes its remembered ticket and disconnects all tabs using it; other browsers and running terminals are not affected |
 | Press Ctrl+C in `luvus web` | Stops the bridge and revokes its browser authority |
 | Detach or close the TUI | Leaves the server and panes running |
 | Run `luvus server stop` | Stops the selected server and its live PTYs |

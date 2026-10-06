@@ -74,8 +74,10 @@ QR code with the phone camera, or use Copy/Share as a fallback. Existing devices
 stay live; each browser profile receives an independent ticket remembered in
 origin-scoped browser storage. Reopening the address in another tab or restarting
 the browser reuses that ticket and does not spend another device slot. By default
-it lasts until the bridge stops or the browser is revoked. **Forget this browser**
-revokes its ticket and disconnects all its tabs, without revoking other devices.
+it lasts until the bridge stops or the browser is revoked. **Disconnect this browser**
+revokes its ticket, disconnects all its tabs, and frees its pairing slot without
+revoking other browsers or stopping running terminals. Pair again with a new
+QR/code to reconnect.
 QR generation happens
 inside the browser and never sends the pairing secret to an external service.
 
@@ -120,7 +122,12 @@ LUVUS_BIN="$PWD/target/debug/luvus" LUVUS_BROWSER_BIN=/path/to/chromium \
 
 It checks that eight tabs share one pairing, reopening tabs and restarting the
 browser retain access while the bridge runs, and revoking one profile signs out
-all its tabs without revoking a separately paired profile.
+all its tabs without revoking a separately paired profile. It also checks the
+header-free rounded content frame, aligned compact sidebar rails at multiple
+widths, independently collapsed sidebars, real terminal input, and mobile drawer
+focus and viewport behavior. Add
+`LUVUS_WEB_SCREENSHOTS=1` to save layout screenshots under the repository's
+`target/` directory for visual inspection.
 
 ## Manual development
 
