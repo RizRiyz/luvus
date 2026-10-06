@@ -69,6 +69,23 @@ export async function checkBrowserLayout({ cdp, sessionId, evaluate, until, scre
     await screenshot(screenshotName);
     await click('[aria-label="Hide terminal controls"]');
   };
+  const breakpoint = async (view) => {
+    // CDP accepts integer viewport widths. Also inspect the browser-parsed
+    // stylesheet to prove its mobile query covers fractional widths below
+    // the exact desktop threshold used by the application's matchMedia.
+    const mobileQuery = await run(`Array.from(document.styleSheets).flatMap(sheet => Array.from(sheet.cssRules))
+      .find(rule => rule instanceof CSSMediaRule && Array.from(rule.cssRules)
+        .some(style => style.selectorText === '.pane-navigation-open .terminal-navigation'))?.conditionText`);
+    assert.equal(mobileQuery, "not all and (min-width: 1024px)", "mobile CSS is the exact complement of desktop routing");
+    const previous = await run("({ width: innerWidth, height: innerHeight })");
+    await viewport(1023, 768, true);
+    await click(`.${view}-header [aria-label="Open navigation"]`);
+    await until(() => run(`getComputedStyle(document.querySelector('#${view === "dashboard" ? "dashboard" : "terminal"}-navigation')).display === 'flex'`));
+    await key("Escape", "Escape", 27);
+    await viewport(1024, 768);
+    await desktop(view);
+    await viewport(previous.width, previous.height);
+  };
   const desktop = async (view, workspacesCollapsed = false, panesCollapsed = false) => {
     const rootSelector = view === "dashboard" ? ".dashboard-layout" : ".terminal-screen";
     await until(() => run(`!!document.querySelector('${rootSelector} > .terminal-sidebar')`));
@@ -125,6 +142,7 @@ export async function checkBrowserLayout({ cdp, sessionId, evaluate, until, scre
     await viewport(width, 900);
     await desktop("dashboard");
   }
+  await breakpoint("dashboard");
   await screenshot("dashboard-desktop");
   await click('[aria-label="Collapse workspaces sidebar"]');
   await desktop("dashboard", true, false);
@@ -136,6 +154,7 @@ export async function checkBrowserLayout({ cdp, sessionId, evaluate, until, scre
   await click('.terminal-workspace-label:not(:disabled)');
   await terminalReady();
   await desktop("terminal");
+  await breakpoint("terminal");
   await click('[data-view-key="pane-filter:true"]');
   await until(() => run("!!document.querySelector('.terminal-sidebar-pane.active')"));
   await screenshot("terminal-desktop");
@@ -186,5 +205,5 @@ export async function checkBrowserLayout({ cdp, sessionId, evaluate, until, scre
   await viewport(1440, 900);
   await desktop("dashboard");
   await click('[data-view-key="pane-filter:false"]');
-  console.log("browser layout passed: header-free desktop frame, aligned compact rails, both collapsed rails, compact action bar with default wrapping, live terminal input, mobile drawers, and short viewport");
+  console.log("browser layout passed: header-free desktop frame, aligned compact rails, both collapsed rails, compact action bar with default wrapping, live terminal input, mobile drawers, complementary breakpoint, and short viewport");
 }

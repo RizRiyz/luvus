@@ -79,7 +79,18 @@ try {
   await ready(phone);
   await evaluate(phone.sessionId, "document.querySelector('[aria-label=Devices]').click()");
   await until(() => evaluate(phone.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('2 authorized')"));
+  // Each tab renders the devices broadcast independently. A ready connection
+  // does not prove that this tab has painted the new browser's device count.
+  await until(() => evaluate(restarted.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('2 authorized') && !!document.querySelector('.device-disconnect:not(:disabled)')"));
   assert.equal(await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect')?.textContent"), "Disconnect this browser");
+  await cdp.call("Network.enable", {}, restarted.sessionId);
+  let forgetRequests = 0;
+  cdp.events.on("Network.webSocketFrameSent", (event) => {
+    if (event.sessionId !== restarted.sessionId) return;
+    try {
+      if (JSON.parse(event.params.response.payloadData).method === "web.devices.forget") forgetRequests += 1;
+    } catch { /* Non-JSON frames are not device requests. */ }
+  });
   let acceptDisconnect = false;
   const disconnectDialogs = [];
   cdp.events.on("Page.javascriptDialogOpening", (event) => {
@@ -92,12 +103,14 @@ try {
   assert.match(disconnectDialogs[0], /every tab.*new QR\/code to reconnect.*Other browsers and running terminals are not affected/);
   await ready(restarted);
   await ready(sibling);
+  assert.equal(forgetRequests, 0, "canceling disconnect sends no revocation request");
   assert.equal(await evaluate(restarted.sessionId, "!!localStorage.getItem('luvus.web.ticket') && document.querySelector('.device-copy')?.textContent?.startsWith('2 authorized')"), true, "canceling disconnect preserves the pairing");
   acceptDisconnect = true;
   await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect').click()");
   assert.equal(disconnectDialogs.length, 2);
   await until(() => evaluate(restarted.sessionId, "!!document.querySelector('.access-problem') && localStorage.getItem('luvus.web.ticket') === null"));
   await until(() => evaluate(sibling.sessionId, "!!document.querySelector('.access-problem') && localStorage.getItem('luvus.web.ticket') === null"));
+  assert.equal(forgetRequests, 1, "confirming disconnect revokes this browser once");
   await ready(phone);
   await until(() => evaluate(phone.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('1 authorized')"));
   assert.equal(exceptions.length, 0, `Unexpected browser exceptions: ${exceptions.length}`);

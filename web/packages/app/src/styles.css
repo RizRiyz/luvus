@@ -445,7 +445,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   .terminal-sidebar-pane { min-height: 0; padding: .3rem .4rem; }
 }
 
-@media (max-width: 1023px) {
+@media not all and (min-width: 1024px) {
   .dashboard-layout { display: flex; flex-direction: column; min-height: 100dvh; }
   .dashboard-header { display: flex; flex: none; align-items: center; justify-content: space-between; gap: .75rem; padding: max(.5rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) .5rem max(1rem, env(safe-area-inset-left)); }
   .dashboard-header .terminal-workspace-brand { width: max-content; margin: 0; }
