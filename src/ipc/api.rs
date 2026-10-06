@@ -159,6 +159,10 @@ impl Drop for RequestMetrics {
 struct ConnectionPermit;
 
 impl ConnectionPermit {
+    #[allow(
+        deprecated,
+        reason = "AtomicUsize::try_update requires Rust 1.95; keep the Rust 1.88 MSRV"
+    )]
     fn acquire() -> Option<Self> {
         ACTIVE_CONNECTIONS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
@@ -172,6 +176,10 @@ impl ConnectionPermit {
 struct TerminalStreamPermit;
 
 impl TerminalStreamPermit {
+    #[allow(
+        deprecated,
+        reason = "AtomicUsize::try_update requires Rust 1.95; keep the Rust 1.88 MSRV"
+    )]
     fn acquire() -> Option<Self> {
         ACTIVE_TERMINAL_STREAMS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {

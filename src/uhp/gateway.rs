@@ -200,6 +200,10 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>) {
         if shared.cancelled.load(Ordering::Acquire) {
             break;
         }
+        #[allow(
+            deprecated,
+            reason = "AtomicUsize::try_update requires Rust 1.95; keep the Rust 1.88 MSRV"
+        )]
         if !peer.ip().is_loopback()
             || shared
                 .active
