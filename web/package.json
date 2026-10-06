@@ -22,6 +22,7 @@
     "test": "npm run build && npm run test -w @luvus/uhp-client && npm run test -w @luvus/web-app && npm run test -w @luvus/web-bridge",
     "test:integration": "npm run build && node bridge/test/live-integration.mjs",
     "test:native": "node scripts/test-native.mjs",
+    "test:browser-pairing": "node scripts/test-browser-pairing.mjs",
     "test:live": "node scripts/test-live.mjs",
     "start": "npm run start -w @luvus/web-bridge"
   }

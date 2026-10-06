@@ -603,6 +603,81 @@ fn pane_split_null_pane_targets_the_focused_layout_pane() {
     assert_eq!(app.layout().focus, base);
 }
 
+#[test]
+fn pane_split_cwd_overrides_pane_and_workspace_defaults() {
+    let (_env, mut app) = app("pane-split-cwd");
+    let cwd = crate::persist::config_dir().join("explicit cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let base = app.layout().focus;
+    for root_first in [false, true] {
+        app.config.layout.new_pane_to_workspace_root = root_first;
+        let out = app
+            .dispatch(
+                "pane.split",
+                &json!({
+                    "pane": base.0.to_string(), "cwd": cwd, "focus": false,
+                }),
+            )
+            .unwrap();
+        let split = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.panes[&split].cwd, cwd);
+        assert_eq!(app.layout().focus, base);
+    }
+}
+
+#[test]
+fn pane_split_invalid_cwd_never_creates_a_pane_or_workspace() {
+    let (_env, mut app) = app("pane-split-invalid-cwd");
+    let file = crate::persist::config_dir().join("file");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "not a directory").unwrap();
+    let mut too_long = file.to_string_lossy().into_owned();
+    too_long.push_str(&"x".repeat(4097 - too_long.len()));
+    let invalid = [
+        json!("relative"),
+        json!(file.with_file_name("missing")),
+        json!(file),
+        json!(false),
+        json!(42),
+        json!([]),
+        json!({}),
+        json!(""),
+        json!(too_long),
+    ];
+    for empty in [false, true] {
+        if empty {
+            app.workspaces.clear();
+            app.panes.clear();
+        }
+        let panes = app.panes.len();
+        let workspaces = app.workspaces.len();
+        for cwd in &invalid {
+            let error = app
+                .dispatch("pane.split", &json!({"cwd": cwd}))
+                .unwrap_err();
+            assert_eq!(error.0, "invalid_request", "cwd: {cwd}");
+            if cwd.as_str().is_some_and(|path| path.len() > 4096) {
+                assert_eq!(
+                    error.1,
+                    "cwd must be a non-empty path of at most 4096 bytes"
+                );
+            }
+            assert_eq!(app.panes.len(), panes);
+            assert_eq!(app.workspaces.len(), workspaces);
+        }
+    }
+}
+
+#[test]
+fn pane_split_null_cwd_keeps_inherited_directory() {
+    let (_env, mut app) = app("pane-split-null-cwd");
+    let base = app.layout().focus;
+    let cwd = app.panes[&base].cwd.clone();
+    let out = app.dispatch("pane.split", &json!({"cwd": null})).unwrap();
+    let split = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+    assert_eq!(app.panes[&split].cwd, cwd);
+}
+
 /// Background and default splits preserve their established focus behavior.
 #[test]
 fn pane_split_no_focus_keeps_the_caller_focused() {

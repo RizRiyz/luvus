@@ -105,6 +105,9 @@ in **Devices**, or set the initial limit at startup:
 luvus web --control --max-devices 4
 ```
 
+Pairing identifies a browser profile, not the physical device. Chrome and Safari
+on the same phone need separate pairing; normal tabs in one profile do not.
+
 Each paired browser receives an independent ticket, remembered in that browser
 profile for the bridge's origin. Open the plain address or a bookmark in another
 tab, or close and reopen the browser: no new pairing link is needed while the

@@ -744,16 +744,13 @@ pub fn unpack_mods(bits: u16) -> Modifier {
     Modifier::from_bits_truncate(bits)
 }
 
-/// Whether the current terminal advertises 24-bit color support.
+/// Whether this display client should preserve RGB colors.
 pub fn truecolor_supported() -> bool {
-    std::env::var("COLORTERM")
-        .map(|v| v.contains("truecolor") || v.contains("24bit"))
-        .unwrap_or(false)
+    crate::terminal::color_depth::truecolor_supported()
 }
 
 /// Downsample an RGB color to the nearest xterm-256 index. Terminals without
-/// truecolor (e.g. macOS Terminal.app) garble `38;2;r;g;b`, so we fall back to
-/// `38;5;n` which every 256-color terminal renders correctly.
+/// truecolor use `38;5;n` rather than unsupported `38;2;r;g;b` sequences.
 pub fn to_256(c: Color) -> Color {
     match c {
         Color::Rgb(r, g, b) => Color::Indexed(nearest_256(r, g, b)),

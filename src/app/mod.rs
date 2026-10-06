@@ -5337,16 +5337,18 @@ impl App {
     /// the synchronous spawn path's own fallback. Shared by `new_tab` and `split`
     /// so the two stay aligned.
     fn spawn_cwds(&self) -> Vec<PathBuf> {
-        self.spawn_cwds_for(self.active_ws, self.layout().focus)
+        self.spawn_cwds_for(self.active_ws, self.layout().focus, None)
     }
 
     /// Resolve the spawn directory chain for a specific pane and its workspace.
     /// Socket callers may target an inactive pane, so this cannot rely on the
     /// active workspace or tab.
-    fn spawn_cwds_for(&self, workspace: usize, pane: PaneId) -> Vec<PathBuf> {
+    fn spawn_cwds_for(&self, workspace: usize, pane: PaneId, cwd: Option<PathBuf>) -> Vec<PathBuf> {
         let home = crate::platform::home_dir().unwrap_or_default();
         let root = self.workspaces[workspace].cwd.clone();
-        let ordered = if self.config.layout.new_pane_to_workspace_root {
+        let ordered = if let Some(cwd) = cwd {
+            vec![cwd, root, home.clone()]
+        } else if self.config.layout.new_pane_to_workspace_root {
             vec![root, home.clone()]
         } else {
             let pane_cwd = self
@@ -5645,12 +5647,23 @@ impl App {
     /// With focus disabled, the current view and the target tab's prior focus are
     /// preserved even when the target belongs to another workspace.
     pub(crate) fn split_pane(&mut self, pane: PaneId, axis: Axis, focus: bool) -> Option<PaneId> {
+        self.split_pane_in(pane, axis, focus, None)
+    }
+
+    /// Split with an optional starting directory that overrides layout defaults.
+    pub(crate) fn split_pane_in(
+        &mut self,
+        pane: PaneId,
+        axis: Axis,
+        focus: bool,
+        cwd: Option<PathBuf>,
+    ) -> Option<PaneId> {
         let (wsi, ti) = self.pane_location(pane)?;
-        // Resolve the candidate chain up front (target pane → target workspace
+        // Resolve the candidate chain up front (explicit cwd or target pane → target workspace
         // root → $HOME, existing only) and hand the primary plus its fallbacks to
         // the deferred worker. If the primary vanishes before the fork, the
         // worker retries the fallbacks instead of spawning in a dead directory.
-        let cwds = self.spawn_cwds_for(wsi, pane);
+        let cwds = self.spawn_cwds_for(wsi, pane, cwd);
         let (cwd, fallback_cwds) = cwds.split_first()?;
         self.spawn_and_attach_new_pane(wsi, ti, pane, axis, focus, |app| {
             app.spawn_into_deferred(cwd.clone(), fallback_cwds)

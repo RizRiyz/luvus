@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -11,13 +10,15 @@ const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const repoRoot = path.resolve(webRoot, "..");
 const executable = path.resolve(process.env.LUVUS_BIN
   || path.join(repoRoot, "target", "debug", process.platform === "win32" ? "luvus.exe" : "luvus"));
-const home = await mkdtemp(path.join(os.tmpdir(), "luvus-native-web-"));
+await mkdir(path.join(repoRoot, "target"), { recursive: true });
+const home = await mkdtemp(path.join(repoRoot, "target", "luvus-native-web-"));
 const workspace = path.join(home, "workspace");
 await mkdir(workspace);
 const session = "native-web-" + process.pid;
 const env = { ...process.env, LUVUS_HOME: home };
 delete env.LUVUS_SOCKET_PATH;
 delete env.LUVUS_SESSION;
+delete env.LUVUS_BIN_PATH;
 let child;
 let stderr = "";
 const sockets = new Set();

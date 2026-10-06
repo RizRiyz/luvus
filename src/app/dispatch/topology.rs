@@ -154,6 +154,27 @@ impl App {
     pub(super) fn api_pane_split(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
+            let cwd = match p.get("cwd") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    let invalid =
+                        |message: &str| ("invalid_request".to_string(), message.to_string());
+                    let cwd = value
+                        .as_str()
+                        .filter(|cwd| !cwd.is_empty() && cwd.len() <= 4096)
+                        .ok_or_else(|| {
+                            invalid("cwd must be a non-empty path of at most 4096 bytes")
+                        })?;
+                    let path = Path::new(cwd);
+                    if !path.is_absolute() {
+                        return Err(invalid("cwd must be absolute"));
+                    }
+                    if !path.is_dir() {
+                        return Err(invalid("cwd must be an existing directory"));
+                    }
+                    Some(path.to_path_buf())
+                }
+            };
             if self.workspaces.is_empty() && !self.ensure_workspace_for_terminal() {
                 return Err((
                     "spawn_failed".to_string(),
@@ -185,7 +206,9 @@ impl App {
                 }
             };
             let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
-            let new = self.split_pane(base, axis, focus).ok_or_else(not_found)?;
+            let new = self
+                .split_pane_in(base, axis, focus, cwd)
+                .ok_or_else(not_found)?;
             let (workspace, tab) = self.pane_location(new).ok_or_else(not_found)?;
             Ok(json!({
                 "type":"pane",

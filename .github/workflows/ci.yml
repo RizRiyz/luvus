@@ -17,6 +17,25 @@ env:
   CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
+  npm:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            website/package-lock.json
+      - name: Audit web dependencies
+        run: npm --prefix web audit --package-lock-only --ignore-scripts
+      - name: Audit website dependencies
+        run: npm --prefix website audit --package-lock-only --ignore-scripts
+
   test:
     name: fmt · clippy · test
     runs-on: ubuntu-latest
@@ -48,6 +67,7 @@ jobs:
         run: |
           cargo build --locked
           python3 tests/server_detach_pty.py --luvus target/debug/luvus
+          python3 scripts/test-terminal-colors-pty.py --luvus target/debug/luvus
       - name: Validate web client and bridge
         run: |
           cargo build --locked
@@ -55,6 +75,7 @@ jobs:
           npm --prefix web test
           npm --prefix web run test:integration
           LUVUS_BIN="$PWD/target/debug/luvus" npm --prefix web run test:native
+          LUVUS_BIN="$PWD/target/debug/luvus" LUVUS_BROWSER_BIN=/usr/bin/google-chrome npm --prefix web run test:browser-pairing
       - name: Validate terminal backend contract
         run: |
           python3 examples/uhp/terminal/consumer.py --fixtures
@@ -94,6 +115,7 @@ jobs:
         run: |
           cargo build --locked
           python3 tests/server_detach_pty.py --luvus target/debug/luvus
+          python3 scripts/test-terminal-colors-pty.py --luvus target/debug/luvus
       - name: Validate terminal backend contract
         run: |
           python3 examples/uhp/terminal/consumer.py --fixtures

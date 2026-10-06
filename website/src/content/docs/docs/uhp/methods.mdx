@@ -407,6 +407,13 @@ by side. `"right"` and `"down"` force a direction (`"stack"` is an alias for
 `"down"`). Older servers reject `"auto"` and treat an omitted direction as
 right, so callers that want the server default should omit the field.
 
+`pane.split` also accepts optional `cwd`: a non-empty absolute path of at most
+4096 bytes that names an existing directory. Invalid values return
+`invalid_request` before creating a pane or workspace. Omitted or `null` values
+keep the existing starting-directory behavior. An explicit `cwd` overrides
+`layout.new_pane_to_workspace_root`; if the directory disappears before spawning,
+Luvus retries the target workspace root and then the home directory.
+
 `direction` is now validated: any other value, or a non-string, returns
 `invalid_request`. Earlier servers silently treated an unrecognized value as
 `"right"`, so a caller that sent something like `"vertical"` used to get a

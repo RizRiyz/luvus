@@ -61,8 +61,14 @@ Luvus pane.
 
 ## Pair local and mobile devices
 
-The bridge authorizes two browser devices by default. After the first browser
-connects, open **Devices**, choose a limit from 1 through 8, and create a new
+QR/code pairing registers a browser profile for this bridge's origin, not a
+physical device. Normal tabs in the same profile share one pairing and count as
+one paired browser; another browser or profile needs its own pairing. There is
+a separate limit of eight simultaneous browser connections across the bridge.
+
+The bridge authorizes two browser profiles by default. Use `--max-devices <1-8>`
+at startup to allow more; **Devices** can adjust the limit up to that ceiling.
+After the first browser connects, open **Devices** and create a new
 one-use pairing for each phone, tablet, or computer. Scan the locally generated
 QR code with the phone camera, or use Copy/Share as a fallback. Existing devices
 stay live; each browser profile receives an independent ticket remembered in
@@ -94,7 +100,8 @@ field to return to the browser's current origin.
 
 `LUVUS_WEB_MAX_DEVICES` sets the initial limit and accepts 1 through 8. The
 Devices panel may change that limit for the current bridge lifetime, but cannot
-set it below the number of authorized devices plus unspent pairing links.
+exceed the startup value or go below the number of authorized profiles plus
+unspent pairing links.
 
 For finite browser access, set `LUVUS_WEB_TICKET_TTL` to 1 through 86400 seconds
 for the development bridge, or use `luvus web --ticket-ttl <seconds>` for the
@@ -102,6 +109,18 @@ native bridge. Leaving it unset means process-bound access with no fixed timeout
 Reconnects do not extend a finite lifetime. Browser storage is a bearer credential
 store: pair only trusted browsers, use a stable HTTPS origin remotely, and pair
 again after a bridge restart. Blocked or private storage may not retain access.
+
+Verify real multi-tab pairing with the exact debug binary and an installed
+Chromium browser. The harness creates and cleans up its own home under `target/`:
+
+```sh
+LUVUS_BIN="$PWD/target/debug/luvus" LUVUS_BROWSER_BIN=/path/to/chromium \
+  npm --prefix web run test:browser-pairing
+```
+
+It checks that eight tabs share one pairing, reopening tabs and restarting the
+browser retain access while the bridge runs, and revoking one profile signs out
+all its tabs without revoking a separately paired profile.
 
 ## Manual development
 
