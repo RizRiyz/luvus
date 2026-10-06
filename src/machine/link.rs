@@ -71,6 +71,10 @@ impl LinkControl {
         let mut bytes = Vec::new();
         protocol::write_message(&mut bytes, message)?;
         let length = bytes.len();
+        #[allow(
+            deprecated,
+            reason = "AtomicUsize::try_update requires Rust 1.95; keep the Rust 1.88 MSRV"
+        )]
         self.queued_bytes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
                 queued

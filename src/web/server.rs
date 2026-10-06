@@ -123,6 +123,10 @@ struct ConnectionGuard(Arc<std::sync::atomic::AtomicUsize>);
 
 impl ConnectionGuard {
     fn acquire(counter: &Arc<std::sync::atomic::AtomicUsize>, limit: usize) -> Option<Self> {
+        #[allow(
+            deprecated,
+            reason = "AtomicUsize::try_update requires Rust 1.95; keep the Rust 1.88 MSRV"
+        )]
         counter
             .fetch_update(
                 std::sync::atomic::Ordering::AcqRel,
