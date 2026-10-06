@@ -2,6 +2,117 @@ use super::super::*;
 use crate::app::App;
 
 #[test]
+fn module_update_adopts_only_fenced_managed_replacements_and_keeps_settings() {
+    let _env = crate::persist::test_env("module-update-api");
+    let old = crate::module::paths::git_dir("fixture", "old");
+    let fresh = crate::module::paths::git_dir("fixture", "new");
+    let manifest = |version| {
+        format!("id = \"you.update\"\nname = \"Update\"\nversion = \"{version}\"\nmin_luvus_version = \"0.1.0\"\n[[settings]]\nkey = \"token\"\ntitle = \"Token\"\ntype = \"string\"\n")
+    };
+    for (root, version) in [(&old, "0.1.0"), (&fresh, "0.2.0")] {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("luvus-module.toml"), manifest(version)).unwrap();
+    }
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.dispatch(
+        "module.link",
+        &json!({"path":old, "source":"owner/repo/sub@old", "git_ref":"v1", "disabled":true}),
+    )
+    .unwrap();
+    let info = app
+        .dispatch("module.info", &json!({"id":"owner/repo/sub"}))
+        .unwrap();
+    assert_eq!(info["git_ref"], "v1");
+    let old_token = app.module_tokens["you.update"].clone();
+    app.module_set_setting("you.update", "token", "secret".into())
+        .unwrap();
+    let config_dir = app.module_config_dir("you.update").unwrap();
+    let state = crate::module::paths::state_dir("you.update");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("sentinel"), "state").unwrap();
+    let params = json!({"id":"owner/repo/sub", "path":fresh, "source":"owner/repo/sub@new", "git_ref":"v2", "expected_root":info["root"], "expected_source":info["source"], "expected_ref":info["git_ref"]});
+    for (key, value) in [
+        ("expected_source", json!("owner/repo/sub@stale")),
+        ("source", json!("other/repo@new")),
+        ("expected_ref", json!("wrong")),
+        ("path", info["root"].clone()),
+        ("unknown", json!(true)),
+        ("git_ref", json!(false)),
+    ] {
+        let mut invalid = params.clone();
+        invalid[key] = value;
+        assert!(app.dispatch("module.update", &invalid).is_err(), "{key}");
+        assert_eq!(
+            app.modules.find("you.update").unwrap().manifest.version,
+            "0.1.0"
+        );
+        assert_eq!(app.module_tokens["you.update"], old_token);
+    }
+    std::fs::write(
+        fresh.join("luvus-module.toml"),
+        manifest("0.2.0").replace("you.update", "you.changed"),
+    )
+    .unwrap();
+    assert!(app.dispatch("module.update", &params).is_err());
+    std::fs::write(fresh.join("luvus-module.toml"), manifest("0.2.0")).unwrap();
+    // Persistence failure must leave the live registry/credential untouched.
+    let registry_path = crate::module::paths::registry_path();
+    std::fs::remove_file(&registry_path).unwrap();
+    std::fs::create_dir(&registry_path).unwrap();
+    assert!(app.dispatch("module.update", &params).is_err());
+    assert_eq!(app.module_tokens["you.update"], old_token);
+    assert_eq!(
+        app.modules.find("you.update").unwrap().manifest.version,
+        "0.1.0"
+    );
+    std::fs::remove_dir(&registry_path).unwrap();
+    assert_eq!(
+        app.dispatch("module.update", &params).unwrap(),
+        json!({"type":"module", "id":"you.update"})
+    );
+    let module = app.modules.find("you.update").unwrap();
+    assert_eq!(module.manifest.version, "0.2.0");
+    assert!(!module.enabled);
+    assert_eq!(module.git_ref.as_deref(), Some("v2"));
+    assert_ne!(app.module_tokens["you.update"], old_token);
+    assert_eq!(
+        app.module_settings("you.update")
+            .unwrap()
+            .get("token")
+            .unwrap(),
+        "secret"
+    );
+    assert_eq!(app.module_config_dir("you.update").unwrap(), config_dir);
+    assert!(state.join("sentinel").exists());
+    assert!(old.exists(), "old live process CWD remains available");
+    assert!(
+        app.dispatch("module.update", &params).is_err(),
+        "concurrent/repeated stale update rejected"
+    );
+    let restored = crate::module::registry::load();
+    let mut legacy = serde_json::to_value(restored.find("you.update").unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("git_ref");
+    let legacy: crate::module::InstalledModule = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.git_ref.is_none(), "old registries remain loadable");
+    assert_eq!(
+        restored.find("you.update").unwrap().manifest.version,
+        "0.2.0"
+    );
+    // A local link cannot be passed off as an updateable checkout.
+    app.module_unlink("you.update").unwrap();
+    let local = crate::persist::config_dir().join("local");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("luvus-module.toml"), manifest("0.1.0")).unwrap();
+    app.module_link_with(&local, true, None).unwrap();
+    assert!(crate::module::install::UpdateTarget::from_module(
+        app.modules.find("you.update").unwrap()
+    )
+    .is_err());
+    assert!(app.dispatch("module.update", &params).is_err());
+}
+
+#[test]
 fn mission_open_targets_a_workspace_and_rejects_missing_ones() {
     let _env = crate::persist::test_env("mission-open-api");
     let (tx, _rx) = std::sync::mpsc::channel();

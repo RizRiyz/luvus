@@ -221,7 +221,11 @@ or bar placement.
 - Use UHP 1.0 for harnesses, orchestrators, typed discovery, event streams,
   atomic prompts, terminal access, and revision-safe mutations.
 - Use modules for reusable, explicitly installed extensions with UI surfaces
-  or event hooks.
+  or event hooks. With explicit approval, update a managed module via
+  `luvus module update <id|owner/repo[/sub]> [--ref REF] [--yes]` against its
+  running session. Saved refs, settings, and enabled state survive; local links
+  are updated in their own checkout. Existing module panes stay on old code
+  and may need reopening to publish UI with the new credentials.
 
 CLI commands and UHP methods control the same server state. UHP is the public
 automation protocol. The binary client-frame transport is an internal rendering

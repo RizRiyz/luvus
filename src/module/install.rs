@@ -14,10 +14,70 @@ use anyhow::{anyhow, bail, Context, Result};
 use super::manifest::{ModuleManifest, MANIFEST_FILE};
 use super::paths;
 
+#[derive(Debug)]
 pub struct Installed {
     pub root: PathBuf,
     pub source: String,
     pub id: String,
+    pub git_ref: Option<String>,
+}
+
+/// Identity fence captured before downloading an update.
+#[derive(Clone, serde::Deserialize)]
+pub struct UpdateTarget {
+    pub id: String,
+    pub root: PathBuf,
+    pub source: String,
+    #[serde(default)]
+    pub git_ref: Option<String>,
+}
+
+impl UpdateTarget {
+    pub fn from_module(module: &super::InstalledModule) -> Result<Self> {
+        let target = Self {
+            id: module.id.clone(),
+            root: module.root.clone(),
+            source: module.source.clone().ok_or_else(|| {
+                anyhow!("linked modules must be updated in their own working directory")
+            })?,
+            git_ref: module.git_ref.clone(),
+        };
+        target.spec()?;
+        Ok(target)
+    }
+
+    pub fn spec(&self) -> Result<&str> {
+        if !is_removable(&self.root) {
+            bail!("linked modules must be updated in their own working directory");
+        }
+        self.source
+            .rsplit_once('@')
+            .map(|(spec, _)| spec)
+            .filter(|spec| !spec.is_empty())
+            .ok_or_else(|| anyhow!("module has no pinned install source"))
+    }
+}
+
+/// Build a replacement separately; never modify the registered checkout.
+pub fn update(target: &UpdateTarget, git_ref: Option<&str>, yes: bool) -> Result<Installed> {
+    let spec = target.spec()?;
+    let (url, slug, sub) = parse_spec(spec)?;
+    let staging = paths::staging_dir();
+    fs::create_dir_all(paths::git_base()).context("create managed modules dir")?;
+    let result = install_inner(
+        &url,
+        &slug,
+        &sub,
+        git_ref.or(target.git_ref.as_deref()),
+        yes,
+        &staging,
+        spec,
+        Some(&target.id),
+    );
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
 }
 
 /// Clone, build, and stage a module; returns where it landed + its pinned source.
@@ -27,7 +87,7 @@ pub fn install(spec: &str, git_ref: Option<&str>, yes: bool) -> Result<Installed
     if let Some(parent) = staging.parent() {
         fs::create_dir_all(parent).context("create managed modules dir")?;
     }
-    let result = install_inner(&url, &slug, &sub, git_ref, yes, &staging, spec);
+    let result = install_inner(&url, &slug, &sub, git_ref, yes, &staging, spec, None);
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging);
     }
@@ -40,6 +100,7 @@ pub fn is_removable(root: &Path) -> bool {
     paths::is_managed_git_path(root)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_inner(
     url: &str,
     slug: &str,
@@ -48,7 +109,11 @@ fn install_inner(
     yes: bool,
     staging: &Path,
     spec: &str,
+    expected_id: Option<&str>,
 ) -> Result<Installed> {
+    if git_ref.is_some_and(|value| value.is_empty() || value.starts_with('-')) {
+        bail!("invalid git ref");
+    }
     // 1. Shallow clone.
     git(&["clone", "--depth", "1", url, &staging.to_string_lossy()])
         .with_context(|| format!("git clone {url}"))?;
@@ -78,11 +143,14 @@ fn install_inner(
     let before = fs::read(&manifest_path)
         .with_context(|| format!("no {MANIFEST_FILE} at {}", module_root.display()))?;
     let manifest = ModuleManifest::load(&module_root).map_err(|e| anyhow!("{e}"))?;
+    if expected_id.is_some_and(|id| id != manifest.id) {
+        bail!("updated manifest changed module id — refusing to update");
+    }
     let sha = git_capture(&["-C", &staging.to_string_lossy(), "rev-parse", "HEAD"])?;
     let sha = sha.trim().to_string();
 
     // 3. Preview + confirm.
-    print_preview(spec, &sha, &manifest);
+    print_preview(spec, &sha, &manifest, expected_id.is_some());
     if !yes && !confirm()? {
         bail!("aborted");
     }
@@ -104,8 +172,22 @@ fn install_inner(
     verify_manifest_unchanged(&module_root, &manifest_path, &before)?;
 
     // 6. Atomically move into the managed dir.
-    let dest = paths::git_dir(slug, &short(&sha));
+    // Updates need a distinct checkout even when the commit did not change:
+    // running panes/commands may still have the old checkout as their CWD.
+    let hash = if expected_id.is_some() {
+        format!(
+            "{}-{}",
+            short(&sha),
+            crate::terminal::backend::random_id().map_err(|e| anyhow!(e))?
+        )
+    } else {
+        short(&sha)
+    };
+    let dest = paths::git_dir(slug, &hash);
     if dest.exists() {
+        if expected_id.is_some() {
+            bail!("replacement checkout already exists");
+        }
         let _ = fs::remove_dir_all(&dest);
     }
     fs::rename(&module_root, &dest).with_context(|| format!("move into {}", dest.display()))?;
@@ -118,6 +200,7 @@ fn install_inner(
         root: dest,
         source: format!("{spec}@{sha}"),
         id: manifest.id,
+        git_ref: git_ref.map(String::from),
     })
 }
 
@@ -160,8 +243,13 @@ fn parse_spec(spec: &str) -> Result<(String, String, String)> {
     Ok((url, format!("{owner}-{repo}"), sub))
 }
 
-fn print_preview(spec: &str, sha: &str, m: &ModuleManifest) {
-    println!("Install module from {}", escape_terminal_controls(spec));
+fn print_preview(spec: &str, sha: &str, m: &ModuleManifest, updating: bool) {
+    let label = if updating {
+        crate::i18n::cli::Context::configured().text("Update module from")
+    } else {
+        "Install module from"
+    };
+    println!("{label} {}", escape_terminal_controls(spec));
     println!("  id:      {}", m.id);
     println!(
         "  name:    {} {}",
@@ -301,6 +389,88 @@ fn short(sha: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn module_update_builds_separately_and_preserves_old_checkout_on_failure() {
+        let _env = crate::persist::test_env("module-update-build");
+        let remote = crate::persist::config_dir().join("remote");
+        fs::create_dir_all(&remote).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&remote)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let manifest = |version: &str, id: &str, build: &str| {
+            format!(
+            "id = {id:?}\nname = \"Update\"\nversion = {version:?}\nmin_luvus_version = \"0.1.0\"\n[[build]]\ncommand = [\"sh\", \"-c\", {build:?}]\n"
+        )
+        };
+        let write = |text: String| fs::write(remote.join(MANIFEST_FILE), text).unwrap();
+        let commit = || {
+            git(&["add", "."]);
+            git(&[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "fixture",
+            ]);
+        };
+        git(&["init", "-q"]);
+        write(manifest("0.1.0", "you.update", "touch built"));
+        commit();
+        git(&["tag", "v1"]);
+        let url = format!("file://{}", remote.display());
+        let old = install(&url, Some("v1"), true).unwrap();
+        let target = UpdateTarget {
+            id: old.id.clone(),
+            root: old.root.clone(),
+            source: old.source.clone(),
+            git_ref: old.git_ref.clone(),
+        };
+        let old_bytes = fs::read(old.root.join(MANIFEST_FILE)).unwrap();
+        write(manifest("0.2.0", "you.update", "touch built"));
+        commit();
+        git(&["tag", "v2"]);
+        // Omitted --ref keeps the original pin; explicit override changes it.
+        let pinned = update(&target, None, true).unwrap();
+        assert_eq!(pinned.source, old.source);
+        assert_ne!(pinned.root, old.root);
+        assert_eq!(pinned.git_ref.as_deref(), Some("v1"));
+        let fresh = update(&target, Some("v2"), true).unwrap();
+        assert_ne!(fresh.source, old.source);
+        assert_eq!(fresh.git_ref.as_deref(), Some("v2"));
+        assert!(fresh.root.join("built").exists());
+        assert_eq!(ModuleManifest::load(&fresh.root).unwrap().version, "0.2.0");
+        let mut unpinned = target.clone();
+        unpinned.git_ref = None;
+        assert_eq!(update(&unpinned, None, true).unwrap().source, fresh.source);
+        write(manifest("0.3.0", "you.update", "exit 1"));
+        commit();
+        assert!(update(&unpinned, None, true).is_err());
+        write(manifest("0.4.0", "you.other", "touch should-not-build"));
+        commit();
+        assert!(update(&unpinned, None, true)
+            .unwrap_err()
+            .to_string()
+            .contains("changed module id"));
+        assert_eq!(fs::read(old.root.join(MANIFEST_FILE)).unwrap(), old_bytes);
+        assert!(!fs::read_dir(paths::git_base()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".staging-")));
+    }
 
     #[test]
     fn build_environment_scrubs_current_and_retired_control_data() {

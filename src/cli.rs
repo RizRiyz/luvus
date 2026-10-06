@@ -230,6 +230,7 @@ modules (extensions):
   module info <id>           show a module's actions / panes / events / source
   module link <path>         register a local module dir (--disabled to skip enabling)
   module install <owner>/<repo>[/sub] [--ref REF] [--yes]   install from GitHub
+  module update <id> [--ref REF] [--yes]   update an installed module
   module unlink <id>         remove a module from the registry
   module uninstall <id>      unlink + delete a git-installed module's checkout
   module enable <id> | disable <id>
@@ -511,6 +512,11 @@ fn run_inner(args: &[String]) -> Result<i32> {
         && args.get(2).map(String::as_str) == Some("install")
     {
         return module_install(args, crate::i18n::cli::Context::configured());
+    }
+    if args.get(1).map(String::as_str) == Some("module")
+        && args.get(2).map(String::as_str) == Some("update")
+    {
+        return module_update(args, crate::i18n::cli::Context::configured());
     }
     // `module search` is a read-only GitHub lookup — no server involved.
     if args.get(1).map(String::as_str) == Some("module")
@@ -1424,6 +1430,7 @@ fn module_install(args: &[String], context: crate::i18n::cli::Context) -> Result
     let params = json!({
         "path": installed.root.display().to_string(),
         "source": installed.source,
+        "git_ref": installed.git_ref,
     });
     match send_request("module.link", params) {
         Ok(v) if v.get("error").is_some() => {
@@ -1453,6 +1460,80 @@ fn module_install(args: &[String], context: crate::i18n::cli::Context) -> Result
             Ok(0)
         }
     }
+}
+
+/// Update is a local approval/build followed by a fenced server-side adoption.
+/// Never fall back to editing the registry on an ambiguous transport failure.
+fn module_update(args: &[String], context: crate::i18n::cli::Context) -> Result<i32> {
+    let (id, git_ref, yes) = parse_module_update(&args[3.min(args.len())..])?;
+    let response = send_request("module.info", json!({"id":id}))?;
+    ensure_api_success(&response)?;
+    if response["result"]["source"].is_null() {
+        return Err(anyhow!(context.text(
+            "linked modules must be updated in their own working directory"
+        )));
+    }
+    let target: crate::module::install::UpdateTarget = serde_json::from_value(
+        response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing module.info result"))?,
+    )?;
+    // Check support before any download/build (older servers cannot adopt).
+    let capabilities = send_request("uhp.capabilities", json!({}))?;
+    ensure_api_success(&capabilities)?;
+    if !capabilities["result"]["methods"]
+        .as_array()
+        .is_some_and(|methods| methods.iter().any(|method| method == "module.update"))
+    {
+        return Err(anyhow!(
+            context.text("selected server does not support module.update")
+        ));
+    }
+    let installed = crate::module::install::update(&target, git_ref.as_deref(), yes)?;
+    let response = send_request(
+        "module.update",
+        json!({
+            "id": target.id,
+            "path": installed.root,
+            "source": installed.source,
+            "git_ref": installed.git_ref,
+            "expected_root": target.root,
+            "expected_source": target.source,
+            "expected_ref": target.git_ref,
+        }),
+    )?;
+    ensure_api_success(&response)?;
+    println!(
+        "{} {} ({})",
+        context.text("updated"),
+        installed.id,
+        installed.source
+    );
+    Ok(0)
+}
+
+fn parse_module_update(args: &[String]) -> Result<(String, Option<String>, bool)> {
+    let usage = "usage: luvus module update <id|owner/repo[/sub]> [--ref REF] [--yes]";
+    let mut id = None;
+    let mut git_ref = None;
+    let mut yes = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--ref" if git_ref.is_none() => {
+                let value = args
+                    .next()
+                    .filter(|value| !value.is_empty() && !value.starts_with('-'))
+                    .ok_or_else(|| anyhow!(usage))?;
+                git_ref = Some(value.clone());
+            }
+            "--yes" | "-y" if !yes => yes = true,
+            value if !value.starts_with('-') && id.is_none() => id = Some(arg.clone()),
+            _ => return Err(anyhow!(usage)),
+        }
+    }
+    Ok((id.ok_or_else(|| anyhow!(usage))?, git_ref, yes))
 }
 
 /// `luvus doctor` — report which optional external tools are present. The core
@@ -2540,6 +2621,7 @@ fn register_directly(installed: &crate::module::install::Installed) -> Result<()
         root: installed.root.clone(),
         enabled: true,
         source: Some(installed.source.clone()),
+        git_ref: installed.git_ref.clone(),
         manifest,
         warning: None,
     });
@@ -4438,6 +4520,34 @@ mod tests {
         let server_message = "remote policy rejected request: permission denied";
         let unchanged = localize_cli_error_with(anyhow!(server_message), context);
         assert_eq!(unchanged.to_string(), server_message);
+    }
+
+    #[test]
+    fn parses_module_update_and_rejects_extras() {
+        let parse = |s: &str| parse_module_update(&argv(s));
+        assert_eq!(parse("you.test").unwrap(), ("you.test".into(), None, false));
+        assert_eq!(
+            parse("--yes owner/repo/sub --ref v2").unwrap(),
+            ("owner/repo/sub".into(), Some("v2".into()), true)
+        );
+        assert!(parse("you.test -y").unwrap().2);
+        for invalid in [
+            "",
+            "--yes",
+            "you.test extra",
+            "you.test --all",
+            "you.test --ref",
+            "you.test --ref --yes",
+            "you.test --ref v1 --ref v2",
+            "you.test --yes -y",
+        ] {
+            assert!(parse(invalid).is_err(), "{invalid}");
+        }
+        assert!(parse_module_update(&["you.test".into(), "--ref".into(), "".into()]).is_err());
+        assert!(DETAILED_USAGE.contains("module update <id>"));
+        let help = rendered_topic_help("module", Some("update"));
+        assert!(help.contains("module update <id>"));
+        assert!(!help.contains("module install"));
     }
 
     fn argv(s: &str) -> Vec<String> {

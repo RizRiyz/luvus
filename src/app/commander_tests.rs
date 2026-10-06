@@ -27,6 +27,7 @@ fn add_commander_test_module(
         root,
         enabled: true,
         source: None,
+        git_ref: None,
         manifest,
         warning: None,
     });

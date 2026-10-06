@@ -280,6 +280,7 @@ impl App {
             "module.list" => self.api_module_list(method, p),
             "module.info" => self.api_module_info(method, p),
             "module.link" => self.api_module_link(method, p),
+            "module.update" => self.api_module_update(method, p),
             "module.unlink" => self.api_module_unlink(method, p),
             "module.uninstall" => self.api_module_uninstall(method, p),
             "module.enable" => self.api_module_enable(method, p),

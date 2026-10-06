@@ -64,8 +64,40 @@ An action opted into Commander also shows its `$` name, target, input, and
 confirmation policy in this preview.
 
 Use `--yes` to skip the prompt in scripts and CI, and only for sources you
-already trust. There's no `module update`: reinstall from GitHub to refresh a
-managed module.
+already trust. To refresh an installed module, use `module update` rather than
+installing over its registered ID.
+
+## Updating
+
+```sh
+luvus module update example.agent-ping
+luvus module update owner/repo/path/to
+luvus module update owner/repo --ref v1.2
+```
+
+Select the session that owns the module; its server must be running and support
+`module.update`. The CLI downloads and builds a separate checkout using the same
+command preview, approval prompt, scrubbed build environment, and manifest
+immutability check as installation. `--yes` skips approval only for trusted
+sources. No background update checks or automatic upgrades run.
+
+Updates preserve the module ID, settings, config/state directories, and current
+enabled/disabled state. A saved `--ref` is reused unless you explicitly supply
+a different one. Without a saved ref, the source's default branch is used.
+Older installations did not store their selected ref: supply `--ref` again on
+their first update if you want to retain a pin.
+
+Only after a successful build does the server validate that the old source,
+checkout, and ref still match, persist the replacement, and refresh module UI
+and startup hooks. Download/build failures, changed module IDs, and concurrent
+replacement conflicts leave the registered version unchanged. Locally linked
+modules must be updated and built in their own working directory.
+
+Existing module panes and commands are not restarted. Their old checkout is
+retained so their working directory remains valid; new invocations use the new
+checkout. Old publisher credentials are retired, so reopen an old module pane
+if it needs to publish docks or bars. Retained old/unadopted checkouts are not
+automatically garbage-collected; `uninstall` removes only the current checkout.
 
 ## Configuring
 

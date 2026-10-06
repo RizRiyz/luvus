@@ -31,7 +31,7 @@
         "task.add", "task.list", "task.get", "task.claim", "task.next", "task.start", "task.heartbeat", "task.update", "task.done", "task.retry", "task.merge", "task.release", "task.delete",
         "automation.create", "automation.list", "automation.get", "automation.update", "automation.enable", "automation.disable", "automation.rebind", "automation.delete", "automation.run", "automation.history", "automation.preview", "automation.health",
         "lease.acquire", "lease.list", "lease.release",
-        "module.list", "module.info", "module.link", "module.unlink", "module.uninstall", "module.enable", "module.disable", "module.action.list", "module.action.invoke", "module.pane.open", "module.pane.focus", "module.pane.close", "module.config_dir", "module.settings.list", "module.settings.get", "module.settings.set", "module.log.list",
+        "module.list", "module.info", "module.link", "module.update", "module.unlink", "module.uninstall", "module.enable", "module.disable", "module.action.list", "module.action.invoke", "module.pane.open", "module.pane.focus", "module.pane.close", "module.config_dir", "module.settings.list", "module.settings.get", "module.settings.set", "module.log.list",
         "theme.list", "theme.path", "theme.use", "theme.reload", "manifest.reload",
         "ui.sidebar", "ui.agent_title.push", "ui.agent_title.clear", "ui.dock.push", "ui.dock.list", "ui.dock.move", "ui.bar.push", "ui.bar.list", "ui.bar.move", "ui.bar.remove", "ui.notification.push", "ui.notification.clear", "ui.toast",
         "terminal.backend.inventory", "terminal.backend.snapshot", "terminal.backend.validate", "terminal.backend.processes", "terminal.backend.capture", "terminal.backend.observe", "terminal.backend.control", "terminal.backend.type_literal", "terminal.backend.paste_text", "terminal.backend.submit_text", "terminal.backend.send_key", "terminal.backend.set_title", "terminal.backend.notify", "terminal.backend.create", "terminal.backend.close", "terminal.backend.wait_change", "terminal.backend.wait_output", "terminal.backend.events.subscribe"
@@ -41,6 +41,19 @@
   },
   "$defs": {
     "emptyParams": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+    "moduleUpdateParams": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "path", "source", "expected_root", "expected_source"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "expected_root": { "type": "string", "minLength": 1 },
+        "expected_source": { "type": "string", "minLength": 1 },
+        "expected_ref": { "type": ["string", "null"], "minLength": 1 },
+        "git_ref": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
     "paneListParams": {
       "type": "object", "additionalProperties": false,
       "properties": { "all_tabs": { "type": "boolean", "default": true } }
@@ -404,6 +417,8 @@
     }
   },
   "allOf": [
+    { "if": { "properties": { "method": { "const": "module.update" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/moduleUpdateParams" } } } },
     { "if": { "properties": { "method": { "enum": ["host.capabilities", "host.info", "host.doctor", "host.update.check", "skill.status", "integration.status", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
     { "if": { "properties": { "method": { "const": "machine.list" } } },

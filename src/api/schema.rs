@@ -78,6 +78,35 @@ mod tests {
     }
 
     #[test]
+    fn module_update_contract_requires_the_old_identity_fence() {
+        let bundle = schema_bundle();
+        let params = &bundle["request"]["$defs"]["moduleUpdateParams"];
+        assert_eq!(params["additionalProperties"], false);
+        assert_eq!(
+            params["required"],
+            json!(["id", "path", "source", "expected_root", "expected_source"])
+        );
+        assert_eq!(
+            params["properties"]["git_ref"]["type"],
+            json!(["string", "null"])
+        );
+        assert!(bundle["request"]["allOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| {
+                branch["if"]["properties"]["method"]["const"] == "module.update"
+                    && branch["then"]["properties"]["params"]["$ref"]
+                        == "#/$defs/moduleUpdateParams"
+            }));
+        assert_eq!(
+            crate::api::capabilities::required_scope("module.update"),
+            "extensions"
+        );
+        assert!(!crate::api::capabilities::is_read_only("module.update"));
+    }
+
+    #[test]
     fn pane_list_request_contract_exposes_boolean_all_tabs_scope() {
         let bundle = schema_bundle();
         let request = &bundle["request"];

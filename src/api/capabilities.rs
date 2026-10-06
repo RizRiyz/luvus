@@ -150,6 +150,7 @@ pub const METHODS: &[&str] = &[
     "module.list",
     "module.info",
     "module.link",
+    "module.update",
     "module.unlink",
     "module.uninstall",
     "module.enable",

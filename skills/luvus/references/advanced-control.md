@@ -49,8 +49,13 @@ remains compatible with older Luvus releases.
   Branch-backed dependencies unblock only after they are merged. Release
   requeues the task and releases leases without stopping its worker pane.
 - Inspect module metadata, actions, settings, and logs before changing module
-  state. Installation, uninstallation, and consequential setting changes need
-  clear authorization.
+  state. Installation, updates, uninstallation, and consequential setting
+  changes need clear authorization. Update a managed module with
+  `luvus module update <id|owner/repo[/sub]> [--ref REF] [--yes]` against its
+  running session. Omitted `--ref` retains a saved pin; use `--yes` only for
+  approved sources. Local links are updated in their own checkout. The command
+  preserves settings/enabled state and leaves existing panes running; reopen
+  old module panes if they need publisher credentials for the new version.
 - Validate theme sources before installation. CLI widgets use `luvus bar`; UHP
   widgets use `ui.bar.*`. Inspect current placement before moving or removing a
   widget or dock.

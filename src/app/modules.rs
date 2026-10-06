@@ -59,6 +59,7 @@ impl App {
             root,
             enabled,
             source,
+            git_ref: None,
             manifest,
             warning: None,
         });
@@ -70,6 +71,32 @@ impl App {
         // next restart, so its docks and bar widgets appear immediately.
         self.run_module_startup_hooks();
         Ok(id)
+    }
+
+    /// Adopt an already approved/built checkout. Git and builds stay in the CLI.
+    pub fn module_update(
+        &mut self,
+        target: &crate::module::install::UpdateTarget,
+        installed: &crate::module::install::Installed,
+    ) -> Result<(), String> {
+        // Allocate the new credential before mutation; old processes must not
+        // publish stale docks/bars using the replacement's identity.
+        let token = crate::terminal::backend::random_id()?;
+        let dock_ids = self.module_dock_ids(&target.id);
+        let mut replacement = self.modules.clone();
+        replacement.replace(target, installed)?;
+        registry::save_checked(&replacement)
+            .map_err(|e| format!("cannot persist module update: {e}"))?;
+        self.modules = replacement;
+        self.remove_module_docks(&dock_ids);
+        self.bar.clear_owner(&target.id);
+        self.clear_agent_row_titles_for_owner(&target.id);
+        self.module_tokens.insert(target.id.clone(), token);
+        self.module_startup_done.remove(&target.id);
+        self.bar.sync_modules(&self.modules);
+        self.refresh_commander_module_catalog();
+        self.run_module_startup_hooks();
+        Ok(())
     }
 
     /// Uninstall a git-installed module: remove it from the registry **and**

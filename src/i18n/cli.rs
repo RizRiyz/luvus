@@ -176,6 +176,7 @@ macro_rules! tr {
 /// Entries are matched only as a complete line or a whitespace-delimited line
 /// suffix, so canonical syntax at the start of a row is never rewritten.
 static HELP: &[Translation] = &[
+    tr!("update an installed module", "actualizar un módulo instalado", "atualizar um módulo instalado", "mettre à jour un module installé", "ein installiertes Modul aktualisieren", "perbarui modul terpasang", "更新已安装的模块", "インストール済みモジュールを更新", "설치된 모듈 업데이트"),
     tr!(
         "Serve the optional browser client",
         "Servir el cliente web opcional",
@@ -3069,6 +3070,9 @@ static TEXT: &[Translation] = &[
         "생성됨"),
     tr!("valid theme", "tema válido", "tema válido", "thème valide", "gültiges Theme", "tema valid", "有效主题", "有効なテーマ",
         "유효한 테마"),
+    tr!("Update module from", "Actualizar módulo desde", "Atualizar módulo de", "Mettre à jour le module depuis", "Modul aktualisieren von", "Perbarui modul dari", "更新模块，来源", "モジュールの更新元", "모듈 업데이트 출처"),
+    tr!("selected server does not support module.update", "el servidor seleccionado no admite module.update", "o servidor selecionado não suporta module.update", "le serveur sélectionné ne prend pas en charge module.update", "der ausgewählte Server unterstützt module.update nicht", "server yang dipilih tidak mendukung module.update", "所选服务器不支持 module.update", "選択したサーバーは module.update をサポートしていません", "선택한 서버가 module.update를 지원하지 않습니다"),
+    tr!("linked modules must be updated in their own working directory", "los módulos vinculados deben actualizarse en su propio directorio de trabajo", "módulos vinculados devem ser atualizados em seu próprio diretório de trabalho", "les modules liés doivent être mis à jour dans leur propre répertoire de travail", "verknüpfte Module müssen in ihrem eigenen Arbeitsverzeichnis aktualisiert werden", "modul tertaut harus diperbarui di direktori kerjanya sendiri", "本地链接模块必须在其工作目录中更新", "リンク済みモジュールは自身の作業ディレクトリで更新してください", "연결된 모듈은 자체 작업 디렉터리에서 업데이트해야 합니다"),
     tr!("installed", "instalado", "instalado", "installé", "installiert", "terpasang", "已安装", "インストール済み",
         "설치됨"),
     tr!("from", "desde", "de", "depuis", "von", "dari", "来源", "取得元",
