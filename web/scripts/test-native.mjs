@@ -20,31 +20,24 @@ delete env.LUVUS_SOCKET_PATH;
 delete env.LUVUS_SESSION;
 let child;
 let stderr = "";
+const sockets = new Set();
 
 try {
-  child = spawn(executable, [
-    "--session", session, "web", "--control", "--port", "0", "--no-open",
-  ], {
-    cwd: workspace,
-    env,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-8192); });
-  const lines = readline.createInterface({ input: child.stdout });
-  const url = await waitForLine(lines, (line) => line.startsWith("http://"), 20_000);
-  const paired = new URL(url);
+  const paired = await startBridge();
   const code = paired.hash.startsWith("#pair=") ? decodeURIComponent(paired.hash.slice(6)) : "";
   assert.ok(code);
 
-  const socket = new WebSocket(paired.origin.replace(/^http/, "ws") + "/bridge", {
-    origin: paired.origin,
-  });
-  await opened(socket);
-  socket.send(JSON.stringify({ type: "authenticate", code }));
-  const ready = await waitFor(socket, (frame) => frame.type === "ready");
+  const { socket, ready } = await authenticate(paired, { code });
   assert.equal(ready.authority.mode, "control");
+  assert.equal(ready.expires_on_close, true);
+  assert.equal(ready.expires_at, undefined);
+  assert.ok(ready.ticket);
+  const second = await authenticate(paired, { ticket: ready.ticket });
+  assert.equal(second.ready.expires_on_close, true);
+  assert.equal(second.ready.ticket, undefined, "another tab reuses the same grant");
+  assert.equal((await request(second.socket, "tab-devices", "web.devices.status", {})).paired_devices, 1);
+  await request(second.socket, "tab-snapshot", "session.snapshot", {});
+  await rejected(paired, { code }); // Spent links still cannot pair a different browser.
 
   const capabilities = await request(socket, "capabilities", "uhp.capabilities", {});
   assert.equal(capabilities.type, "uhp_capabilities");
@@ -58,6 +51,9 @@ try {
   assert.equal(publicStatus.public_url, "https://phone.example");
   const phonePairing = await request(socket, "phone-pairing", "web.devices.create_pairing", {});
   assert.equal(phonePairing.url, `https://phone.example/#pair=${encodeURIComponent(phonePairing.code)}`);
+  const phone = await authenticate(paired, { code: phonePairing.code });
+  assert.notEqual(phone.ready.ticket, ready.ticket);
+  assert.equal((await request(phone.socket, "phone-devices", "web.devices.status", {})).paired_devices, 2);
 
   const snapshot = await request(socket, "snapshot", "session.snapshot", {});
   const pane = snapshot.workspaces.flatMap((workspace) => workspace.tabs)
@@ -118,20 +114,88 @@ try {
       `terminal input ${id} failed: ${JSON.stringify(result)}`);
   }
   const burstElapsed = performance.now() - burstStarted;
+  const tabsClosed = Promise.all([closed(socket), closed(second.socket)]);
   socket.close();
+  second.socket.close();
+  await tabsClosed;
+  const reopened = await authenticate(paired, { ticket: ready.ticket });
+  const reopenedTab = await authenticate(paired, { ticket: ready.ticket });
+  await request(reopened.socket, "reopened-snapshot", "session.snapshot", {});
+  assert.equal((await request(reopened.socket, "reopened-devices", "web.devices.status", {})).paired_devices, 2);
+  await assert.rejects(request(reopened.socket, "foreign-forget", "web.devices.forget", { ticket: phone.ready.ticket }), /method_not_found/);
+  const forgottenTabs = Promise.all([closed(reopened.socket), closed(reopenedTab.socket)]);
+  const forgotten = await request(reopened.socket, "forget", "web.devices.forget", {});
+  assert.equal(forgotten.type, "browser_device_forgotten");
+  await forgottenTabs;
+  await rejected(paired, { ticket: ready.ticket });
+  assert.equal((await request(phone.socket, "remaining-devices", "web.devices.status", {})).paired_devices, 1);
+  await request(phone.socket, "still-live", "session.snapshot", {});
 
+  const phoneClosed = closed(phone.socket);
   child.kill("SIGINT");
   await exited(child, 10_000);
+  await phoneClosed;
   child = undefined;
   const status = run(["--session", session, "server", "status"], env);
   assert.equal(status.status, 0, status.stderr);
   assert.match(status.stdout, /running/);
-  process.stdout.write(`native luvus web integration passed (${burstCount} inputs in ${Math.round(burstElapsed)}ms)\n`);
+  const finite = await startBridge(["--ticket-ttl", "2"]);
+  await rejected(finite, { ticket: phone.ready.ticket }); // Stopping a bridge revoked all its tickets.
+  const limited = await authenticate(finite, { code: finite.hash.slice(6) });
+  assert.equal(typeof limited.ready.expires_at, "number");
+  assert.equal(limited.ready.expires_on_close, undefined);
+  await closed(limited.socket);
+  await rejected(finite, { ticket: limited.ready.ticket });
+  child.kill("SIGINT");
+  await exited(child, 10_000);
+  child = undefined;
+  process.stdout.write(`native luvus web integration passed (multi-tab, reconnect, revoke, finite expiry, shutdown; ${burstCount} inputs in ${Math.round(burstElapsed)}ms)\n`);
 } finally {
+  for (const socket of sockets) socket.terminate();
   if (child?.exitCode === null) child.kill("SIGINT");
   run(["--session", session, "server", "stop"], env, true);
   run(["session", "delete", session], env, true);
   await rm(home, { recursive: true, force: true });
+}
+
+async function startBridge(extra = []) {
+  stderr = "";
+  child = spawn(executable, [
+    "--session", session, "web", "--control", "--port", "0", "--no-open", ...extra,
+  ], { cwd: workspace, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-8192); });
+  const lines = readline.createInterface({ input: child.stdout });
+  return new URL(await waitForLine(lines, (line) => line.startsWith("http://"), 20_000));
+}
+
+async function authenticate(address, credential) {
+  const socket = new WebSocket(address.origin.replace(/^http/, "ws") + "/bridge", { origin: address.origin });
+  sockets.add(socket);
+  socket.once("close", () => sockets.delete(socket));
+  await opened(socket);
+  const response = waitFor(socket, (frame) => frame.type === "ready" || frame.type === "error");
+  socket.send(JSON.stringify({ type: "authenticate", ...credential }));
+  return { socket, ready: await response };
+}
+
+async function rejected(address, credential) {
+  const { socket, ready } = await authenticate(address, credential);
+  assert.equal(ready.type, "error");
+  assert.equal(ready.code, "forbidden");
+  await closed(socket);
+}
+
+function closed(socket) {
+  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off("close", finish);
+      reject(new Error("WebSocket did not close"));
+    }, 5_000);
+    const finish = () => { clearTimeout(timer); resolve(); };
+    socket.once("close", finish);
+  });
 }
 
 function run(args, runEnv, allowFailure = false) {

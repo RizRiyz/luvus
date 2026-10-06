@@ -3,7 +3,8 @@ import type { JsonObject } from "./types.js";
 type ReadyFrame = {
   type: "ready";
   ticket?: string;
-  expires_at: number;
+  expires_at?: number;
+  expires_on_close?: true;
   authority: { mode: "read_only" | "control"; scopes: string[] };
 };
 

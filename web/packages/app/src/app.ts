@@ -1,4 +1,5 @@
 import { BridgeClient, BridgeError, LiveSession, type PaneSnapshot, type SessionSnapshot } from "@luvus/uhp-client";
+import { BrowserTickets, TICKET_KEY } from "./browser-tickets.js";
 import { button, element } from "./dom.js";
 import { accessProblem, pairingCredential, parsePairingInput, type SentCredential } from "./pairing.js";
 import { pairingQrDataUrl } from "./pairing-qr.js";
@@ -10,8 +11,6 @@ import { TerminalPaneSidebar } from "./terminal-pane-sidebar.js";
 import { TerminalWorkspaceSidebar } from "./terminal-workspace-sidebar.js";
 import { TerminalView } from "./terminal-view.js";
 import { markFieldSaved, rebuildPreservingView } from "./view-state.js";
-
-const TICKET_KEY = "luvus.web.ticket";
 
 type DeviceStatus = {
   type: "browser_device_status";
@@ -76,6 +75,8 @@ export class WebApp {
   /** What this tab last presented, so a rejection can be explained truthfully. */
   #sent: SentCredential = { ticket: false, code: false };
   #pairError: string | undefined;
+  readonly #tickets = new BrowserTickets();
+  #sentTicket: string | null = null;
   /** Redraws caused by live updates, as opposed to the person's own actions. */
   readonly #renders = new RenderScheduler(() => this.#renderNow());
 
@@ -135,11 +136,13 @@ export class WebApp {
     this.#tabCode = consumePairingFragment();
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     this.#bridge = new BridgeClient(`${scheme}//${location.host}/bridge`, () => {
-      const credential = pairingCredential(sessionStorage.getItem(TICKET_KEY), this.#tabCode);
+      this.#sentTicket = this.#tickets.get();
+      const credential = pairingCredential(this.#sentTicket, this.#tabCode);
       this.#sent = { ticket: Boolean(credential.ticket), code: Boolean(credential.code) };
       return credential;
     }, (ticket) => {
-      sessionStorage.setItem(TICKET_KEY, ticket);
+      this.#tickets.set(ticket);
+      this.#sentTicket = ticket;
       // The code was spent to issue this ticket.
       this.#tabCode = undefined;
     });
@@ -170,6 +173,15 @@ export class WebApp {
       this.#renders.request();
     });
     this.#session.addEventListener("titles", (event) => this.#updateTitles((event as CustomEvent<string[]>).detail));
+    window.addEventListener("storage", (event) => {
+      // Pairing or forgetting in another tab updates this tab too. Transient
+      // disconnects do not erase access, and there is no idle polling.
+      if ((event.key === TICKET_KEY || event.key === null) && this.#tickets.get() !== this.#sentTicket) {
+        // Replace the old connection and any in-flight synchronization as one
+        // lifecycle; late results from the old authority cannot restore its UI.
+        location.reload();
+      }
+    });
   }
 
   async start(): Promise<void> {
@@ -287,7 +299,7 @@ export class WebApp {
       return;
     }
     // A ticket the bridge just rejected can never work again.
-    if (this.#sent.ticket) sessionStorage.removeItem(TICKET_KEY);
+    if (this.#sent.ticket) this.#tickets.clear(this.#sentTicket);
     this.#tabCode = code;
     this.#pairError = undefined;
     void this.start();
@@ -360,8 +372,13 @@ export class WebApp {
         savePublicUrl,
       ),
       element("p", { className: "device-help", text: "Use your HTTPS tunnel address for phone links. Clear it to use this browser's address. This changes links only, not network exposure or origin permissions." }),
-      element("p", { className: "device-help", text: "Each device receives its own ticket. Pairing links work once and expire after five minutes." }),
+      element("p", { className: "device-help", text: "Pair each browser once. Access is remembered across tabs and browser restarts. "
+        + (this.#bridge.ready?.expires_at
+          ? `This browser's access expires at ${new Date(this.#bridge.ready.expires_at * 1000).toLocaleString()}. `
+          : "Access lasts until the bridge stops or this browser is revoked. ")
+        + "Pairing links expire after five minutes." }),
       this.#pairingUrl ? this.#pairingCard(this.#pairingUrl) : pairButton,
+      button("Forget this browser", "ghost device-forget", () => void this.#forgetBrowser()),
     );
     const overlay = element("div", {
       className: "device-overlay",
@@ -413,6 +430,22 @@ export class WebApp {
       if (this.#devicePanelOpen) this.#render();
     }
     if (failure) this.#showError(failure);
+  }
+
+  async #forgetBrowser(): Promise<void> {
+    if (this.#deviceLoading || !confirm("Revoke this browser's access in every tab? Other devices will stay connected.")) return;
+    this.#deviceLoading = true;
+    const ticket = this.#sentTicket;
+    try {
+      await this.#bridge.request("web.devices.forget");
+      this.#tickets.clear(ticket);
+      location.reload();
+    } catch (error) {
+      this.#showError(error);
+    } finally {
+      this.#deviceLoading = false;
+      this.#render();
+    }
   }
 
   async #setDeviceLimit(limit: number): Promise<void> {

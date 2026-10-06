@@ -27,7 +27,8 @@ pub(super) struct BrowserDeviceStatus {
 
 pub(super) struct Authentication {
     pub ticket: Option<String>,
-    pub expires_at: u64,
+    /// None means access lasts until this bridge closes or revokes the ticket.
+    pub expires_at: Option<u64>,
     /// The ticket this connection holds, whether presented or newly issued.
     /// Used only to count live connections per device.
     pub ticket_digest: [u8; 32],
@@ -64,7 +65,7 @@ pub(super) struct Full {
 }
 
 struct Ticket {
-    expires_at: u64,
+    expires_at: Option<u64>,
     /// Open WebSocket connections authenticated with this ticket.
     live: usize,
     /// When `live` last dropped to zero, or when the ticket was issued.
@@ -72,7 +73,7 @@ struct Ticket {
 }
 
 pub(super) struct BrowserAuthority {
-    ticket_seconds: u64,
+    ticket_seconds: Option<u64>,
     max_devices: usize,
     /// The operator's `--max-devices` value, fixed for the bridge's lifetime.
     ceiling: usize,
@@ -82,7 +83,10 @@ pub(super) struct BrowserAuthority {
 }
 
 impl BrowserAuthority {
-    pub fn new(ticket_seconds: u64, max_devices: usize) -> Result<(Self, BrowserPairing), String> {
+    pub fn new(
+        ticket_seconds: Option<u64>,
+        max_devices: usize,
+    ) -> Result<(Self, BrowserPairing), String> {
         let mut authority = Self {
             ticket_seconds,
             max_devices,
@@ -109,7 +113,10 @@ impl BrowserAuthority {
         if let Some(ticket) = ticket {
             let ticket_digest = digest(ticket);
             if let Some(existing) = self.tickets.get(&ticket_digest) {
-                if existing.expires_at > unix_now() {
+                if existing
+                    .expires_at
+                    .is_none_or(|deadline| deadline > unix_now())
+                {
                     return Some(Authentication {
                         ticket: None,
                         expires_at: existing.expires_at,
@@ -126,7 +133,9 @@ impl BrowserAuthority {
             return None;
         }
         let ticket = random_token(32).ok()?;
-        let expires_at = unix_now().saturating_add(self.ticket_seconds);
+        let expires_at = self
+            .ticket_seconds
+            .map(|seconds| unix_now().saturating_add(seconds));
         let ticket_digest = digest(&ticket);
         self.tickets.insert(
             ticket_digest,
@@ -170,8 +179,8 @@ impl BrowserAuthority {
     /// Create a pairing link on behalf of the operator at the terminal running
     /// the bridge. When the limit is full, exactly one slot is freed: the
     /// oldest unused pairing link, which the new link replaces, or else the
-    /// device disconnected longest, since a closed tab can never reuse its
-    /// per-tab ticket. Connected devices, and devices that disconnected too
+    /// device disconnected longest. That browser must pair again if it returns.
+    /// Connected devices, and devices that disconnected too
     /// recently to tell apart from a reconnecting tab, are never revoked.
     pub fn create_operator_pairing(&mut self) -> Result<(BrowserPairing, Reclaimed), Full> {
         self.purge();
@@ -211,6 +220,9 @@ impl BrowserAuthority {
     /// Returns `false` if the ticket was revoked since it authenticated; the
     /// connection must then be closed.
     pub fn connect(&mut self, ticket_digest: &[u8; 32]) -> bool {
+        if !self.is_valid(ticket_digest) {
+            return false;
+        }
         let Some(ticket) = self.tickets.get_mut(ticket_digest) else {
             return false;
         };
@@ -226,6 +238,19 @@ impl BrowserAuthority {
                 ticket.idle_since = Some(unix_now());
             }
         }
+    }
+
+    pub fn is_valid(&self, ticket_digest: &[u8; 32]) -> bool {
+        self.tickets.get(ticket_digest).is_some_and(|ticket| {
+            ticket
+                .expires_at
+                .is_none_or(|deadline| deadline > unix_now())
+        })
+    }
+
+    /// Forget only this authenticated browser, including all its open tabs.
+    pub fn revoke(&mut self, ticket_digest: &[u8; 32]) {
+        self.tickets.remove(ticket_digest);
     }
 
     pub fn set_max_devices(&mut self, max_devices: usize) -> Result<(), LimitError> {
@@ -251,9 +276,13 @@ impl BrowserAuthority {
     }
 
     fn purge(&mut self) {
-        let now = unix_now();
+        self.purge_at(unix_now());
+    }
+
+    fn purge_at(&mut self, now: u64) {
         self.pairings.retain(|_, expires_at| *expires_at > now);
-        self.tickets.retain(|_, ticket| ticket.expires_at > now);
+        self.tickets
+            .retain(|_, ticket| ticket.expires_at.is_none_or(|deadline| deadline > now));
     }
 }
 
@@ -298,8 +327,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn process_bound_ticket_survives_time_and_browser_disconnects() {
+        let (mut authority, initial) = BrowserAuthority::new(None, 1).unwrap();
+        let browser = authority.authenticate(Some(&initial.code), None).unwrap();
+        assert_eq!(browser.expires_at, None);
+        authority.purge_at(unix_now() + 7 * 24 * 60 * 60);
+        for _ in 0..2 {
+            assert!(authority.connect(&browser.ticket_digest));
+        }
+        authority.disconnect(&browser.ticket_digest);
+        assert_eq!(authority.tickets[&browser.ticket_digest].live, 1);
+        assert!(authority.create_operator_pairing().is_err());
+        authority.disconnect(&browser.ticket_digest);
+        assert!(authority
+            .authenticate(None, browser.ticket.as_deref())
+            .is_some());
+        assert_eq!(authority.status().paired_devices, 1);
+    }
+
+    #[test]
+    fn finite_tickets_expire_without_extending_on_reconnect() {
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 1).unwrap();
+        let browser = authority.authenticate(Some(&initial.code), None).unwrap();
+        let again = authority
+            .authenticate(None, browser.ticket.as_deref())
+            .unwrap();
+        assert_eq!(again.expires_at, browser.expires_at);
+        authority.purge_at(browser.expires_at.unwrap());
+        assert!(!authority.is_valid(&browser.ticket_digest));
+        assert!(!authority.connect(&browser.ticket_digest));
+        assert!(authority
+            .authenticate(None, browser.ticket.as_deref())
+            .is_none());
+    }
+
+    #[test]
+    fn forgetting_a_browser_revokes_its_ticket_not_other_devices() {
+        let (mut authority, initial) = BrowserAuthority::new(None, 2).unwrap();
+        let browser = authority.authenticate(Some(&initial.code), None).unwrap();
+        let link = authority.create_pairing().unwrap();
+        let phone = authority.authenticate(Some(&link.code), None).unwrap();
+        authority.revoke(&browser.ticket_digest);
+        assert!(!authority.is_valid(&browser.ticket_digest));
+        assert!(authority
+            .authenticate(None, browser.ticket.as_deref())
+            .is_none());
+        assert!(authority.is_valid(&phone.ticket_digest));
+        assert!(authority
+            .authenticate(None, phone.ticket.as_deref())
+            .is_some());
+        assert_eq!(authority.status().paired_devices, 1);
+        let (mut restarted, _) = BrowserAuthority::new(None, 2).unwrap();
+        assert!(restarted
+            .authenticate(None, phone.ticket.as_deref())
+            .is_none());
+    }
+
+    #[test]
     fn pairing_is_one_use_and_tickets_are_independent() {
-        let (mut authority, initial) = BrowserAuthority::new(600, 2).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 2).unwrap();
         let desktop = authority.authenticate(Some(&initial.code), None).unwrap();
         assert!(authority.authenticate(Some(&initial.code), None).is_none());
         assert!(authority
@@ -324,7 +410,7 @@ mod tests {
 
     #[test]
     fn a_valid_ticket_wins_without_spending_a_code_sent_with_it() {
-        let (mut authority, initial) = BrowserAuthority::new(600, 2).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 2).unwrap();
         let device = authority.authenticate(Some(&initial.code), None).unwrap();
         let spare = authority.create_pairing().unwrap();
 
@@ -344,7 +430,7 @@ mod tests {
 
     #[test]
     fn a_browser_may_lower_but_never_raise_the_operator_limit() {
-        let (mut authority, _) = BrowserAuthority::new(600, 3).unwrap();
+        let (mut authority, _) = BrowserAuthority::new(Some(600), 3).unwrap();
         assert_eq!(authority.set_max_devices(4), Err(LimitError::AboveCeiling));
         assert_eq!(authority.set_max_devices(8), Err(LimitError::AboveCeiling));
         assert_eq!(authority.set_max_devices(2), Ok(()));
@@ -359,7 +445,7 @@ mod tests {
     #[test]
     fn operator_pairing_replaces_the_oldest_unused_link_first() {
         // Default limit: the initial link plus one more fill both slots.
-        let (mut authority, initial) = BrowserAuthority::new(600, 2).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 2).unwrap();
         let (second, reclaimed) = authority.create_operator_pairing().unwrap();
         assert_eq!(reclaimed, Reclaimed::Nothing);
         let now = unix_now();
@@ -376,7 +462,7 @@ mod tests {
 
     #[test]
     fn operator_pairing_reclaims_one_long_disconnected_device() {
-        let (mut authority, initial) = BrowserAuthority::new(600, 3).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 3).unwrap();
         authority.reconnect_grace = 0;
         let open = authority.authenticate(Some(&initial.code), None).unwrap();
         authority.connect(&open.ticket_digest);
@@ -409,7 +495,7 @@ mod tests {
 
     #[test]
     fn operator_pairing_spares_a_tab_that_may_be_reconnecting() {
-        let (mut authority, initial) = BrowserAuthority::new(600, 1).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 1).unwrap();
         let tab = authority.authenticate(Some(&initial.code), None).unwrap();
         authority.connect(&tab.ticket_digest);
         authority.disconnect(&tab.ticket_digest); // waiting to reconnect
@@ -425,7 +511,7 @@ mod tests {
 
     #[test]
     fn operator_pairing_spares_a_device_between_pairing_and_connecting() {
-        let (mut authority, initial) = BrowserAuthority::new(600, 1).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 1).unwrap();
         let tab = authority.authenticate(Some(&initial.code), None).unwrap();
         assert!(authority.create_operator_pairing().is_err());
         assert!(authority
@@ -435,7 +521,7 @@ mod tests {
 
     #[test]
     fn a_ticket_reclaimed_after_authenticating_cannot_connect() {
-        let (mut authority, initial) = BrowserAuthority::new(600, 1).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 1).unwrap();
         authority.reconnect_grace = 0;
         let device = authority.authenticate(Some(&initial.code), None).unwrap();
         authority.connect(&device.ticket_digest);
@@ -453,7 +539,7 @@ mod tests {
 
     #[test]
     fn operator_pairing_never_revokes_a_connected_device() {
-        let (mut authority, initial) = BrowserAuthority::new(600, 1).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 1).unwrap();
         authority.reconnect_grace = 0;
         let open = authority.authenticate(Some(&initial.code), None).unwrap();
         authority.connect(&open.ticket_digest);
@@ -479,7 +565,7 @@ mod tests {
 
     #[test]
     fn rolled_back_pairing_can_authenticate_again() {
-        let (mut authority, initial) = BrowserAuthority::new(600, 1).unwrap();
+        let (mut authority, initial) = BrowserAuthority::new(Some(600), 1).unwrap();
         let authentication = authority.authenticate(Some(&initial.code), None).unwrap();
         authority.rollback(authentication);
 

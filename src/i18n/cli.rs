@@ -177,6 +177,50 @@ macro_rules! tr {
 /// suffix, so canonical syntax at the start of a row is never rewritten.
 static HELP: &[Translation] = &[
     tr!(
+        "Pairing links work once and expire after five minutes.",
+        "Los enlaces de vinculación se usan una vez y caducan a los cinco minutos.",
+        "Os links de pareamento funcionam uma vez e expiram após cinco minutos.",
+        "Les liens d’association sont à usage unique et expirent après cinq minutes.",
+        "Kopplungslinks sind einmalig und laufen nach fünf Minuten ab.",
+        "Tautan pemasangan berlaku sekali dan kedaluwarsa setelah lima menit.",
+        "配对链接只能使用一次，五分钟后失效。",
+        "ペアリングリンクは一度だけ使用でき、5 分後に失効します。",
+        "페어링 링크는 한 번만 사용할 수 있으며 5분 후 만료됩니다."
+    ),
+    tr!(
+        "Paired browsers remember access across tabs and browser restarts until the bridge stops.",
+        "Los navegadores vinculados conservan el acceso entre pestañas y reinicios hasta que se detiene el puente.",
+        "Os navegadores pareados mantêm o acesso entre abas e reinicializações até a ponte parar.",
+        "Les navigateurs associés conservent l’accès entre onglets et redémarrages jusqu’à l’arrêt du pont.",
+        "Gekoppelte Browser behalten den Zugriff über Tabs und Browserneustarts hinweg bis zum Stopp der Bridge.",
+        "Browser yang dipasangkan mengingat akses antar tab dan setelah dimulai ulang hingga bridge berhenti.",
+        "已配对的浏览器可跨标签页和浏览器重启保留访问权限，直到桥接器停止。",
+        "ペアリング済みブラウザーはタブ間や再起動後もアクセスを保持し、ブリッジ停止時に失効します。",
+        "페어링된 브라우저는 탭과 브라우저 재시작 간에 접근을 유지하며 브리지가 중지되면 만료됩니다."
+    ),
+    tr!(
+        "Press Enter in this terminal while the bridge runs to print a new one.",
+        "Pulsa Enter en esta terminal mientras funciona el puente para imprimir uno nuevo.",
+        "Pressione Enter neste terminal enquanto a ponte estiver ativa para imprimir um novo.",
+        "Appuyez sur Enter dans ce terminal pendant le fonctionnement du pont pour en afficher un nouveau.",
+        "Drücken Sie bei laufender Bridge in diesem Terminal Enter, um einen neuen Link auszugeben.",
+        "Tekan Enter di terminal ini saat bridge berjalan untuk mencetak tautan baru.",
+        "桥接器运行时，在此终端按 Enter 可显示新链接。",
+        "ブリッジ実行中にこのターミナルで Enter を押すと、新しいリンクを表示します。",
+        "브리지가 실행 중일 때 이 터미널에서 Enter를 누르면 새 링크가 출력됩니다."
+    ),
+    tr!(
+        "expire browser access after 1-86400 seconds (default: until bridge stops)",
+        "caducar el acceso del navegador tras 1-86400 segundos (predeterminado: hasta detener el puente)",
+        "expirar o acesso do navegador após 1-86400 segundos (padrão: até a ponte parar)",
+        "faire expirer l’accès après 1-86400 secondes (défaut : jusqu’à l’arrêt du pont)",
+        "Browserzugriff nach 1-86400 Sekunden beenden (Standard: bis zum Stopp der Bridge)",
+        "akhiri akses browser setelah 1-86400 detik (bawaan: hingga bridge berhenti)",
+        "在 1-86400 秒后使浏览器访问失效（默认：桥接器停止时）",
+        "1-86400 秒後にブラウザーのアクセスを失効（既定：ブリッジ停止時）",
+        "1-86400초 후 브라우저 접근 만료(기본값: 브리지 중지 시)"
+    ),
+    tr!(
         "Serve the optional browser client",
         "Servir el cliente web opcional",
         "Servir o cliente web opcional",
@@ -2855,6 +2899,72 @@ static HELP: &[Translation] = &[
 /// Local CLI labels and diagnostics. These are kept out of `HELP` so short
 /// labels such as `name` can never be mistaken for a help-row description.
 static TEXT: &[Translation] = &[
+    tr!(
+        "Pair this browser once within 5 minutes. Access is remembered across tabs and browser restarts.",
+        "Vincula este navegador una vez en 5 minutos. El acceso se conserva entre pestañas y reinicios.",
+        "Pareie este navegador uma vez em 5 minutos. O acesso é mantido entre abas e reinicializações.",
+        "Associez ce navigateur une fois dans les 5 minutes. L’accès est conservé entre onglets et redémarrages.",
+        "Koppeln Sie diesen Browser einmal innerhalb von 5 Minuten. Der Zugriff bleibt über Tabs und Browserneustarts erhalten.",
+        "Pasangkan browser ini sekali dalam 5 menit. Akses diingat antar tab dan setelah browser dimulai ulang.",
+        "请在 5 分钟内配对此浏览器。访问权限可跨标签页和浏览器重启保留。",
+        "5 分以内にこのブラウザーを一度ペアリングしてください。タブ間や再起動後もアクセスが保持されます。",
+        "5분 이내에 이 브라우저를 한 번 페어링하세요. 탭과 브라우저 재시작 간에 접근이 유지됩니다."
+    ),
+    tr!(
+        "Browser access expires after {seconds} seconds.",
+        "El acceso del navegador caduca tras {seconds} segundos.",
+        "O acesso do navegador expira após {seconds} segundos.",
+        "L’accès du navigateur expire après {seconds} secondes.",
+        "Der Browserzugriff läuft nach {seconds} Sekunden ab.",
+        "Akses browser kedaluwarsa setelah {seconds} detik.",
+        "浏览器访问将在 {seconds} 秒后失效。",
+        "ブラウザーのアクセスは {seconds} 秒後に失効します。",
+        "브라우저 접근은 {seconds}초 후 만료됩니다."
+    ),
+    tr!(
+        "Browser access lasts until this bridge stops or you forget this browser.",
+        "El acceso dura hasta detener este puente u olvidar este navegador.",
+        "O acesso dura até esta ponte parar ou você esquecer este navegador.",
+        "L’accès dure jusqu’à l’arrêt de ce pont ou à l’oubli de ce navigateur.",
+        "Der Zugriff gilt, bis diese Bridge stoppt oder Sie diesen Browser vergessen.",
+        "Akses berlaku hingga bridge ini berhenti atau Anda melupakan browser ini.",
+        "访问权限持续到此桥接器停止或您取消此浏览器的配对。",
+        "アクセスはブリッジ停止時、またはこのブラウザーの登録解除時まで有効です。",
+        "접근은 이 브리지가 중지되거나 이 브라우저를 잊을 때까지 유지됩니다."
+    ),
+    tr!(
+        "--ticket-ttl requires a value",
+        "--ticket-ttl requiere un valor",
+        "--ticket-ttl requer um valor",
+        "--ticket-ttl exige une valeur",
+        "--ticket-ttl erfordert einen Wert",
+        "--ticket-ttl memerlukan nilai",
+        "--ticket-ttl 需要一个值",
+        "--ticket-ttl には値が必要です",
+        "--ticket-ttl에는 값이 필요합니다"
+    ),
+    tr!(
+        "--ticket-ttl must be an integer from 1 through 86400",
+        "--ticket-ttl debe ser un entero entre 1 y 86400",
+        "--ticket-ttl deve ser um inteiro de 1 a 86400",
+        "--ticket-ttl doit être un entier compris entre 1 et 86400",
+        "--ticket-ttl muss eine ganze Zahl von 1 bis 86400 sein",
+        "--ticket-ttl harus berupa bilangan bulat dari 1 hingga 86400",
+        "--ticket-ttl 必须是 1 到 86400 之间的整数",
+        "--ticket-ttl は 1 から 86400 までの整数で指定してください",
+        "--ticket-ttl은 1에서 86400 사이의 정수여야 합니다"
+    ),
+    tr!(
+        "No room for another device: every allowed device is still connected. Forget a browser in Devices, close all its tabs, or restart with a larger --max-devices.",
+        "No hay espacio para otro dispositivo: todos siguen conectados. Olvida un navegador en Devices, cierra todas sus pestañas o reinicia con un --max-devices mayor.",
+        "Não há espaço para outro dispositivo: todos continuam conectados. Esqueça um navegador em Devices, feche todas as suas abas ou reinicie com --max-devices maior.",
+        "Aucune place pour un autre appareil : tous restent connectés. Oubliez un navigateur dans Devices, fermez tous ses onglets ou redémarrez avec --max-devices plus grand.",
+        "Kein Platz für ein weiteres Gerät: Alle sind noch verbunden. Vergessen Sie einen Browser in Devices, schließen Sie alle seine Tabs oder starten Sie mit größerem --max-devices neu.",
+        "Tidak ada ruang untuk perangkat lain: semuanya masih terhubung. Lupakan browser di Devices, tutup semua tabnya, atau mulai ulang dengan --max-devices lebih besar.",
+        "无法添加设备：所有允许的设备仍已连接。请在 Devices 中取消一个浏览器的配对，关闭其所有标签页，或使用更大的 --max-devices 重启。",
+        "追加のデバイス用の空きがありません。Devices でブラウザーの登録を解除するか、その全タブを閉じるか、--max-devices を増やして再起動してください。",
+        "다른 기기를 위한 자리가 없습니다. 모두 연결되어 있습니다. Devices에서 브라우저를 잊거나 모든 탭을 닫거나 --max-devices를 늘려 다시 시작하세요."
+    ),
     tr!(
         "exact search query must be at most 4096 bytes",
         "la búsqueda exacta no puede superar los 4096 bytes",

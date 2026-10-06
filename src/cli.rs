@@ -334,7 +334,7 @@ universal harness protocol:
   uhp proxy                 forward one JSON request from stdin to the selected server
 
 web access:
-  web [--control|--read-only] [--port <port>] [--max-devices <1-8>] [--public-url <origin>] [--origin <origin>] [--no-open]
+  web [--control|--read-only] [--port <port>] [--max-devices <1-8>] [--ticket-ttl <seconds>] [--public-url <origin>] [--origin <origin>] [--no-open]
                              serve the optional loopback browser client (read-only by default)
 
 sessions:

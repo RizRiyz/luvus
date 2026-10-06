@@ -42,18 +42,18 @@ export function accessProblem(sent: SentCredential): { title: string; body: stri
     + "or create one from Devices on a browser that is still connected.";
   if (sent.ticket) {
     return {
-      title: "This tab's access ended",
+      title: "This browser's access ended",
       body: `The web bridge restarted, this device was revoked, or its access expired. ${newLink}`,
     };
   }
   if (sent.code) {
     return {
       title: "This pairing link was already used",
-      body: `Each link works once, in one browser tab, for five minutes. ${newLink}`,
+      body: `Each link pairs one browser and expires after five minutes. Paired browsers can open more tabs without a new link. ${newLink}`,
     };
   }
   return {
-    title: "This tab is not paired yet",
-    body: `Each browser tab needs its own one-use pairing link. ${newLink}`,
+    title: "This browser is not paired yet",
+    body: `Pair this browser once to remember access across tabs and browser restarts. ${newLink}`,
   };
 }

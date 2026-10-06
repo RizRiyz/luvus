@@ -10,17 +10,17 @@ export interface BridgeConfig {
   control: boolean;
   origins: ReadonlySet<string>;
   appDir: string;
-  browserTicketSeconds: number;
+  browserTicketSeconds: number | undefined;
   browserMaxDevices: number;
   publicUrl?: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   const port = boundedInteger(env.LUVUS_WEB_PORT, 4174, 0, 65_535, "LUVUS_WEB_PORT");
-  const browserTicketSeconds = boundedInteger(
+  const browserTicketSeconds = env.LUVUS_WEB_TICKET_TTL === undefined ? undefined : boundedInteger(
     env.LUVUS_WEB_TICKET_TTL,
-    12 * 60 * 60,
-    60,
+    1,
+    1,
     24 * 60 * 60,
     "LUVUS_WEB_TICKET_TTL",
   );

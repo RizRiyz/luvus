@@ -380,6 +380,9 @@ async fn client(socket: WebSocket, state: BridgeState, pending: ConnectionGuard)
     };
     // Authenticated: this socket now counts against the client budget instead.
     drop(pending);
+    // Subscribe before proving the live ticket, so a revocation between that
+    // proof and sending ready cannot be missed by an otherwise idle tab.
+    let mut devices = state.devices.subscribe();
     let Some(_live) = LiveTicket::open(&state.authority, authentication.ticket_digest) else {
         let _ = sink
             .send(text_message(json!({
@@ -394,12 +397,16 @@ async fn client(socket: WebSocket, state: BridgeState, pending: ConnectionGuard)
     let authority = state.uhp.authority();
     let mut ready = json!({
         "type": "ready",
-        "expires_at": authentication.expires_at,
         "authority": {
             "mode": authority.mode,
             "scopes": authority.scopes,
         },
     });
+    if let Some(expires_at) = authentication.expires_at {
+        ready["expires_at"] = Value::from(expires_at);
+    } else {
+        ready["expires_on_close"] = Value::Bool(true);
+    }
     if let Some(ticket) = authentication.ticket {
         ready["ticket"] = Value::String(ticket);
     }
@@ -444,20 +451,29 @@ async fn client(socket: WebSocket, state: BridgeState, pending: ConnectionGuard)
             }
         }
     });
-    let mut devices = state.devices.subscribe();
     let mut streams: HashMap<String, BrowserStream> = HashMap::new();
     let mut rate = RateState::new();
-    let remaining = UNIX_EPOCH
-        .checked_add(Duration::from_secs(authentication.expires_at))
-        .and_then(|deadline| deadline.duration_since(SystemTime::now()).ok())
-        .unwrap_or_default();
-    let expiry = tokio::time::sleep(remaining);
+    let expiry = async {
+        if let Some(expires_at) = authentication.expires_at {
+            let remaining = UNIX_EPOCH
+                .checked_add(Duration::from_secs(expires_at))
+                .and_then(|deadline| deadline.duration_since(SystemTime::now()).ok())
+                .unwrap_or_default();
+            tokio::time::sleep(remaining).await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
     tokio::pin!(expiry);
 
     loop {
         tokio::select! {
             _ = &mut expiry => break,
             device = devices.recv() => {
+                if !state.authority.lock().expect("browser authority poisoned")
+                    .is_valid(&authentication.ticket_digest) {
+                    break;
+                }
                 if let Ok(devices) = device {
                     if send(&outgoing, json!({"type": "devices", "devices": devices})).is_err() {
                         break;
@@ -465,6 +481,10 @@ async fn client(socket: WebSocket, state: BridgeState, pending: ConnectionGuard)
                 }
             }
             message = source.next() => {
+                if !state.authority.lock().expect("browser authority poisoned")
+                    .is_valid(&authentication.ticket_digest) {
+                    break;
+                }
                 let text = match message {
                     Some(Ok(Message::Text(text))) => text,
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
@@ -475,7 +495,7 @@ async fn client(socket: WebSocket, state: BridgeState, pending: ConnectionGuard)
                     let _ = rate_limited(&outgoing, &frame);
                     continue;
                 }
-                if handle_frame(&state, &outgoing, &mut streams, frame).await.is_err() {
+                if handle_frame(&state, &outgoing, &mut streams, &authentication.ticket_digest, frame).await.is_err() {
                     break;
                 }
             }
@@ -493,11 +513,12 @@ async fn handle_frame(
     state: &BridgeState,
     outgoing: &Outbound,
     streams: &mut HashMap<String, BrowserStream>,
+    ticket_digest: &[u8; 32],
     frame: Map<String, Value>,
 ) -> Result<(), ()> {
     match frame.get("type").and_then(Value::as_str) {
         Some("ping") => send(outgoing, json!({"type": "pong"})),
-        Some("request") => request(state, outgoing, frame).await,
+        Some("request") => request(state, outgoing, ticket_digest, frame).await,
         Some("stream.open") => open_stream(state, outgoing, streams, frame).await,
         Some("stream.action") => stream_action(outgoing, streams, frame).await,
         Some("stream.close") => {
@@ -522,13 +543,14 @@ async fn handle_frame(
 async fn request(
     state: &BridgeState,
     outgoing: &Outbound,
+    ticket_digest: &[u8; 32],
     frame: Map<String, Value>,
 ) -> Result<(), ()> {
     let id = required_string(&frame, "id", valid_id)?.to_string();
     let method = required_string(&frame, "method", valid_method)?.to_string();
     let params = object_field(&frame, "params")?;
     if method.starts_with("web.devices.") {
-        return device_request(state, outgoing, &id, &method, params);
+        return device_request(state, outgoing, ticket_digest, &id, &method, params);
     }
     if method == "web.sessions.list" {
         if !params.is_empty() {
@@ -606,6 +628,7 @@ async fn request(
 fn device_request(
     state: &BridgeState,
     outgoing: &Outbound,
+    ticket_digest: &[u8; 32],
     id: &str,
     method: &str,
     params: Map<String, Value>,
@@ -613,6 +636,19 @@ fn device_request(
     match method {
         "web.devices.status" if params.is_empty() => {
             response_result(outgoing, id, state.device_status())
+        }
+        "web.devices.forget" if params.is_empty() => {
+            state
+                .authority
+                .lock()
+                .expect("browser authority poisoned")
+                .revoke(ticket_digest);
+            let response =
+                response_result(outgoing, id, json!({"type": "browser_device_forgotten"}));
+            // Revocation must reach other tabs even if this tab's reply queue
+            // is full or its connection disappeared before acknowledging.
+            state.broadcast_devices();
+            response
         }
         "web.devices.create_pairing" if params.is_empty() => {
             let pairing = state

@@ -65,8 +65,12 @@ The bridge authorizes two browser devices by default. After the first browser
 connects, open **Devices**, choose a limit from 1 through 8, and create a new
 one-use pairing for each phone, tablet, or computer. Scan the locally generated
 QR code with the phone camera, or use Copy/Share as a fallback. Existing devices
-stay live; each new device receives an independent in-memory ticket that can
-reconnect until its ticket expires or the bridge stops. QR generation happens
+stay live; each browser profile receives an independent ticket remembered in
+origin-scoped browser storage. Reopening the address in another tab or restarting
+the browser reuses that ticket and does not spend another device slot. By default
+it lasts until the bridge stops or the browser is revoked. **Forget this browser**
+revokes its ticket and disconnects all its tabs, without revoking other devices.
+QR generation happens
 inside the browser and never sends the pairing secret to an external service.
 
 For a bridge behind a private TLS tunnel, configure the public address so links
@@ -92,6 +96,13 @@ field to return to the browser's current origin.
 Devices panel may change that limit for the current bridge lifetime, but cannot
 set it below the number of authorized devices plus unspent pairing links.
 
+For finite browser access, set `LUVUS_WEB_TICKET_TTL` to 1 through 86400 seconds
+for the development bridge, or use `luvus web --ticket-ttl <seconds>` for the
+native bridge. Leaving it unset means process-bound access with no fixed timeout.
+Reconnects do not extend a finite lifetime. Browser storage is a bearer credential
+store: pair only trusted browsers, use a stable HTTPS origin remotely, and pair
+again after a bridge restart. Blocked or private storage may not retain access.
+
 ## Manual development
 
 Build Luvus first, then run an isolated server and the bridge:
@@ -112,9 +123,9 @@ npm start
 ```
 
 Open the fragment-bearing URL printed by the bridge. Every browser pairing code
-is one-use and is exchanged for an independent in-memory bridge ticket. Browser
-tickets expire and are never persisted beyond that device tab's
-`sessionStorage`.
+is one-use and is exchanged for an independent bridge ticket. The browser stores
+it in origin-scoped `localStorage` for reuse across tabs and browser restarts.
+Server-side grants remain in memory and are revoked when the bridge stops.
 
 In a controlled terminal, click the terminal or the keyboard button to focus
 native input. Physical and mobile keyboards write directly to the PTY; shell

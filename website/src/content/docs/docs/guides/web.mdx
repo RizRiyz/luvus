@@ -27,10 +27,11 @@ This command:
 3. creates a one-use browser pairing link; and
 4. opens that link in the default browser.
 
-The pairing link works **once, in one browser tab**, and expires after five
-minutes. The tab it opens keeps its access across reloads. To pair another tab
-or browser, press **Enter** in the terminal running `luvus web`: it prints a new
-one-use link each time.
+The pairing link works **once** and expires after five minutes. Pair a browser
+once, then use the plain address in more tabs or after restarting the browser.
+Access is remembered until the bridge stops or that browser is revoked. To pair
+another browser or device, press **Enter** in the terminal running `luvus web`:
+it prints a new one-use link each time.
 
 The default is **read-only**. You can inspect Mission Control and terminal
 output, but the browser cannot send input or change the workspace.
@@ -104,16 +105,36 @@ in **Devices**, or set the initial limit at startup:
 luvus web --control --max-devices 4
 ```
 
-Each paired browser receives its own in-memory ticket. A pairing link works only
-once, while a ticket may reconnect from the same browser tab until it expires or
-the bridge stops. The device limit cannot be reduced below the number of paired
+Each paired browser receives an independent ticket, remembered in that browser
+profile for the bridge's origin. Open the plain address or a bookmark in another
+tab, or close and reopen the browser: no new pairing link is needed while the
+bridge runs. Tabs sharing a ticket count as one paired device, with at most
+eight simultaneous browser connections across the bridge. A different browser,
+profile, device, or origin needs its own one-use pairing link.
+
+Access has **no fixed timeout by default**. It ends when you stop the bridge,
+revoke the browser, or reclaim its disconnected slot. To opt into finite access,
+set a lifetime from 1 through 86400 seconds when starting the bridge:
+
+```sh
+luvus web --control --ticket-ttl 3600
+```
+
+The lifetime starts when a browser pairs; reconnecting does not extend it.
+**Devices → Forget this browser** revokes that ticket and disconnects every tab
+using it, without revoking other devices. Use this on a shared computer. After a
+bridge restart, pair again; remembered browser tickets do not restore revoked
+authority or survive the bridge's shutdown.
+
+The device limit cannot be reduced below the number of paired
 devices plus unspent pairing links, and a browser can never raise it above the
 `--max-devices` value the bridge started with.
 
 Pressing Enter in the bridge's terminal also recovers a device slot. When the
 limit is full, the new link replaces the oldest link nobody has used yet. If
 every slot belongs to a paired device, it revokes the one that has been
-disconnected longest, such as a closed tab. It never revokes a connected device,
+disconnected longest. That browser must pair again if it returns. A browser is
+disconnected only after all its tabs close. It never revokes a connected device,
 or one that disconnected within the last 30 seconds and may be an open tab
 reconnecting.
 
@@ -248,6 +269,7 @@ These operations have different effects:
 | Action | Result |
 |---|---|
 | Close a browser tab | Disconnects only that browser client |
+| Forget this browser in Devices | Revokes its remembered ticket and disconnects all tabs using it |
 | Press Ctrl+C in `luvus web` | Stops the bridge and revokes its browser authority |
 | Detach or close the TUI | Leaves the server and panes running |
 | Run `luvus server stop` | Stops the selected server and its live PTYs |
@@ -258,8 +280,10 @@ These operations have different effects:
   upstream token.
 - Only the terminal running the bridge can add a remote address; a paired
   browser can change the pairing address but not what the bridge answers to.
-- Browser pairing links are one-use, and tickets stay in that tab's
-  `sessionStorage`. Only the terminal running the bridge, or an already paired
+- Browser pairing links are one-use; browser tickets are bearer credentials
+  stored in origin-scoped `localStorage`. Pair only browsers and devices you
+  trust. A private browser or cleared/blocked storage may require pairing again.
+  Only the terminal running the bridge, or an already paired
   browser, can create a pairing link.
 - The automatically opened link is passed to the browser through an owner-only
   file, so the pairing code never appears in the process list where another user
@@ -283,11 +307,16 @@ Access](/docs/uhp/remote-access/).
 reverse proxy, then paste its HTTPS address into the terminal running
 `luvus web`, or supply it with both `--public-url` and `--origin` at startup.
 
-### The page says the tab is not paired or the link was already used
+### The page says the browser is not paired or the link was already used
 
-Pairing links are one-use, belong to one browser tab, and expire after five
-minutes. Opening the plain address, a bookmark, or a new tab needs a new link.
-Press **Enter** in the terminal running `luvus web` to print one, then open it
+Pairing links are one-use and expire after five minutes. Pair each browser
+profile once, then reuse the plain address in any tab. If you restarted the
+bridge, revoked access, reached an explicit ticket expiry, cleared browser
+storage, or changed the address, pair again. A stable HTTPS tunnel origin keeps
+the browser's saved access available across visits. Private browsing and blocked
+storage may retain access only for the current tab.
+
+Press **Enter** in the terminal running `luvus web` for a new link, then open it
 or paste it into the box on that page. A connected browser can also create one
 in **Devices**.
 
@@ -316,7 +345,8 @@ luvus web --control
 Press **Enter** in the bridge's terminal: when the limit is full, it replaces an
 unused link or revokes a device that is no longer connected, then prints a new
 link. If a device disconnected moments ago, wait 30 seconds and press Enter
-again. If every device is still connected, close one, or restart with a larger
+again. If every device is still connected, forget a browser in **Devices**, close
+all its tabs, or restart with a larger
 `--max-devices` value. The
 accepted range is 1 through 8, and **Devices** can only lower the limit below
 that startup value.

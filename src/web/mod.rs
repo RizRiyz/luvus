@@ -27,8 +27,9 @@ Serve the optional browser client for the selected Luvus session. The web
 bridge runs in the foreground and stops without stopping the Luvus server,
 its PTYs, or attached TUI clients.
 
-Each pairing link works once, in one browser tab, and expires after five
-minutes. Press Enter in this terminal while the bridge runs to print a new one.
+Pairing links work once and expire after five minutes.
+Paired browsers remember access across tabs and browser restarts until the bridge stops.
+Press Enter in this terminal while the bridge runs to print a new one.
 To reach the bridge through a tunnel such as ngrok, paste the tunnel's HTTPS
 address here instead: the bridge then answers to it and prints a link that
 uses it.
@@ -38,6 +39,7 @@ Options:
   --read-only           explicitly select the default read-only authority
   --port <port>         loopback port (default: 4174; 0 selects a free port)
   --max-devices <1-8>   authorized browser devices (default: 2)
+  --ticket-ttl <seconds> expire browser access after 1-86400 seconds (default: until bridge stops)
   --public-url <origin> public HTTPS origin used in pairing links
   --origin <origin>     allow a public HTTP(S) WebSocket origin (repeatable)
   --no-open             print the pairing URL without opening a browser
@@ -45,13 +47,20 @@ Options:
 ";
 
 pub(crate) fn run_cli(args: &[String]) -> Result<i32> {
+    let context = crate::i18n::cli::Context::configured();
+    let usage = crate::i18n::cli::help(USAGE, context.language());
     let options = match Options::parse(args) {
         Ok(Some(options)) => options,
         Ok(None) => {
-            print!("{USAGE}");
+            print!("{usage}");
             return Ok(0);
         }
-        Err(message) => return Err(anyhow!("{message}\n\n{USAGE}")),
+        Err(message) => {
+            return Err(anyhow!(
+                "{}\n\n{usage}",
+                crate::i18n::cli::diagnostic(&message, context.language())
+            ))
+        }
     };
 
     let selected = crate::session::active_name();
@@ -74,8 +83,8 @@ async fn run(session: String, options: Options) -> Result<()> {
             .map_err(anyhow::Error::msg)
             .context("could not establish scoped web authority")?,
     );
-    let (authority, initial) =
-        BrowserAuthority::new(12 * 60 * 60, options.max_devices).map_err(anyhow::Error::msg)?;
+    let (authority, initial) = BrowserAuthority::new(options.ticket_seconds, options.max_devices)
+        .map_err(anyhow::Error::msg)?;
     // Bind before building the state: the Host allowlist needs the real port,
     // which `--port 0` only learns here.
     let listener = tokio::net::TcpListener::bind(SocketAddr::new(
@@ -102,9 +111,23 @@ async fn run(session: String, options: Options) -> Result<()> {
     let url = format!("{base}/#pair={}", initial.code);
     println!("Luvus Web is ready for session '{session}'.");
     println!("{url}");
-    println!(
-        "Open this link once, in one browser tab. It works one time and expires in 5 minutes."
-    );
+    let context = crate::i18n::cli::Context::configured();
+    println!("{}", context.text("Pair this browser once within 5 minutes. Access is remembered across tabs and browser restarts."));
+    if let Some(seconds) = options.ticket_seconds {
+        println!(
+            "{}",
+            context.render(
+                "Browser access expires after {seconds} seconds.",
+                &[("seconds", &seconds.to_string())]
+            )
+        );
+    } else {
+        println!(
+            "{}",
+            context
+                .text("Browser access lasts until this bridge stops or you forget this browser.")
+        );
+    }
     let interactive = std::io::stdin().is_terminal();
     if interactive {
         println!("Press Enter here for a new one-use link.");
@@ -209,7 +232,14 @@ async fn operator_links(state: BridgeState, mut base: String) {
                 continue;
             }
         }
-        println!("{}", operator_link_message(&base, state.operator_pairing()));
+        let message = operator_link_message(&base, state.operator_pairing());
+        println!(
+            "{}",
+            crate::i18n::cli::diagnostic(
+                &message,
+                crate::i18n::cli::Context::configured().language()
+            )
+        );
     }
 }
 
@@ -252,7 +282,7 @@ fn operator_link_message(
         Ok(created) => created,
         Err(auth::Full { reconnecting: 0 }) => {
             return "No room for another device: every allowed device is still connected. \
-                    Close a Luvus Web tab, or restart with a larger --max-devices."
+                    Forget a browser in Devices, close all its tabs, or restart with a larger --max-devices."
                 .to_string()
         }
         Err(auth::Full { .. }) => {
@@ -363,6 +393,7 @@ struct Options {
     control: bool,
     port: u16,
     max_devices: usize,
+    ticket_seconds: Option<u64>,
     public_url: Option<String>,
     origins: Vec<String>,
     no_open: bool,
@@ -374,6 +405,7 @@ impl Options {
         let mut read_only = false;
         let mut port = 4174;
         let mut max_devices = 2;
+        let mut ticket_seconds = None;
         let mut public_url = None;
         let mut origins = Vec::new();
         let mut no_open = false;
@@ -410,6 +442,16 @@ impl Options {
                     );
                     index += 1;
                 }
+                "--ticket-ttl" => {
+                    let raw = args.get(index + 1).ok_or("--ticket-ttl requires a value")?;
+                    ticket_seconds = Some(
+                        raw.parse::<u64>()
+                            .ok()
+                            .filter(|seconds| (1..=86400).contains(seconds))
+                            .ok_or("--ticket-ttl must be an integer from 1 through 86400")?,
+                    );
+                    index += 1;
+                }
                 "--origin" => {
                     let raw = args.get(index + 1).ok_or("--origin requires a value")?;
                     origins.push(
@@ -431,6 +473,7 @@ impl Options {
             control,
             port,
             max_devices,
+            ticket_seconds,
             public_url,
             origins,
             no_open,
@@ -583,11 +626,34 @@ mod tests {
         assert!(options.control);
         assert_eq!(options.port, 0);
         assert_eq!(options.max_devices, 4);
+        assert_eq!(options.ticket_seconds, None);
         assert_eq!(options.public_url.as_deref(), Some("https://phone.example"));
         assert!(options.no_open);
         assert!(Options::parse(&strings(&["--control", "--read-only"])).is_err());
         assert!(Options::parse(&strings(&["--max-devices", "9"])).is_err());
         assert!(Options::parse(&strings(&["--public-url", "http://phone.example"])).is_err());
         assert!(Options::parse(&strings(&["--origin", "https://phone.example/path"])).is_err());
+    }
+
+    #[test]
+    fn browser_ticket_lifetime_is_process_bound_unless_explicitly_finite() {
+        assert_eq!(Options::parse(&[]).unwrap().unwrap().ticket_seconds, None);
+        for seconds in ["1", "600", "86400"] {
+            let options = Options::parse(&strings(&["--ticket-ttl", seconds]))
+                .unwrap()
+                .unwrap();
+            assert_eq!(options.ticket_seconds, Some(seconds.parse().unwrap()));
+        }
+        for seconds in [
+            "0",
+            "-1",
+            "86401",
+            "1.5",
+            "not-a-number",
+            "18446744073709551616",
+        ] {
+            assert!(Options::parse(&strings(&["--ticket-ttl", seconds])).is_err());
+        }
+        assert!(Options::parse(&strings(&["--ticket-ttl"])).is_err());
     }
 }
