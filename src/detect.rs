@@ -4059,7 +4059,7 @@ Antigravity CLI requires permission to read, edit, and execute files here.
         // the same non-empty window is used.
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut working = AlacrittyEngine::new(80, 30, tx, 1024 * 1024);
-        working.advance(format!("\x1b[2J\x1b[28;1H⠹ Working...\r\nesc to cancel").as_bytes());
+        working.advance("\x1b[2J\x1b[28;1H⠹ Working...\r\nesc to cancel".as_bytes());
         assert_eq!(
             antigravity_detection(&working.detection_text_non_empty(rows), &running).state,
             State::Working
