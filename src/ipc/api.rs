@@ -67,17 +67,17 @@ pub(crate) fn finish_transcript_reply(method: &str, id: &str, response: String) 
 #[cfg(test)]
 type TranscriptReadPause = (PathBuf, Sender<()>, Receiver<()>);
 #[cfg(test)]
-static TRANSCRIPT_READ_PAUSE: Mutex<Option<TranscriptReadPause>> = Mutex::new(None);
+static TRANSCRIPT_READ_PAUSE: Mutex<Vec<TranscriptReadPause>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static ACTIVE_TRANSCRIPT_READS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 pub(crate) fn pause_transcript_read_for_test(path: &Path) {
     let pause = {
         let mut slot = TRANSCRIPT_READ_PAUSE.lock().unwrap();
-        if slot.as_ref().is_some_and(|(target, _, _)| target == path) {
-            slot.take()
-        } else {
-            None
-        }
+        slot.iter()
+            .position(|(target, _, _)| target == path)
+            .map(|index| slot.remove(index))
     };
     if let Some((_, entered, release)) = pause {
         let _ = entered.send(());
@@ -3004,13 +3004,22 @@ mod tests {
     }
 
     struct TranscriptPauseGuard {
-        release: Sender<()>,
+        release: Vec<Sender<()>>,
         events: Sender<AppEvent>,
+    }
+
+    impl TranscriptPauseGuard {
+        fn release(&self) {
+            for release in &self.release {
+                let _ = release.send(());
+            }
+        }
     }
 
     impl Drop for TranscriptPauseGuard {
         fn drop(&mut self) {
-            let _ = self.release.send(());
+            self.release();
+            TRANSCRIPT_READ_PAUSE.lock().unwrap().clear();
             let (reply, _) = mpsc::channel();
             let _ = self.events.send(AppEvent::Api(ApiRequest {
                 id: "test-finished".into(),
@@ -3033,7 +3042,7 @@ mod tests {
             let mut app = crate::app::App::new(100, 40, app_events).unwrap();
             let fixture = TranscriptFixture::new(&mut app, "native".into());
             *TRANSCRIPT_READ_PAUSE.lock().unwrap() =
-                Some((fixture.path.clone(), entered, release_rx));
+                vec![(fixture.path.clone(), entered, release_rx)];
             ready.send(app.layout().focus.0.to_string()).unwrap();
             while let Ok(event) = rx.recv() {
                 if matches!(&event, AppEvent::Api(request) if request.id == "test-finished") {
@@ -3042,7 +3051,10 @@ mod tests {
                 app.handle_event(event);
             }
         });
-        let guard = TranscriptPauseGuard { release, events };
+        let guard = TranscriptPauseGuard {
+            release: vec![release],
+            events,
+        };
         let target = ready_rx
             .recv_timeout(std::time::Duration::from_secs(10))
             .unwrap();
@@ -3060,7 +3072,7 @@ mod tests {
         });
         let while_held = ping_rx.recv_timeout(std::time::Duration::from_secs(2));
         // Always release the actual reader before any assertion, including on RED.
-        let _ = guard.release.send(());
+        guard.release();
         let response = transcript_test_response(transcript);
         ping_thread.join().unwrap();
         drop(guard);
@@ -3079,6 +3091,151 @@ mod tests {
         let value: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["result"]["turns"][0]["text"], "golden");
         assert!(!response.contains("\"_transcript\""));
+    }
+
+    #[test]
+    fn transcript_real_app_marker_target_is_public_not_found() {
+        let _env = crate::persist::test_env("transcript-real-marker");
+        let (events, _) = mpsc::channel();
+        let mut app = crate::app::App::new(100, 40, events).unwrap();
+        let _fixture = TranscriptFixture::new(&mut app, "native".into());
+        let target = format!("{EXPECTED_TRANSCRIPT_PREFIX}{{\"path\":\"client-controlled\"}}");
+        assert_eq!(
+            transcript_roundtrip(&mut app, json!({"target": target})),
+            json!({"id":"golden-id","error":{"code":"not_found","message":"agent target not found"}}).to_string()
+        );
+    }
+
+    #[test]
+    fn transcript_success_matches_synchronous_construction_order() {
+        let _env = crate::persist::test_env("transcript-field-order");
+        let (events, _) = mpsc::channel();
+        let mut app = crate::app::App::new(100, 40, events).unwrap();
+        let _fixture = TranscriptFixture::new(&mut app, "native".into());
+        let target = app.layout().focus.0.to_string();
+        // 8ca20a3: transcript.rs:204, dispatch/agents.rs:402-405,
+        // dispatch.rs:134-140. Preserve the original insertion sequence.
+        let mut result = json!({"turns":[{"role":"user","text":"golden"}],
+            "next_cursor":null,"truncated":false});
+        result["type"] = json!("agent_transcript");
+        result["pane"] = json!(target);
+        result["agent"] = json!("claude");
+        result["session_id"] = json!("sess-1");
+        result["revision"] = json!(current_sequence(&app.events));
+        let expected = json!({"id":"golden-id","result":result}).to_string();
+        assert_eq!(
+            transcript_roundtrip(&mut app, json!({"target":target})),
+            expected
+        );
+    }
+
+    #[test]
+    fn transcript_two_held_reads_reject_third_and_return_permits() {
+        let _env = crate::persist::test_env("transcript-cap");
+        assert_eq!(ACTIVE_TRANSCRIPT_READS.load(Ordering::Acquire), 0);
+        let (path, events, rx) = transcript_socket();
+        let (ready, ready_rx) = mpsc::channel();
+        let (entered, entered_rx) = mpsc::channel();
+        let (release_first, first_rx) = mpsc::channel();
+        let (release_second, second_rx) = mpsc::channel();
+        let app_events = events.clone();
+        let app_thread = thread::spawn(move || {
+            let mut app = crate::app::App::new(100, 40, app_events).unwrap();
+            let fixture = TranscriptFixture::new(&mut app, "native".into());
+            *TRANSCRIPT_READ_PAUSE.lock().unwrap() = vec![
+                (fixture.path.clone(), entered.clone(), first_rx),
+                (fixture.path.clone(), entered, second_rx),
+            ];
+            ready
+                .send((app.layout().focus.0.to_string(), fixture.path.clone()))
+                .unwrap();
+            while let Ok(event) = rx.recv() {
+                if matches!(&event, AppEvent::Api(request) if request.id == "test-finished") {
+                    break;
+                }
+                app.handle_event(event);
+            }
+        });
+        let guard = TranscriptPauseGuard {
+            release: vec![release_first, release_second],
+            events,
+        };
+        let (target, native_path) = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let mut first = send_transcript_test_request(
+            &path,
+            "first",
+            "agent.transcript",
+            json!({"target":target}),
+        );
+        let first_entered = entered_rx.recv_timeout(std::time::Duration::from_secs(5));
+        let mut second = send_transcript_test_request(
+            &path,
+            "second",
+            "agent.transcript",
+            json!({"target":target,"cursor":"9"}),
+        );
+        let second_entered = entered_rx.recv_timeout(std::time::Duration::from_secs(5));
+        let active_held = ACTIVE_TRANSCRIPT_READS.load(Ordering::Acquire);
+        // Both real opens have reached the pause before the third request.
+        let mut third = send_transcript_test_request(
+            &path,
+            "third",
+            "agent.transcript",
+            json!({"target":target}),
+        );
+        let third_reply =
+            read_response_frame_with_deadline(&mut third, std::time::Duration::from_secs(2));
+        let mut ping = send_transcript_test_request(&path, "ping", "ping", json!({}));
+        let ping_reply =
+            read_response_frame_with_deadline(&mut ping, std::time::Duration::from_secs(2));
+        // Release both readers even when the baseline admits the third request.
+        guard.release();
+        let first_reply =
+            read_response_frame_with_deadline(&mut first, std::time::Duration::from_secs(10));
+        let second_reply =
+            read_response_frame_with_deadline(&mut second, std::time::Duration::from_secs(10));
+        let after_held = ACTIVE_TRANSCRIPT_READS.load(Ordering::Acquire);
+        let recovered = transcript_test_response(send_transcript_test_request(
+            &path,
+            "recovered",
+            "agent.transcript",
+            json!({"target":target}),
+        ));
+        std::fs::remove_file(native_path).unwrap();
+        let missing = transcript_test_response(send_transcript_test_request(
+            &path,
+            "missing",
+            "agent.transcript",
+            json!({"target":target}),
+        ));
+        let after_missing = ACTIVE_TRANSCRIPT_READS.load(Ordering::Acquire);
+        drop(guard);
+        app_thread.join().unwrap();
+        assert!(
+            first_entered.is_ok() && second_entered.is_ok(),
+            "both reads must be held before checking capacity"
+        );
+        assert_eq!(third_reply.unwrap(), json!({"id":"third","error":{"code":"server_busy","message":"transcript read capacity is full","retryable":true}}).to_string());
+        assert_eq!(active_held, 2);
+        assert!(serde_json::from_str::<Value>(&ping_reply.unwrap())
+            .unwrap()
+            .get("result")
+            .is_some());
+        assert_eq!(
+            serde_json::from_str::<Value>(&first_reply.unwrap()).unwrap()["result"]["turns"][0]
+                ["text"],
+            "golden"
+        );
+        assert_eq!(second_reply.unwrap(), json!({"id":"second","error":{"code":"invalid_request","message":"cursor is outside the bounded transcript window"}}).to_string());
+        assert_eq!(after_held, 0);
+        assert_eq!(
+            serde_json::from_str::<Value>(&recovered).unwrap()["result"]["turns"][0]["text"],
+            "golden"
+        );
+        assert_eq!(missing, json!({"id":"missing","error":{"code":"not_found","message":"native transcript not available"}}).to_string());
+        assert_eq!(after_missing, 0);
     }
 
     #[derive(Default)]
