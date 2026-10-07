@@ -1726,11 +1726,23 @@ fn backend_key_bytes(key: &str, application_cursor: bool) -> Option<Vec<u8>> {
         "delete" => b"\x1b[3~",
         "pageup" => b"\x1b[5~",
         "pagedown" => b"\x1b[6~",
+        "ctrl-a" => b"\x01",
+        "ctrl-b" => b"\x02",
         "ctrl-c" => b"\x03",
         "ctrl-d" => b"\x04",
+        "ctrl-e" => b"\x05",
+        "ctrl-f" => b"\x06",
+        "ctrl-g" => b"\x07",
         "ctrl-k" => b"\x0b",
+        "ctrl-l" => b"\x0c",
+        "ctrl-n" => b"\x0e",
+        "ctrl-o" => b"\x0f",
+        "ctrl-p" => b"\x10",
+        "ctrl-r" => b"\x12",
+        "ctrl-t" => b"\x14",
         "ctrl-u" => b"\x15",
         "ctrl-w" => b"\x17",
+        "ctrl-y" => b"\x19",
         "alt-d" => b"\x1bd",
         "space" => b" ",
         "digit-0" => b"0",
@@ -2506,6 +2518,10 @@ mod tests {
         assert_eq!(backend_key_bytes("left", true).unwrap(), b"\x1bOD");
         assert_eq!(backend_key_bytes("ctrl-k", false).unwrap(), b"\x0b");
         assert_eq!(backend_key_bytes("alt-d", false).unwrap(), b"\x1bd");
+        assert_eq!(backend_key_bytes("ctrl-a", false).unwrap(), b"\x01");
+        assert_eq!(backend_key_bytes("ctrl-r", false).unwrap(), b"\x12");
+        assert_eq!(backend_key_bytes("ctrl-y", false).unwrap(), b"\x19");
+        assert!(backend_key_bytes("ctrl-z", false).is_none());
         assert!(backend_key_bytes("raw-escape", false).is_none());
     }
 

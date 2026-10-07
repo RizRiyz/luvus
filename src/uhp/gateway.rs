@@ -861,11 +861,23 @@ fn valid_terminal_control_frame(frame: &str) -> bool {
                                     | "delete"
                                     | "pageup"
                                     | "pagedown"
+                                    | "ctrl-a"
+                                    | "ctrl-b"
                                     | "ctrl-c"
                                     | "ctrl-d"
+                                    | "ctrl-e"
+                                    | "ctrl-f"
+                                    | "ctrl-g"
                                     | "ctrl-k"
+                                    | "ctrl-l"
+                                    | "ctrl-n"
+                                    | "ctrl-o"
+                                    | "ctrl-p"
+                                    | "ctrl-r"
+                                    | "ctrl-t"
                                     | "ctrl-u"
                                     | "ctrl-w"
+                                    | "ctrl-y"
                                     | "alt-d"
                                     | "space"
                                     | "digit-0"
@@ -1255,6 +1267,9 @@ mod tests {
         ));
         assert!(valid_terminal_control_frame(
             r#"{"id":"key-3","action":"send_key","params":{"key":"alt-d"}}"#
+        ));
+        assert!(valid_terminal_control_frame(
+            r#"{"id":"key-4","action":"send_key","params":{"key":"ctrl-r"}}"#
         ));
         assert!(valid_terminal_control_frame(
             r#"{"id":"size-1","action":"set_viewport","params":{"cols":40,"rows":18}}"#

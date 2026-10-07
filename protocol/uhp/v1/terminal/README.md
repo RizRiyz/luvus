@@ -67,7 +67,10 @@ field retain the original strict create-response shape.
 
 The bounded `send_key` vocabulary includes `ctrl-w` and `alt-d` for backward
 and forward word deletion plus `ctrl-u` and `ctrl-k` for deletion toward the
-start and end of the current line.
+start and end of the current line. It also carries the common shell and agent
+controls `ctrl-a`, `ctrl-b`, `ctrl-e`, `ctrl-f`, `ctrl-g`, `ctrl-l`, `ctrl-n`,
+`ctrl-o`, `ctrl-p`, `ctrl-r`, `ctrl-t`, and `ctrl-y`. Job-control and
+flow-control keys such as `ctrl-z`, `ctrl-s`, and `ctrl-q` remain excluded.
 
 Protocol 1.0 capture includes a monotonic `content_revision` and provides a
 sequence-fenced snapshot, bounded terminal-only event streams, and event-driven

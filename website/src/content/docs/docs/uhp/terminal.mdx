@@ -185,6 +185,10 @@ when the child prints nothing. Observe streams cannot set a viewport.
 For native command-line editing, `send_key` includes `ctrl-w` and `alt-d` for
 backward and forward word deletion, and `ctrl-u` and `ctrl-k` for deletion
 toward the start and end of the current line.
+It also includes `ctrl-a`, `ctrl-b`, `ctrl-e`, `ctrl-f`, `ctrl-g`, `ctrl-l`,
+`ctrl-n`, `ctrl-o`, `ctrl-p`, `ctrl-r`, `ctrl-t`, and `ctrl-y` for line
+movement, history search, screen clearing, and agent shortcuts. Job-control and
+flow-control keys such as `ctrl-z`, `ctrl-s`, and `ctrl-q` are not accepted.
 
 `paste_image` takes `{png_base64}` for one validated PNG up to 160 KiB. Luvus
 stages the image beneath private selected-session storage and delivers its
