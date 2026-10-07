@@ -213,6 +213,51 @@ mod tests {
         Fixture(path)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn transcript_rejects_final_symlink_inside_and_outside_project() {
+        let root = fixture(b"");
+        std::fs::remove_file(root.path()).unwrap();
+        std::fs::create_dir(root.path()).unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let mut results = Vec::new();
+        for target in [
+            project.join("inside.jsonl"),
+            root.path().join("outside.jsonl"),
+        ] {
+            std::fs::write(
+                &target,
+                b"{\"role\":\"user\",\"content\":\"private-target-bytes\"}\n",
+            )
+            .unwrap();
+            let link = project.join("session.jsonl");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let result = read_transcript(&link, 50, None);
+            std::fs::remove_file(&link).unwrap();
+            results.push(result);
+        }
+        std::fs::remove_dir_all(root.path()).unwrap();
+        for result in results {
+            assert_eq!(result, Err("not_found"));
+            assert!(!format!("{result:?}").contains("private-target-bytes"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_same_handle_survives_path_replacement() {
+        let original = fixture(b"{\"role\":\"user\",\"content\":\"original\"}\n");
+        let handle = open_transcript(original.path()).unwrap();
+        std::fs::remove_file(original.path()).unwrap();
+        let mut replacement = vec![b'x'; WINDOW_BYTES as usize + 99];
+        replacement.extend_from_slice(b"\n{\"role\":\"user\",\"content\":\"replacement\"}\n");
+        std::fs::write(original.path(), replacement).unwrap();
+        let result = read_transcript_file(handle, 50, None).unwrap();
+        assert_eq!(result["turns"], json!([{"role":"user","text":"original"}]));
+        assert_eq!(result["truncated"], false);
+    }
+
     #[test]
     /// Extract supported roles, joined text parts, and numeric timestamps.
     fn transcript_extracts_roles_text_parts_and_numeric_ts() {
