@@ -2906,8 +2906,16 @@ mod tests {
         let _env = crate::persist::test_env("transcript-native-path");
         let (events, _) = mpsc::channel();
         let mut app = crate::app::App::new(100, 40, events).unwrap();
-        let fixture = TranscriptFixture::new(&mut app, directory);
-        let target = app.layout().focus.0.to_string();
+        let _fixture = TranscriptFixture::new(&mut app, "native".into());
+        let fixture_base = std::env::var_os("CLAUDE_CONFIG_DIR").unwrap();
+        // APFS cannot create arbitrary Unix byte names. Prove the handoff
+        // encoding without requiring the filesystem to accept this component.
+        let native_base = crate::persist::ensure_config_dir().join(directory);
+        std::env::set_var("CLAUDE_CONFIG_DIR", &native_base);
+        let pane = app.layout().focus;
+        let expected_path = crate::agent::claude_project_dir(&native_base, &app.panes[&pane].cwd)
+            .join("sess-1.jsonl");
+        let target = pane.0.to_string();
         let (reply, _) = mpsc::channel();
         let raw = app.handle_api(&ApiRequest {
             id: "path".into(),
@@ -2922,7 +2930,13 @@ mod tests {
         .unwrap();
         let path: std::ffi::OsString =
             serde_json::from_value(plan["result"]["_transcript"]["path"].clone()).unwrap();
-        assert_eq!(PathBuf::from(path), fixture.path);
+        assert_eq!(PathBuf::from(path), expected_path);
+        assert_eq!(
+            finish_transcript_reply("agent.transcript", "path", raw),
+            json!({"id":"path","error":{"code":"not_found","message":"native transcript not available"}}).to_string()
+        );
+        // Exercise an actual socket read separately with a portable fixture name.
+        std::env::set_var("CLAUDE_CONFIG_DIR", fixture_base);
         let response = transcript_roundtrip(&mut app, json!({"target":target}));
         assert!(!response.contains("\"_transcript\""));
         assert!(!response.contains("\\u0000"));
