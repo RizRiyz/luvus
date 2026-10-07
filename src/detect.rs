@@ -170,6 +170,10 @@ enum Cond {
     /// in the OSC title, so the generic start-of-line spinner rule cannot see it.
     SpinnerAfterPrefix(Vec<String>),
     LastLine(Vec<String>),
+    /// The last non-empty line, or the non-empty line above one trailing row,
+    /// contains one of these substrings. A live menu footer can sit directly
+    /// above a model-status row.
+    LastTwoLines(Vec<String>),
 }
 
 impl Cond {
@@ -195,6 +199,12 @@ impl Cond {
                 .rev()
                 .find(|line| !line.trim().is_empty())
                 .is_some_and(|line| subs.iter().any(|s| line.contains(s))),
+            Cond::LastTwoLines(subs) => low
+                .lines()
+                .rev()
+                .filter(|line| !line.trim().is_empty())
+                .take(2)
+                .any(|line| subs.iter().any(|s| line.contains(s))),
         }
     }
 }
@@ -873,20 +883,23 @@ fn builtin_rules() -> Vec<Rule> {
                 Cond::LastLine(vec!["enter continue".to_string()]),
             ],
         ),
-        // Antigravity's first-run workspace-trust screen is a cursor menu. The
-        // question, the "Yes, I trust this folder" row, and the confirm hint
-        // stay together on that screen; a transcript that only mentions the
-        // question does not.
+        // Antigravity's first-run workspace-trust screen ends on
+        // "↑/↓ Navigate · enter Confirm", sometimes with one model-status row
+        // after it. The footer has to be one of those last rows. The same
+        // menu text above the composer ends on the composer.
         per(
             "antigravity",
             State::Blocked,
             310,
             Region::Screen,
-            vec![all(&[
-                "do you trust the contents of this project?",
-                "yes, i trust this folder",
-                "enter confirm",
-            ])],
+            vec![
+                all(&[
+                    "do you trust the contents of this project?",
+                    "yes, i trust this folder",
+                    "enter confirm",
+                ]),
+                Cond::LastTwoLines(vec!["enter confirm".to_string()]),
+            ],
         ),
     ]
 }
@@ -3977,11 +3990,12 @@ Antigravity CLI requires permission to read, edit, and execute files here.
         assert_eq!(trust.rule_region, Some("screen"));
 
         // The model status can sit on its own last row. The menu is still blocked.
-        let with_status = format!("{ANTIGRAVITY_WORKSPACE_TRUST_SCREEN}\nGemini 3.5 Flash (High)");
-        assert_eq!(
-            antigravity_detection(&with_status, &running).state,
-            State::Blocked
+        let with_status = antigravity_detection(
+            &format!("{ANTIGRAVITY_WORKSPACE_TRUST_SCREEN}\nGemini 3.5 Flash (High)"),
+            &running,
         );
+        assert_eq!(with_status.state, State::Blocked);
+        assert_eq!(with_status.prompt_evidence, PromptEvidence::Blocked);
         // Moving the cursor to the exit row leaves the same menu on screen.
         assert_eq!(
             antigravity_detection(
@@ -4021,6 +4035,23 @@ Antigravity CLI requires permission to read, edit, and execute files here.
             .state,
             State::Idle
         );
+        // The full menu can remain above the composer after it is dismissed.
+        // The live rows are the composer, so this is idle.
+        let inactive = antigravity_detection(
+            "Do you trust the contents of this project?\n\
+             Antigravity CLI requires permission to read, edit, and execute files here.\n\
+             > Yes, I trust this folder\n\
+               No, exit\n\
+               ↑/↓ Navigate · enter Confirm\n\
+             ────────────────────────────────\n\
+             >\n\
+             ────────────────────────────────\n\
+             ? for shortcuts",
+            &running,
+        );
+        assert_eq!(inactive.state, State::Idle);
+        assert_eq!(inactive.state_source, "no_positive_state_evidence");
+        assert_eq!(inactive.prompt_evidence, PromptEvidence::Unknown);
     }
 
     #[test]
