@@ -334,7 +334,10 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   padding: 5rem 1rem 1.1rem; overflow: auto; overflow-x: hidden;
   color: #d9d7e7; background: #0d0e14; outline: none; overscroll-behavior: contain; overflow-anchor: none; scrollbar-width: none;
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; tab-size: 4;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* Nerd Font families after the text faces supply private-use icons and powerline separators only. */
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Symbols Nerd Font Mono", "Symbols Nerd Font", "MesloLGS NF", "MesloLGS Nerd Font Mono", "JetBrainsMono Nerd Font Mono",
+    "JetBrainsMono Nerd Font", "FiraCode Nerd Font Mono", "Hack Nerd Font Mono", monospace;
   font-size: .9rem; line-height: 1.5;
 }
 .terminal-output:focus-visible { box-shadow: inset 0 0 0 1px #ead77855; }
