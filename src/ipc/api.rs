@@ -28,6 +28,27 @@ pub struct ApiRequest {
     pub reply: Sender<String>,
 }
 
+#[cfg(test)]
+type TranscriptReadPause = (PathBuf, Sender<()>, Receiver<()>);
+#[cfg(test)]
+static TRANSCRIPT_READ_PAUSE: Mutex<Option<TranscriptReadPause>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn pause_transcript_read_for_test(path: &Path) {
+    let pause = {
+        let mut slot = TRANSCRIPT_READ_PAUSE.lock().unwrap();
+        if slot.as_ref().is_some_and(|(target, _, _)| target == path) {
+            slot.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, entered, release)) = pause {
+        let _ = entered.send(());
+        let _ = release.recv();
+    }
+}
+
 /// A bounded event broadcaster shared by the app loop and socket workers.
 /// Slow consumers are disconnected instead of growing an unbounded queue on
 /// the server. Every published event receives a monotonic sequence number.
@@ -2695,6 +2716,307 @@ fn parse_agent_wait_states(params: &Value) -> Result<Vec<String>, &'static str> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EXPECTED_TRANSCRIPT_PREFIX: &str = "\0luvus-transcript-v1\0";
+
+    struct TranscriptFixture {
+        path: PathBuf,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TranscriptFixture {
+        fn new(app: &mut crate::app::App, directory: std::ffi::OsString) -> Self {
+            let base = crate::persist::ensure_config_dir().join(directory);
+            let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+            std::env::set_var("CLAUDE_CONFIG_DIR", &base);
+            let pane = app.layout().focus;
+            let project = crate::agent::claude_project_dir(&base, &app.panes[&pane].cwd);
+            std::fs::create_dir_all(&project).unwrap();
+            let path = project.join("sess-1.jsonl");
+            std::fs::write(&path, b"{\"role\":\"user\",\"content\":\"golden\"}\n").unwrap();
+            let status = app.status.get_mut(&pane).unwrap();
+            status.agent = "claude".into();
+            status.agent_session = Some(crate::app::AgentSession {
+                agent: "claude".into(),
+                session_id: "sess-1".into(),
+            });
+            Self { path, previous }
+        }
+    }
+
+    impl Drop for TranscriptFixture {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
+    }
+
+    fn transcript_socket() -> (PathBuf, Sender<AppEvent>, Receiver<AppEvent>) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = crate::persist::ensure_config_dir();
+        let path = root.join(format!("t{}.sock", NEXT.fetch_add(1, Ordering::Relaxed)));
+        let lock = transport::acquire_server_startup_lock(&root).unwrap();
+        let listener = bind_server(&path, &lock).unwrap();
+        let (events, rx) = mpsc::channel();
+        start_server(listener, events.clone(), new_bus());
+        drop(lock);
+        (path, events, rx)
+    }
+
+    fn send_transcript_test_request(path: &Path, id: &str, method: &str, params: Value) -> Conn {
+        let mut stream = transport::connect(path).unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({"id":id,"method":method,"params":params})
+        )
+        .unwrap();
+        stream
+    }
+
+    fn transcript_test_response(stream: Conn) -> String {
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response).unwrap();
+        response.strip_suffix('\n').unwrap().to_owned()
+    }
+
+    fn transcript_roundtrip(app: &mut crate::app::App, params: Value) -> String {
+        let (path, _, rx) = transcript_socket();
+        let stream = send_transcript_test_request(&path, "golden-id", "agent.transcript", params);
+        let AppEvent::Api(request) = rx.recv().unwrap() else {
+            panic!("expected API request")
+        };
+        app.handle_event(AppEvent::Api(request));
+        transcript_test_response(stream)
+    }
+
+    #[test]
+    fn transcript_worker_matches_synchronous_golden_responses() {
+        let _env = crate::persist::test_env("transcript-wire-golden");
+        let (events, _) = mpsc::channel();
+        let mut app = crate::app::App::new(100, 40, events).unwrap();
+        let fixture = TranscriptFixture::new(&mut app, "native".into());
+        let pane = app.layout().focus;
+        let target = pane.0.to_string();
+        // These exact envelopes are first exercised against synchronous 8ca20a39.
+        let success = json!({"id":"golden-id","result":{
+            "type":"agent_transcript","pane":target,"agent":"claude","session_id":"sess-1",
+            "turns":[{"role":"user","text":"golden"}],"next_cursor":null,"truncated":false,
+            "revision":current_sequence(&app.events)}})
+        .to_string();
+        assert_eq!(
+            transcript_roundtrip(&mut app, json!({"target":target})),
+            success
+        );
+        for (params, code, message) in [
+            (
+                json!({"target":"absent"}),
+                "not_found",
+                "agent target not found",
+            ),
+            (
+                json!({"target":target,"limit":0}),
+                "invalid_request",
+                "limit must be 1..50 and cursor must be 1..10 ASCII digits",
+            ),
+            (
+                json!({"target":target,"cursor":"9"}),
+                "invalid_request",
+                "cursor is outside the bounded transcript window",
+            ),
+        ] {
+            let expected =
+                json!({"id":"golden-id","error":{"code":code,"message":message}}).to_string();
+            assert_eq!(transcript_roundtrip(&mut app, params), expected);
+        }
+        let binding = app
+            .status
+            .get_mut(&pane)
+            .unwrap()
+            .agent_session
+            .take()
+            .unwrap();
+        assert_eq!(transcript_roundtrip(&mut app, json!({"target":target})), json!({"id":"golden-id","error":{"code":"not_found","message":"target pane has no bound native session"}}).to_string());
+        app.status.get_mut(&pane).unwrap().agent_session = Some(binding);
+        let unavailable = json!({"id":"golden-id","error":{"code":"not_found","message":"native transcript not available"}}).to_string();
+        std::fs::remove_file(&fixture.path).unwrap();
+        assert_eq!(
+            transcript_roundtrip(&mut app, json!({"target":target})),
+            unavailable
+        );
+        #[cfg(unix)]
+        {
+            let secret = fixture.path.with_extension("secret");
+            std::fs::write(&secret, b"{\"role\":\"user\",\"content\":\"secret\"}\n").unwrap();
+            std::os::unix::fs::symlink(&secret, &fixture.path).unwrap();
+            assert_eq!(
+                transcript_roundtrip(&mut app, json!({"target":target})),
+                unavailable
+            );
+        }
+        app.status
+            .get_mut(&pane)
+            .unwrap()
+            .agent_session
+            .as_mut()
+            .unwrap()
+            .agent = "codex".into();
+        assert_eq!(transcript_roundtrip(&mut app, json!({"target":target})), json!({"id":"golden-id","error":{"code":"unsupported_agent","message":"native transcript is supported only for Claude"}}).to_string());
+    }
+
+    fn assert_transcript_native_path_roundtrip(directory: std::ffi::OsString) {
+        let _env = crate::persist::test_env("transcript-native-path");
+        let (events, _) = mpsc::channel();
+        let mut app = crate::app::App::new(100, 40, events).unwrap();
+        let fixture = TranscriptFixture::new(&mut app, directory);
+        let target = app.layout().focus.0.to_string();
+        let (reply, _) = mpsc::channel();
+        let raw = app.handle_api(&ApiRequest {
+            id: "path".into(),
+            method: "agent.transcript".into(),
+            params: json!({"target":target}),
+            reply,
+        });
+        let plan: Value = serde_json::from_str(
+            raw.strip_prefix(EXPECTED_TRANSCRIPT_PREFIX)
+                .expect("app must emit a private non-JSON prefix"),
+        )
+        .unwrap();
+        let path: std::ffi::OsString =
+            serde_json::from_value(plan["result"]["_transcript"]["path"].clone()).unwrap();
+        assert_eq!(PathBuf::from(path), fixture.path);
+        let response = transcript_roundtrip(&mut app, json!({"target":target}));
+        assert!(!response.contains("_transcript"));
+        assert!(!response.contains("\\u0000"));
+        let result: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(result["result"]["turns"][0]["text"], "golden");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transcript_plan_roundtrips_non_utf8_native_path() {
+        use std::os::unix::ffi::OsStringExt;
+        assert_transcript_native_path_roundtrip(std::ffi::OsString::from_vec(
+            b"native-\xff".to_vec(),
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transcript_plan_roundtrips_windows_native_path() {
+        use std::os::windows::ffi::OsStringExt;
+        assert_transcript_native_path_roundtrip(std::ffi::OsString::from_wide(&[
+            110, 97, 116, 105, 118, 101, 45, 0xd800,
+        ]));
+    }
+
+    #[test]
+    fn transcript_worker_never_interprets_client_text_or_other_method_replies() {
+        let _env = crate::persist::test_env("transcript-marker");
+        let fake_plan = format!("{EXPECTED_TRANSCRIPT_PREFIX}{{\"path\":\"client-controlled\"}}");
+        let text =
+            json!({"id":"marker","result":{"type":"agent_read","text":fake_plan}}).to_string();
+        for (method, response) in [
+            ("agent.read", fake_plan.clone()),
+            ("agent.read", text.clone()),
+            ("agent.transcript", text),
+            (
+                "agent.transcript",
+                serde_json::to_string(&fake_plan).unwrap(),
+            ),
+            ("agent.transcript", format!(" {fake_plan}")),
+        ] {
+            let (path, _, rx) = transcript_socket();
+            // Feed the imitating text as actual client input as well as in the app reply.
+            let stream =
+                send_transcript_test_request(&path, "marker", method, json!({"target":fake_plan}));
+            let AppEvent::Api(request) = rx.recv().unwrap() else {
+                panic!("expected API request")
+            };
+            assert_eq!(request.params["target"], fake_plan);
+            request.reply.send(response.clone()).unwrap();
+            assert_eq!(transcript_test_response(stream), response);
+        }
+        let (path, _, rx) = transcript_socket();
+        let stream = send_transcript_test_request(
+            &path,
+            "marker",
+            "agent.transcript",
+            json!({"target":"7"}),
+        );
+        let AppEvent::Api(request) = rx.recv().unwrap() else {
+            panic!("expected API request")
+        };
+        request.reply.send(fake_plan).unwrap();
+        assert_eq!(transcript_test_response(stream), json!({"id":"marker","error":{"code":"not_found","message":"native transcript not available"}}).to_string());
+    }
+
+    #[test]
+    fn transcript_worker_held_read_leaves_dispatcher_responsive() {
+        let _env = crate::persist::test_env("transcript-worker-held");
+        let (path, events, rx) = transcript_socket();
+        let (ready, ready_rx) = mpsc::channel();
+        let (entered, entered_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let app_events = events.clone();
+        let app_thread = thread::spawn(move || {
+            let mut app = crate::app::App::new(100, 40, app_events).unwrap();
+            let fixture = TranscriptFixture::new(&mut app, "native".into());
+            *TRANSCRIPT_READ_PAUSE.lock().unwrap() =
+                Some((fixture.path.clone(), entered, release_rx));
+            ready.send(app.layout().focus.0.to_string()).unwrap();
+            while let Ok(event) = rx.recv() {
+                if matches!(&event, AppEvent::Api(request) if request.id == "test-finished") {
+                    break;
+                }
+                app.handle_event(event);
+            }
+        });
+        let target = ready_rx.recv().unwrap();
+        let transcript = send_transcript_test_request(
+            &path,
+            "held",
+            "agent.transcript",
+            json!({"target":target}),
+        );
+        let entered_result = entered_rx.recv_timeout(std::time::Duration::from_secs(5));
+        let ping = send_transcript_test_request(&path, "ping", "ping", json!({}));
+        let (ping_done, ping_rx) = mpsc::channel();
+        let ping_thread = thread::spawn(move || {
+            let _ = ping_done.send(transcript_test_response(ping));
+        });
+        let while_held = ping_rx.recv_timeout(std::time::Duration::from_secs(2));
+        // Always release the actual reader before any assertion, including on RED.
+        let _ = release.send(());
+        let response = transcript_test_response(transcript);
+        ping_thread.join().unwrap();
+        let (reply, _) = mpsc::channel();
+        events
+            .send(AppEvent::Api(ApiRequest {
+                id: "test-finished".into(),
+                method: "ping".into(),
+                params: json!({}),
+                reply,
+            }))
+            .unwrap();
+        app_thread.join().unwrap();
+        assert!(
+            entered_result.is_ok(),
+            "the native read never reached its pause"
+        );
+        assert!(
+            while_held.is_ok(),
+            "dispatcher could not answer ping while transcript read was held"
+        );
+        let value: Value = serde_json::from_str(&while_held.unwrap()).unwrap();
+        assert_eq!(value["id"], "ping");
+        assert!(value.get("result").is_some());
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["result"]["turns"][0]["text"], "golden");
+        assert!(!response.contains("_transcript"));
+    }
 
     #[derive(Default)]
     struct FlushProbe {

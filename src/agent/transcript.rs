@@ -69,7 +69,10 @@ fn read_transcript(
     limit: usize,
     cursor: Option<usize>,
 ) -> Result<Value, &'static str> {
-    read_transcript_file(open_transcript(path)?, limit, cursor)
+    let file = open_transcript(path)?;
+    #[cfg(test)]
+    crate::ipc::api::pause_transcript_read_for_test(path);
+    read_transcript_file(file, limit, cursor)
 }
 
 /// Validate, size, and read the same handle even if the path is replaced after opening.
