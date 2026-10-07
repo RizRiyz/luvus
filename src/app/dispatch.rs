@@ -153,6 +153,8 @@ impl App {
     }
 
     /// Validate and execute one bounded local API method against server-owned state.
+    /// `agent.transcript` returns a private read plan completed only by `ipc::api`;
+    /// in-process callers must not use this method or `handle_api` for transcript data.
     ///
     /// Keep this inventory explicit so CLI, API, and UHP parity stays auditable.
     /// Handler bodies belong in the domain modules, not in this router.

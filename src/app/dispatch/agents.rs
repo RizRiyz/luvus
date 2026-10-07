@@ -392,11 +392,7 @@ impl App {
             cursor,
         )
         .map_err(|code| {
-            let message = match code {
-                "unsupported_agent" => "native transcript is supported only for Claude",
-                "invalid_request" => "cursor is outside the bounded transcript window",
-                _ => "native transcript not available",
-            };
+            let message = crate::agent::session_transcript::error_message(code);
             (code.to_string(), message.to_string())
         })?;
         let mut result = json!({"_transcript": plan});

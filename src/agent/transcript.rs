@@ -15,6 +15,15 @@ const TEXT_BYTES: usize = 8192;
 pub mod session_transcript {
     use super::*;
 
+    pub(crate) fn error_message(code: &str) -> &'static str {
+        match code {
+            "unsupported_agent" => "native transcript is supported only for Claude",
+            "invalid_request" => "cursor is outside the bounded transcript window",
+            "server_busy" => "transcript read capacity is full",
+            _ => "native transcript not available",
+        }
+    }
+
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
     pub(crate) struct Plan {
         // Serde's OsString representation preserves native Unix bytes / Windows wide units.

@@ -48,18 +48,24 @@ pub(crate) fn finish_transcript_reply(method: &str, id: &str, response: String) 
         let plan: crate::agent::session_transcript::Plan =
             serde_json::from_value(result.remove("_transcript").ok_or("not_found")?)
                 .map_err(|_| "not_found")?;
-        let page = plan.read()?;
-        result.extend(page.as_object().ok_or("not_found")?.clone());
-        Ok(envelope)
+        let _permit = TranscriptReadPermit::acquire().ok_or("server_busy")?;
+        // Match the synchronous handler's insertion order, including when
+        // serde_json is built with preserve_order.
+        let mut page = plan.read()?;
+        for field in ["type", "pane", "agent", "session_id", "revision"] {
+            page[field] = result.remove(field).ok_or("not_found")?;
+        }
+        Ok(json!({"id": id, "result": page}))
     };
     match complete() {
         Ok(envelope) => envelope.to_string(),
         Err(code) => {
-            let message = match code {
-                "invalid_request" => "cursor is outside the bounded transcript window",
-                _ => "native transcript not available",
-            };
-            json!({"id": id, "error": {"code": code, "message": message}}).to_string()
+            let message = crate::agent::session_transcript::error_message(code);
+            let mut error = json!({"code": code, "message": message});
+            if code == "server_busy" {
+                error["retryable"] = json!(true);
+            }
+            json!({"id": id, "error": error}).to_string()
         }
     }
 }
@@ -68,8 +74,6 @@ pub(crate) fn finish_transcript_reply(method: &str, id: &str, response: String) 
 type TranscriptReadPause = (PathBuf, Sender<()>, Receiver<()>);
 #[cfg(test)]
 static TRANSCRIPT_READ_PAUSE: Mutex<Vec<TranscriptReadPause>> = Mutex::new(Vec::new());
-#[cfg(test)]
-static ACTIVE_TRANSCRIPT_READS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(test)]
 pub(crate) fn pause_transcript_read_for_test(path: &Path) {
@@ -129,6 +133,7 @@ const MAX_EVENT_SUBSCRIBERS: usize = 64;
 const EVENT_REPLAY_CAPACITY: usize = 256;
 const EVENT_REPLAY_BYTES: usize = 1024 * 1024;
 const MAX_ACTIVE_CONNECTIONS: usize = 80;
+const MAX_TRANSCRIPT_READS: usize = 2;
 const API_WORKER_STACK_BYTES: usize = 256 * 1024;
 const EVENT_FORWARDER_STACK_BYTES: usize = 128 * 1024;
 const INITIAL_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -137,6 +142,7 @@ const INITIAL_FRAME_POLL: std::time::Duration = std::time::Duration::from_millis
 const MAX_REQUEST_ID_BYTES: usize = 128;
 
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_TRANSCRIPT_READS: AtomicUsize = AtomicUsize::new(0);
 static REJECTED_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 static ACCEPTED_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
 static TIMED_OUT_CONNECTIONS: AtomicU64 = AtomicU64::new(0);
@@ -227,6 +233,29 @@ impl ConnectionPermit {
             })
             .ok()
             .map(|_| Self)
+    }
+}
+
+struct TranscriptReadPermit;
+
+impl TranscriptReadPermit {
+    #[allow(
+        deprecated,
+        reason = "AtomicUsize::try_update requires Rust 1.95; keep the Rust 1.88 MSRV"
+    )]
+    fn acquire() -> Option<Self> {
+        ACTIVE_TRANSCRIPT_READS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_TRANSCRIPT_READS).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for TranscriptReadPermit {
+    fn drop(&mut self) {
+        ACTIVE_TRANSCRIPT_READS.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
