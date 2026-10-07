@@ -244,7 +244,8 @@ session database, so its sessions are never listed as resumable and
 `luvus agent resume <id>` cannot find them. A pane resumes on restore only from
 an exact binding that was reported and persisted, which restores as
 `devin --resume <id>`. The optional integration reports it automatically;
-without it, use `luvus pane report --agent devin --session <id>`.
+without it, use `luvus pane report --agent devin --session <id>`. Scheduled
+Devin work is offered with **Read only** or **Full access**, not **Workspace**.
 
 Muse Code supports native detection and resume, but not **Fork to New Pane**.
 Its `/fork` command exists only inside the active TUI, and its CLI refuses to

@@ -123,8 +123,10 @@ testnet.
   managed. Without the integration, bind a pane with
   `luvus pane report --agent devin --session <id>`. Luvus does not open Devin's
   private session database, so `luvus agent resume <id>` cannot find Devin
-  sessions and there is no native fork. Automation profiles are not declared
-  yet.
+  sessions and there is no native fork. Scheduled Devin workers accept
+  **Read only** (`--permission-mode auto`) or **Full access**
+  (`--permission-mode dangerous`), both with `--respect-workspace-trust false`
+  and print mode; workspace automation is rejected.
 
   Hermes installs `~/.hermes/plugins/luvus-agent-state`, or the equivalent
   directory under `HERMES_HOME`, and enables only that plugin in

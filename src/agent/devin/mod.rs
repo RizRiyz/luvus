@@ -12,8 +12,14 @@
 //! it for new, cleared, and resumed sessions, so each pane reports its exact
 //! session id. Without it, a binding comes only from
 //! `luvus pane report --agent devin --session <id>`.
+//!
+//! Scheduled automation runs Devin in print mode with a fixed
+//! `--permission-mode`: `auto` for read-only tasks and `dangerous` for
+//! full-access tasks. Workspace access is not offered.
 
-use super::types::{AgentDescriptor, IdentityDescriptor, SessionOperations};
+use super::types::{
+    AgentDescriptor, AutomationLaunch, AutomationOperations, IdentityDescriptor, SessionOperations,
+};
 
 mod integration;
 
@@ -25,13 +31,33 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
     launch_command: "devin",
     // Devin reads every positional argument after `--` as the initial prompt.
     task_prompt_args: &["--"],
-    // Devin does expose the pieces an unattended profile needs (`-p` print mode
-    // and `--permission-mode`), but its trust gate also has to be resolved:
-    // print mode fails in an untrusted directory because it cannot show the
-    // prompt. Declaring an access level that has not been run end to end could
-    // strand or over-permit a scheduled task, so automation waits for its own
-    // reviewed change.
-    automation: None,
+    // Print mode refuses a directory Devin has not trusted, and a task worktree
+    // is a new directory. `--respect-workspace-trust false` skips that check
+    // for one run without recording the directory as trusted.
+    automation: Some(AutomationOperations {
+        // `auto` approves only reads and read-only shell commands.
+        read_only: Some(AutomationLaunch {
+            args: &[
+                "--respect-workspace-trust",
+                "false",
+                "--permission-mode",
+                "auto",
+                "-p",
+            ],
+        }),
+        // `accept-edits` rejects `git commit`, so a worktree worker's edits
+        // would never reach the task branch that merge integrates.
+        workspace: None,
+        full_access: Some(AutomationLaunch {
+            args: &[
+                "--respect-workspace-trust",
+                "false",
+                "--permission-mode",
+                "dangerous",
+                "-p",
+            ],
+        }),
+    }),
     identity: IdentityDescriptor {
         // `devin` is an ordinary given name, so trust it only in deliberate
         // command/title evidence — the same regime as `hermes` and `grok`.

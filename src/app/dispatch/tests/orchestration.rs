@@ -303,6 +303,23 @@ fn automation_api_validates_targets_and_is_idempotent() {
     );
     assert_eq!(bad_access.unwrap_err().0, "unsupported_automation_access");
 
+    let devin_workspace = app.dispatch(
+        "automation.create",
+        &json!({
+            "name":"devin-workspace",
+            "trigger":{"kind":"daily","timezone":"UTC","second_of_day":0},
+            "task":{
+                "title":"bad", "prompt":"bad", "agent_id":"devin",
+                "workspace_id":workspace_id, "access":"workspace"
+            }
+        }),
+    );
+    assert_eq!(
+        devin_workspace.unwrap_err().0,
+        "unsupported_automation_access"
+    );
+    assert_eq!(app.automation.automations.len(), 1);
+
     let automation_id = first["automation"]["id"].as_str().unwrap();
     let run_params = json!({"id":automation_id, "idempotency_key":"run-1"});
     let first_run = app.dispatch("automation.run", &run_params).unwrap();

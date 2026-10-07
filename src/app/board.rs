@@ -4672,6 +4672,15 @@ mod tests {
         );
         assert!(agent_automation_command("opencode2", AutomationAccess::ReadOnly).is_err());
         assert!(agent_automation_command("opencode2", AutomationAccess::Workspace).is_err());
+        assert_eq!(
+            agent_automation_command("devin", AutomationAccess::ReadOnly).unwrap(),
+            "devin --respect-workspace-trust false --permission-mode auto -p"
+        );
+        assert_eq!(
+            agent_automation_command("devin", AutomationAccess::FullAccess).unwrap(),
+            "devin --respect-workspace-trust false --permission-mode dangerous -p"
+        );
+        assert!(agent_automation_command("devin", AutomationAccess::Workspace).is_err());
         assert!(agent_automation_command("aider", AutomationAccess::Workspace).is_err());
         assert!(agent_automation_command("antigravity", AutomationAccess::Workspace).is_err());
 
@@ -5384,8 +5393,9 @@ mod tests {
     fn automation_agent_picker_keeps_all_launch_capable_agents_visible() {
         use crate::automation::AutomationAccess;
 
-        assert_eq!(automation_agent_choices().len(), 18);
+        assert_eq!(automation_agent_choices().len(), 19);
         assert!(automation_agent_choices().contains(&"kilo"));
+        assert!(automation_agent_choices().contains(&"devin"));
         assert!(automation_agent_choices().contains(&"pi"));
         assert!(!automation_agent_choices().contains(&"antigravity"));
         assert!(!automation_agent_choices().contains(&"amp"));
