@@ -1,11 +1,12 @@
 //! Bounded native conversation reads, separate from token usage accounting.
 
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use super::usage::{claude_path, for_each_json_slice, read_window, MAX_USAGE_LINE};
+use super::usage::{claude_path, for_each_json_slice, read_file_window, MAX_USAGE_LINE};
 
 const WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 const TEXT_BYTES: usize = 8192;
@@ -43,15 +44,55 @@ fn transcript_path(base: &Path, cwd: &Path, session_id: &str) -> Result<PathBuf,
     Ok(path)
 }
 
+/// Refuse final-component links; parent directories remain under the local user's control.
+fn open_transcript(path: &Path) -> Result<File, &'static str> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Avoid blocking on a FIFO before the handle's regular-file check.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path).map_err(|_| "not_found")
+}
+
 /// Extract a bounded page of text turns, retaining pagination and truncation metadata.
 fn read_transcript(
     path: &Path,
     limit: usize,
     cursor: Option<usize>,
 ) -> Result<Value, &'static str> {
-    let len = std::fs::metadata(path).map_err(|_| "not_found")?.len();
+    read_transcript_file(open_transcript(path)?, limit, cursor)
+}
+
+/// Validate, size, and read the same handle even if the path is replaced after opening.
+fn read_transcript_file(
+    mut file: File,
+    limit: usize,
+    cursor: Option<usize>,
+) -> Result<Value, &'static str> {
+    let metadata = file.metadata().map_err(|_| "not_found")?;
+    if !metadata.is_file() {
+        return Err("not_found");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("not_found");
+        }
+    }
+    let len = metadata.len();
     let start = len.saturating_sub(WINDOW_BYTES);
-    let bytes = read_window(path, start, WINDOW_BYTES).ok_or("not_found")?;
+    let bytes = read_file_window(&mut file, start, WINDOW_BYTES).ok_or("not_found")?;
     let mut truncated = start > 0
         || bytes
             .split(|b| *b == b'\n')

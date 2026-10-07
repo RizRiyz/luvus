@@ -85,8 +85,17 @@ fn for_each_json_line(path: &Path, mut visit: impl FnMut(&Value)) -> Option<()> 
 }
 
 /// Read at most `limit` bytes from a clamped file offset, returning `None` on I/O failure.
-pub(in crate::agent) fn read_window(path: &Path, start: u64, limit: u64) -> Option<Vec<u8>> {
+fn read_window(path: &Path, start: u64, limit: u64) -> Option<Vec<u8>> {
     let mut file = File::open(path).ok()?;
+    read_file_window(&mut file, start, limit)
+}
+
+/// Read a bounded window using the caller's already opened file, without reopening a path.
+pub(in crate::agent) fn read_file_window(
+    file: &mut File,
+    start: u64,
+    limit: u64,
+) -> Option<Vec<u8>> {
     let len = file.metadata().ok()?.len();
     let start = start.min(len);
     file.seek(SeekFrom::Start(start)).ok()?;
