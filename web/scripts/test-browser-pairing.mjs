@@ -69,6 +69,7 @@ try {
   await ready(restarted);
   const sibling = await page(pairing.origin);
   await ready(sibling);
+  await foreground(restarted);
   await evaluate(restarted.sessionId, "document.querySelector('[aria-label=Devices]').click()");
   await until(() => evaluate(restarted.sessionId, "!!document.querySelector('.device-pair:not(:disabled)')"));
   await evaluate(restarted.sessionId, "document.querySelector('.device-pair').click()");
@@ -79,8 +80,9 @@ try {
   await ready(phone);
   await evaluate(phone.sessionId, "document.querySelector('[aria-label=Devices]').click()");
   await until(() => evaluate(phone.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('2 authorized')"));
-  // Each tab renders the devices broadcast independently. A ready connection
-  // does not prove that this tab has painted the new browser's device count.
+  // Background tabs can receive broadcasts while Chrome pauses their animation
+  // frames. Activate the tab before checking its newly painted device count.
+  await foreground(restarted);
   await until(() => evaluate(restarted.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('2 authorized') && !!document.querySelector('.device-disconnect:not(:disabled)')"));
   assert.equal(await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect')?.textContent"), "Disconnect this browser");
   await cdp.call("Network.enable", {}, restarted.sessionId);
@@ -109,8 +111,12 @@ try {
   await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect').click()");
   assert.equal(disconnectDialogs.length, 2);
   await until(() => evaluate(restarted.sessionId, "!!document.querySelector('.access-problem') && localStorage.getItem('luvus.web.ticket') === null"));
+  // Revocation must clear shared credentials without activating the sibling.
+  await until(() => evaluate(sibling.sessionId, "localStorage.getItem('luvus.web.ticket') === null"));
+  await foreground(sibling);
   await until(() => evaluate(sibling.sessionId, "!!document.querySelector('.access-problem') && localStorage.getItem('luvus.web.ticket') === null"));
   assert.equal(forgetRequests, 1, "confirming disconnect revokes this browser once");
+  await foreground(phone);
   await ready(phone);
   await until(() => evaluate(phone.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('1 authorized')"));
   assert.equal(exceptions.length, 0, `Unexpected browser exceptions: ${exceptions.length}`);
@@ -155,7 +161,14 @@ async function page(url, browserContextId) {
   const { sessionId } = await cdp.call("Target.attachToTarget", { targetId, flatten: true });
   await cdp.call("Page.enable", {}, sessionId);
   await cdp.call("Runtime.enable", {}, sessionId);
-  return { targetId, sessionId };
+  const created = { targetId, sessionId };
+  await foreground(created);
+  return created;
+}
+
+async function foreground(page) {
+  await cdp.call("Page.bringToFront", {}, page.sessionId);
+  await until(() => evaluate(page.sessionId, "document.visibilityState === 'visible'"));
 }
 
 function ready(page) {
