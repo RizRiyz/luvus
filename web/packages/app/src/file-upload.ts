@@ -24,7 +24,8 @@ export async function uploadTerminalFile(file: File, dispatch: Dispatch): Promis
     throw new Error("The server did not create a terminal upload.");
   }
   const uploadId = start.upload_id;
-  const chunkBytes = Number.isSafeInteger(start.max_chunk_bytes)
+  // A zero or negative limit would never advance the offset below.
+  const chunkBytes = Number.isSafeInteger(start.max_chunk_bytes) && Number(start.max_chunk_bytes) > 0
     ? Math.min(FALLBACK_CHUNK_BYTES, Number(start.max_chunk_bytes))
     : FALLBACK_CHUNK_BYTES;
   try {
