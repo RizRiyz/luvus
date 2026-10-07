@@ -137,7 +137,14 @@ impl App {
                         );
                     }
                 }
-                json!({ "id": req.id, "result": result }).to_string()
+                let response = json!({ "id": req.id, "result": result }).to_string();
+                if req.method == "agent.transcript" {
+                    // Private worker plan, never a wire response. A raw NUL cannot
+                    // begin serde_json output, even with client-controlled strings.
+                    format!("{}{response}", crate::ipc::api::TRANSCRIPT_REPLY_PREFIX)
+                } else {
+                    response
+                }
             }
             Err((code, message)) => {
                 json!({ "id": req.id, "error": { "code": code, "message": message } }).to_string()

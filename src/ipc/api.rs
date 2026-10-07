@@ -28,6 +28,42 @@ pub struct ApiRequest {
     pub reply: Sender<String>,
 }
 
+// Only app-produced transcript successes carry this non-JSON prefix.
+pub(crate) const TRANSCRIPT_REPLY_PREFIX: &str = "\0luvus-transcript-v1\0";
+
+/// Complete the app's trusted plan on the existing connection worker, before writing any bytes.
+pub(crate) fn finish_transcript_reply(method: &str, id: &str, response: String) -> String {
+    if method != "agent.transcript" {
+        return response;
+    }
+    let Some(payload) = response.strip_prefix(TRANSCRIPT_REPLY_PREFIX) else {
+        return response;
+    };
+    let complete = || -> Result<Value, &'static str> {
+        let mut envelope: Value = serde_json::from_str(payload).map_err(|_| "not_found")?;
+        let result = envelope
+            .get_mut("result")
+            .and_then(Value::as_object_mut)
+            .ok_or("not_found")?;
+        let plan: crate::agent::session_transcript::Plan =
+            serde_json::from_value(result.remove("_transcript").ok_or("not_found")?)
+                .map_err(|_| "not_found")?;
+        let page = plan.read()?;
+        result.extend(page.as_object().ok_or("not_found")?.clone());
+        Ok(envelope)
+    };
+    match complete() {
+        Ok(envelope) => envelope.to_string(),
+        Err(code) => {
+            let message = match code {
+                "invalid_request" => "cursor is outside the bounded transcript window",
+                _ => "native transcript not available",
+            };
+            json!({"id": id, "error": {"code": code, "message": message}}).to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 type TranscriptReadPause = (PathBuf, Sender<()>, Receiver<()>);
 #[cfg(test)]
@@ -2586,6 +2622,7 @@ fn handle_conn(
         }
         return;
     }
+    let request_method = method.clone();
     if event_tx
         .send(AppEvent::Api(ApiRequest {
             id: id.clone(),
@@ -2598,6 +2635,7 @@ fn handle_conn(
         return;
     }
     if let Ok(resp) = reply_rx.recv() {
+        let resp = finish_transcript_reply(&request_method, &id, resp);
         let _ = write_response(&mut writer, &id, &resp);
     }
 }

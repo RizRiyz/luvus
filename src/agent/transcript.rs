@@ -11,26 +11,47 @@ use super::usage::{claude_path, for_each_json_slice, read_file_window, MAX_USAGE
 const WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 const TEXT_BYTES: usize = 8192;
 
-/// Read only the exact bound native session; never discover a replacement.
-pub fn session_transcript(
-    agent: &str,
-    cwd: &Path,
-    session_id: &str,
-    limit: usize,
-    cursor: Option<usize>,
-) -> Result<Value, &'static str> {
-    match agent {
-        "claude" => {
-            if !super::safe_session_id(session_id)
-                || matches!(session_id, "." | "..")
-                || session_id.bytes().any(|byte| matches!(byte, b'/' | b'\\'))
-            {
-                return Err("not_found");
-            }
-            let path = transcript_path(&super::claude::sessions::base(), cwd, session_id)?;
-            read_transcript(&path, limit, cursor)
+/// Private transcript handoff from app-owned resolution to the IPC connection worker.
+pub mod session_transcript {
+    use super::*;
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    pub(crate) struct Plan {
+        // Serde's OsString representation preserves native Unix bytes / Windows wide units.
+        path: std::ffi::OsString,
+        limit: usize,
+        cursor: Option<usize>,
+    }
+
+    impl Plan {
+        pub(crate) fn read(self) -> Result<Value, &'static str> {
+            read_transcript(Path::new(&self.path), self.limit, self.cursor)
         }
-        _ => Err("unsupported_agent"),
+    }
+
+    /// Resolve only the exact bound session, without opening or reading its file.
+    pub(crate) fn prepare(
+        agent: &str,
+        cwd: &Path,
+        session_id: &str,
+        limit: usize,
+        cursor: Option<usize>,
+    ) -> Result<Plan, &'static str> {
+        if agent != "claude" {
+            return Err("unsupported_agent");
+        }
+        if !crate::agent::safe_session_id(session_id)
+            || matches!(session_id, "." | "..")
+            || session_id.bytes().any(|byte| matches!(byte, b'/' | b'\\'))
+        {
+            return Err("not_found");
+        }
+        let path = transcript_path(&crate::agent::claude::sessions::base(), cwd, session_id)?;
+        Ok(Plan {
+            path: path.into_os_string(),
+            limit,
+            cursor,
+        })
     }
 }
 
@@ -425,7 +446,7 @@ mod tests {
     fn transcript_rejects_unsafe_bound_session_before_path_construction() {
         for session in ["", "../other", "/absolute", "nested/session"] {
             assert_eq!(
-                session_transcript("claude", Path::new("unused"), session, 50, None),
+                session_transcript::prepare("claude", Path::new("unused"), session, 50, None),
                 Err("not_found")
             );
         }

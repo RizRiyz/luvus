@@ -2,6 +2,31 @@ use super::super::params::*;
 use super::super::*;
 use crate::app::App;
 
+impl App {
+    // Exercise the same app envelope and worker completion as the socket route.
+    fn transcript_reply_for_test(&mut self, params: &Value) -> DispatchResult {
+        let (reply, _) = std::sync::mpsc::channel();
+        let req = crate::ipc::api::ApiRequest {
+            id: "transcript-test".into(),
+            method: "agent.transcript".into(),
+            params: params.clone(),
+            reply,
+        };
+        let raw = self.handle_api(&req);
+        let wire = crate::ipc::api::finish_transcript_reply(&req.method, &req.id, raw);
+        let mut value: Value = serde_json::from_str(&wire).unwrap();
+        if let Some(error) = value.get("error") {
+            return Err((
+                error["code"].as_str().unwrap().into(),
+                error["message"].as_str().unwrap().into(),
+            ));
+        }
+        let mut result = value["result"].take();
+        result.as_object_mut().unwrap().remove("revision");
+        Ok(result)
+    }
+}
+
 struct TranscriptStore {
     previous: Option<std::ffi::OsString>,
     dir: std::path::PathBuf,
@@ -66,7 +91,7 @@ fn agent_transcript_happy_path_targets_limits_cursor_and_grid_regression() {
     let before = super::support::layout_state_bytes(&app);
     for target in [pane.0.to_string(), "reviewer".into(), "claude".into()] {
         let out = app
-            .dispatch("agent.transcript", &json!({"target":target}))
+            .transcript_reply_for_test(&json!({"target":target}))
             .unwrap();
         assert_eq!(
             out,
@@ -79,10 +104,7 @@ fn agent_transcript_happy_path_targets_limits_cursor_and_grid_regression() {
     }
     for limit in [1, 50] {
         let out = app
-            .dispatch(
-                "agent.transcript",
-                &json!({"target":"reviewer","limit":limit}),
-            )
+            .transcript_reply_for_test(&json!({"target":"reviewer","limit":limit}))
             .unwrap();
         assert_eq!(
             out["turns"].as_array().unwrap().len(),
@@ -90,17 +112,11 @@ fn agent_transcript_happy_path_targets_limits_cursor_and_grid_regression() {
         );
     }
     let first = app
-        .dispatch(
-            "agent.transcript",
-            &json!({"target":"reviewer","limit":1,"cursor":"0"}),
-        )
+        .transcript_reply_for_test(&json!({"target":"reviewer","limit":1,"cursor":"0"}))
         .unwrap();
     assert_eq!(first["next_cursor"], "1");
     let next = app
-        .dispatch(
-            "agent.transcript",
-            &json!({"target":"reviewer","cursor":first["next_cursor"]}),
-        )
+        .transcript_reply_for_test(&json!({"target":"reviewer","cursor":first["next_cursor"]}))
         .unwrap();
     assert_eq!(next["turns"][0]["role"], "assistant");
     assert_eq!(next["next_cursor"], json!(null));
@@ -127,7 +143,7 @@ fn agent_transcript_unbound_and_missing_target_do_not_read_store() {
     let pane = app.layout().focus;
     let before = super::support::layout_state_bytes(&app);
     let err = app
-        .dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+        .transcript_reply_for_test(&json!({"target":pane.0.to_string()}))
         .unwrap_err();
     assert_eq!(
         err,
@@ -143,7 +159,7 @@ fn agent_transcript_unbound_and_missing_target_do_not_read_store() {
         json!({"target":""}),
     ] {
         assert_eq!(
-            app.dispatch("agent.transcript", &params).unwrap_err().0,
+            app.transcript_reply_for_test(&params).unwrap_err().0,
             "not_found"
         );
     }
@@ -161,7 +177,7 @@ fn agent_transcript_rejects_nonclaude_bound_kind_without_io() {
         bind_transcript(&mut app, agent, "missing-session");
         app.status.get_mut(&pane).unwrap().agent = "claude".into();
         let err = app
-            .dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+            .transcript_reply_for_test(&json!({"target":pane.0.to_string()}))
             .unwrap_err();
         assert_eq!(err.0, "unsupported_agent", "bound kind {agent}");
         assert_eq!(
@@ -180,7 +196,7 @@ fn agent_transcript_missing_jsonl_is_not_found_and_keeps_binding() {
     bind_transcript(&mut app, "claude", "missing-session");
     let pane = app.layout().focus;
     let err = app
-        .dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+        .transcript_reply_for_test(&json!({"target":pane.0.to_string()}))
         .unwrap_err();
     assert_eq!(
         err,
@@ -205,7 +221,7 @@ fn agent_transcript_cannot_read_outside_bound_project() {
     bind_transcript(&mut app, "claude", "../escaped");
     let pane = app.layout().focus;
     assert_eq!(
-        app.dispatch("agent.transcript", &json!({"target":pane.0.to_string()}))
+        app.transcript_reply_for_test(&json!({"target":pane.0.to_string()}))
             .unwrap_err()
             .0,
         "not_found"
@@ -228,7 +244,7 @@ fn agent_transcript_escape_heavy_pages_fit_protocol_frames() {
     bind_transcript(&mut app, "claude", "sess-1");
     let target = app.layout().focus.0.to_string();
     let latest = app
-        .dispatch("agent.transcript", &json!({"target":target}))
+        .transcript_reply_for_test(&json!({"target":target}))
         .unwrap();
     assert!(
         serde_json::to_vec(&json!({"id":"latest","result":latest}))
@@ -247,10 +263,7 @@ fn agent_transcript_escape_heavy_pages_fit_protocol_frames() {
     let mut count = 0;
     loop {
         let out = app
-            .dispatch(
-                "agent.transcript",
-                &json!({"target":target,"cursor":cursor}),
-            )
+            .transcript_reply_for_test(&json!({"target":target,"cursor":cursor}))
             .unwrap();
         assert!(
             serde_json::to_vec(&json!({"id":"page","result":out}))
@@ -313,7 +326,7 @@ fn agent_transcript_invalid_params_and_cursor_leave_state_untouched() {
     }
     for params in cases {
         assert_eq!(
-            app.dispatch("agent.transcript", &params).unwrap_err().0,
+            app.transcript_reply_for_test(&params).unwrap_err().0,
             "invalid_request",
             "{params}"
         );
@@ -324,10 +337,7 @@ fn agent_transcript_invalid_params_and_cursor_leave_state_untouched() {
         );
     }
     assert!(app
-        .dispatch(
-            "agent.transcript",
-            &json!({"target":pane.0.to_string(),"cursor":"0000000000"})
-        )
+        .transcript_reply_for_test(&json!({"target":pane.0.to_string(),"cursor":"0000000000"}))
         .is_ok());
 }
 
@@ -344,7 +354,7 @@ fn agent_transcript_preserves_ambiguous_target() {
         .unwrap_err();
     assert_eq!(expected.0, "ambiguous_target");
     assert_eq!(
-        app.dispatch("agent.transcript", &json!({"target":"claude"}))
+        app.transcript_reply_for_test(&json!({"target":"claude"}))
             .unwrap_err(),
         expected
     );

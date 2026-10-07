@@ -384,7 +384,7 @@ impl App {
                 )
             })?;
         let pane = self.panes.get(&id).ok_or_else(agent_not_found)?;
-        let mut result = crate::agent::session_transcript(
+        let plan = crate::agent::session_transcript::prepare(
             &session.agent,
             &pane.cwd,
             &session.session_id,
@@ -399,6 +399,7 @@ impl App {
             };
             (code.to_string(), message.to_string())
         })?;
+        let mut result = json!({"_transcript": plan});
         result["type"] = json!("agent_transcript");
         result["pane"] = json!(id.0.to_string());
         result["agent"] = json!(session.agent);
