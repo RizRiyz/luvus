@@ -2970,3 +2970,17 @@ fn session_evidence_binds_only_one_matching_pane() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn agent_start_launches_the_descriptor_binary_not_the_kind() {
+    use super::super::agent_workflow::agent_launch_program;
+    assert_eq!(agent_launch_program("antigravity"), "agy");
+    assert_eq!(agent_launch_program("cursor"), "cursor-agent");
+    assert_eq!(agent_launch_program("kiro"), "kiro-cli");
+    assert_eq!(agent_launch_program("codex"), "codex");
+    assert_eq!(
+        agent_launch_program("manifest-only-agent"),
+        "manifest-only-agent",
+        "a detection-manifest agent launches by its kind"
+    );
+}
