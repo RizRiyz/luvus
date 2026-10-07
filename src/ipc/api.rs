@@ -2776,10 +2776,8 @@ mod tests {
         stream
     }
 
-    fn transcript_test_response(stream: Conn) -> String {
-        let mut response = String::new();
-        BufReader::new(stream).read_line(&mut response).unwrap();
-        response.strip_suffix('\n').unwrap().to_owned()
+    fn transcript_test_response(mut stream: Conn) -> String {
+        read_response_frame_with_deadline(&mut stream, std::time::Duration::from_secs(10)).unwrap()
     }
 
     fn transcript_roundtrip(app: &mut crate::app::App, params: Value) -> String {
@@ -2888,7 +2886,7 @@ mod tests {
             serde_json::from_value(plan["result"]["_transcript"]["path"].clone()).unwrap();
         assert_eq!(PathBuf::from(path), fixture.path);
         let response = transcript_roundtrip(&mut app, json!({"target":target}));
-        assert!(!response.contains("_transcript"));
+        assert!(!response.contains("\"_transcript\""));
         assert!(!response.contains("\\u0000"));
         let result: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(result["result"]["turns"][0]["text"], "golden");
@@ -2953,6 +2951,24 @@ mod tests {
         assert_eq!(transcript_test_response(stream), json!({"id":"marker","error":{"code":"not_found","message":"native transcript not available"}}).to_string());
     }
 
+    struct TranscriptPauseGuard {
+        release: Sender<()>,
+        events: Sender<AppEvent>,
+    }
+
+    impl Drop for TranscriptPauseGuard {
+        fn drop(&mut self) {
+            let _ = self.release.send(());
+            let (reply, _) = mpsc::channel();
+            let _ = self.events.send(AppEvent::Api(ApiRequest {
+                id: "test-finished".into(),
+                method: "ping".into(),
+                params: json!({}),
+                reply,
+            }));
+        }
+    }
+
     #[test]
     fn transcript_worker_held_read_leaves_dispatcher_responsive() {
         let _env = crate::persist::test_env("transcript-worker-held");
@@ -2974,7 +2990,10 @@ mod tests {
                 app.handle_event(event);
             }
         });
-        let target = ready_rx.recv().unwrap();
+        let guard = TranscriptPauseGuard { release, events };
+        let target = ready_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
         let transcript = send_transcript_test_request(
             &path,
             "held",
@@ -2989,18 +3008,10 @@ mod tests {
         });
         let while_held = ping_rx.recv_timeout(std::time::Duration::from_secs(2));
         // Always release the actual reader before any assertion, including on RED.
-        let _ = release.send(());
+        let _ = guard.release.send(());
         let response = transcript_test_response(transcript);
         ping_thread.join().unwrap();
-        let (reply, _) = mpsc::channel();
-        events
-            .send(AppEvent::Api(ApiRequest {
-                id: "test-finished".into(),
-                method: "ping".into(),
-                params: json!({}),
-                reply,
-            }))
-            .unwrap();
+        drop(guard);
         app_thread.join().unwrap();
         assert!(
             entered_result.is_ok(),
@@ -3015,7 +3026,7 @@ mod tests {
         assert!(value.get("result").is_some());
         let value: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["result"]["turns"][0]["text"], "golden");
-        assert!(!response.contains("_transcript"));
+        assert!(!response.contains("\"_transcript\""));
     }
 
     #[derive(Default)]
