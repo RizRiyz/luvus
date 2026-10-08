@@ -134,6 +134,14 @@ fn agent_prompt_response(
     response.to_string()
 }
 
+/// Return the executable that starts a fresh interactive session of `kind`.
+/// Built-in agents may install under a different binary name than their
+/// canonical id (Antigravity is `agy`, Cursor is `cursor-agent`); agents
+/// defined only by a detection manifest launch by their kind.
+pub(in crate::app::dispatch) fn agent_launch_program(kind: &str) -> &str {
+    crate::agent::registry::find(kind).map_or(kind, |descriptor| descriptor.launch_command)
+}
+
 pub(in crate::app::dispatch) fn agent_prompt_not_ready_error() -> (String, String) {
     (
         "agent_not_ready".to_string(),
@@ -421,7 +429,7 @@ impl App {
             return;
         };
         let shell = target.command.clone();
-        let mut command = match shell_word(kind, &shell) {
+        let mut command = match shell_word(agent_launch_program(kind), &shell) {
             Ok(word) => word,
             Err(message) => {
                 if created {
