@@ -33,6 +33,13 @@ workspace or branch. Press `f` in an open DIFF view to cycle **All**,
 | `r` | refresh the Git status snapshot |
 | `q` / `Esc` | return keyboard input to the terminal pane |
 
+Selection follows the WORKSPACES and AGENTS lists: focusing DIFF starts at the
+currently open diff when its row is visible. Moving with `j` / `k` only
+preselects a file; Enter opens it, while Esc cancels without changing the view.
+The open file has the theme's active-row background, and keyboard preselection
+or hover uses the stronger selection background. Background refreshes preserve
+the preselected file instead of moving it back to the open file.
+
 ```text
 FILES  DIFF
 STAGED  2

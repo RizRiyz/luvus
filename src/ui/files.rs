@@ -273,6 +273,12 @@ fn draw_diff_list(
     app.diff.scroll = app.diff.scroll.min(max_scroll);
     app.diff.viewport = cap;
     let snapshot = app.diff.snapshot.as_ref().expect("rows require snapshot");
+    // Like WORKSPACES/AGENTS, the active view and keyboard preselection are
+    // independent. Rendering never changes the cursor or its stable key.
+    let active_diff_key = match app.views.get(&app.layout().focus) {
+        Some(crate::app::ViewKind::Diff(view)) => Some(&view.key),
+        _ => None,
+    };
     let rows = &app.diff.rows;
     for row_index in app.diff.scroll..rows.len().min(app.diff.scroll.saturating_add(cap)) {
         let y = list_top + row_index.saturating_sub(app.diff.scroll) as u16;
@@ -296,7 +302,12 @@ fn draw_diff_list(
                 let Some(file) = snapshot.files.get(*file_index) else {
                     continue;
                 };
-                let selected = row_index == app.diff.cursor;
+                let selected = app.files_focused && row_index == app.diff.cursor;
+                let active = active_diff_key == Some(&file.key);
+                let rect = Rect::new(area.x, y, area.width, 1);
+                let hovered = app
+                    .hover
+                    .is_some_and(|(col, row)| col >= rect.x && col < rect.right() && row == rect.y);
                 let fg =
                     match file.status {
                         crate::diff::DiffFileStatus::Added
@@ -323,12 +334,12 @@ fn draw_diff_list(
                 } else {
                     " "
                 };
-                let style = if selected {
-                    Style::new().fg(t.base).bg(t.accent).bold()
+                let style = if selected || active {
+                    Style::new().fg(t.accent).bold()
                 } else {
                     Style::new().fg(t.subtext0)
                 };
-                let badge_style = if selected { style } else { Style::new().fg(fg) };
+                let badge_style = Style::new().fg(if selected { t.accent } else { fg });
                 let stats = diff_list_stats(file.additions, file.deletions, t);
                 let stats_width = stats.as_ref().map_or(0, Line::width) as u16;
                 // Keep enough room for the review marker, status badge, and a
@@ -357,8 +368,17 @@ fn draw_diff_list(
                         stats_width,
                     );
                 }
-                app.diff_row_rects
-                    .push((row_index, Rect::new(area.x, y, area.width, 1)));
+                if selected || hovered || active {
+                    f.buffer_mut().set_style(
+                        Rect::new(area.x, y, area.width.saturating_sub(1), 1),
+                        Style::new().bg(if selected || hovered {
+                            t.surface1
+                        } else {
+                            t.sel_bg
+                        }),
+                    );
+                }
+                app.diff_row_rects.push((row_index, rect));
             }
         }
     }
