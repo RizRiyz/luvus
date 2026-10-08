@@ -18,6 +18,14 @@ tree immediately while preserving that project's cursor, scroll position, and
 expanded folders. A project that has not been listed yet shows `loading…` until
 its folder has been read.
 
+The visible row for the file in the focused read-only view, document preview,
+or Luvus-launched editor keeps the theme's active-row background. Keyboard
+preselection and mouse hover use the stronger selection background, like
+WORKSPACES, AGENTS, and DIFF. Leaving the tree with Esc/q removes preselection
+without clearing the open-file highlight. Highlighting does not expand folders
+or move the tree cursor or scroll position; files hidden by a collapsed folder
+or filter have no highlighted row.
+
 The global fuzzy finder can search every eligible file name and relative path
 in the workspace even when its folder has never been expanded here. Press
 `Ctrl+Space /`, then choose **Files** with `Tab`. It indexes paths only, follows

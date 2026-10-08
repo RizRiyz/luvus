@@ -165,11 +165,36 @@ impl App {
         self.set_files_mode(FilesMode::Diff);
         self.files_focused = true;
         self.diff.scroll_detached = false;
+        // Start at the active view, like WORKSPACES and AGENTS. This explicit
+        // focus transition must not be repeated by background list refreshes.
+        if let Some(ViewKind::Diff(view)) = self.views.get(&self.layout().focus) {
+            if let Some(row) = self.diff.rows.iter().position(|row| {
+                let DiffListRow::File(index) = row else {
+                    return false;
+                };
+                self.diff
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.files.get(*index))
+                    .is_some_and(|file| file.key == view.key)
+            }) {
+                self.diff.cursor = row;
+            }
+        }
         if self.diff.selected_file().is_none() {
             self.diff.move_cursor(1);
         }
         self.diff.ensure_cursor_visible();
+        self.sync_diff_list_selection();
         self.refresh_diff_status(false);
+    }
+
+    /// Keep the list's stable selection key in lockstep with its cursor. The
+    /// key is used by asynchronous row rebuilds to restore the highlighted
+    /// file, so leaving it at the file most recently opened in a preview can
+    /// make a later j/k selection jump back when a refresh completes.
+    fn sync_diff_list_selection(&mut self) {
+        self.diff.selected_key = self.diff.selected_file().map(|file| file.key.clone());
     }
 
     pub fn refresh_diff_status(&mut self, force: bool) {
@@ -461,6 +486,7 @@ impl App {
         self.diff.scroll_detached = false;
         self.diff.move_cursor(delta);
         self.diff.ensure_cursor_visible();
+        self.sync_diff_list_selection();
     }
 
     fn move_diff_list_page(&mut self, delta: isize) {
@@ -486,6 +512,7 @@ impl App {
             self.diff.cursor = row;
             self.diff.scroll_detached = false;
             self.diff.ensure_cursor_visible();
+            self.sync_diff_list_selection();
         }
     }
 
@@ -505,6 +532,7 @@ impl App {
             self.diff.cursor = row;
             self.diff.scroll_detached = false;
             self.diff.ensure_cursor_visible();
+            self.sync_diff_list_selection();
         }
     }
 
@@ -2374,6 +2402,150 @@ mod tests {
             .views
             .values()
             .any(|view| matches!(view, ViewKind::Diff(diff) if diff.key == key)));
+    }
+
+    #[test]
+    fn diff_list_navigation_updates_selection_after_opening_a_file() {
+        let _env = crate::persist::test_env("diff-list-selection-after-open");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let first_key = install_snapshot(&mut app);
+        let second_key = add_snapshot_file(&mut app, "src/second.rs");
+        app.files_mode = FilesMode::Diff;
+        app.files_focused = true;
+
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(
+            app.diff.selected_file().map(|file| &file.key),
+            Some(&first_key)
+        );
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.diff.selected_key.as_ref(), Some(&first_key));
+
+        // Returning to the list and preselecting another file must supersede
+        // the key remembered when the first file was opened. A later status or
+        // note refresh rebuilds rows asynchronously, which is where the stale
+        // key used to move the highlight back to the first file.
+        app.files_focused = true;
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            app.diff.selected_file().map(|file| &file.key),
+            Some(&second_key)
+        );
+
+        app.diff.rebuild_rows();
+        assert_eq!(
+            app.diff.selected_file().map(|file| &file.key),
+            Some(&second_key)
+        );
+    }
+
+    #[test]
+    fn diff_list_highlight_follows_open_view_after_leaving_keyboard_selection() {
+        let _env = crate::persist::test_env("diff-list-open-view-highlight");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let first_key = install_snapshot(&mut app);
+        add_snapshot_file(&mut app, "src/second.rs");
+        app.move_dock(&DockKind::Files, crate::app::Side::Right);
+        app.sidebars.right.visible = true;
+        app.files_mode = FilesMode::Diff;
+        app.open_diff_view(first_key, OpenTarget::Preview);
+        app.files_focused = true;
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let preselected = app.diff.cursor;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let assert_highlight = |app: &mut App, terminal: &mut Terminal<TestBackend>, selected| {
+            terminal
+                .draw(|frame| crate::ui::render(frame, app))
+                .unwrap();
+            for (index, rect) in &app.diff_row_rects {
+                assert_eq!(
+                    terminal.backend().buffer()[(rect.x, rect.y)].bg,
+                    if selected == Some(*index) {
+                        app.theme.surface1
+                    } else if *index == 1 {
+                        app.theme.sel_bg
+                    } else {
+                        app.theme.base
+                    },
+                    "highlight for row {index}"
+                );
+                assert_eq!(
+                    terminal.backend().buffer()[(rect.x + 6, rect.y)].fg,
+                    if selected == Some(*index) || *index == 1 {
+                        app.theme.accent
+                    } else {
+                        app.theme.subtext0
+                    },
+                    "path color for row {index}"
+                );
+            }
+        };
+        assert_highlight(&mut app, &mut terminal, Some(preselected));
+        let (_, active_rect) = app
+            .diff_row_rects
+            .iter()
+            .find(|(row, _)| *row == 1)
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(active_rect.x + 4, active_rect.y)].fg,
+            app.theme.amber,
+            "active status badge retains its Git color"
+        );
+        let hovered_rect = app
+            .diff_row_rects
+            .iter()
+            .find(|(row, _)| *row == preselected)
+            .unwrap()
+            .1;
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.hover = Some((hovered_rect.x, hovered_rect.y));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(hovered_rect.x, hovered_rect.y)].bg,
+            app.theme.surface1
+        );
+        app.hover = None;
+        assert_highlight(&mut app, &mut terminal, None);
+
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_highlight(&mut app, &mut terminal, None);
+        assert_eq!(
+            app.diff.cursor, preselected,
+            "rendering preserves preselection"
+        );
+        app.diff.rebuild_rows();
+        assert_highlight(&mut app, &mut terminal, None);
+
+        app.git_status_inflight = true;
+        app.focus_diff_list();
+        assert_eq!(
+            app.diff.cursor, 1,
+            "focus starts at the currently open diff"
+        );
+        assert_highlight(&mut app, &mut terminal, Some(1));
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_highlight(&mut app, &mut terminal, None);
+
+        let terminal_pane = app
+            .layout()
+            .leaves()
+            .into_iter()
+            .find(|id| app.panes.contains_key(id))
+            .unwrap();
+        app.layout_mut().focus = terminal_pane;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        for (_, rect) in &app.diff_row_rects {
+            assert_eq!(
+                terminal.backend().buffer()[(rect.x, rect.y)].bg,
+                app.theme.base
+            );
+        }
     }
 
     #[test]
