@@ -149,6 +149,21 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
     let scroll = app.file_tree.scroll;
     let hover = app.hover;
     let keyboard_cursor = app.files_focused.then_some(app.file_tree.cursor);
+    // Native views and Luvus-launched editors carry an exact file identity.
+    // Never infer a file from terminal text or perform filesystem work here.
+    let active_path = app
+        .workspaces
+        .get(app.active_ws)
+        .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+        .and_then(|tab| match app.views.get(&tab.layout.focus) {
+            Some(crate::app::ViewKind::File(view)) => Some(view.path.as_path()),
+            Some(crate::app::ViewKind::Preview(view)) => Some(view.path.as_path()),
+            Some(crate::app::ViewKind::Diff(_)) => None,
+            None => app
+                .editor_files
+                .get(&tab.layout.focus)
+                .map(|editor| editor.path.as_path()),
+        });
 
     let rows = app.file_tree.visible_rows();
     for (i, row) in rows.iter().enumerate().skip(scroll).take(cap) {
@@ -158,6 +173,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
             hc >= rect.x && hc < rect.right() && hr >= rect.y && hr < rect.bottom()
         });
         let selected = keyboard_cursor == Some(i);
+        let active = !row.is_dir && active_path == Some(row.path.as_path());
 
         // Indentation, then a marker column: a dir gets its expand chevron, a
         // file gets a small dot in the same column. A file used to render two
@@ -193,7 +209,10 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         if row.is_dir {
             style = style.bold();
         }
-        if hovered || selected {
+        if active {
+            style = style.bold();
+        }
+        if hovered || selected || active {
             style = style.fg(t.accent);
         }
         // A folder's chevron keeps the folder's own styling; a file's dot sits
@@ -204,7 +223,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         let marker_style = if row.is_dir {
             style
         } else {
-            Style::new().fg(if hovered || selected {
+            Style::new().fg(if hovered || selected || active {
                 t.accent
             } else {
                 git_fg.unwrap_or(t.overlay1)
@@ -220,8 +239,15 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
                 Style::new().fg(git_fg.unwrap_or(t.overlay1)),
             ));
         }
-        if selected {
-            f.buffer_mut().set_style(rect, Style::new().bg(t.surface1));
+        if selected || hovered || active {
+            f.buffer_mut().set_style(
+                Rect::new(rect.x, rect.y, rect.width.saturating_sub(1), rect.height),
+                Style::new().bg(if selected || hovered {
+                    t.surface1
+                } else {
+                    t.sel_bg
+                }),
+            );
         }
         line_at(f, y, Line::from(spans));
         app.file_tree_rects.push((i, rect));
@@ -905,6 +931,95 @@ mod tests {
     use crate::ids::PaneId;
     use crate::ui::{theme::Theme, RenderTarget};
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn files_tree_distinguishes_open_file_from_keyboard_preselection() {
+        use crate::app::{App, DockKind, Side, ViewKind};
+        use crate::files::{Entry, FileView};
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let _env = crate::persist::test_env("files-open-row-highlight");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let root = app.ws().cwd.clone();
+        app.file_tree.set_root(root.clone());
+        app.file_tree.apply_dir(
+            root.clone(),
+            vec![
+                Entry {
+                    name: "alpha.txt".into(),
+                    is_dir: false,
+                },
+                Entry {
+                    name: "beta.txt".into(),
+                    is_dir: false,
+                },
+            ],
+        );
+        app.move_dock(&DockKind::Files, Side::Right);
+        app.sidebars.right.visible = true;
+        let pane = app.layout().focus;
+        app.views
+            .insert(pane, ViewKind::File(FileView::new(root.join("alpha.txt"))));
+        app.file_tree.cursor = 1;
+        app.files_focused = true;
+        let area = Rect::new(0, 0, 30, 6);
+        let assert_rows = |app: &mut App, selected: bool, active: bool| {
+            let mut buffer = Buffer::empty(area);
+            buffer.set_style(area, ratatui::style::Style::new().bg(app.theme.base));
+            let theme = app.theme.clone();
+            super::draw_files_dock(&mut RenderTarget::new(&mut buffer, area), area, app, &theme);
+            for (index, rect) in &app.file_tree_rects {
+                let is_selected = selected && *index == 1;
+                let is_active = active && *index == 0;
+                assert_eq!(
+                    buffer[(rect.x, rect.y)].bg,
+                    if is_selected {
+                        theme.surface1
+                    } else if is_active {
+                        theme.sel_bg
+                    } else {
+                        theme.base
+                    }
+                );
+                assert_eq!(
+                    buffer[(rect.x + 4, rect.y)].fg,
+                    if is_selected || is_active {
+                        theme.accent
+                    } else {
+                        theme.subtext0
+                    }
+                );
+            }
+        };
+        assert_rows(&mut app, true, true);
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_rows(&mut app, false, true);
+        assert_eq!(
+            app.file_tree.cursor, 1,
+            "active highlight does not retarget cursor"
+        );
+
+        app.views.insert(
+            pane,
+            ViewKind::Preview(crate::files::preview::DocumentView::new(
+                root.join("alpha.txt"),
+                crate::files::preview::PreviewKind::Markdown,
+            )),
+        );
+        assert_rows(&mut app, false, true);
+        app.views.remove(&pane);
+        app.editor_files.insert(
+            pane,
+            crate::app::EditorFile {
+                path: root.join("alpha.txt"),
+                command: "vim".into(),
+            },
+        );
+        assert_rows(&mut app, false, true);
+        app.editor_files.remove(&pane);
+        assert_rows(&mut app, false, false);
+    }
 
     #[test]
     fn narrow_wrapped_file_shows_overflow_marker_and_following_text() {
