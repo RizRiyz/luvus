@@ -169,7 +169,16 @@ impl App {
             self.diff.move_cursor(1);
         }
         self.diff.ensure_cursor_visible();
+        self.sync_diff_list_selection();
         self.refresh_diff_status(false);
+    }
+
+    /// Keep the list's stable selection key in lockstep with its cursor. The
+    /// key is used by asynchronous row rebuilds to restore the highlighted
+    /// file, so leaving it at the file most recently opened in a preview can
+    /// make a later j/k selection jump back when a refresh completes.
+    fn sync_diff_list_selection(&mut self) {
+        self.diff.selected_key = self.diff.selected_file().map(|file| file.key.clone());
     }
 
     pub fn refresh_diff_status(&mut self, force: bool) {
@@ -461,6 +470,7 @@ impl App {
         self.diff.scroll_detached = false;
         self.diff.move_cursor(delta);
         self.diff.ensure_cursor_visible();
+        self.sync_diff_list_selection();
     }
 
     fn move_diff_list_page(&mut self, delta: isize) {
@@ -486,6 +496,7 @@ impl App {
             self.diff.cursor = row;
             self.diff.scroll_detached = false;
             self.diff.ensure_cursor_visible();
+            self.sync_diff_list_selection();
         }
     }
 
@@ -505,6 +516,7 @@ impl App {
             self.diff.cursor = row;
             self.diff.scroll_detached = false;
             self.diff.ensure_cursor_visible();
+            self.sync_diff_list_selection();
         }
     }
 
@@ -2374,6 +2386,42 @@ mod tests {
             .views
             .values()
             .any(|view| matches!(view, ViewKind::Diff(diff) if diff.key == key)));
+    }
+
+    #[test]
+    fn diff_list_navigation_updates_selection_after_opening_a_file() {
+        let _env = crate::persist::test_env("diff-list-selection-after-open");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let first_key = install_snapshot(&mut app);
+        let second_key = add_snapshot_file(&mut app, "src/second.rs");
+        app.files_mode = FilesMode::Diff;
+        app.files_focused = true;
+
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(
+            app.diff.selected_file().map(|file| &file.key),
+            Some(&first_key)
+        );
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.diff.selected_key.as_ref(), Some(&first_key));
+
+        // Returning to the list and preselecting another file must supersede
+        // the key remembered when the first file was opened. A later status or
+        // note refresh rebuilds rows asynchronously, which is where the stale
+        // key used to move the highlight back to the first file.
+        app.files_focused = true;
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            app.diff.selected_file().map(|file| &file.key),
+            Some(&second_key)
+        );
+
+        app.diff.rebuild_rows();
+        assert_eq!(
+            app.diff.selected_file().map(|file| &file.key),
+            Some(&second_key)
+        );
     }
 
     #[test]
