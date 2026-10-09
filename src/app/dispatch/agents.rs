@@ -32,7 +32,10 @@ impl App {
                         // Only real agent sessions, not the shells behind tabs.
                         if !(self.manifests.is_agent(&s.agent)
                             || s.agent_session.is_some()
-                            || s.agent_report.is_some())
+                            || s.agent_report.is_some()
+                            || s.program_status
+                                .as_ref()
+                                .is_some_and(|store| !store.is_empty()))
                         {
                             continue;
                         }
@@ -680,7 +683,7 @@ impl App {
             _ => "none",
         };
         let state_confidence = match status.state_source {
-            "integration_report" => "authoritative",
+            "integration_report" | "program_status" => "authoritative",
             "manifest_rule" => "high",
             "shell_activity" => "heuristic",
             _ => "none",
@@ -699,6 +702,23 @@ impl App {
                 "rule_region":status.rule_region,
                 "blocked_hint":status.blocked_hint,
             },
+            "program_status":status.program_status.as_ref().map(|store| {
+                store.records().map(|record| json!({
+                    "id":record.id,
+                    "state":match record.state {
+                        crate::terminal::program_status::ProgramState::Idle => "idle",
+                        crate::terminal::program_status::ProgramState::Working => "working",
+                        crate::terminal::program_status::ProgramState::Blocked => "blocked",
+                        crate::terminal::program_status::ProgramState::Done => "done",
+                        crate::terminal::program_status::ProgramState::Error => "error",
+                    },
+                    "kind":record.kind,
+                    "progress":record.progress,
+                    "app":record.app,
+                    "title":record.title,
+                    "message":record.message,
+                })).collect::<Vec<_>>()
+            }),
             "authority":report.map(|report| json!({
                 "source":report.source,
                 "sequence":report.sequence,
@@ -761,6 +781,9 @@ impl App {
             self.manifests.is_agent(&s.agent)
                 || s.agent_session.is_some()
                 || s.agent_report.is_some()
+                || s.program_status
+                    .as_ref()
+                    .is_some_and(|store| !store.is_empty())
         })
     }
 

@@ -107,6 +107,19 @@ reconcile ownership without guessing from a release number. Requests that omit
 the field keep the original create-response shape. This policy intentionally
 does not persist and replay arbitrary original command arguments.
 
+## Program status
+
+Programs running in a pane can report structured lifecycle state with OSC 7501,
+for example `ESC ] 7501 ; state=blocked:kind=permission:msg=<base64> ESC \\`.
+Luvus treats valid reports as authoritative state evidence and exposes the
+bounded records through `agent.explain`. The self-reported `app` value is
+presentation metadata only; it cannot impersonate a built-in agent identity.
+
+Reports support `idle`, `working`, `blocked`, `done`, `error`, and `clear`, with
+nested `id` records, optional progress, titles, and messages. Malformed or
+oversized reports are ignored. Existing heuristic detection remains the
+fallback when a pane does not report OSC 7501.
+
 Capture responses include `content_revision`. To initialize without a race,
 subscribe first, request a snapshot on another connection, discard
 buffered events up through `event_sequence`, then apply later events. Each

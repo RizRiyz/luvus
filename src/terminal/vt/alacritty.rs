@@ -36,6 +36,9 @@ type TitleSlot = Arc<Mutex<TitleState>>;
 /// Latest OSC 52 store request from the child, drained by the app loop.
 type ClipboardSlot = Arc<Mutex<Option<String>>>;
 
+/// Latest OSC 7501 report, drained by the app loop.
+type ProgramStatusSlot = Arc<Mutex<Vec<(Vec<u8>, bool)>>>;
+
 /// Receives terminal-generated responses (cursor reports, device attributes,
 /// etc.) and forwards them back to the child via the shared write channel.
 /// Also captures the window title (OSC 0/2) for agent detection.
@@ -44,6 +47,7 @@ pub struct EventProxy {
     tx: InputSender,
     title: TitleSlot,
     clipboard: ClipboardSlot,
+    program_status: ProgramStatusSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
 }
 
@@ -92,6 +96,26 @@ impl EventListener for EventProxy {
                     *pending = Some(text);
                 }
             }
+            Event::ProgramStatusReset => {
+                if let Ok(mut pending) = self.program_status.lock() {
+                    pending.clear();
+                    pending.push((b"state=clear".to_vec(), false));
+                }
+            }
+            Event::ProgramStatus(body, bell_terminated) => {
+                if body.as_slice() == b"?" {
+                    let response = if bell_terminated {
+                        b"\x1b]7501;?\x07".to_vec()
+                    } else {
+                        b"\x1b]7501;?\x1b\\".to_vec()
+                    };
+                    let _ = self.tx.send(InputAction::Bytes(response));
+                } else if let Ok(mut pending) = self.program_status.lock() {
+                    if pending.len() < 64 {
+                        pending.push((body, bell_terminated));
+                    }
+                }
+            }
             // OSC 52 read would expose the host clipboard to untrusted pane apps.
             Event::ClipboardLoad(_, _) => {}
             _ => {}
@@ -123,6 +147,7 @@ pub struct AlacrittyEngine {
     parser: Processor,
     title: TitleSlot,
     clipboard: ClipboardSlot,
+    program_status: ProgramStatusSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
     history_budget_bytes: usize,
@@ -171,11 +196,13 @@ impl AlacrittyEngine {
         };
         let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
         let clipboard: ClipboardSlot = Arc::new(Mutex::new(None));
+        let program_status: ProgramStatusSlot = Arc::new(Mutex::new(Vec::new()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
             title: title.clone(),
             clipboard: clipboard.clone(),
+            program_status: program_status.clone(),
             appearance: appearance.clone(),
         };
         // Alacritty retains history by rows, not bytes. Derive a conservative
@@ -194,6 +221,7 @@ impl AlacrittyEngine {
             parser: Processor::new(),
             title,
             clipboard,
+            program_status,
             response_tx: resp_tx,
             appearance,
             history_budget_bytes,
@@ -1241,6 +1269,13 @@ impl VtEngine for AlacrittyEngine {
             .lock()
             .ok()
             .and_then(|mut pending| pending.take())
+    }
+
+    fn take_pending_program_status(&mut self) -> Vec<(Vec<u8>, bool)> {
+        self.program_status
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default()
     }
 
     fn set_history_budget(&mut self, bytes: usize) {
@@ -3260,6 +3295,26 @@ mod tests {
 
         engine.advance(b"\x1b[?2040$p");
         assert_eq!(recv_bytes(&rx), b"\x1b[?2040;0$y");
+    }
+
+    #[test]
+    fn osc7501_reports_are_queued_and_query_echoes_terminator() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        engine.advance(
+            b"\x1b]7501;state=working:app=build:progress=40\x07\x1b]7501;state=done:app=build\x1b\\",
+        );
+        assert_eq!(
+            engine.take_pending_program_status(),
+            vec![
+                (b"state=working:app=build:progress=40".to_vec(), true),
+                (b"state=done:app=build".to_vec(), false),
+            ]
+        );
+        assert!(rx.try_recv().is_err());
+
+        engine.advance(b"\x1b]7501;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]7501;?\x07");
     }
 
     #[test]

@@ -1962,6 +1962,8 @@ pub struct PaneStatus {
     pub rule_region: Option<&'static str>,
     /// Optional authoritative state lease from an agent integration.
     pub agent_report: Option<AgentReport>,
+    /// Terminal-native OSC 7501 records reported by the foreground program.
+    pub program_status: Option<crate::terminal::program_status::ProgramStatusStore>,
 }
 
 impl PaneStatus {
@@ -1998,6 +2000,7 @@ impl PaneStatus {
             rule_priority: None,
             rule_region: None,
             agent_report: None,
+            program_status: None,
         }
     }
 }
