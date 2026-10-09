@@ -21,6 +21,12 @@ pub enum Event {
     /// Reset to the default window title.
     ResetTitle,
 
+    /// OSC 7501 Program Status Protocol report from the child.
+    ProgramStatus(Vec<u8>, bool),
+
+    /// Full terminal reset (RIS), which clears OSC 7501 records.
+    ProgramStatusReset,
+
     /// Request to store a text string in the clipboard.
     ClipboardStore(ClipboardType, String),
 
@@ -64,6 +70,10 @@ pub enum Event {
 impl Debug for Event {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Event::ProgramStatus(body, bell) => {
+                write!(f, "ProgramStatus({} bytes, bell={bell})", body.len())
+            }
+            Event::ProgramStatusReset => write!(f, "ProgramStatusReset"),
             Event::ClipboardStore(ty, text) => write!(f, "ClipboardStore({ty:?}, {text})"),
             Event::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
             Event::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),

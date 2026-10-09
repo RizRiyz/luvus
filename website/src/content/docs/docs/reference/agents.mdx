@@ -41,9 +41,11 @@ resume flag; Luvus does not advertise resume, fork, precise hooks, or
 scheduled automation for Arc Studio. Arc Studio currently deploys to Arc
 testnet.
 
-- **Live status** (blocked/working/done/idle) needs no setup. luvus identifies
-  the agent from the processes running in the pane, then reads the pane's screen
-  to tell what state it is in.
+- **Live status** (blocked/working/done/idle) needs no setup. A program may
+  report authoritative status over OSC 7501, the terminal-native Program Status
+  Protocol. Luvus keeps bounded records for nested tasks, while process and
+  launch evidence still determines the agent identity. Programs without OSC
+  7501 support continue to use process and screen detection.
 - **Session resume** discovers the agent's latest session from its own on-disk
   store, keyed by the pane's folder, and runs the agent's resume command on
   restore.

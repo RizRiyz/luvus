@@ -421,7 +421,7 @@ pub fn capabilities(event_sequence: u64) -> Value {
         },
         "identity":{"workspace":"stable","tab":"stable","terminal":"pty_lifetime"},
         "events":{"resume":"after_sequence","loss":"resync_required"},
-        "agent_authorities":["integration_report","process_tree","launch_command","osc_title","screen_text","prior_identity","command_fallback"],
+        "agent_authorities":["program_status","integration_report","process_tree","launch_command","osc_title","screen_text","prior_identity","command_fallback"],
         "agent_states":["idle","working","blocked","done"],
         "terminal":{
             "capabilities":crate::terminal::backend::advertised_capabilities(),

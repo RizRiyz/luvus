@@ -568,6 +568,10 @@ impl App {
                         && status.candidate == status.state
                         && status.state != State::Working
                         && status.agent_report.is_none()
+                        && status
+                            .program_status
+                            .as_ref()
+                            .is_none_or(|store| store.is_empty())
                 });
             self.detection_dirty.remove(&id);
             let Some(pane) = self.panes.get(&id) else {
@@ -589,6 +593,14 @@ impl App {
                 .status
                 .get(&id)
                 .and_then(|status| status.agent_report.clone());
+            let program_status = self
+                .status
+                .get(&id)
+                .and_then(|status| status.program_status.as_ref())
+                .and_then(|store| store.effective_projection())
+                .map(|(state, app, message)| {
+                    (state, app.map(str::to_string), message.map(str::to_string))
+                });
             let known_agent = self
                 .status
                 .get(&id)
@@ -734,6 +746,24 @@ impl App {
                     rule_priority: None,
                     rule_region: None,
                 },
+                None if program_status.is_some() => {
+                    let (state, _app, _message) = program_status.as_ref().expect("checked above");
+                    detect::Detection {
+                        state: *state,
+                        // `app` is display metadata, not trusted agent identity.
+                        // Keep process/launch/session identity when available.
+                        agent: known.to_string(),
+                        prompt_evidence: if *state == State::Blocked {
+                            detect::PromptEvidence::Blocked
+                        } else {
+                            detect::PromptEvidence::Unknown
+                        },
+                        identity_source: "program_status",
+                        state_source: "program_status",
+                        rule_priority: None,
+                        rule_region: None,
+                    }
+                }
                 None => detect::classify_with_composer(
                     title.as_deref(),
                     &bottom,
@@ -801,11 +831,17 @@ impl App {
                 };
                 let was_visible_agent = self.manifests.is_agent(&s.agent)
                     || s.agent_session.is_some()
-                    || s.agent_report.is_some();
+                    || s.agent_report.is_some()
+                    || s.program_status
+                        .as_ref()
+                        .is_some_and(|store| !store.is_empty());
                 let agent_changed = s.agent != detected;
                 let is_visible_agent = self.manifests.is_agent(&detected)
                     || s.agent_session.is_some()
-                    || s.agent_report.is_some();
+                    || s.agent_report.is_some()
+                    || s.program_status
+                        .as_ref()
+                        .is_some_and(|store| !store.is_empty());
                 s.agent = detected;
                 if agent_changed && !s.agent.eq_ignore_ascii_case("claude") {
                     s.claude_prompt_semantic_ready = false;
@@ -888,7 +924,12 @@ impl App {
             self.pane_is_visible(*id)
                 || self.manifests.is_agent(agent)
                 || self.status.get(id).is_some_and(|status| {
-                    status.agent_session.is_some() || status.agent_report.is_some()
+                    status.agent_session.is_some()
+                        || status.agent_report.is_some()
+                        || status
+                            .program_status
+                            .as_ref()
+                            .is_some_and(|store| !store.is_empty())
                 })
                 || self.active_is_orch()
                 || self.active_is_mission()
@@ -937,10 +978,13 @@ impl App {
             // Optional sound cues (off by default). A plain shell going
             // quiet or blocking is not an agent, so it stays silent either way.
             let is_agent_pane = self.manifests.is_agent(&agent)
-                || self
-                    .status
-                    .get(&id)
-                    .is_some_and(|s| s.agent_session.is_some() || s.agent_report.is_some());
+                || self.status.get(&id).is_some_and(|s| {
+                    s.agent_session.is_some()
+                        || s.agent_report.is_some()
+                        || s.program_status
+                            .as_ref()
+                            .is_some_and(|store| !store.is_empty())
+                });
             // *Done*: one chime per real finish of a working stretch — the
             // debounce already absorbs mid-turn pauses, and it rings whether or
             // not the pane is focused (that's the point: you looked away).

@@ -549,6 +549,38 @@ impl App {
         }
     }
 
+    fn handle_program_status(&mut self, id: PaneId, body: Vec<u8>, _bell_terminated: bool) {
+        let Some(report) = crate::terminal::program_status::parse_report(&body) else {
+            return;
+        };
+        let Some(status) = self.status.get_mut(&id) else {
+            return;
+        };
+        let store = status
+            .program_status
+            .get_or_insert_with(crate::terminal::program_status::ProgramStatusStore::new);
+        store.apply(report);
+        if let Some((state, app, message)) = store.effective_projection() {
+            status.candidate = state;
+            status.candidate_since = Instant::now();
+            status.last_activity = Instant::now();
+            status.identity_source = "program_status";
+            status.state_source = "program_status";
+            status.blocked_hint = message
+                .map(str::to_string)
+                .filter(|_| state == State::Blocked);
+            // `app` is untrusted display metadata and must not become the
+            // pane's agent identity. Process/launch/session detection remains
+            // authoritative for identity.
+            let _ = app;
+            status.force_detect = true;
+        } else {
+            status.program_status = None;
+            status.force_detect = true;
+        }
+        self.detection_dirty.insert(id);
+    }
+
     /// Apply an event; returns whether it changed the rendered UI (→ the loop
     /// should redraw). Input forwarded to a pane returns `false` — the screen only
     /// changes when the pane echoes (a separate `PtyData` event), so we don't waste
@@ -960,6 +992,9 @@ impl App {
                 if let Some(pane) = self.panes.get(&id) {
                     if let Some(text) = pane.take_pending_clipboard() {
                         self.pending_clipboard = Some(text);
+                    }
+                    for (body, bell_terminated) in pane.take_pending_program_status() {
+                        self.handle_program_status(id, body, bell_terminated);
                     }
                 }
                 // The PTY grid has already advanced by the time this event is
