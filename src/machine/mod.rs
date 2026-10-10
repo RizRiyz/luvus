@@ -9,9 +9,12 @@ pub(crate) mod catalog;
 mod cli;
 pub(crate) mod command;
 pub(crate) mod link;
+mod mux;
 mod provision;
 mod recovery;
 mod ssh;
+
+pub(crate) use ssh::ssh_command;
 
 pub(crate) use cli::run as run_cli;
 

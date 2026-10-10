@@ -165,10 +165,12 @@ Keep these three things separate:
 | Local named session | A top-level local server namespace with its own workspaces, panes, agents, and saved machines |
 | Workspace | A project directory and its tabs inside that server |
 
-Each client window owns its connections. Two clients attached to the same local
-named session load the same saved profiles but do not share one SSH process. A
-machine uses one selected remote session at a time in each client, defaulting
-to `default`.
+Each client window owns its machine links. Two clients attached to the same
+local named session load the same saved profiles and each run their own link.
+On macOS and Linux, SSH commands to the same destination share one OpenSSH
+connection (see [Shared SSH connections](#shared-ssh-connections)). A machine
+uses one selected remote session at a time in each client, defaulting to
+`default`.
 
 The session dropdown at the top of the interface always belongs to the local
 client session, including while a machine workspace is active. Opening it
@@ -277,6 +279,27 @@ OpenSSH configuration remains authoritative for aliases, keys, jump hosts, and
 authentication agents. A remote server that is already running is never
 restarted automatically; restart it deliberately if it still serves an older
 binary after provisioning.
+
+### Shared SSH connections
+
+Setting up a machine runs several short SSH commands: discovery, target
+detection, installation, and the endpoint check. On macOS and Linux, Luvus sends
+all SSH commands for one destination over one shared OpenSSH connection
+(`ControlMaster`), including the machine link, `luvus machine status`,
+`luvus machine sessions`, and `luvus machine open`. A server that limits new SSH
+connections, such as UFW's `limit` rule (six connections in 30 seconds) or
+fail2ban, therefore sees one connection instead of one per step.
+
+The control socket lives in `ssh/` under the Luvus home (for example
+`~/.luvus/ssh`). The directory is created with mode `0700`, must be owned by
+you, and is never followed through a symlink. When the home path is too long
+for a socket, Luvus uses `/tmp/luvus-<uid>/ssh` (`/private/tmp` on macOS) under
+the same checks; if no private directory is available, each command connects
+directly. An idle shared connection closes 60 seconds after its last command.
+These options apply only to Luvus's own SSH commands and take precedence over
+`ControlMaster`, `ControlPath`, and `ControlPersist` in your SSH configuration.
+Windows OpenSSH has no connection sharing, so each command connects directly
+there.
 
 Use `--disabled` to record a profile without connecting or probing it:
 
@@ -491,6 +514,16 @@ Complete the SSH setup outside Luvus and repeat the `BatchMode=yes` check from
 step 1. Unlock your SSH agent if needed. Luvus does not save passwords or
 answer host-key prompts for you.
 
+### Setup reports "Connection refused" or "Operation timed out"
+
+When SSH itself fails, Luvus reports the OpenSSH error and stops; it does not
+offer to install anything on a host it cannot reach. Check the same destination
+with the `BatchMode=yes` command from step 1. A timeout usually means the host
+is down, its address changed, or a firewall drops port 22. A refusal that
+clears after about 30 seconds usually means a connection rate limit; Luvus's
+[shared SSH connections](#shared-ssh-connections) normally stay under it, but
+other SSH sessions from the same address still count toward the limit.
+
 ### The machine is missing in another local session
 
 Run `luvus machine list` using the same binary and `LUVUS_HOME` as that client.
@@ -543,7 +576,9 @@ work. Removing a profile does not delete remote files or named-session data.
   is available without adding another idle thread.
 - Disabled profiles create no SSH process, reader, timer, or render work.
 - Each enabled machine uses one OpenSSH process and one blocking reader with a
-  small fixed stack; there is no polling loop or machine-specific multiplexer.
+  small fixed stack; there is no polling loop. On macOS and Linux, SSH commands
+  to the same destination share one background OpenSSH connection, which
+  closes 60 seconds after its last command.
   A quiet Online endpoint receives one lightweight protocol health check after
   five seconds without another valid message and times out after ten seconds.
 - Every SSH bridge carries the existing native Luvus client messages directly.
