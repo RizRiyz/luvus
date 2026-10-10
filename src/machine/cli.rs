@@ -203,7 +203,9 @@ fn prepare_foreground(
 ) -> Result<super::ssh::ProbeResult> {
     let probe = match super::ssh::prepare(profile) {
         Ok(probe) => Ok(probe),
-        Err(_) if approved => super::ssh::prepare_or_provision(profile, true),
+        // An unreachable host has nothing to install on; never offer to.
+        Err(initial) if initial.is::<super::ssh::TransportError>() => Err(initial),
+        Err(initial) if approved => super::ssh::provision_after(profile, true, initial),
         Err(initial) => {
             if (profile.remote_binary.is_some() && !profile.automatic_provisioning)
                 || !std::io::stdin().is_terminal()
@@ -211,7 +213,7 @@ fn prepare_foreground(
             {
                 return Err(initial.context("no remote changes made; use machine add --install to permit managed installation"));
             }
-            eprintln!("{initial}");
+            eprintln!("{initial:#}");
             eprint!(
                 "{} ({} @ {})? [y/N] ",
                 crate::i18n::cli::machine_install_label(
@@ -227,7 +229,7 @@ fn prepare_foreground(
                 return Err(anyhow!("machine setup cancelled; no remote changes made"));
             }
             profile.automatic_provisioning = true;
-            super::ssh::prepare_or_provision(profile, true)
+            super::ssh::provision_after(profile, true, initial)
         }
     }?;
     profile.remote_binary = Some(probe.remote_binary.clone());

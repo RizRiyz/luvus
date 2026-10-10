@@ -33,6 +33,40 @@ pub(super) struct ProbeResult {
     recovery: Option<String>,
 }
 
+/// `ssh` itself failed (exit 255): the host refused or dropped the
+/// connection, timed out, or rejected authentication. No remote command ran,
+/// so the next probe would fail the same way and only cost another connection.
+#[derive(Debug)]
+pub(super) struct TransportError(String);
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+/// The SSH failure an exit status 255 reports, with ssh's own first message
+/// line (for example `Connection refused`).
+pub(super) fn transport_failure(destination: &str, output: &Output) -> Option<anyhow::Error> {
+    if output.status.code() != Some(255) {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("ssh exited with status 255");
+    Some(
+        TransportError(format!(
+            "SSH connection to `{destination}` failed: {detail}"
+        ))
+        .into(),
+    )
+}
+
 pub(super) enum ForegroundPreparation {
     Ready(ProbeResult),
     ApprovalRequired(String),
@@ -61,13 +95,16 @@ pub(crate) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
         return Ok(probe);
     }
     let path_error = path_probe.expect_err("the successful probe returned above");
+    if path_error.is::<TransportError>() {
+        return Err(path_error);
+    }
 
     // POSIX login environments commonly omit user-local bin directories from
     // non-interactive PATH. Windows has no equivalent shell-neutral search;
     // automatic provisioning handles that case after this read-only attempt.
     let binary = discover_binary(&profile.destination)?;
     verified_probe(&profile.destination, &binary, Some(&binary)).map_err(|fallback| {
-        anyhow!("PATH probe failed: {path_error}; user-local probe failed: {fallback}")
+        anyhow!("PATH probe failed: {path_error:#}; user-local probe failed: {fallback:#}")
     })
 }
 
@@ -145,24 +182,35 @@ pub(crate) fn prepare_or_provision(
 ) -> Result<ProbeResult> {
     match prepare(profile) {
         Ok(probe) => Ok(probe),
-        Err(initial) if !provision_allowed(profile, approved) => Err(initial),
-        Err(initial) => {
-            let (binary, operation) = super::recovery::install(profile, |record_plan| {
-                super::provision::install(&profile.destination, record_plan)
-            }).map_err(|provision| {
-                anyhow!(
-                    "remote preparation failed: {initial}; automatic provisioning failed: {provision}"
-                )
-            })?;
-            let mut provisioned = profile.clone();
-            provisioned.remote_binary = Some(binary);
-            let mut probe = prepare(&provisioned).context(
-                "installation receipt retained; inspect `luvus machine list` before retrying",
-            )?;
-            probe.recovery = Some(operation);
-            Ok(probe)
-        }
+        Err(initial) => provision_after(profile, approved, initial),
     }
+}
+
+/// Provision after `prepare` already failed with `initial`, without probing
+/// the host again. A transport failure is returned as is: the host could not
+/// be reached, so there is nothing to install on.
+pub(super) fn provision_after(
+    profile: &MachineProfile,
+    approved: bool,
+    initial: anyhow::Error,
+) -> Result<ProbeResult> {
+    if !provision_allowed(profile, approved) || initial.is::<TransportError>() {
+        return Err(initial);
+    }
+    let (binary, operation) = super::recovery::install(profile, |record_plan| {
+        super::provision::install(&profile.destination, record_plan)
+    })
+    .map_err(|provision| {
+        anyhow!(
+            "remote preparation failed: {initial:#}; automatic provisioning failed: {provision:#}"
+        )
+    })?;
+    let mut provisioned = profile.clone();
+    provisioned.remote_binary = Some(binary);
+    let mut probe = prepare(&provisioned)
+        .context("installation receipt retained; inspect `luvus machine list` before retrying")?;
+    probe.recovery = Some(operation);
+    Ok(probe)
 }
 
 /// Prepare an explicit foreground setup without assuming installation
@@ -180,10 +228,13 @@ pub(super) fn prepare_for_foreground(
         Err(initial) if profile.remote_binary.is_some() && !profile.automatic_provisioning => {
             Err(initial)
         }
+        Err(initial) if initial.is::<TransportError>() => Err(initial),
         Err(initial) => match super::provision::verify_install_target(&profile.destination) {
-            Ok(()) => Ok(ForegroundPreparation::ApprovalRequired(initial.to_string())),
+            Ok(()) => Ok(ForegroundPreparation::ApprovalRequired(format!(
+                "{initial:#}"
+            ))),
             Err(target) => Err(initial.context(format!(
-                "SSH target cannot be prepared automatically: {target}"
+                "SSH target cannot be prepared automatically: {target:#}"
             ))),
         },
     }
@@ -194,33 +245,21 @@ fn provision_allowed(profile: &MachineProfile, approved: bool) -> bool {
 }
 
 fn discover_binary(destination: &str) -> Result<String> {
-    // This fixed script contains no user input. It prints exactly one path and
-    // never installs, modifies, or starts anything on the remote host.
-    const DISCOVER: &str = r#"for p in "$HOME/.local/share/luvus/remote/v__VERSION__-p__PROTOCOL__/luvus" "$HOME/.local/bin/luvus" "$HOME/.cargo/bin/luvus" "$HOME/.nix-profile/bin/luvus" /usr/local/bin/luvus /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do
-if [ -x "$p" ]; then
- info=$("$p" remote-client-info --json 2>/dev/null) || continue
- printf '%s' "$info" | grep -E '"protocol_version":__PROTOCOL__([,}])' >/dev/null || continue
- printf '%s' "$info" | grep -E '"machine_endpoint_version":__ENDPOINT__([,}])' >/dev/null || continue
- printf '%s' "$info" | grep -F '"machine_endpoint_v1"' >/dev/null || continue
- printf '%s\n' "$p"; exit 0
-fi
-done
-exit 127"#;
     let mut command = ssh_command(destination, true);
     // OpenSSH already invokes the remote login shell. Passing this fixed
     // script as the only command argument preserves it as one command string;
     // no profile or user data is interpolated into it.
-    command.arg(
-        DISCOVER
-            .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
-            .replace(
-                "__PROTOCOL__",
-                &crate::ipc::protocol::PROTOCOL_VERSION.to_string(),
-            )
-            .replace("__ENDPOINT__", &super::MACHINE_ENDPOINT_VERSION.to_string()),
-    );
+    command.arg(posix_discovery_script());
     let output = run_bounded(command, PROBE_TIMEOUT)?;
+    if let Some(error) = transport_failure(destination, &output) {
+        return Err(error);
+    }
     if !output.status.success() {
+        // A POSIX shell ran the whole script and found nothing; only another
+        // shell (cmd.exe or PowerShell) is worth a Windows discovery attempt.
+        if posix_found_nothing(&output.stdout) {
+            return Err(not_found(destination));
+        }
         return discover_windows_binary(destination);
     }
     let binary = String::from_utf8(output.stdout)
@@ -247,14 +286,54 @@ fn discover_windows_binary(destination: &str) -> Result<String> {
         ])
         .arg(crate::base64_encode(&bytes));
     let output = run_bounded(command, PROBE_TIMEOUT)?;
+    if let Some(error) = transport_failure(destination, &output) {
+        return Err(error);
+    }
     if !output.status.success() {
-        return Err(anyhow!(
-            "compatible Luvus was not found on remote machine `{destination}`"
-        ));
+        return Err(not_found(destination));
     }
     let path = String::from_utf8(output.stdout)?.trim().to_string();
     validate_remote_binary(&path)?;
     Ok(path)
+}
+
+/// The read-only POSIX discovery script. It contains no user input, prints
+/// exactly one path when it finds a compatible binary, and otherwise prints
+/// [`POSIX_NOT_FOUND`] so the caller knows a POSIX shell checked every location.
+fn posix_discovery_script() -> String {
+    // This fixed script never installs, modifies, or starts anything remotely.
+    const DISCOVER: &str = r#"for p in "$HOME/.local/share/luvus/remote/v__VERSION__-p__PROTOCOL__/luvus" "$HOME/.local/bin/luvus" "$HOME/.cargo/bin/luvus" "$HOME/.nix-profile/bin/luvus" /usr/local/bin/luvus /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do
+if [ -x "$p" ]; then
+ info=$("$p" remote-client-info --json 2>/dev/null) || continue
+ printf '%s' "$info" | grep -E '"protocol_version":__PROTOCOL__([,}])' >/dev/null || continue
+ printf '%s' "$info" | grep -E '"machine_endpoint_version":__ENDPOINT__([,}])' >/dev/null || continue
+ printf '%s' "$info" | grep -F '"machine_endpoint_v1"' >/dev/null || continue
+ printf '%s\n' "$p"; exit 0
+fi
+done
+printf '%s\n' __NOT_FOUND__
+exit 127"#;
+    DISCOVER
+        .replace("__VERSION__", env!("CARGO_PKG_VERSION"))
+        .replace(
+            "__PROTOCOL__",
+            &crate::ipc::protocol::PROTOCOL_VERSION.to_string(),
+        )
+        .replace("__ENDPOINT__", &super::MACHINE_ENDPOINT_VERSION.to_string())
+        .replace("__NOT_FOUND__", POSIX_NOT_FOUND)
+}
+
+/// Printed by the POSIX discovery script after checking every location.
+const POSIX_NOT_FOUND: &str = "luvus-discovery-not-found";
+
+fn posix_found_nothing(stdout: &[u8]) -> bool {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .any(|line| line.trim() == POSIX_NOT_FOUND)
+}
+
+fn not_found(destination: &str) -> anyhow::Error {
+    anyhow!("compatible Luvus was not found on remote machine `{destination}`")
 }
 
 fn windows_discovery_script() -> String {
@@ -282,6 +361,9 @@ fn probe(destination: &str, binary: &str, batch: bool) -> Result<ProbeResponse> 
     let mut command = ssh_command(destination, batch);
     super::command::append(&mut command, binary, &["remote-client-info", "--json"])?;
     let output = run_bounded(command, PROBE_TIMEOUT)?;
+    if let Some(error) = transport_failure(destination, &output) {
+        return Err(error);
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr.lines().next().unwrap_or("remote probe failed");
@@ -318,7 +400,11 @@ pub(super) fn open(profile: &MachineProfile, session: Option<&str>) -> Result<()
     crate::remote_attach_profile(&profile.destination, binary, session)
 }
 
-pub(super) fn ssh_command(destination: &str, batch: bool) -> Command {
+/// The `ssh` command every saved-machine operation uses: probes, discovery,
+/// provisioning, session listing, the persistent link, and `machine open`.
+/// They share one connection per destination (see `mux`), so preparing a
+/// machine opens one TCP connection instead of one per step.
+pub(crate) fn ssh_command(destination: &str, batch: bool) -> Command {
     let mut command = Command::new("ssh");
     command
         .arg("-T")
@@ -331,6 +417,7 @@ pub(super) fn ssh_command(destination: &str, batch: bool) -> Command {
     if batch {
         command.arg("-o").arg("BatchMode=yes");
     }
+    super::mux::apply(&mut command);
     command.arg(destination);
     command
 }
@@ -771,5 +858,80 @@ mod tests {
         assert!(output.status.success());
         assert_eq!(output.stdout, b"bridge-test");
         assert!(output.stderr.is_empty());
+    }
+
+    #[cfg(unix)]
+    fn shell_output(script: &str) -> Output {
+        Command::new("sh").arg("-c").arg(script).output().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_ssh_failure_is_reported_as_itself_not_as_a_missing_binary() {
+        let refused = shell_output(
+            "printf '%s\\n' 'ssh: connect to host 203.0.113.9 port 22: Connection refused' >&2; exit 255",
+        );
+        let error = transport_failure("dev@box", &refused).expect("exit 255 is ssh's own failure");
+        assert!(error.is::<TransportError>());
+        assert_eq!(
+            error.to_string(),
+            "SSH connection to `dev@box` failed: ssh: connect to host 203.0.113.9 port 22: Connection refused"
+        );
+        assert!(transport_failure("dev@box", &shell_output("exit 127")).is_none());
+        assert!(transport_failure("dev@box", &shell_output("exit 0")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_discovery_reports_a_clean_miss_so_windows_is_not_probed() {
+        let home = std::env::temp_dir().join(format!("luvus-discovery-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(posix_discovery_script())
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(output.status.code(), Some(127));
+        assert!(posix_found_nothing(&output.stdout));
+        assert!(!posix_found_nothing(b"/home/dev/.local/bin/luvus\n"));
+        assert!(!posix_found_nothing(
+            b"'for' is not recognized as a command\n"
+        ));
+        assert!(!posix_discovery_script().contains("__"));
+    }
+
+    #[test]
+    fn an_unreachable_host_is_never_provisioned() {
+        let _env = crate::persist::test_env("machine-unreachable");
+        let profile = MachineProfile::new("box".into(), "dev@box".into());
+        let unreachable: anyhow::Error =
+            TransportError("SSH connection to `dev@box` failed: Connection refused".into()).into();
+        let error = provision_after(&profile, true, unreachable).unwrap_err();
+        assert!(error.is::<TransportError>());
+        assert!(
+            !super::super::catalog::path()
+                .with_file_name("machine-preparations.json")
+                .exists(),
+            "no installation was planned or recorded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_commands_share_one_connection_per_destination() {
+        let _env = crate::persist::test_env("machine-shared-ssh");
+        let args = ssh_command("dev@buildbox", true)
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-o", "ControlMaster=auto"]));
+        assert!(args.windows(2).any(|pair| pair[0] == "-o"
+            && pair[1].starts_with("ControlPath=")
+            && pair[1].ends_with("/%C")));
+        assert_eq!(args.last().map(String::as_str), Some("dev@buildbox"));
     }
 }

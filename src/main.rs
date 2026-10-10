@@ -806,18 +806,7 @@ pub(crate) fn remote_attach_profile(
     binary: &str,
     session_name: Option<&str>,
 ) -> Result<()> {
-    let mut command = Command::new("ssh");
-    command
-        .arg("-T")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=10")
-        .arg("-o")
-        .arg("ServerAliveInterval=15")
-        .arg("-o")
-        .arg("ServerAliveCountMax=3")
-        .arg(destination);
+    let mut command = machine::ssh_command(destination, true);
     let mut remote_args = Vec::new();
     if let Some(name) = session_name {
         session::validate_name(name).map_err(anyhow::Error::msg)?;

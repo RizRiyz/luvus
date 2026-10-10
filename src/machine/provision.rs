@@ -301,6 +301,9 @@ fn detect_target(destination: &str) -> Result<DetectedTarget> {
     let mut posix = super::ssh::ssh_command(destination, true);
     posix.arg("uname -s; uname -m; printf '%s\\n' \"$HOME\"");
     let output = super::ssh::run_bounded_with_input(posix, PROVISION_TIMEOUT, None)?;
+    if let Some(error) = super::ssh::transport_failure(destination, &output) {
+        return Err(error);
+    }
     if output.status.success() {
         let identity = String::from_utf8_lossy(&output.stdout);
         let mut lines = identity.lines().map(str::trim);

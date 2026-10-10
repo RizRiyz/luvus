@@ -291,18 +291,8 @@ fn command(
     session: &str,
     mode: BridgeMode,
 ) -> Result<Command> {
-    let mut command = Command::new("ssh");
+    let mut command = super::ssh_command(&profile.destination, true);
     command
-        .arg("-T")
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("ConnectTimeout=10")
-        .arg("-o")
-        .arg("ServerAliveInterval=15")
-        .arg("-o")
-        .arg("ServerAliveCountMax=3")
-        .arg(&profile.destination)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
