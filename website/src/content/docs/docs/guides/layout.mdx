@@ -325,7 +325,9 @@ paths may not exist on the client machine; let the click reach luvus so its
 server-aware native file view handles the target instead. Luvus also suppresses
 these projections for SSH and tmux clients, where the outer terminal may belong
 to a different filesystem. A direct local terminal must identify itself before
-Luvus exposes server file paths to its file handler.
+Luvus exposes server file paths to its file handler. Windows Terminal never gets
+them: it keeps `Ctrl`+click on any link for itself and does not open these file
+links, so luvus leaves the path unlinked there and handles the click itself.
 
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell
