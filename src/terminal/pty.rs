@@ -796,6 +796,13 @@ impl Pane {
         self.engine.lock().ok()?.take_pending_clipboard()
     }
 
+    pub(crate) fn take_pending_program_status(&self) -> Vec<(Vec<u8>, bool)> {
+        self.engine
+            .lock()
+            .map(|mut engine| engine.take_pending_program_status())
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub(crate) fn mark_data_pending_for_test(&self) {
         self.data_pending.store(true, Ordering::Release);

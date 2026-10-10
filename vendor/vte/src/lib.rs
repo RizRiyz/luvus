@@ -43,7 +43,9 @@ pub use params::{Params, ParamsIter};
 
 const MAX_INTERMEDIATES: usize = 2;
 const MAX_OSC_PARAMS: usize = 16;
-const MAX_OSC_RAW: usize = 1024;
+// OSC 7501 permits reports up to 4096 bytes including the body. Keep the
+// parser buffer large enough that a legal report reaches the protocol layer.
+const MAX_OSC_RAW: usize = 4096;
 
 /// Parser for raw _VTE_ protocol which delegates actions to a [`Perform`]
 ///
@@ -65,6 +67,7 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     osc_params: [(usize, usize); MAX_OSC_PARAMS],
     osc_num_params: usize,
     ignoring: bool,
+    osc_overflowed: bool,
     partial_utf8: [u8; 4],
     partial_utf8_len: usize,
 }
@@ -382,6 +385,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0x5D => {
                 self.osc_raw.clear();
                 self.osc_num_params = 0;
+                self.osc_overflowed = false;
                 self.state = State::OscString
             },
             0x5E..=0x5F => self.state = State::SosPmApcString,
@@ -432,15 +436,19 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.state = State::Escape
             },
             0x3B => {
-                #[cfg(not(feature = "std"))]
-                {
-                    if self.osc_raw.is_full() {
-                        return;
-                    }
+                if self.osc_raw.len() >= OSC_RAW_BUF_SIZE {
+                    self.osc_overflowed = true;
+                    return;
                 }
                 self.action_osc_put_param()
             },
-            _ => self.action_osc_put(byte),
+            _ => {
+                if self.osc_raw.len() >= OSC_RAW_BUF_SIZE {
+                    self.osc_overflowed = true;
+                } else {
+                    self.action_osc_put(byte);
+                }
+            },
         }
     }
 
@@ -562,10 +570,13 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     }
 
     fn osc_end<P: Perform>(&mut self, performer: &mut P, byte: u8) {
-        self.action_osc_put_param();
-        self.osc_dispatch(performer, byte);
+        if !self.osc_overflowed {
+            self.action_osc_put_param();
+            self.osc_dispatch(performer, byte);
+        }
         self.osc_raw.clear();
         self.osc_num_params = 0;
+        self.osc_overflowed = false;
     }
 
     /// Reset escape sequence parameters and intermediates.
@@ -1122,20 +1133,9 @@ mod tests {
         // Terminate escape for dispatch
         parser.advance(&mut dispatcher, INPUT_END);
 
-        assert_eq!(dispatcher.dispatched.len(), 1);
-        match &dispatcher.dispatched[0] {
-            Sequence::Osc(params, _) => {
-                assert_eq!(params.len(), 2);
-                assert_eq!(params[0], b"52");
-
-                #[cfg(feature = "std")]
-                assert_eq!(params[1].len(), NUM_BYTES + INPUT_END.len());
-
-                #[cfg(not(feature = "std"))]
-                assert_eq!(params[1].len(), MAX_OSC_RAW - params[0].len());
-            },
-            _ => panic!("expected osc sequence"),
-        }
+        // Oversized OSC strings are discarded as a unit. This is important
+        // for OSC 7501: a truncated report must not partially update state.
+        assert_eq!(dispatcher.dispatched.len(), 0);
     }
 
     #[test]

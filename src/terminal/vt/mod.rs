@@ -474,6 +474,11 @@ pub trait VtEngine: Send {
         None
     }
 
+    /// Raw OSC 7501 reports queued by the child since the last take.
+    fn take_pending_program_status(&mut self) -> Vec<(Vec<u8>, bool)> {
+        Vec::new()
+    }
+
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
     /// retained history. No-op while on the alternate screen.

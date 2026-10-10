@@ -689,6 +689,9 @@ pub trait Handler {
     /// Reset an indexed color to original value.
     fn reset_color(&mut self, _: usize) {}
 
+    /// Receive an OSC 7501 Program Status Protocol report.
+    fn program_status(&mut self, _: &[u8], _: bool) {}
+
     /// Store data into clipboard.
     fn clipboard_store(&mut self, _: u8, _: &[u8]) {}
 
@@ -1506,6 +1509,11 @@ where
                     return;
                 }
                 unhandled(params);
+            },
+
+            // Program Status Protocol.
+            b"7501" if params.len() == 2 => {
+                self.handler.program_status(params[1], bell_terminated);
             },
 
             // Set clipboard.
