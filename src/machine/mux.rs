@@ -72,7 +72,7 @@ fn control_dir() -> Option<PathBuf> {
 }
 
 /// Short enough for a socket path, and safe inside one `-o` option value:
-/// OpenSSH splits option values on whitespace and expands `%` tokens.
+/// OpenSSH splits option values on whitespace and expands `%` tokens and `${...}`.
 #[cfg(unix)]
 fn usable_path(dir: &Path) -> bool {
     let Some(text) = dir.to_str() else {
@@ -80,9 +80,9 @@ fn usable_path(dir: &Path) -> bool {
     };
     dir.is_absolute()
         && text.len() + SOCKET_NAME_BYTES <= MAX_SOCKET_PATH_BYTES
-        && !text
-            .chars()
-            .any(|character| character.is_whitespace() || matches!(character, '%' | '"' | '\''))
+        && !text.chars().any(|character| {
+            character.is_whitespace() || matches!(character, '%' | '$' | '"' | '\'')
+        })
 }
 
 /// Create `dir` if needed and confirm it is a real directory owned by `uid`
@@ -136,6 +136,8 @@ mod tests {
         assert!(!usable_path(Path::new(&format!("/{}/ssh", "a".repeat(60)))));
         assert!(!usable_path(Path::new("/Users/Jane Doe/.luvus/ssh")));
         assert!(!usable_path(Path::new("/tmp/100%/ssh")));
+        assert!(!usable_path(Path::new("/tmp/${HOME}/ssh")));
+        assert!(!usable_path(Path::new("/tmp/dollar$/ssh")));
         assert!(!usable_path(Path::new("relative/ssh")));
     }
 

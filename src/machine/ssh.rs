@@ -104,6 +104,9 @@ pub(crate) fn prepare(profile: &MachineProfile) -> Result<ProbeResult> {
     // automatic provisioning handles that case after this read-only attempt.
     let binary = discover_binary(&profile.destination)?;
     verified_probe(&profile.destination, &binary, Some(&binary)).map_err(|fallback| {
+        if fallback.is::<TransportError>() {
+            return fallback;
+        }
         anyhow!("PATH probe failed: {path_error:#}; user-local probe failed: {fallback:#}")
     })
 }
@@ -879,6 +882,58 @@ mod tests {
         );
         assert!(transport_failure("dev@box", &shell_output("exit 127")).is_none());
         assert!(transport_failure("dev@box", &shell_output("exit 0")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_probe_preserves_transport_errors() {
+        let _env = crate::persist::test_env("machine-fallback-probe");
+        const EXIT_CODE_ENV: &str = "LUVUS_TEST_FALLBACK_PROBE_EXIT_CODE";
+        if let Ok(exit_code) = std::env::var(EXIT_CODE_ENV) {
+            let profile = MachineProfile::new("box".into(), "dev@box".into());
+            let error = prepare(&profile).unwrap_err();
+            if exit_code == "255" {
+                assert!(error.is::<TransportError>());
+                assert_eq!(
+                    error.to_string(),
+                    "SSH connection to `dev@box` failed: fallback failed"
+                );
+            } else {
+                assert!(!error.is::<TransportError>());
+                let message = error.to_string();
+                assert!(message.contains("PATH probe failed:"));
+                assert!(message.contains("user-local probe failed:"));
+                assert!(message.contains("fallback failed"));
+            }
+            return;
+        }
+
+        let bin = crate::persist::config_dir().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let ssh = bin.join("ssh");
+        std::fs::write(
+            &ssh,
+            "#!/bin/sh\ncase \"$*\" in\n*'for p in '*) printf '%s\\n' /opt/luvus ;;\n*'/opt/luvus'*) printf '%s\\n' 'fallback failed' >&2; exit \"$LUVUS_TEST_FALLBACK_PROBE_EXIT_CODE\" ;;\n*) printf '%s\\n' 'PATH missing' >&2; exit 127 ;;\nesac\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+        let path = std::env::join_paths(paths).unwrap();
+        for exit_code in ["255", "127"] {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "machine::ssh::tests::fallback_probe_preserves_transport_errors",
+                    "--nocapture",
+                ])
+                .env("PATH", &path)
+                .env(EXIT_CODE_ENV, exit_code)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
     }
 
     #[cfg(unix)]
