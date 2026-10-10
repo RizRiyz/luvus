@@ -4365,11 +4365,14 @@ fn paint_dock_content(
                 cell.set_bg(bg);
             }
         }
+        // Endpoint headings sit one column left of the workspace rows beneath
+        // them, so a machine reads as the parent of its list rather than as
+        // another entry in it.
         write_endpoint_text(
             &mut cells,
             geometry,
             row,
-            2,
+            ENDPOINT_HEADING_INDENT,
             symbol,
             StyleSpec {
                 fg: tone,
@@ -4386,7 +4389,14 @@ fn paint_dock_content(
             bg: selected.then(|| protocol::unpack(style.active_bg)),
             bold,
         };
-        write_endpoint_text(&mut cells, geometry, row, 4, &label, primary);
+        write_endpoint_text(
+            &mut cells,
+            geometry,
+            row,
+            ENDPOINT_HEADING_INDENT + 2,
+            &label,
+            primary,
+        );
         if rect.show_paths {
             let secondary_style = StyleSpec {
                 fg: protocol::unpack(if selected {
@@ -4398,7 +4408,14 @@ fn paint_dock_content(
                 bold: false,
             };
             if let Some(value) = secondary_text.as_deref() {
-                write_endpoint_text(&mut cells, geometry, row + 1, 4, value, secondary_style);
+                write_endpoint_text(
+                    &mut cells,
+                    geometry,
+                    row + 1,
+                    ENDPOINT_HEADING_INDENT + 2,
+                    value,
+                    secondary_style,
+                );
             }
         }
         dock.hits
@@ -5416,6 +5433,11 @@ struct StyleSpec {
     bg: Option<Color>,
     bold: bool,
 }
+
+/// Column of a machine or Local heading's chevron inside the Workspaces dock.
+/// Workspace rows start their state dot at column 2, so headings outdent by
+/// one cell to separate machines from the workspaces listed under them.
+const ENDPOINT_HEADING_INDENT: u16 = 1;
 
 fn write_endpoint_text(
     cells: &mut [(u16, u16, Cell)],
