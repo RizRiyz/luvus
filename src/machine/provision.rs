@@ -337,6 +337,9 @@ fn detect_target(destination: &str) -> Result<DetectedTarget> {
         ])
         .arg(crate::base64_encode(&encoded));
     let output = super::ssh::run_bounded_with_input(windows, PROVISION_TIMEOUT, None)?;
+    if let Some(error) = super::ssh::transport_failure(destination, &output) {
+        return Err(error);
+    }
     if output.status.success() {
         let identity = String::from_utf8_lossy(&output.stdout);
         let mut lines = identity.lines().map(str::trim);

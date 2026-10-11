@@ -238,7 +238,10 @@ binary when both machines have the same target and sibling Cargo artifacts at
 `target/<triple>/debug/luvus` or `target/<triple>/release/luvus` during
 cross-platform development. Luvus verifies the transfer checksum and native
 client capability on the remote host, then starts an absent selected session
-and completes a real endpoint handshake before saving it.
+and completes a real endpoint handshake before saving it. A session whose
+server was stopped, crashed, or lost to a reboot counts as absent: its leftover
+socket is replaced only when no live server is recorded for it, so a busy
+running server is never restarted.
 
 When no compatible local artifact exists, Luvus downloads the matching
 published release on the remote host, verifies its published SHA-256 digest

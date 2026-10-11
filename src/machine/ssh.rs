@@ -304,8 +304,16 @@ fn discover_windows_binary(destination: &str) -> Result<String> {
 /// exactly one path when it finds a compatible binary, and otherwise prints
 /// [`POSIX_NOT_FOUND`] so the caller knows a POSIX shell checked every location.
 fn posix_discovery_script() -> String {
+    discovery_script_with(SYSTEM_LOCATIONS)
+}
+
+/// System-wide install locations, searched after the user's own.
+const SYSTEM_LOCATIONS: &str =
+    "/usr/local/bin/luvus /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus";
+
+fn discovery_script_with(system_locations: &str) -> String {
     // This fixed script never installs, modifies, or starts anything remotely.
-    const DISCOVER: &str = r#"for p in "$HOME/.local/share/luvus/remote/v__VERSION__-p__PROTOCOL__/luvus" "$HOME/.local/bin/luvus" "$HOME/.cargo/bin/luvus" "$HOME/.nix-profile/bin/luvus" /usr/local/bin/luvus /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do
+    const DISCOVER: &str = r#"for p in "$HOME/.local/share/luvus/remote/v__VERSION__-p__PROTOCOL__/luvus" "$HOME/.local/bin/luvus" "$HOME/.cargo/bin/luvus" "$HOME/.nix-profile/bin/luvus" __SYSTEM__; do
 if [ -x "$p" ]; then
  info=$("$p" remote-client-info --json 2>/dev/null) || continue
  printf '%s' "$info" | grep -E '"protocol_version":__PROTOCOL__([,}])' >/dev/null || continue
@@ -324,6 +332,7 @@ exit 127"#;
         )
         .replace("__ENDPOINT__", &super::MACHINE_ENDPOINT_VERSION.to_string())
         .replace("__NOT_FOUND__", POSIX_NOT_FOUND)
+        .replace("__SYSTEM__", system_locations)
 }
 
 /// Printed by the POSIX discovery script after checking every location.
@@ -941,9 +950,11 @@ mod tests {
     fn posix_discovery_reports_a_clean_miss_so_windows_is_not_probed() {
         let home = std::env::temp_dir().join(format!("luvus-discovery-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
+        // System-wide locations are left out so a Luvus installed on this
+        // machine cannot turn the expected miss into a hit.
         let output = Command::new("sh")
             .arg("-c")
-            .arg(posix_discovery_script())
+            .arg(discovery_script_with(""))
             .env("HOME", &home)
             .output()
             .unwrap();
@@ -954,7 +965,9 @@ mod tests {
         assert!(!posix_found_nothing(
             b"'for' is not recognized as a command\n"
         ));
-        assert!(!posix_discovery_script().contains("__"));
+        let script = posix_discovery_script();
+        assert!(!script.contains("__"));
+        assert!(script.contains(SYSTEM_LOCATIONS));
     }
 
     #[test]
