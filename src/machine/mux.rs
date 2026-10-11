@@ -85,24 +85,71 @@ fn usable_path(dir: &Path) -> bool {
         })
 }
 
-/// Create `dir` if needed and confirm it is a real directory owned by `uid`
-/// that no one else can enter. A wider mode on our own directory is narrowed.
+/// Walk and create each component without following symlinks, then protect
+/// the final owner-scoped directory through its open descriptor.
 #[cfg(unix)]
 fn private_dir(dir: &Path, uid: u32) -> bool {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::Component;
 
-    let _ = std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir);
-    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
+    if !dir.is_absolute() {
+        return false;
+    }
+    let Ok(mut directory) = std::fs::File::open("/") else {
+        return false;
+    };
+    let mut visited = false;
+    for component in dir.components() {
+        if component == Component::RootDir {
+            continue;
+        }
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        let Ok(name) = CString::new(name.as_bytes()) else {
+            return false;
+        };
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: the parent descriptor is live and name is NUL-terminated.
+        let mut fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound {
+                return false;
+            }
+            // SAFETY: the same parent descriptor and name remain live.
+            if unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) } != 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return false;
+            }
+            // A racing creator may have supplied a symlink, so reopen with
+            // O_NOFOLLOW rather than trusting a successful mkdirat.
+            // SAFETY: the parent descriptor and name remain live.
+            fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                return false;
+            }
+        }
+        // SAFETY: openat returned a new descriptor owned only by this File.
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+        visited = true;
+    }
+    if !visited {
+        return false;
+    }
+    let Ok(metadata) = directory.metadata() else {
         return false;
     };
     if !metadata.file_type().is_dir() || metadata.uid() != uid {
         return false;
     }
     if metadata.mode() & 0o077 != 0
-        && std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).is_err()
+        && directory
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .is_err()
     {
         return false;
     }
@@ -146,6 +193,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("luvus-mux-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
         let uid = unsafe { libc::geteuid() };
 
         let open = root.join("open");
@@ -166,5 +214,71 @@ mod tests {
             "another owner is refused"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_symlinked_parent_cannot_create_a_socket_directory() {
+        let _env = crate::persist::test_env("machine-mux-linked-parent");
+        let root = crate::persist::ensure_session_dir();
+        let root = std::fs::canonicalize(root).unwrap();
+        let target = root.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = root.join("linked-parent");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(!private_dir(&link.join("nested/ssh"), unsafe {
+            libc::geteuid()
+        }));
+        assert!(!target.join("nested").exists(), "the target is untouched");
+    }
+
+    #[test]
+    fn a_symlinked_ancestor_cannot_chmod_an_existing_socket_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = crate::persist::test_env("machine-mux-linked-ancestor");
+        let root = crate::persist::ensure_session_dir();
+        let root = std::fs::canonicalize(root).unwrap();
+        let target = root.join("target");
+        let socket_dir = target.join("nested/ssh");
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = root.join("linked-ancestor");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert!(!private_dir(&link.join("nested/ssh"), unsafe {
+            libc::geteuid()
+        }));
+        assert_eq!(
+            std::fs::metadata(&socket_dir).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "the target permissions are untouched"
+        );
+    }
+
+    #[test]
+    fn a_real_parent_creates_private_components_without_changing_ancestors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env = crate::persist::test_env("machine-mux-real-parent");
+        let root = crate::persist::ensure_session_dir();
+        let root = std::fs::canonicalize(root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let socket_dir = root.join("nested/ssh");
+        let uid = unsafe { libc::geteuid() };
+
+        assert!(private_dir(&socket_dir, uid));
+        for path in [root.join("nested"), socket_dir] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(!private_dir(Path::new("/"), uid));
+        assert!(!private_dir(&root.join("nested/../ssh"), uid));
     }
 }

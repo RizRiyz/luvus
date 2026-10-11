@@ -275,12 +275,18 @@ pub struct ServerPidFile;
 impl ServerPidFile {
     pub fn claim() -> Self {
         let pid = std::process::id();
-        let mut body = pid.to_string();
-        if let Some(marker) = crate::platform::process_start_marker(pid) {
-            body.push(' ');
-            body.push_str(&marker);
+        Self::claim_with_marker(pid, crate::platform::process_start_marker(pid))
+    }
+
+    fn claim_with_marker(pid: u32, marker: Option<String>) -> Self {
+        let path = session_dir().join("server.pid");
+        if let Some(marker) = marker {
+            let _ = fs::write(path, format!("{pid} {marker}"));
+        } else {
+            // A PID alone cannot prove a server lifetime. Do not retain a
+            // previous claim when this process cannot be identified safely.
+            let _ = fs::remove_file(path);
         }
-        let _ = fs::write(session_dir().join("server.pid"), body);
         Self
     }
 
@@ -327,6 +333,22 @@ mod server_pid_file_tests {
         fs::write(&path, format!("{} not-a-live-marker", std::process::id())).unwrap();
         assert_eq!(ServerPidFile::read(), None);
         drop(claimed);
+    }
+
+    #[test]
+    fn server_pid_file_without_a_start_marker_removes_any_old_claim() {
+        let _env = test_env("server-pid-no-marker");
+        ensure_session_dir();
+        let path = session_dir().join("server.pid");
+        for previous in [None, Some("123"), Some("123 old-marker")] {
+            if let Some(previous) = previous {
+                fs::write(&path, previous).unwrap();
+            }
+            let claimed = ServerPidFile::claim_with_marker(std::process::id(), None);
+            assert!(!path.exists(), "an unidentified claim must not remain");
+            assert_eq!(ServerPidFile::read(), None);
+            drop(claimed);
+        }
     }
 }
 

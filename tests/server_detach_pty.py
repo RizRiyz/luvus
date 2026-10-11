@@ -1,4 +1,4 @@
-"""Real Unix server/client lifecycle regressions for issue #417.
+"""Real Unix server/client lifecycle regressions for issue #417 and machine bridges.
 
 Run: python3 tests/server_detach_pty.py --luvus target/debug/luvus
 All homes, sockets and PTYs are isolated under this checkout's target directory.
@@ -274,6 +274,46 @@ class DetachedServerTests(unittest.TestCase):
         os.write(second_master, b"\x00q")
         self.drain(second_master)
         self.assertEqual(second.wait(timeout=TIMEOUT), 0)
+
+    def test_remote_bridge_preserves_a_live_server_and_recovers_a_crashed_one(self):
+        name = "remote-recovery"
+        client, master = self.client(name)
+        pid = self.server_pid(name)
+        before = self.inventory(name)
+        pid_file = self.session_dir(name) / "server.pid"
+        self.assertEqual(len(pid_file.read_text().split()), 2, "PID claims require a start marker")
+
+        def bridge():
+            process = self.command(["--session", name, "remote-client-bridge", "--start-if-missing"],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+            output, error = process.communicate(timeout=TIMEOUT)
+            self.assertEqual(process.returncode, 0, (output, error))
+
+        bridge()
+        self.assertEqual(self.server_pid(name), pid, "onboarding must not restart a live server")
+        self.assertEqual(self.inventory(name), before, "live panes must survive the bridge")
+        os.write(master, b"\x00q")
+        self.drain(master)
+        self.assertEqual(client.wait(timeout=TIMEOUT), 0)
+
+        # Only this fixture's detached server: a crash leaves its PID file and
+        # client socket behind, unlike a clean server stop.
+        os.kill(pid, signal.SIGKILL)
+        wait_until(lambda: pid not in process_table(), "fixture server did not exit")
+        self.assertTrue(pid_file.exists())
+        with socket.socket(socket.AF_UNIX) as endpoint:
+            with self.assertRaises(ConnectionRefusedError):
+                endpoint.connect(str(self.session_dir(name) / "luvus-client.sock"))
+
+        bridge()
+        self.assertNotEqual(self.server_pid(name), pid)
+        self.assertEqual(len(pid_file.read_text().split()), 2)
+        self.assertTrue(self.inventory(name), "the replacement server must own real PTYs")
+        restored, restored_master = self.client(name)
+        os.write(restored_master, b"\x00q")
+        self.drain(restored_master)
+        self.assertEqual(restored.wait(timeout=TIMEOUT), 0)
 
     def test_named_start_stop_restart_and_restart_all_keep_state_isolated(self):
         for name in ("alpha", "beta", "stopped"):
