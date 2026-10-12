@@ -180,7 +180,7 @@ impl ProgramStatusStore {
         let apps: Vec<_> = self
             .records
             .values()
-            .filter(|r| r.state.is_result() && r.update_sequence <= boundary)
+            .filter(|r| r.state.is_result() && !r.left_behind && r.update_sequence <= boundary)
             .map(|r| (r.id.clone(), self.inherited_app(r).map(str::to_string)))
             .collect();
         for (id, app) in apps {
@@ -793,9 +793,14 @@ mod tests {
             store.inherited_app(store.records().find(|r| r.id == "test").unwrap()),
             Some("new-build")
         );
+        store.prompt_start();
+        assert_eq!(store.effective_projection().unwrap().1, Some("build"));
+        store.apply(parse_report(b"state=idle:app=third-build").unwrap());
+        store.prompt_start();
+        assert_eq!(store.effective_projection().unwrap().1, Some("build"));
         store.apply(parse_report(b"state=error:id=replacement:app=codex").unwrap());
         store.command_start();
-        assert_eq!(store.records().count(), 2);
+        assert_eq!(store.records().count(), 1);
         assert!(store.records().any(|r| r.id == "replacement"));
         assert!(!store.records().any(|r| r.id == "test"));
     }
