@@ -317,7 +317,13 @@ impl ProgramStatusStore {
                 } else {
                     record.state.projected()
                 },
-                app: self.inherited_app(record).map(str::to_string),
+                // Freeze old-result presentation, but retain dynamic ancestor
+                // inheritance for the protocol API projection.
+                app: if record.left_behind {
+                    record.shown_app.clone()
+                } else {
+                    self.inherited_app(record).map(str::to_string)
+                },
                 message: record.message.clone(),
                 progress: record.progress,
                 unread_result: record.state.is_result() && !record.done_read,
@@ -780,9 +786,18 @@ mod tests {
                 .unwrap()
                 .left_behind
         );
+        store.apply(parse_report(b"state=clear:id=replacement").unwrap());
+        store.apply(parse_report(b"state=idle:app=new-build").unwrap());
+        assert_eq!(store.effective_projection().unwrap().1, Some("build"));
+        assert_eq!(
+            store.inherited_app(store.records().find(|r| r.id == "test").unwrap()),
+            Some("new-build")
+        );
+        store.apply(parse_report(b"state=error:id=replacement:app=codex").unwrap());
         store.command_start();
-        assert_eq!(store.records().count(), 1);
-        assert_eq!(store.records().next().unwrap().id, "replacement");
+        assert_eq!(store.records().count(), 2);
+        assert!(store.records().any(|r| r.id == "replacement"));
+        assert!(!store.records().any(|r| r.id == "test"));
     }
 
     #[test]
