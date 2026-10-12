@@ -692,6 +692,9 @@ pub trait Handler {
     /// Receive an OSC 7501 Program Status Protocol report.
     fn program_status(&mut self, _: &[u8], _: bool) {}
 
+    /// Receive an OSC 133 shell prompt marker.
+    fn prompt_start(&mut self) {}
+
     /// Store data into clipboard.
     fn clipboard_store(&mut self, _: u8, _: &[u8]) {}
 
@@ -1514,6 +1517,11 @@ where
             // Program Status Protocol.
             b"7501" if params.len() == 2 => {
                 self.handler.program_status(params[1], bell_terminated);
+            },
+
+            // OSC 133;A marks the beginning of a new shell prompt.
+            b"133" if params.get(1).is_some_and(|value| *value == b"A") => {
+                self.handler.prompt_start();
             },
 
             // Set clipboard.

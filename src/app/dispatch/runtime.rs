@@ -601,6 +601,9 @@ impl App {
                 .map(|(state, app, message)| {
                     (state, app.map(str::to_string), message.map(str::to_string))
                 });
+            let program_message = program_status
+                .as_ref()
+                .and_then(|(_, _, message)| message.clone());
             let known_agent = self
                 .status
                 .get(&id)
@@ -732,6 +735,21 @@ impl App {
             let known = known_agent.as_str();
             // Ground truth for identity, when the last scan could see this pane.
             let running = self.running_for_detection(id);
+            let identity_det = report.is_none().then(|| {
+                detect::classify_with_composer(
+                    title.as_deref(),
+                    &bottom,
+                    recent,
+                    recent_input,
+                    base,
+                    known,
+                    running,
+                    &self.manifests,
+                    composer_agent
+                        .filter(|agent| agent.eq_ignore_ascii_case("claude"))
+                        .and(detected_composer_ready),
+                )
+            });
             let det = match report.as_ref() {
                 Some(report) => detect::Detection {
                     state: report.state,
@@ -752,39 +770,48 @@ impl App {
                         state: *state,
                         // `app` is display metadata, not trusted agent identity.
                         // Keep process/launch/session identity when available.
-                        agent: known.to_string(),
+                        agent: identity_det
+                            .as_ref()
+                            .expect("no integration authority")
+                            .agent
+                            .clone(),
                         prompt_evidence: if *state == State::Blocked {
                             detect::PromptEvidence::Blocked
                         } else {
                             detect::PromptEvidence::Unknown
                         },
-                        identity_source: "program_status",
+                        identity_source: identity_det
+                            .as_ref()
+                            .expect("no integration authority")
+                            .identity_source,
                         state_source: "program_status",
                         rule_priority: None,
                         rule_region: None,
                     }
                 }
-                None => detect::classify_with_composer(
-                    title.as_deref(),
-                    &bottom,
-                    recent,
-                    recent_input,
-                    base,
-                    known,
-                    running,
-                    &self.manifests,
-                    // Only Claude's own probe can vouch for Claude's screen.
-                    composer_agent
-                        .filter(|agent| agent.eq_ignore_ascii_case("claude"))
-                        .and(detected_composer_ready),
-                ),
+                None => identity_det.expect("no integration authority"),
             };
 
             if let Some(s) = self.status.get_mut(&id) {
+                if program_status.is_some()
+                    && det.identity_source == "process_tree"
+                    && self.manifests.is_agent(&det.agent)
+                {
+                    s.program_status_agent = Some(det.agent.clone());
+                }
                 s.identity_source = det.identity_source;
                 s.state_source = det.state_source;
                 s.rule_priority = det.rule_priority;
                 s.rule_region = det.rule_region;
+                let program_authority = report.is_none() && program_status.is_some();
+                if program_authority {
+                    // No screen interpretation of protocol msg, even when the
+                    // message is absent or changes without a state transition.
+                    s.blocked_hint = (det.state == State::Blocked)
+                        .then(|| program_message.clone())
+                        .flatten();
+                    s.done = false;
+                }
                 let focused = id == focus;
                 if focused {
                     s.seen = true;
@@ -799,8 +826,10 @@ impl App {
                 // would flip an idle agent to "working" for the whole ~2.5s Idle
                 // dwell. The pane keeps whatever state it already had until the
                 // grid settles (docs/07).
-                if s.last_resize
-                    .is_some_and(|t| now.duration_since(t) < RESIZE_GRACE)
+                if report.is_none()
+                    && !program_authority
+                    && s.last_resize
+                        .is_some_and(|t| now.duration_since(t) < RESIZE_GRACE)
                 {
                     s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
                         detect::PromptEvidence::Blocked
@@ -811,7 +840,7 @@ impl App {
                 }
                 s.last_resize = None;
                 // The done-latch and working history track the *raw* reading.
-                if s.prev_working && det.state == State::Idle && !focused {
+                if !program_authority && s.prev_working && det.state == State::Idle && !focused {
                     s.done = true;
                 }
                 s.prev_working = det.state == State::Working;
@@ -872,7 +901,7 @@ impl App {
                     }
                 }
                 // The state the raw reading wants right now.
-                let desired = if s.done && det.state == State::Idle {
+                let desired = if !program_authority && s.done && det.state == State::Idle {
                     State::Done
                 } else {
                     det.state
@@ -887,7 +916,7 @@ impl App {
                     s.candidate = desired;
                     s.candidate_since = now;
                 }
-                let dwell = if report.is_some() {
+                let dwell = if report.is_some() || program_status.is_some() {
                     Duration::ZERO
                 } else {
                     commit_dwell(desired)
@@ -901,10 +930,14 @@ impl App {
                     // moment it enters Blocked (not every tick), for Mission
                     // Control's "why blocked / answer inline" (docs/54); cleared
                     // when it leaves. No per-tick string allocation.
-                    s.blocked_hint = if desired == State::Blocked {
-                        blocking_hint(&bottom)
-                    } else {
+                    s.blocked_hint = if desired != State::Blocked {
                         None
+                    } else if program_authority {
+                        program_message.clone()
+                    } else if let Some(report) = report.as_ref() {
+                        report.message.clone()
+                    } else {
+                        blocking_hint(&bottom)
                     };
                     changes.push((id, s.state, s.agent.clone()));
                     if was_working && matches!(desired, State::Idle | State::Done) {

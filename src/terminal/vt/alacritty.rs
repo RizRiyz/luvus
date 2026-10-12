@@ -36,8 +36,14 @@ type TitleSlot = Arc<Mutex<TitleState>>;
 /// Latest OSC 52 store request from the child, drained by the app loop.
 type ClipboardSlot = Arc<Mutex<Option<String>>>;
 
-/// Latest OSC 7501 report, drained by the app loop.
-type ProgramStatusSlot = Arc<Mutex<Vec<(Vec<u8>, bool)>>>;
+#[derive(Default)]
+struct ProgramStatusSlotState {
+    records: crate::terminal::program_status::ProgramStatusStore,
+    changed: bool,
+}
+
+/// Bounded terminal metadata, reduced in wire order; App consumes a snapshot.
+type ProgramStatusSlot = Arc<Mutex<ProgramStatusSlotState>>;
 
 /// Receives terminal-generated responses (cursor reports, device attributes,
 /// etc.) and forwards them back to the child via the shared write channel.
@@ -98,8 +104,17 @@ impl EventListener for EventProxy {
             }
             Event::ProgramStatusReset => {
                 if let Ok(mut pending) = self.program_status.lock() {
-                    pending.clear();
-                    pending.push((b"state=clear".to_vec(), false));
+                    if !pending.records.is_empty() {
+                        pending.records.clear_all();
+                        pending.changed = true;
+                    }
+                }
+            }
+            Event::ProgramStatusPromptStart => {
+                if let Ok(mut pending) = self.program_status.lock() {
+                    let count = pending.records.records().count();
+                    pending.records.clear_transient();
+                    pending.changed |= count != pending.records.records().count();
                 }
             }
             Event::ProgramStatus(body, bell_terminated) => {
@@ -110,9 +125,10 @@ impl EventListener for EventProxy {
                         b"\x1b]7501;?\x1b\\".to_vec()
                     };
                     let _ = self.tx.send(InputAction::Bytes(response));
-                } else if let Ok(mut pending) = self.program_status.lock() {
-                    if pending.len() < 64 {
-                        pending.push((body, bell_terminated));
+                } else if let Some(report) = crate::terminal::program_status::parse_report(&body) {
+                    if let Ok(mut pending) = self.program_status.lock() {
+                        pending.records.apply(report);
+                        pending.changed = true;
                     }
                 }
             }
@@ -196,7 +212,8 @@ impl AlacrittyEngine {
         };
         let title: TitleSlot = Arc::new(Mutex::new(TitleState::default()));
         let clipboard: ClipboardSlot = Arc::new(Mutex::new(None));
-        let program_status: ProgramStatusSlot = Arc::new(Mutex::new(Vec::new()));
+        let program_status: ProgramStatusSlot =
+            Arc::new(Mutex::new(ProgramStatusSlotState::default()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
@@ -1271,11 +1288,21 @@ impl VtEngine for AlacrittyEngine {
             .and_then(|mut pending| pending.take())
     }
 
-    fn take_pending_program_status(&mut self) -> Vec<(Vec<u8>, bool)> {
-        self.program_status
-            .lock()
-            .map(|mut pending| std::mem::take(&mut *pending))
-            .unwrap_or_default()
+    fn take_pending_program_status(
+        &mut self,
+    ) -> Option<crate::terminal::program_status::ProgramStatusStore> {
+        let mut pending = self.program_status.lock().ok()?;
+        if !std::mem::take(&mut pending.changed) {
+            return None;
+        }
+        Some(pending.records.clone())
+    }
+
+    fn program_status_process_exited(&mut self) {
+        if let Ok(mut pending) = self.program_status.lock() {
+            pending.records.clear_transient();
+            pending.changed = true;
+        }
     }
 
     fn set_history_budget(&mut self, bytes: usize) {
@@ -3298,23 +3325,143 @@ mod tests {
     }
 
     #[test]
-    fn osc7501_reports_are_queued_and_query_echoes_terminator() {
+    fn osc7501_reports_are_coalesced_and_query_echoes_terminator() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
         engine.advance(
             b"\x1b]7501;state=working:app=build:progress=40\x07\x1b]7501;state=done:app=build\x1b\\",
         );
+        let store = engine.take_pending_program_status().unwrap();
+        let record = store.effective().unwrap();
         assert_eq!(
-            engine.take_pending_program_status(),
-            vec![
-                (b"state=working:app=build:progress=40".to_vec(), true),
-                (b"state=done:app=build".to_vec(), false),
-            ]
+            record.state,
+            crate::terminal::program_status::ProgramState::Done
         );
+        assert_eq!(record.app.as_deref(), Some("build"));
         assert!(rx.try_recv().is_err());
 
         engine.advance(b"\x1b]7501;?\x07");
         assert_eq!(recv_bytes(&rx), b"\x1b]7501;?\x07");
+    }
+
+    #[test]
+    fn osc7501_prompt_and_invalid_control_clear_transient_state() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        engine.advance(b"\x1b]7501;state=working\x07");
+        assert!(engine.take_pending_program_status().is_some());
+        engine.advance(b"\x1b]133;A\x07");
+        assert!(engine
+            .take_pending_program_status()
+            .is_some_and(|store| store.is_empty()));
+
+        engine.advance(b"\x1b]7501;state=wo\x01rking\x07");
+        assert!(engine.take_pending_program_status().is_none());
+    }
+
+    #[test]
+    fn osc7501_snapshot_reduces_bursts_without_losing_clears() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        for i in 0..256 {
+            engine.advance(format!("\x1b]7501;state=working:id=worker/{i}\x07").as_bytes());
+        }
+        engine.advance(b"\x1b]7501;state=clear:id=worker\x07\x1b]7501;state=done:id=worker\x07");
+        let store = engine.take_pending_program_status().unwrap();
+        assert_eq!(store.records().count(), 1);
+        assert_eq!(
+            store.effective().unwrap().state,
+            crate::terminal::program_status::ProgramState::Done
+        );
+        assert!(engine.take_pending_program_status().is_none());
+        // Invalid replacements leave all existing metadata untouched.
+        engine.advance(b"\x1b]7501;state=error:id=worker:msg=YQ=\x07");
+        assert!(engine.take_pending_program_status().is_none());
+        engine.advance(b"\x1b]7501;state=clear\x07");
+        assert!(engine.take_pending_program_status().unwrap().is_empty());
+    }
+
+    #[test]
+    fn osc7501_reset_prompt_alternate_and_exit_lifetimes() {
+        use crate::terminal::program_status::ProgramState;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        engine.advance(b"\x1b]7501;state=done:id=result\x07\x1b]7501;state=blocked:id=work\x07");
+        engine.take_pending_program_status();
+        engine.advance(b"\x1b[?1049h\x1b[?1049l\x1b[!p");
+        assert!(engine.take_pending_program_status().is_none());
+        engine.program_status_process_exited();
+        let store = engine.take_pending_program_status().unwrap();
+        assert_eq!(store.records().count(), 1);
+        assert_eq!(store.effective().unwrap().state, ProgramState::Done);
+        engine.advance(b"\x1b]7501;state=working:id=work\x07\x1b]133;A;cl=m\x1b\\");
+        assert_eq!(
+            engine
+                .take_pending_program_status()
+                .unwrap()
+                .records()
+                .count(),
+            1
+        );
+        engine.advance(b"\x1bc");
+        assert!(engine.take_pending_program_status().unwrap().is_empty());
+    }
+
+    #[test]
+    fn osc7501_wire_limits_fragmentation_and_control_pairs() {
+        use crate::terminal::program_status::ProgramState;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        engine.advance(b"\x1b]7501;state=done\x1b");
+        assert!(engine.take_pending_program_status().is_none());
+        engine.advance(b"\\");
+        assert_eq!(
+            engine
+                .take_pending_program_status()
+                .unwrap()
+                .effective()
+                .unwrap()
+                .state,
+            ProgramState::Done
+        );
+        engine.advance(b"\x1b]7501;state=blocked\x1b[31m");
+        assert!(engine.take_pending_program_status().is_none());
+        engine.advance(b"\x1b]7501;invalid=bad;pair:state=wo\x01rking:state=idle\x07");
+        assert_eq!(
+            engine
+                .take_pending_program_status()
+                .unwrap()
+                .effective()
+                .unwrap()
+                .state,
+            ProgramState::Idle
+        );
+        for (terminator, overhead) in [("\x07", 8), ("\x1b\\", 9)] {
+            let body = format!("state=done:x={}", "a".repeat(4096 - overhead - 13));
+            let sequence = format!("\x1b]7501;{body}{terminator}");
+            assert_eq!(sequence.len(), 4096);
+            engine.advance(sequence.as_bytes());
+            assert!(engine.take_pending_program_status().is_some());
+            let oversized = format!("\x1b]7501;{body}a{terminator}");
+            engine.advance(oversized.as_bytes());
+            assert!(engine.take_pending_program_status().is_none());
+        }
+        engine.advance(b"\x1b]7501;?\x1b\\\x1b[c");
+        assert_eq!(recv_bytes(&rx), b"\x1b]7501;?\x1b\\");
+        assert!(recv_bytes(&rx).starts_with(b"\x1b[?"));
+    }
+
+    #[test]
+    fn osc52_large_clipboard_is_not_limited_by_osc7501() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        let text = "clipboard".repeat(1000);
+        let sequence = format!("\x1b]52;c;{}\x07", crate::base64_encode(text.as_bytes()));
+        engine.advance(sequence.as_bytes());
+        assert_eq!(
+            engine.take_pending_clipboard().as_deref(),
+            Some(text.as_str())
+        );
     }
 
     #[test]

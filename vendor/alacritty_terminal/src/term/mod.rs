@@ -1945,6 +1945,11 @@ impl<T: EventListener> Handler for Term<T> {
             .send_event(Event::ProgramStatus(body.to_vec(), bell_terminated));
     }
 
+    #[inline]
+    fn prompt_start(&mut self) {
+        self.event_proxy.send_event(Event::ProgramStatusPromptStart);
+    }
+
     /// Store data into clipboard.
     #[inline]
     fn clipboard_store(&mut self, clipboard: u8, base64: &[u8]) {

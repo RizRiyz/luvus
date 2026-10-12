@@ -27,6 +27,9 @@ pub enum Event {
     /// Full terminal reset (RIS), which clears OSC 7501 records.
     ProgramStatusReset,
 
+    /// OSC 133 prompt start, which ends transient program status records.
+    ProgramStatusPromptStart,
+
     /// Request to store a text string in the clipboard.
     ClipboardStore(ClipboardType, String),
 
@@ -74,6 +77,7 @@ impl Debug for Event {
                 write!(f, "ProgramStatus({} bytes, bell={bell})", body.len())
             }
             Event::ProgramStatusReset => write!(f, "ProgramStatusReset"),
+            Event::ProgramStatusPromptStart => write!(f, "ProgramStatusPromptStart"),
             Event::ClipboardStore(ty, text) => write!(f, "ClipboardStore({ty:?}, {text})"),
             Event::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
             Event::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),

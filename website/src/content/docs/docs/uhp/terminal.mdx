@@ -112,13 +112,33 @@ does not persist and replay arbitrary original command arguments.
 Programs running in a pane can report structured lifecycle state with OSC 7501,
 for example `ESC ] 7501 ; state=blocked:kind=permission:msg=<base64> ESC \\`.
 Luvus treats valid reports as authoritative state evidence and exposes the
-bounded records through `agent.explain`. The self-reported `app` value is
-presentation metadata only; it cannot impersonate a built-in agent identity.
+bounded records through `agent.explain`, with `state_source: "program_status"`.
+Identity continues to come from process, launch, title, and session evidence.
+The self-reported `app` value is grouping metadata only; it cannot grant native
+agent capabilities or impersonate a built-in agent identity. An active leased
+integration report takes precedence over OSC 7501 state.
 
 Reports support `idle`, `working`, `blocked`, `done`, `error`, and `clear`, with
 nested `id` records, optional progress, titles, and messages. Malformed or
 oversized reports are ignored. Existing heuristic detection remains the
-fallback when a pane does not report OSC 7501.
+fallback when a pane does not report OSC 7501 or clears its records.
+
+Each report replaces one record completely. The terminal retains at most 256
+records, evicting the least recently updated one on insertion past capacity.
+Updates are reduced in PTY wire order into a bounded metadata snapshot, not a
+lossy report queue. A query `OSC 7501 ; ? ST` receives the fixed `?` reply.
+
+OSC 133 `A` prompt starts and confirmed process exits remove `working` and
+`blocked` records while retaining `done` and `error`. RIS clears every record;
+alternate-screen switches do not. Pane closure removes the pane and its
+metadata. A shell without OSC 133 prompt markers cannot signal the end of an
+arbitrary child command; explicit reports/clears remain necessary in that case.
+No heartbeat or new process polling is added.
+
+The existing four-state Luvus presentation maps protocol `error` to `done`;
+`agent.explain.program_status` preserves the original `error` state. Consumers
+that need to distinguish failed results should inspect those records rather
+than interpreting `done` as success.
 
 Capture responses include `content_revision`. To initialize without a race,
 subscribe first, request a snapshot on another connection, discard

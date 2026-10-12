@@ -76,24 +76,31 @@ pub struct ProgramStatusRecord {
     updated_at: Instant,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProgramStatusStore {
     records: HashMap<String, ProgramStatusRecord>,
 }
 
 impl ProgramStatusStore {
-    pub fn new() -> Self {
-        Self {
-            records: HashMap::new(),
-        }
-    }
-
     pub fn records(&self) -> impl Iterator<Item = &ProgramStatusRecord> {
         self.records.values()
     }
 
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    pub fn clear_transient(&mut self) {
+        self.records.retain(|_, record| {
+            matches!(
+                record.state,
+                ProgramState::Idle | ProgramState::Done | ProgramState::Error
+            )
+        });
+    }
+
+    pub fn clear_all(&mut self) {
+        self.records.clear();
     }
 
     pub fn apply(&mut self, report: ProgramStatusReport) {
@@ -112,7 +119,7 @@ impl ProgramStatusStore {
             if let Some(oldest) = self
                 .records
                 .values()
-                .min_by_key(|record| record.updated_at)
+                .min_by_key(|record| (record.updated_at, record.id.as_str()))
                 .map(|record| record.id.clone())
             {
                 self.records.remove(&oldest);
@@ -134,9 +141,13 @@ impl ProgramStatusStore {
     }
 
     pub fn effective(&self) -> Option<&ProgramStatusRecord> {
-        self.records
-            .values()
-            .max_by_key(|record| record.state.priority())
+        self.records.values().max_by_key(|record| {
+            (
+                record.state.priority(),
+                record.updated_at,
+                record.id.as_str(),
+            )
+        })
     }
 
     pub fn effective_projection(&self) -> Option<(State, Option<&str>, Option<&str>)> {
@@ -152,6 +163,9 @@ impl ProgramStatusStore {
                 {
                     return Some(app);
                 }
+            }
+            if !record.id.is_empty() {
+                return self.records.get("").and_then(|root| root.app.as_deref());
             }
             None
         });
@@ -173,7 +187,9 @@ pub struct ProgramStatusReport {
 
 /// Parse one OSC 7501 body. The body excludes `OSC 7501;` and its terminator.
 pub fn parse_report(body: &[u8]) -> Option<ProgramStatusReport> {
-    if body.len() > 4096 || body == b"?" {
+    // The shortest legal envelope is ESC ] 7501 ; body BEL (8 bytes).
+    // VTE additionally validates the complete wire length for ESC-backslash ST.
+    if body.len() > 4088 || body == b"?" {
         return None;
     }
     let mut values = HashMap::<&str, &str>::new();
@@ -187,14 +203,47 @@ pub fn parse_report(body: &[u8]) -> Option<ProgramStatusReport> {
         let Ok(value) = std::str::from_utf8(&pair[separator + 1..]) else {
             continue;
         };
-        let key = key.trim();
-        let value = value.trim();
-        if key.is_empty()
-            || key.len() > MAX_KEY
-            || !key.bytes().all(|byte| byte.is_ascii_lowercase())
-            || !value.bytes().all(is_value_byte)
-        {
+        let key = key.trim_matches(|character: char| character.is_ascii_whitespace());
+        let value = value.trim_matches(|character: char| character.is_ascii_whitespace());
+        if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_lowercase()) {
             continue;
+        }
+        if key.len() > MAX_KEY {
+            return None;
+        }
+        // Validate every occurrence before applying last-value-wins, so an
+        // oversized or invalid earlier value cannot be hidden by a duplicate.
+        match key {
+            "app" if value.len() > MAX_APP => return None,
+            "id" if value.len() > MAX_ID => return None,
+            "msg" if value.len() > MAX_MSG_ENCODED => return None,
+            "title" if value.len() > MAX_TITLE_ENCODED => return None,
+            _ => {}
+        }
+        if !value.bytes().all(is_value_byte) {
+            // Invalid ids must never accidentally address the root record.
+            if key == "id" {
+                return None;
+            }
+            continue;
+        }
+        match key {
+            "app" if value.len() > MAX_APP => return None,
+            "id" if value.len() > MAX_ID
+                || value.split('/').count() > MAX_ID_DEPTH
+                || value
+                    .split('/')
+                    .any(|segment| segment.len() > MAX_ID_SEGMENT) =>
+            {
+                return None
+            }
+            "msg" => {
+                decode_text(Some(value), MAX_MSG_ENCODED, MAX_MSG_DECODED)?;
+            }
+            "title" => {
+                decode_text(Some(value), MAX_TITLE_ENCODED, MAX_TITLE_DECODED)?;
+            }
+            _ => {}
         }
         values.insert(key, value);
     }
@@ -207,7 +256,7 @@ pub fn parse_report(body: &[u8]) -> Option<ProgramStatusReport> {
         Some(ProgramState::parse(state_value)?)
     };
     let id = values.get("id").copied().unwrap_or("");
-    if !valid_id(id) {
+    if (values.contains_key("id") && id.is_empty()) || !valid_id(id) {
         return None;
     }
 
@@ -216,10 +265,14 @@ pub fn parse_report(body: &[u8]) -> Option<ProgramStatusReport> {
     });
     let progress = values
         .get("progress")
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
         .and_then(|value| value.parse::<u8>().ok().filter(|progress| *progress <= 100));
+    if values.get("app").is_some_and(|value| value.len() > MAX_APP) {
+        return None;
+    }
     let app = values
         .get("app")
-        .filter(|value| value.len() <= MAX_APP && value.bytes().all(is_app_byte))
+        .filter(|value| !value.is_empty() && value.bytes().all(is_app_byte))
         .map(|value| (*value).to_string());
     let title = decode_text(
         values.get("title").copied(),
@@ -294,22 +347,28 @@ fn decode_text(
 }
 
 fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
-    if input.len() % 4 == 1
-        || input
-            .iter()
-            .position(|byte| *byte == b'=')
-            .is_some_and(|index| input[index..].iter().any(|byte| *byte != b'='))
-        || input.iter().filter(|byte| **byte == b'=').count() > 2
+    let padding = input.iter().position(|byte| *byte == b'=');
+    let (data, padding_count) = match padding {
+        Some(index) => {
+            if input[index..].iter().any(|byte| *byte != b'=') {
+                return None;
+            }
+            (&input[..index], input.len() - index)
+        }
+        None => (input, 0),
+    };
+    if padding_count > 2
+        || data.len() % 4 == 1
+        || (padding_count > 0 && !input.len().is_multiple_of(4))
+        || (padding_count == 1 && data.len() % 4 != 3)
+        || (padding_count == 2 && data.len() % 4 != 2)
     {
         return None;
     }
-    let mut output = Vec::with_capacity(input.len().saturating_mul(3) / 4);
+    let mut output = Vec::with_capacity(data.len().saturating_mul(3) / 4);
     let mut buffer = 0u32;
     let mut bits = 0u8;
-    for &byte in input {
-        if byte == b'=' {
-            break;
-        }
+    for &byte in data {
         let value = match byte {
             b'A'..=b'Z' => byte - b'A',
             b'a'..=b'z' => byte - b'a' + 26,
@@ -326,6 +385,9 @@ fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
             buffer &= (1u32 << bits).saturating_sub(1);
         }
     }
+    if bits > 0 && buffer != 0 {
+        return None;
+    }
     Some(output)
 }
 
@@ -335,7 +397,7 @@ mod tests {
 
     #[test]
     fn parses_and_replaces_root_record() {
-        let mut store = ProgramStatusStore::new();
+        let mut store = ProgramStatusStore::default();
         store.apply(
             parse_report(b"state=blocked:kind=permission:app=terraform:msg=QXBwbHk/").unwrap(),
         );
@@ -351,7 +413,7 @@ mod tests {
 
     #[test]
     fn clear_removes_descendants() {
-        let mut store = ProgramStatusStore::new();
+        let mut store = ProgramStatusStore::default();
         for body in [
             b"state=working:id=build".as_slice(),
             b"state=blocked:id=build/test",
@@ -363,10 +425,78 @@ mod tests {
     }
 
     #[test]
+    fn hard_limits_apply_to_every_occurrence() {
+        for body in [
+            format!("state=idle:{}=x", "a".repeat(17)),
+            format!("state=idle:app={}:app=ok", "a".repeat(33)),
+            format!("state=idle:msg={}:msg=", "A".repeat(2733)),
+            format!("state=idle:title={}:title=", "A".repeat(257)),
+            format!("state=idle:id={}:id=ok", "a".repeat(129)),
+            format!("state=idle:id={}:id=ok", "a".repeat(33)),
+            "state=idle:id=a/b/c/d/e/f/g/h/i:id=ok".to_string(),
+            "state=idle:msg=YQ=:msg=YQ==".to_string(),
+            "state=idle:msg=Cg==".to_string(),
+            "state=idle:title=woc=".to_string(),
+        ] {
+            assert!(parse_report(body.as_bytes()).is_none(), "{body}");
+        }
+    }
+
+    #[test]
+    fn ancestry_and_capacity_are_bounded_and_lru() {
+        let mut store = ProgramStatusStore::default();
+        store.apply(parse_report(b"state=idle:app=root").unwrap());
+        store.apply(parse_report(b"state=blocked:id=a/b").unwrap());
+        assert_eq!(store.effective_projection().unwrap().1, Some("root"));
+        store.apply(parse_report(b"state=idle:id=a:app=parent").unwrap());
+        assert_eq!(store.effective_projection().unwrap().1, Some("parent"));
+        store.clear_all();
+        for i in 0..256 {
+            store.apply(parse_report(format!("state=idle:id=r{i}").as_bytes()).unwrap());
+        }
+        store.apply(parse_report(b"state=done:id=r0").unwrap());
+        store.apply(parse_report(b"state=idle:id=new").unwrap());
+        assert_eq!(store.records().count(), 256);
+        assert!(store.records().any(|r| r.id == "r0"));
+        assert!(!store.records().any(|r| r.id == "r1"));
+    }
+
+    #[test]
+    fn transient_cleanup_preserves_completed_records() {
+        let mut store = ProgramStatusStore::default();
+        for state in ["working", "blocked", "idle", "done", "error"] {
+            store.apply(parse_report(format!("state={state}:id={state}").as_bytes()).unwrap());
+        }
+        store.clear_transient();
+        assert_eq!(store.records().count(), 3);
+        assert!(store
+            .records()
+            .all(|r| !matches!(r.state, ProgramState::Working | ProgramState::Blocked)));
+        store.clear_all();
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn duplicate_and_invalid_ids_never_address_root() {
+        assert!(parse_report(b"state=clear:id=").is_none());
+        assert!(parse_report(b"state=clear:id=bad@id").is_none());
+        let report =
+            parse_report(b"invalid:state=working:state=idle:id=a:id=b:progress=+1:app=").unwrap();
+        assert_eq!(report.id, "b");
+        assert_eq!(report.state, Some(ProgramState::Idle));
+        assert_eq!(report.progress, None);
+        assert_eq!(report.app, None);
+    }
+
+    #[test]
     fn rejects_invalid_text_and_ids() {
         // Malformed pairs are ignored while the rest of the report remains valid.
         assert!(parse_report(b"state=done:msg=%%%").is_some());
         assert!(parse_report(b"state=done:id=build//test").is_none());
         assert!(parse_report(b"state=done:msg=YQ==").is_some());
+        assert!(parse_report(b"state=done:msg=YQ").is_some());
+        assert!(parse_report(b"state=done:msg=YQ=").is_none());
+        assert!(parse_report(b"state=done:msg===").is_none());
+        assert!(parse_report(b"state=done:app=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none());
     }
 }

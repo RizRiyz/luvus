@@ -796,11 +796,16 @@ impl Pane {
         self.engine.lock().ok()?.take_pending_clipboard()
     }
 
-    pub(crate) fn take_pending_program_status(&self) -> Vec<(Vec<u8>, bool)> {
-        self.engine
-            .lock()
-            .map(|mut engine| engine.take_pending_program_status())
-            .unwrap_or_default()
+    pub(crate) fn take_pending_program_status(
+        &self,
+    ) -> Option<crate::terminal::program_status::ProgramStatusStore> {
+        self.engine.lock().ok()?.take_pending_program_status()
+    }
+
+    pub(crate) fn program_status_process_exited(&self) {
+        if let Ok(mut engine) = self.engine.lock() {
+            engine.program_status_process_exited();
+        }
     }
 
     #[cfg(test)]

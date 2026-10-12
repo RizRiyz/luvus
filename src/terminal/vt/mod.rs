@@ -474,10 +474,15 @@ pub trait VtEngine: Send {
         None
     }
 
-    /// Raw OSC 7501 reports queued by the child since the last take.
-    fn take_pending_program_status(&mut self) -> Vec<(Vec<u8>, bool)> {
-        Vec::new()
+    /// Coalesced bounded OSC 7501 metadata snapshot, only when changed.
+    fn take_pending_program_status(
+        &mut self,
+    ) -> Option<crate::terminal::program_status::ProgramStatusStore> {
+        None
     }
+
+    /// Clear transient terminal metadata after a confirmed process exit.
+    fn program_status_process_exited(&mut self) {}
 
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
