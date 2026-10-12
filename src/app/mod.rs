@@ -1968,6 +1968,7 @@ pub struct PaneStatus {
     /// from the current display identity so the first absent scan cannot erase
     /// the evidence needed by the second confirmation.
     program_status_agent: Option<String>,
+    program_status_presentation_changed: bool,
 }
 
 impl PaneStatus {
@@ -1979,10 +1980,19 @@ impl PaneStatus {
         if let Some(previous) = self.program_status.as_ref() {
             store.preserve_done_reads(previous);
         }
+        self.program_status_presentation_changed |= self
+            .program_status
+            .as_ref()
+            .map_or(!store.is_empty(), |previous| {
+                !store.same_presentation(previous)
+            });
         self.program_status = (!store.is_empty()).then_some(store);
         if self.program_status.is_none() {
             self.program_status_agent = None;
-        } else if self.identity_source == "process_tree" && manifests.is_agent(&self.agent) {
+        } else if self.program_status_agent.is_none()
+            && self.identity_source == "process_tree"
+            && manifests.is_agent(&self.agent)
+        {
             self.program_status_agent = Some(self.agent.clone());
         }
         // Detection owns published identity/state and transition side effects.
@@ -2024,6 +2034,7 @@ impl PaneStatus {
             agent_report: None,
             program_status: None,
             program_status_agent: None,
+            program_status_presentation_changed: false,
         }
     }
 }
@@ -11487,7 +11498,13 @@ mod tests {
         engine
             .lock()
             .unwrap()
-            .advance(b"\x1b]7501;state=blocked:id=live\x07\x1b]7501;state=done:id=result\x07");
+            .advance(b"\x1b]7501;state=done:id=result\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(Instant::now()); // result was actually visible/read
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked:id=live\x07");
         app.handle_event(AppEvent::PtyData(pane));
         let status = app.status.get_mut(&pane).unwrap();
         status.agent = "claude".into();
@@ -11648,11 +11665,17 @@ mod tests {
         engine
             .lock()
             .unwrap()
+            .advance(b"\x1b]7501;state=working:app=pi\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_millis(14200));
+        engine
+            .lock()
+            .unwrap()
             .advance(b"\x1b]7501;state=done:app=pi\x07");
         app.handle_event(AppEvent::PtyData(pane));
         let next = now + Duration::from_secs(15);
         app.detect_tick(next);
-        assert_eq!(app.status[&pane].state, State::Idle);
+        assert_eq!(app.status[&pane].state, State::Working);
         app.detect_tick(next + QUIET_DWELL + Duration::from_millis(100));
         assert_eq!(app.status[&pane].state, State::Done);
         app.layout_mut().focus = pane;
@@ -11803,6 +11826,242 @@ mod tests {
         assert!(detect::state_rule_evaluations_for_test() > before);
         assert_eq!(app.status[&pane].state_source, "manifest_rule");
         assert_eq!(app.status[&pane].state, State::Blocked);
+    }
+
+    #[test]
+    fn osc7501_metadata_wake_survives_input_rearming() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-independent-wake");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input, _rx) = std::sync::mpsc::channel();
+        let sender = crate::terminal::pty::InputSender::from(input);
+        let (notify, received) = std::sync::mpsc::channel();
+        sender.set_notice(pane, notify);
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            sender,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=working\x07");
+        app.panes[&pane].mark_data_pending_for_test();
+        app.handle_event(AppEvent::PtyData(pane));
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked\x07");
+        app.panes[&pane].rearm_pty_notify(); // input/wait used to strand report
+        assert!(!app.panes[&pane].has_data_pending());
+        for event in received.try_iter() {
+            app.handle_event(event);
+        }
+        assert_eq!(
+            app.status[&pane]
+                .program_status
+                .as_ref()
+                .unwrap()
+                .effective_projection()
+                .unwrap()
+                .0,
+            State::Blocked
+        );
+        engine.lock().unwrap().advance(b"\x1b]7501;state=clear\x07");
+        app.handle_event(received.recv_timeout(Duration::from_secs(1)).unwrap());
+        assert!(app.status[&pane].program_status.is_none());
+    }
+
+    #[test]
+    fn osc7501_reported_result_is_not_live_agent_admission() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-live-admission");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=done:app=claude\x07\x1b]133;A\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.proc_commands.insert(pane, vec!["zsh".into()]);
+        app.detect_tick(Instant::now());
+        assert!(!app.is_agent_pane(pane));
+        assert!(app.is_status_reporter_pane(pane));
+        assert_eq!(app.status_reporter_label(pane), Some("claude"));
+        assert_eq!(
+            app.agent_explanation(pane)["program_status"][0]["state"],
+            "done"
+        );
+        assert!(app
+            .resolve_agent_target(&json!({"target":"claude"}))
+            .is_err());
+        // A result has no authority to reject launch or acquire native capabilities.
+        let (reply, received) = std::sync::mpsc::channel();
+        app.start_agent_launch(
+            "test".into(),
+            json!({"pane":pane.0.to_string(),"name":"new-agent","kind":"pi","timeout_s":1}),
+            reply,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        assert!(app.agent_starts.contains_key(&pane));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn osc7501_old_producer_binding_survives_new_agent_detection() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-producer-drift");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let root = app.panes[&pane]
+            .child_pid
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.proc_commands.insert(pane, vec!["claude".into()]);
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked:id=old\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let now = Instant::now();
+        app.detect_tick(now);
+        assert_eq!(
+            app.status[&pane].program_status_agent.as_deref(),
+            Some("claude")
+        );
+        app.apply_proc_scan(Some(HashMap::from([(root, vec!["codex".into()])])));
+        app.detect_tick(now + Duration::from_millis(200));
+        assert_eq!(app.status[&pane].agent, "codex");
+        assert_eq!(
+            app.status[&pane].program_status_agent.as_deref(),
+            Some("claude")
+        );
+        app.apply_proc_scan(Some(HashMap::from([(root, vec!["codex".into()])])));
+        assert!(app.status[&pane].program_status.is_none());
+        assert!(engine.lock().unwrap().program_status_state().is_none());
+    }
+
+    #[test]
+    fn osc7501_metadata_only_hint_updates_request_presentation() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-metadata-redraw");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked:msg=Zmlyc3Q=\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let now = Instant::now();
+        app.detect_tick(now);
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked:msg=c2Vjb25k\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        assert!(
+            app.detect_tick(now + Duration::from_millis(200)),
+            "message-only metadata needs redraw"
+        );
+        assert_eq!(app.status[&pane].blocked_hint.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn osc7501_idle_is_not_a_completion_but_error_is_readable() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-result-sound");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.split_pane(pane, crate::layout::Axis::Col, true)
+            .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.config.notifications.sound_on_done = true;
+        let now = Instant::now();
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=working\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now);
+        engine.lock().unwrap().advance(b"\x1b]7501;state=idle\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_millis(200));
+        app.detect_tick(now + QUIET_DWELL + Duration::from_millis(300));
+        assert_eq!(app.status[&pane].state, State::Idle);
+        assert!(app.pending_sound.is_none());
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=working\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_secs(4));
+        engine.lock().unwrap().advance(b"\x1b]7501;state=error\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_secs(5));
+        app.detect_tick(now + Duration::from_secs(5) + QUIET_DWELL + Duration::from_millis(100));
+        assert_eq!(app.status[&pane].state, State::Done);
+        assert!(app.pending_sound.is_some());
+        app.layout_mut().focus = pane;
+        app.detect_tick(now + Duration::from_secs(8));
+        app.detect_tick(now + Duration::from_secs(8) + QUIET_DWELL + Duration::from_millis(100));
+        assert_eq!(app.status[&pane].state, State::Idle);
+        assert_eq!(
+            app.agent_explanation(pane)["program_status"][0]["state"],
+            "error"
+        );
     }
 
     #[test]

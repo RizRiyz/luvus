@@ -30,13 +30,7 @@ impl App {
                             continue;
                         };
                         // Only real agent sessions, not the shells behind tabs.
-                        if !(self.manifests.is_agent(&s.agent)
-                            || s.agent_session.is_some()
-                            || s.agent_report.is_some()
-                            || s.program_status
-                                .as_ref()
-                                .is_some_and(|store| !store.is_empty()))
-                        {
+                        if !self.is_status_reporter_pane(id) {
                             continue;
                         }
                         let cwd = self
@@ -57,6 +51,8 @@ impl App {
                         let session = s.agent_session.as_ref().map(|a| a.session_id.clone());
                         arr.push(json!({
                             "pane": id.0.to_string(), "agent": s.agent,
+                            "display_agent":self.status_reporter_label(id),
+                            "is_agent":self.is_agent_pane(id),
                             "terminal_id": terminal_id,
                             "name": self.agent_name_for(id),
                             // Display text only; target panes by id or alias.
@@ -715,6 +711,7 @@ impl App {
                     "kind":record.kind,
                     "progress":record.progress,
                     "app":record.app,
+                    "effective_app":store.inherited_app(record),
                     "title":record.title,
                     "message":record.message,
                 })).collect::<Vec<_>>()
@@ -781,10 +778,29 @@ impl App {
             self.manifests.is_agent(&s.agent)
                 || s.agent_session.is_some()
                 || s.agent_report.is_some()
-                || s.program_status
-                    .as_ref()
-                    .is_some_and(|store| !store.is_empty())
         })
+    }
+
+    /// Read-only result visibility is separate from trusted live-agent identity.
+    /// A retained done/error record must not reject agent.start in an idle shell.
+    pub(crate) fn is_status_reporter_pane(&self, pane: PaneId) -> bool {
+        self.is_agent_pane(pane)
+            || self
+                .status
+                .get(&pane)
+                .and_then(|s| s.program_status.as_ref())
+                .is_some_and(|store| !store.is_empty())
+    }
+
+    pub(crate) fn status_reporter_label(&self, pane: PaneId) -> Option<&str> {
+        let s = self.status.get(&pane)?;
+        if self.is_agent_pane(pane) {
+            return Some(&s.agent);
+        }
+        s.program_status
+            .as_ref()?
+            .effective_projection()
+            .map(|(_, app, _)| app.unwrap_or("program"))
     }
 
     /// Resolve an `agent.*` `target` param (a live alias or a numeric pane id) to a

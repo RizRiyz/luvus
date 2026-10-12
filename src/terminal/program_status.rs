@@ -43,12 +43,15 @@ impl ProgramState {
 
     fn priority(self) -> u8 {
         match self {
-            Self::Blocked => 5,
-            Self::Error => 4,
-            Self::Done => 3,
-            Self::Working => 2,
+            Self::Blocked => 4,
+            Self::Working => 3,
+            Self::Done | Self::Error => 2,
             Self::Idle => 1,
         }
+    }
+
+    fn is_result(self) -> bool {
+        matches!(self, Self::Done | Self::Error)
     }
 
     pub(crate) fn projected(self) -> State {
@@ -74,14 +77,27 @@ pub struct ProgramStatusRecord {
     pub title: Option<String>,
     pub message: Option<String>,
     updated_at: Instant,
-    // App-local presentation acknowledgement. The VT copy stays unacknowledged
-    // so a raw record is never changed by display-client focus.
+    // Sequence identifies a result independently of LRU recency.
+    result_sequence: u64,
     done_read: bool,
+    left_behind: bool,
+    shown_app: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProgramStatusStore {
     records: HashMap<String, ProgramStatusRecord>,
+    last_sequence: u64,
+    summary: Option<ProgramStatusSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProgramStatusSummary {
+    state: State,
+    app: Option<String>,
+    message: Option<String>,
+    progress: Option<u8>,
+    unread_result: bool,
 }
 
 impl ProgramStatusStore {
@@ -89,48 +105,79 @@ impl ProgramStatusStore {
         self.records.values()
     }
 
+    pub(crate) fn same_presentation(&self, other: &Self) -> bool {
+        self.summary == other.summary
+    }
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
 
-    /// Carry acknowledgement across snapshots only for the exact same report.
+    /// Preserve read confirmation for the same result, not merely the same ID.
     pub(crate) fn preserve_done_reads(&mut self, previous: &Self) {
         for (id, record) in &mut self.records {
             record.done_read = previous
                 .records
                 .get(id)
-                .is_some_and(|old| old.done_read && old.updated_at == record.updated_at);
+                .is_some_and(|old| old.done_read && old.result_sequence == record.result_sequence);
         }
+        self.refresh_summary();
     }
 
     pub(crate) fn has_unread_done(&self) -> bool {
-        self.records
-            .values()
-            .any(|record| record.state == ProgramState::Done && !record.done_read)
+        self.summary
+            .as_ref()
+            .is_some_and(|summary| summary.unread_result)
     }
 
+    /// A result hidden behind ongoing work does not become read just from focus.
     pub(crate) fn acknowledge_done(&mut self) -> bool {
-        let mut changed = false;
+        if !self.has_unread_done() {
+            return false;
+        }
         for record in self.records.values_mut() {
-            if record.state == ProgramState::Done && !record.done_read {
+            if record.state.is_result() {
                 record.done_read = true;
-                changed = true;
             }
         }
-        changed
+        self.refresh_summary();
+        true
     }
 
     pub fn clear_transient(&mut self) {
+        let apps: Vec<_> = self
+            .records
+            .values()
+            .filter(|r| r.state.is_result())
+            .map(|r| (r.id.clone(), self.inherited_app(r).map(str::to_string)))
+            .collect();
+        for (id, app) in apps {
+            let record = self.records.get_mut(&id).expect("retained result");
+            record.left_behind = true;
+            record.shown_app = app;
+        }
         self.records.retain(|_, record| {
             matches!(
                 record.state,
                 ProgramState::Idle | ProgramState::Done | ProgramState::Error
             )
         });
+        self.refresh_summary();
+    }
+
+    pub fn prompt_start(&mut self) {
+        self.clear_transient();
+        self.records.retain(|_, record| record.state.is_result());
+        self.refresh_summary();
+    }
+
+    pub fn command_start(&mut self) {
+        self.records.retain(|_, record| !record.left_behind);
+        self.refresh_summary();
     }
 
     pub fn clear_all(&mut self) {
         self.records.clear();
+        self.refresh_summary();
     }
 
     pub fn apply(&mut self, report: ProgramStatusReport) {
@@ -142,19 +189,39 @@ impl ProgramStatusStore {
                 self.records
                     .retain(|id, _| id != &report.id && !id.starts_with(&prefix));
             }
+            self.refresh_summary();
             return;
         }
-
         if self.records.len() >= MAX_RECORDS && !self.records.contains_key(&report.id) {
             if let Some(oldest) = self
                 .records
                 .values()
-                .min_by_key(|record| (record.updated_at, record.id.as_str()))
-                .map(|record| record.id.clone())
+                .min_by_key(|r| (r.updated_at, r.id.as_str()))
+                .map(|r| r.id.clone())
             {
                 self.records.remove(&oldest);
             }
         }
+        let repeated = self
+            .records
+            .get(&report.id)
+            .filter(|old| {
+                !old.left_behind
+                    && Some(old.state) == report.state
+                    && old.kind == report.kind
+                    && old.progress == report.progress
+                    && old.app == report.app
+                    && old.title == report.title
+                    && old.message == report.message
+            })
+            .map(|old| (old.result_sequence, old.done_read));
+        let (result_sequence, done_read) = repeated.unwrap_or_else(|| {
+            self.last_sequence = self
+                .last_sequence
+                .checked_add(1)
+                .expect("report sequence exhausted");
+            (self.last_sequence, false)
+        });
         self.records.insert(
             report.id.clone(),
             ProgramStatusRecord {
@@ -166,54 +233,68 @@ impl ProgramStatusStore {
                 title: report.title,
                 message: report.message,
                 updated_at: Instant::now(),
-                done_read: false,
+                result_sequence,
+                done_read,
+                left_behind: false,
+                shown_app: None,
             },
         );
+        self.refresh_summary();
     }
 
     #[cfg(test)]
     pub fn effective(&self) -> Option<&ProgramStatusRecord> {
-        self.records.values().max_by_key(|record| {
-            (
-                record.state.priority(),
-                record.updated_at,
-                record.id.as_str(),
-            )
-        })
+        self.records
+            .values()
+            .max_by_key(|r| (r.state.priority(), r.updated_at, r.id.as_str()))
+    }
+
+    pub(crate) fn inherited_app<'a>(&'a self, record: &'a ProgramStatusRecord) -> Option<&'a str> {
+        let mut id = record.id.as_str();
+        loop {
+            if let Some(app) = self.records.get(id).and_then(|r| r.app.as_deref()) {
+                return Some(app);
+            }
+            if id.is_empty() {
+                return record.shown_app.as_deref();
+            }
+            id = id.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+    }
+
+    /// Update-time reduction keeps UI/input scalar reads independent of records.
+    fn refresh_summary(&mut self) {
+        self.summary = self
+            .records
+            .values()
+            .max_by_key(|record| {
+                let priority = if record.state.is_result() && record.done_read {
+                    1
+                } else {
+                    record.state.priority()
+                };
+                (priority, record.updated_at, record.id.as_str())
+            })
+            .map(|record| ProgramStatusSummary {
+                state: if record.state.is_result() && record.done_read {
+                    State::Idle
+                } else {
+                    record.state.projected()
+                },
+                app: self.inherited_app(record).map(str::to_string),
+                message: record.message.clone(),
+                progress: record.progress,
+                unread_result: record.state.is_result() && !record.done_read,
+            });
     }
 
     pub fn effective_projection(&self) -> Option<(State, Option<&str>, Option<&str>)> {
-        let record = self.records.values().max_by_key(|record| {
-            let priority = if record.state == ProgramState::Done && record.done_read {
-                ProgramState::Idle.priority()
-            } else {
-                record.state.priority()
-            };
-            (priority, record.updated_at, record.id.as_str())
-        })?;
-        let app = record.app.as_deref().or_else(|| {
-            let mut parent = record.id.as_str();
-            while let Some((prefix, _)) = parent.rsplit_once('/') {
-                parent = prefix;
-                if let Some(app) = self
-                    .records
-                    .get(parent)
-                    .and_then(|record| record.app.as_deref())
-                {
-                    return Some(app);
-                }
-            }
-            if !record.id.is_empty() {
-                return self.records.get("").and_then(|root| root.app.as_deref());
-            }
-            None
-        });
-        let state = if record.state == ProgramState::Done && record.done_read {
-            State::Idle
-        } else {
-            record.state.projected()
-        };
-        Some((state, app, record.message.as_deref()))
+        self.summary
+            .as_ref()
+            .map(|s| (s.state, s.app.as_deref(), s.message.as_deref()))
+    }
+    pub(crate) fn effective_progress(&self) -> Option<u8> {
+        self.summary.as_ref().and_then(|s| s.progress)
     }
 }
 
@@ -581,7 +662,68 @@ mod tests {
         );
         snapshot.apply(parse_report(b"state=done:id=one").unwrap());
         snapshot.preserve_done_reads(&store);
+        assert!(!snapshot.has_unread_done(), "duplicate result stays read");
+        snapshot.apply(parse_report(b"state=working:id=one").unwrap());
+        snapshot.apply(parse_report(b"state=done:id=one").unwrap());
+        snapshot.apply(parse_report(b"state=clear:id=two").unwrap());
+        snapshot.apply(parse_report(b"state=clear:id=three").unwrap());
+        snapshot.preserve_done_reads(&store);
         assert!(snapshot.has_unread_done());
+    }
+
+    #[test]
+    fn results_do_not_hide_work_and_error_is_acknowledgeable() {
+        let mut store = ProgramStatusStore::default();
+        store.apply(parse_report(b"state=working:app=build:progress=40").unwrap());
+        store.apply(parse_report(b"state=done:id=test").unwrap());
+        assert_eq!(
+            store.effective_projection().unwrap().0,
+            crate::ui::theme::State::Working
+        );
+        assert_eq!(store.effective_progress(), Some(40));
+        assert!(
+            !store.acknowledge_done(),
+            "a hidden result has not been shown"
+        );
+        store.apply(parse_report(b"state=error:id=failed").unwrap());
+        assert_eq!(
+            store.effective_projection().unwrap().0,
+            crate::ui::theme::State::Working
+        );
+        store.apply(parse_report(b"state=idle:app=build").unwrap());
+        assert!(store.has_unread_done());
+        assert!(store.acknowledge_done());
+        assert_eq!(
+            store.effective_projection().unwrap().0,
+            crate::ui::theme::State::Idle
+        );
+        assert!(store.records().any(|r| r.state == ProgramState::Error));
+        store.apply(parse_report(b"state=error:id=failed").unwrap());
+        assert!(!store.has_unread_done(), "identical results do not rearm");
+        store.prompt_start();
+        store.apply(parse_report(b"state=error:id=failed").unwrap());
+        assert!(
+            store.has_unread_done(),
+            "same result after prompt belongs to a new run"
+        );
+        store.apply(parse_report(b"state=blocked:id=approval").unwrap());
+        assert_eq!(
+            store.effective_projection().unwrap().0,
+            crate::ui::theme::State::Blocked
+        );
+    }
+
+    #[test]
+    fn command_start_only_clears_left_behind_results() {
+        let mut store = ProgramStatusStore::default();
+        store.apply(parse_report(b"state=working:app=deploy").unwrap());
+        store.apply(parse_report(b"state=done:id=job").unwrap());
+        store.prompt_start();
+        assert_eq!(store.effective_projection().unwrap().1, Some("deploy"));
+        store.apply(parse_report(b"state=done:id=fresh").unwrap());
+        store.command_start();
+        assert_eq!(store.records().count(), 1);
+        assert_eq!(store.records().next().unwrap().id, "fresh");
     }
 
     #[test]

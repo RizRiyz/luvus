@@ -574,6 +574,16 @@ impl App {
                 self.show_toast(self.catalog.copied);
                 return true;
             }
+            AppEvent::ProgramStatusChanged(id) => {
+                if let Some(store) = self
+                    .panes
+                    .get(&id)
+                    .and_then(|pane| pane.take_pending_program_status())
+                {
+                    self.sync_program_status(id, store);
+                }
+                return false; // detection decides which rendered consumers changed
+            }
             AppEvent::IoCompleted(completion) => {
                 return completion.apply(self);
             }
@@ -1437,6 +1447,7 @@ impl App {
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.
             AppEvent::IoCompleted(_)
+            | AppEvent::ProgramStatusChanged(_)
             | AppEvent::ThemeUninstalled { .. }
             | AppEvent::ConfigReloaded { .. }
             | AppEvent::ManifestsReloaded { .. }

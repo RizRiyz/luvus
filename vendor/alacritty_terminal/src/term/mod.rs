@@ -1950,6 +1950,11 @@ impl<T: EventListener> Handler for Term<T> {
         self.event_proxy.send_event(Event::ProgramStatusPromptStart);
     }
 
+    #[inline]
+    fn command_start(&mut self) {
+        self.event_proxy.send_event(Event::ProgramStatusCommandStart);
+    }
+
     /// Store data into clipboard.
     #[inline]
     fn clipboard_store(&mut self, clipboard: u8, base64: &[u8]) {

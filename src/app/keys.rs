@@ -1070,8 +1070,7 @@ impl App {
             for tab in &ws.tabs {
                 for id in tab.layout.leaves() {
                     if let Some(status) = self.status.get(&id) {
-                        let is_agent = self.manifests.is_agent(&status.agent)
-                            || status.agent_session.is_some();
+                        let is_agent = self.is_status_reporter_pane(id);
                         if is_agent && status.state == state {
                             matches.push(id);
                         }

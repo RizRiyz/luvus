@@ -607,6 +607,11 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         #[cfg(not(feature = "std"))]
         {
             if self.osc_raw.is_full() {
+                if self.is_program_status()
+                    || (self.osc_num_params == 0 && self.osc_raw.starts_with(b"7501"))
+                {
+                    self.osc_overflowed = true;
+                }
                 return;
             }
         }
@@ -1169,6 +1174,17 @@ mod tests {
             },
             _ => panic!("expected osc sequence"),
         }
+    }
+
+    #[cfg(not(feature = "std"))]
+    #[test]
+    fn small_program_status_buffer_rejects_targeted_clear_atomically() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::<15>::new_with_size();
+        parser.advance(&mut dispatcher, b"\x1b]7501;state=clear:id=task\x07");
+        assert!(dispatcher.dispatched.is_empty());
+        parser.advance(&mut dispatcher, b"\x1b]7501;?\x07");
+        assert!(matches!(&dispatcher.dispatched[..], [Sequence::Osc(_, true)]));
     }
 
     #[test]

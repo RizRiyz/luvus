@@ -695,6 +695,9 @@ pub trait Handler {
     /// Receive an OSC 133 shell prompt marker.
     fn prompt_start(&mut self) {}
 
+    /// Receive an OSC 133 command/output start marker.
+    fn command_start(&mut self) {}
+
     /// Store data into clipboard.
     fn clipboard_store(&mut self, _: u8, _: &[u8]) {}
 
@@ -1522,6 +1525,10 @@ where
             // OSC 133;A marks the beginning of a new shell prompt.
             b"133" if params.get(1).is_some_and(|value| *value == b"A") => {
                 self.handler.prompt_start();
+            },
+
+            b"133" if params.get(1).is_some_and(|value| *value == b"C") => {
+                self.handler.command_start();
             },
 
             // Set clipboard.

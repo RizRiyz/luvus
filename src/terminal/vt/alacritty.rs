@@ -107,14 +107,28 @@ impl EventListener for EventProxy {
                     if !pending.records.is_empty() {
                         pending.records.clear_all();
                         pending.changed = true;
+                        self.tx.notify_program_status();
                     }
                 }
             }
             Event::ProgramStatusPromptStart => {
                 if let Ok(mut pending) = self.program_status.lock() {
                     let count = pending.records.records().count();
-                    pending.records.clear_transient();
+                    pending.records.prompt_start();
                     pending.changed |= count != pending.records.records().count();
+                    if pending.changed {
+                        self.tx.notify_program_status();
+                    }
+                }
+            }
+            Event::ProgramStatusCommandStart => {
+                if let Ok(mut pending) = self.program_status.lock() {
+                    let count = pending.records.records().count();
+                    pending.records.command_start();
+                    pending.changed |= count != pending.records.records().count();
+                    if pending.changed {
+                        self.tx.notify_program_status();
+                    }
                 }
             }
             Event::ProgramStatus(body, bell_terminated) => {
@@ -129,6 +143,7 @@ impl EventListener for EventProxy {
                     if let Ok(mut pending) = self.program_status.lock() {
                         pending.records.apply(report);
                         pending.changed = true;
+                        self.tx.notify_program_status();
                     }
                 }
             }
@@ -1291,6 +1306,7 @@ impl VtEngine for AlacrittyEngine {
     fn take_pending_program_status(
         &mut self,
     ) -> Option<crate::terminal::program_status::ProgramStatusStore> {
+        self.response_tx.rearm_program_status();
         let mut pending = self.program_status.lock().ok()?;
         if !std::mem::take(&mut pending.changed) {
             return None;
@@ -3476,6 +3492,18 @@ mod tests {
         engine.advance(b"\x1b]7501;?\x1b\\\x1b[c");
         assert_eq!(recv_bytes(&rx), b"\x1b]7501;?\x1b\\");
         assert!(recv_bytes(&rx).starts_with(b"\x1b[?"));
+    }
+
+    #[test]
+    fn osc7501_command_start_discards_only_previous_command_results() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        engine.advance(b"\x1b]7501;state=done:id=old\x07\x1b]133;A\x07\x1b]7501;state=error:id=fresh\x07\x1b]133;C\x07");
+        let store = engine.take_pending_program_status().unwrap();
+        assert_eq!(store.records().count(), 1);
+        assert_eq!(store.records().next().unwrap().id, "fresh");
+        engine.advance(b"\x1b]133;A\x07\x1b]133;C\x07");
+        assert!(engine.take_pending_program_status().unwrap().is_empty());
     }
 
     #[test]

@@ -30,6 +30,9 @@ pub enum Event {
     /// OSC 133 prompt start, which ends transient program status records.
     ProgramStatusPromptStart,
 
+    /// OSC 133 C command start ends results left behind by the last command.
+    ProgramStatusCommandStart,
+
     /// Request to store a text string in the clipboard.
     ClipboardStore(ClipboardType, String),
 
@@ -78,6 +81,7 @@ impl Debug for Event {
             }
             Event::ProgramStatusReset => write!(f, "ProgramStatusReset"),
             Event::ProgramStatusPromptStart => write!(f, "ProgramStatusPromptStart"),
+            Event::ProgramStatusCommandStart => write!(f, "ProgramStatusCommandStart"),
             Event::ClipboardStore(ty, text) => write!(f, "ClipboardStore({ty:?}, {text})"),
             Event::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
             Event::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),

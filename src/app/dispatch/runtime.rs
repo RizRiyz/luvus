@@ -590,6 +590,8 @@ impl App {
                 continue;
             };
             if let Some(status) = self.status.get_mut(&id) {
+                presentation_metadata_changed |=
+                    std::mem::take(&mut status.program_status_presentation_changed);
                 if status
                     .agent_report
                     .as_ref()
@@ -823,6 +825,7 @@ impl App {
                 if program_status.is_some()
                     && det.identity_source == "process_tree"
                     && self.manifests.is_agent(&det.agent)
+                    && s.program_status_agent.is_none()
                 {
                     s.program_status_agent = Some(det.agent.clone());
                 }
@@ -834,9 +837,11 @@ impl App {
                 if program_authority {
                     // No screen interpretation of protocol msg, even when the
                     // message is absent or changes without a state transition.
-                    s.blocked_hint = (det.state == State::Blocked)
+                    let hint = (det.state == State::Blocked)
                         .then(|| program_message.clone())
                         .flatten();
+                    presentation_metadata_changed |= s.blocked_hint != hint;
+                    s.blocked_hint = hint;
                     s.done = false;
                 }
                 let focused = id == focus;
@@ -967,7 +972,14 @@ impl App {
                         blocking_hint(&bottom)
                     };
                     changes.push((id, s.state, s.agent.clone()));
-                    if was_working && matches!(desired, State::Idle | State::Done) {
+                    if was_working
+                        && matches!(desired, State::Idle | State::Done)
+                        && (!program_authority
+                            || (desired == State::Done
+                                && s.program_status
+                                    .as_ref()
+                                    .is_some_and(|store| store.has_unread_done())))
+                    {
                         finished.push(id);
                     }
                 }
