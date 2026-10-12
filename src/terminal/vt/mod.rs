@@ -481,6 +481,12 @@ pub trait VtEngine: Send {
         None
     }
 
+    /// Current OSC authority without consuming a pending metadata snapshot.
+    /// Prompt admission uses this to reject blocked state even before detection.
+    fn program_status_state(&self) -> Option<crate::ui::theme::State> {
+        None
+    }
+
     /// Clear transient terminal metadata after a confirmed process exit.
     fn program_status_process_exited(&mut self) {}
 

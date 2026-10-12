@@ -118,6 +118,15 @@ The self-reported `app` value is grouping metadata only; it cannot grant native
 agent capabilities or impersonate a built-in agent identity. An active leased
 integration report takes precedence over OSC 7501 state.
 
+While valid OSC 7501 records provide state, Luvus skips legacy screen-state
+manifest rules. If a process scan proves identity, it also skips the screen
+text extraction needed only by those rules. Where process evidence is
+unavailable, bounded title/screen identity detection remains available.
+Agent-specific input-composer checks remain independent: a protocol `idle` or
+`done` does not prove that the program can receive a prompt, and a fresh
+protocol `blocked` report rejects submission even before the normal detection
+pass. Clearing all records restores the heuristic state path.
+
 Reports support `idle`, `working`, `blocked`, `done`, `error`, and `clear`, with
 nested `id` records, optional progress, titles, and messages. Malformed or
 oversized reports are ignored. Existing heuristic detection remains the

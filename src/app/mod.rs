@@ -11685,6 +11685,82 @@ mod tests {
     }
 
     #[test]
+    fn osc7501_skips_state_rules_until_authority_is_cleared() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-skip-heuristics");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.proc_commands.insert(pane, vec!["pi".into()]);
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"do you want to proceed\r\n\x1b]7501;state=working:app=codex\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let before = detect::state_rule_evaluations_for_test();
+        let now = Instant::now();
+        app.detect_tick(now);
+        assert_eq!(detect::state_rule_evaluations_for_test(), before);
+        assert_eq!(app.status[&pane].agent, "pi");
+        assert_eq!(app.status[&pane].state, State::Working);
+        assert_eq!(app.status[&pane].state_source, "program_status");
+        assert!(app.status[&pane].detected_bottom.is_empty());
+        assert!(app.agent_prompt_is_ready(pane, false));
+        assert!(!app.agent_prompt_is_ready(pane, true));
+        assert_eq!(detect::state_rule_evaluations_for_test(), before);
+        // Protocol-blocked evidence closes admission before PtyData/detect.
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked\x07");
+        assert!(!app.agent_prompt_is_ready(pane, false));
+        assert_eq!(detect::state_rule_evaluations_for_test(), before);
+        // Composer geometry remains required independently of idle/working.
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=working\x07\x1b[2J\x1b[Htranscript");
+        assert!(!app.agent_prompt_is_ready(pane, false));
+        engine
+            .lock()
+            .unwrap()
+            .advance("\x1b[2J\x1b[2;1H› ".as_bytes());
+        assert!(app.agent_prompt_is_ready(pane, true));
+        assert_eq!(detect::state_rule_evaluations_for_test(), before);
+        // Without a successful process scan, retain bounded text identity
+        // fallback without evaluating screen-state rules.
+        app.proc_commands.remove(&pane);
+        engine.lock().unwrap().advance(b"\x1b]2;Pi\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_millis(200));
+        assert_eq!(app.status[&pane].agent, "pi");
+        assert_eq!(app.status[&pane].identity_source, "osc_title");
+        assert_eq!(detect::state_rule_evaluations_for_test(), before);
+        // Clearing authority forces a fresh bounded screen read and fallback.
+        app.proc_commands.insert(pane, vec!["pi".into()]);
+        engine.lock().unwrap().advance(
+            b"\x1b]2;\x07\x1b[2J\x1b[23;1Hdo you want to proceed\r\n\x1b]7501;state=clear\x07",
+        );
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_millis(400));
+        assert!(detect::state_rule_evaluations_for_test() > before);
+        assert_eq!(app.status[&pane].state_source, "manifest_rule");
+        assert_eq!(app.status[&pane].state, State::Blocked);
+    }
+
+    #[test]
     fn pane_osc52_store_queues_pending_clipboard() {
         let _env = crate::persist::test_env("pane-osc52-clipboard");
         let (tx, _rx) = std::sync::mpsc::channel();

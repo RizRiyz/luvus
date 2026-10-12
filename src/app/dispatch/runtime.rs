@@ -684,12 +684,19 @@ impl App {
                     Ok(engine) => {
                         let generation = engine.output_generation();
                         if force_detect || last_generation != Some(generation) {
-                            let text = detect::screen_text_for_detection(
-                                &*engine,
-                                detection_rows,
-                                non_empty_rows,
-                                probe_arc_studio,
-                            );
+                            let text =
+                                if program_status.is_some() && !running_for_detection.is_empty() {
+                                    // A successful process scan already proves identity;
+                                    // OSC state needs no title/screen manifest inputs.
+                                    String::new()
+                                } else {
+                                    detect::screen_text_for_detection(
+                                        &*engine,
+                                        detection_rows,
+                                        non_empty_rows,
+                                        probe_arc_studio,
+                                    )
+                                };
                             let composer_ready = composer_agent.and_then(|agent| {
                                 detect::live_composer_ready(agent, &*engine, claude_semantic_ready)
                             });
@@ -756,21 +763,6 @@ impl App {
             let known = known_agent.as_str();
             // Ground truth for identity, when the last scan could see this pane.
             let running = self.running_for_detection(id);
-            let identity_det = report.is_none().then(|| {
-                detect::classify_with_composer(
-                    title.as_deref(),
-                    &bottom,
-                    recent,
-                    recent_input,
-                    base,
-                    known,
-                    running,
-                    &self.manifests,
-                    composer_agent
-                        .filter(|agent| agent.eq_ignore_ascii_case("claude"))
-                        .and(detected_composer_ready),
-                )
-            });
             let det = match report.as_ref() {
                 Some(report) => detect::Detection {
                     state: report.state,
@@ -787,30 +779,43 @@ impl App {
                 },
                 None if program_status.is_some() => {
                     let (state, _app, _message) = program_status.as_ref().expect("checked above");
+                    // OSC owns state, not identity or prompt readiness. Do not
+                    // evaluate the legacy state rules just to discard them.
+                    let (agent, identity_source) = detect::identity(
+                        title.as_deref(),
+                        &bottom,
+                        base,
+                        known,
+                        running,
+                        &self.manifests,
+                    );
                     detect::Detection {
                         state: *state,
-                        // `app` is display metadata, not trusted agent identity.
-                        // Keep process/launch/session identity when available.
-                        agent: identity_det
-                            .as_ref()
-                            .expect("no integration authority")
-                            .agent
-                            .clone(),
+                        agent,
                         prompt_evidence: if *state == State::Blocked {
                             detect::PromptEvidence::Blocked
                         } else {
                             detect::PromptEvidence::Unknown
                         },
-                        identity_source: identity_det
-                            .as_ref()
-                            .expect("no integration authority")
-                            .identity_source,
+                        identity_source,
                         state_source: "program_status",
                         rule_priority: None,
                         rule_region: None,
                     }
                 }
-                None => identity_det.expect("no integration authority"),
+                None => detect::classify_with_composer(
+                    title.as_deref(),
+                    &bottom,
+                    recent,
+                    recent_input,
+                    base,
+                    known,
+                    running,
+                    &self.manifests,
+                    composer_agent
+                        .filter(|agent| agent.eq_ignore_ascii_case("claude"))
+                        .and(detected_composer_ready),
+                ),
             };
 
             if let Some(s) = self.status.get_mut(&id) {

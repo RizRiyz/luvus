@@ -510,6 +510,26 @@ impl App {
         let Ok(engine) = pane.engine.lock() else {
             return false;
         };
+        if report.is_none() {
+            if let Some(state) = engine.program_status_state() {
+                if state == State::Blocked {
+                    return false;
+                }
+                // idle/done are not composer evidence. Keep the existing
+                // positive-geometry and strict-mode gates, but skip legacy
+                // state rules under active terminal-native authority.
+                let composer = detect::live_composer_ready(
+                    agent,
+                    &*engine,
+                    status.claude_prompt_semantic_ready,
+                );
+                return admits(if composer == Some(true) {
+                    detect::PromptEvidence::Ready
+                } else {
+                    detect::PromptEvidence::Unknown
+                });
+            }
+        }
         if !status.force_detect
             && status.last_detect_generation == Some(engine.output_generation())
             && !(positive_evidence_required

@@ -1298,6 +1298,15 @@ impl VtEngine for AlacrittyEngine {
         Some(pending.records.clone())
     }
 
+    fn program_status_state(&self) -> Option<crate::ui::theme::State> {
+        self.program_status
+            .lock()
+            .ok()?
+            .records
+            .effective_projection()
+            .map(|(state, _, _)| state)
+    }
+
     fn program_status_process_exited(&mut self) {
         if let Ok(mut pending) = self.program_status.lock() {
             pending.records.clear_transient();

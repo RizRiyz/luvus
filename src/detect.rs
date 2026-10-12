@@ -256,6 +256,16 @@ pub(crate) fn builtin_agent_in_argv(argv: &[String]) -> Option<String> {
     .agent_in_argv(argv)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static STATE_RULE_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn state_rule_evaluations_for_test() -> usize {
+    STATE_RULE_EVALUATIONS.with(std::cell::Cell::get)
+}
+
 impl Manifests {
     /// Just the compiled-in defaults (test helper; production uses `load`).
     #[cfg(test)]
@@ -318,6 +328,8 @@ impl Manifests {
         regions: &Regions,
         skip_screen_blocked: bool,
     ) -> Option<RuleMatch> {
+        #[cfg(test)]
+        STATE_RULE_EVALUATIONS.with(|count| count.set(count.get() + 1));
         let mut best: Option<RuleMatch> = None;
         for r in &self.rules {
             if !(r.agent.is_empty() || r.agent == agent) {
@@ -1242,6 +1254,49 @@ fn is_claude_status_line(line: &str) -> bool {
     busy || done
 }
 
+/// Resolve identity independently of screen-state rules. A successful process
+/// scan is decisive; text is used only where process evidence is unavailable.
+pub(crate) fn identity(
+    title: Option<&str>,
+    bottom: &str,
+    base_command: &str,
+    known_agent: &str,
+    running: &[String],
+    manifests: &Manifests,
+) -> (String, &'static str) {
+    if running.is_empty() {
+        text_identity(
+            title,
+            &bottom.to_lowercase(),
+            base_command,
+            known_agent,
+            manifests,
+        )
+    } else {
+        manifests
+            .agent_in_processes(running)
+            .map(|agent| (agent, "process_tree"))
+            .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
+    }
+}
+
+fn text_identity(
+    title: Option<&str>,
+    lowercase_bottom: &str,
+    base_command: &str,
+    known_agent: &str,
+    manifests: &Manifests,
+) -> (String, &'static str) {
+    manifests
+        .detect_agent(title, lowercase_bottom, base_command)
+        .or_else(|| {
+            manifests
+                .is_agent(known_agent)
+                .then(|| (known_agent.to_string(), "prior_identity"))
+        })
+        .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
+}
+
 /// Classify a pane from its title, bottom-buffer text, whether it produced
 /// output recently, whether the user typed into it recently, and the active
 /// rule set. `base_command` is the spawned program, used as a fallback label.
@@ -1262,34 +1317,10 @@ pub(crate) fn classify_with_composer(
         screen: bottom.to_lowercase(),
         title: title.map(|t| t.to_lowercase()).unwrap_or_default(),
     };
-    // Identity has two regimes, and which one applies is decided by whether we
-    // could see the pane's processes at all.
-    //
-    // `running` non-empty means the scan worked, so it is the *whole* answer: an
-    // agent is a program, and a pane that is not running one is a plain shell no
-    // matter what it prints. Letting text vote here is what put "amp" and "kiro"
-    // in the sidebar for panes running neither.
-    //
-    // `running` empty means we could not tell (Windows, a remote pane, `ps`
-    // failed, or the pane has no child yet). Only then do the text heuristics
-    // run — including `known_agent` stickiness, which covers the frames where an
-    // agent's UI does not print its own name (Claude Code's bottom rows are a
-    // prompt box and a model label, so a repaint would otherwise resolve to the
-    // bare shell and read its own redraw as work).
     let (agent, identity_source) = if running.is_empty() {
-        manifests
-            .detect_agent(title, &regions.screen, base_command)
-            .or_else(|| {
-                manifests
-                    .is_agent(known_agent)
-                    .then(|| (known_agent.to_string(), "prior_identity"))
-            })
-            .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
+        text_identity(title, &regions.screen, base_command, known_agent, manifests)
     } else {
-        manifests
-            .agent_in_processes(running)
-            .map(|agent| (agent, "process_tree"))
-            .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
+        identity(title, bottom, base_command, known_agent, running, manifests)
     };
 
     // A recognised agent is *working* only on positive evidence — a spinner or
@@ -1778,6 +1809,44 @@ mod tests {
     use super::*;
     use crate::terminal::vt::alacritty::AlacrittyEngine;
     use crate::terminal::vt::VtEngine;
+
+    #[test]
+    fn identity_resolution_never_evaluates_state_rules() {
+        let manifests = Manifests::builtin();
+        let before = state_rule_evaluations_for_test();
+        for (title, bottom, base, known, running) in [
+            (
+                None,
+                "do you want to proceed",
+                "zsh",
+                "",
+                vec!["pi".to_string()],
+            ),
+            (Some("Claude"), "esc to interrupt", "zsh", "", vec![]),
+            (None, "", "zsh", "pi", vec![]),
+            (None, "Claude", "zsh", "pi", vec!["zsh".to_string()]),
+        ] {
+            let resolved = identity(title, bottom, base, known, &running, &manifests);
+            let full = classify_with_composer(
+                title, bottom, false, false, base, known, &running, &manifests, None,
+            );
+            assert_eq!(resolved, (full.agent, full.identity_source));
+        }
+        assert_eq!(state_rule_evaluations_for_test() - before, 4);
+        let before = state_rule_evaluations_for_test();
+        assert_eq!(
+            identity(
+                None,
+                "do you want to proceed",
+                "zsh",
+                "",
+                &["pi".to_string()],
+                &manifests
+            ),
+            ("pi".to_string(), "process_tree")
+        );
+        assert_eq!(state_rule_evaluations_for_test(), before);
+    }
 
     fn state(bottom: &str, activity: bool, input: bool) -> State {
         classify(
