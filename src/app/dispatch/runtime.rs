@@ -607,7 +607,7 @@ impl App {
                 .status
                 .get(&id)
                 .and_then(|status| status.agent_report.clone());
-            if id == focus {
+            if id == focus && report.is_none() {
                 if let Some(store) = self
                     .status
                     .get_mut(&id)
@@ -972,14 +972,18 @@ impl App {
                         blocking_hint(&bottom)
                     };
                     changes.push((id, s.state, s.agent.clone()));
-                    if was_working
-                        && matches!(desired, State::Idle | State::Done)
-                        && (!program_authority
-                            || (desired == State::Done
-                                && s.program_status
-                                    .as_ref()
-                                    .is_some_and(|store| store.has_unread_done())))
-                    {
+                    if program_authority && matches!(desired, State::Idle | State::Done) {
+                        if let Some(sequence) = s
+                            .program_status
+                            .as_ref()
+                            .and_then(|store| store.visible_result_sequence())
+                        {
+                            if sequence > s.program_status_completed_through {
+                                s.program_status_completed_through = sequence;
+                                finished.push(id);
+                            }
+                        }
+                    } else if was_working && matches!(desired, State::Idle | State::Done) {
                         finished.push(id);
                     }
                 }

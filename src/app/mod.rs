@@ -1968,6 +1968,8 @@ pub struct PaneStatus {
     /// from the current display identity so the first absent scan cannot erase
     /// the evidence needed by the second confirmation.
     program_status_agent: Option<String>,
+    program_status_exit_boundary: Option<u64>,
+    program_status_completed_through: u64,
     program_status_presentation_changed: bool,
 }
 
@@ -1989,6 +1991,7 @@ impl PaneStatus {
         self.program_status = (!store.is_empty()).then_some(store);
         if self.program_status.is_none() {
             self.program_status_agent = None;
+            self.program_status_exit_boundary = None;
         } else if self.program_status_agent.is_none()
             && self.identity_source == "process_tree"
             && manifests.is_agent(&self.agent)
@@ -2034,6 +2037,8 @@ impl PaneStatus {
             agent_report: None,
             program_status: None,
             program_status_agent: None,
+            program_status_exit_boundary: None,
+            program_status_completed_through: 0,
             program_status_presentation_changed: false,
         }
     }
@@ -8827,7 +8832,14 @@ impl App {
             };
             if self.manifests.process_has_agent(cmds, bound_agent) {
                 st.agent_absent_scans = 0;
+                st.program_status_exit_boundary = None;
                 continue;
+            }
+            if st.program_status_exit_boundary.is_none() {
+                st.program_status_exit_boundary = self
+                    .panes
+                    .get(id)
+                    .map(|pane| pane.program_status_revision());
             }
 
             st.agent_absent_scans = st.agent_absent_scans.saturating_add(1);
@@ -8848,7 +8860,9 @@ impl App {
             st.agent_absent_scans = 0;
             st.agent = self.manifests.agent_in_processes(cmds).unwrap_or(base);
             if let Some(pane) = self.panes.get(id) {
-                pane.program_status_process_exited();
+                pane.program_status_process_exited_through(
+                    st.program_status_exit_boundary.take().unwrap_or(0),
+                );
                 if let Some(store) = pane.take_pending_program_status() {
                     st.sync_program_status(store, &self.manifests);
                 }
@@ -12062,6 +12076,137 @@ mod tests {
             app.agent_explanation(pane)["program_status"][0]["state"],
             "error"
         );
+    }
+
+    #[test]
+    fn osc7501_exit_boundary_preserves_replacement_reports() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-replacement-reports");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let root = app.panes[&pane]
+            .child_pid
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.proc_commands.insert(pane, vec!["claude".into()]);
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked:id=old\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let now = Instant::now();
+        app.detect_tick(now);
+        app.apply_proc_scan(Some(HashMap::from([(root, vec!["codex".into()])])));
+        app.detect_tick(now + Duration::from_millis(200));
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked:id=new\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.apply_proc_scan(Some(HashMap::from([(root, vec!["codex".into()])])));
+        let store = app.status[&pane].program_status.as_ref().unwrap();
+        assert_eq!(store.records().count(), 1);
+        assert_eq!(store.records().next().unwrap().id, "new");
+        app.detect_tick(now + Duration::from_millis(400));
+        assert_eq!(app.status[&pane].state_source, "program_status");
+        assert_eq!(
+            app.status[&pane].program_status_agent.as_deref(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn osc7501_focused_explicit_result_still_plays_done_sound() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-focused-sound");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.config.notifications.sound_on_done = true;
+        let mut now = Instant::now();
+        for result in ["done", "error"] {
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b]7501;state=working\x07");
+            app.handle_event(AppEvent::PtyData(pane));
+            app.detect_tick(now);
+            engine
+                .lock()
+                .unwrap()
+                .advance(format!("\x1b]7501;state={result}\x07").as_bytes());
+            app.handle_event(AppEvent::PtyData(pane));
+            app.detect_tick(now + Duration::from_millis(200));
+            app.detect_tick(now + QUIET_DWELL + Duration::from_millis(300));
+            assert_eq!(app.status[&pane].state, State::Idle);
+            assert!(
+                app.pending_sound.take().is_some(),
+                "focused {result} is explicit completion"
+            );
+            now += Duration::from_secs(4);
+        }
+    }
+
+    #[test]
+    fn osc7501_integration_hidden_results_are_not_acknowledged() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-hidden-result");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.dispatch("agent.report", &json!({"pane":pane.0.to_string(),"source":"test/hook","agent":"pi","status":"working"})).unwrap();
+        engine.lock().unwrap().advance(b"\x1b]7501;state=error\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let now = Instant::now();
+        app.detect_tick(now);
+        assert!(app.status[&pane]
+            .program_status
+            .as_ref()
+            .unwrap()
+            .has_unread_done());
+        app.split_pane(pane, crate::layout::Axis::Col, true)
+            .unwrap();
+        app.dispatch(
+            "agent.release",
+            &json!({"pane":pane.0.to_string(),"source":"test/hook"}),
+        )
+        .unwrap();
+        app.detect_tick(now + Duration::from_millis(200));
+        app.detect_tick(now + QUIET_DWELL + Duration::from_millis(300));
+        assert_eq!(app.status[&pane].state, State::Done);
     }
 
     #[test]

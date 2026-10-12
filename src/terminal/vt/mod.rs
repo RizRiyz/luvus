@@ -487,7 +487,15 @@ pub trait VtEngine: Send {
         None
     }
 
-    /// Clear transient terminal metadata after a confirmed process exit.
+    /// Revision observed at the first absent producer process scan.
+    fn program_status_revision(&self) -> u64 {
+        0
+    }
+
+    /// Clear only transient reports belonging to the absent producer boundary.
+    fn program_status_process_exited_through(&mut self, _boundary: u64) {}
+
+    /// Clear transient terminal metadata after an attached process exit.
     fn program_status_process_exited(&mut self) {}
 
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls

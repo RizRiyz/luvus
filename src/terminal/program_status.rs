@@ -79,6 +79,7 @@ pub struct ProgramStatusRecord {
     updated_at: Instant,
     // Sequence identifies a result independently of LRU recency.
     result_sequence: u64,
+    update_sequence: u64,
     done_read: bool,
     left_behind: bool,
     shown_app: Option<String>,
@@ -141,6 +142,37 @@ impl ProgramStatusStore {
         }
         self.refresh_summary();
         true
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.last_sequence
+    }
+
+    /// Confirmed producer exit only ends reports at/before the first absent
+    /// process observation. Later reports can belong to its replacement.
+    pub(crate) fn clear_transient_through(&mut self, boundary: u64) {
+        self.records.retain(|_, r| {
+            r.update_sequence > boundary
+                || !matches!(r.state, ProgramState::Working | ProgramState::Blocked)
+        });
+        self.refresh_summary();
+    }
+
+    /// Completion evidence survives focus/read acknowledgement; presentation
+    /// can be idle while a real result still warrants an enabled done cue.
+    pub(crate) fn visible_result_sequence(&self) -> Option<u64> {
+        if self
+            .records
+            .values()
+            .any(|r| matches!(r.state, ProgramState::Working | ProgramState::Blocked))
+        {
+            return None;
+        }
+        self.records
+            .values()
+            .filter(|r| r.state.is_result())
+            .map(|r| r.result_sequence)
+            .max()
     }
 
     pub fn clear_transient(&mut self) {
@@ -215,13 +247,11 @@ impl ProgramStatusStore {
                     && old.message == report.message
             })
             .map(|old| (old.result_sequence, old.done_read));
-        let (result_sequence, done_read) = repeated.unwrap_or_else(|| {
-            self.last_sequence = self
-                .last_sequence
-                .checked_add(1)
-                .expect("report sequence exhausted");
-            (self.last_sequence, false)
-        });
+        self.last_sequence = self
+            .last_sequence
+            .checked_add(1)
+            .expect("report sequence exhausted");
+        let (result_sequence, done_read) = repeated.unwrap_or((self.last_sequence, false));
         self.records.insert(
             report.id.clone(),
             ProgramStatusRecord {
@@ -234,6 +264,7 @@ impl ProgramStatusStore {
                 message: report.message,
                 updated_at: Instant::now(),
                 result_sequence,
+                update_sequence: self.last_sequence,
                 done_read,
                 left_behind: false,
                 shown_app: None,

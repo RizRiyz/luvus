@@ -802,6 +802,19 @@ impl Pane {
         self.engine.lock().ok()?.take_pending_program_status()
     }
 
+    pub(crate) fn program_status_revision(&self) -> u64 {
+        self.engine
+            .lock()
+            .map(|engine| engine.program_status_revision())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn program_status_process_exited_through(&self, boundary: u64) {
+        if let Ok(mut engine) = self.engine.lock() {
+            engine.program_status_process_exited_through(boundary);
+        }
+    }
+
     pub(crate) fn program_status_process_exited(&self) {
         if let Ok(mut engine) = self.engine.lock() {
             engine.program_status_process_exited();

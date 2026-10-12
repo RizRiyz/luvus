@@ -1323,6 +1323,20 @@ impl VtEngine for AlacrittyEngine {
             .map(|(state, _, _)| state)
     }
 
+    fn program_status_revision(&self) -> u64 {
+        self.program_status
+            .lock()
+            .map(|slot| slot.records.revision())
+            .unwrap_or(0)
+    }
+
+    fn program_status_process_exited_through(&mut self, boundary: u64) {
+        if let Ok(mut pending) = self.program_status.lock() {
+            pending.records.clear_transient_through(boundary);
+            pending.changed = true;
+        }
+    }
+
     fn program_status_process_exited(&mut self) {
         if let Ok(mut pending) = self.program_status.lock() {
             pending.records.clear_transient();
