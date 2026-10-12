@@ -937,7 +937,7 @@ impl App {
                     s.candidate = desired;
                     s.candidate_since = now;
                 }
-                let dwell = if report.is_some() || program_status.is_some() {
+                let dwell = if report.is_some() {
                     Duration::ZERO
                 } else {
                     commit_dwell(desired)

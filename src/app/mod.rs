@@ -11423,7 +11423,10 @@ mod tests {
         assert_eq!(app.status[&pane].agent, "codex");
         engine.lock().unwrap().advance(b"\x1b]7501;state=idle\x07");
         app.handle_event(AppEvent::PtyData(pane));
-        app.detect_tick(now + Duration::from_millis(600));
+        let quiet = now + Duration::from_millis(600);
+        app.detect_tick(quiet);
+        assert_eq!(app.status[&pane].state, State::Blocked);
+        app.detect_tick(quiet + QUIET_DWELL + Duration::from_millis(100));
         assert_eq!(app.status[&pane].state, State::Idle);
     }
 
@@ -11567,11 +11570,23 @@ mod tests {
         app.handle_event(AppEvent::PtyData(pane));
         let now = Instant::now();
         app.detect_tick(now);
+        assert_eq!(app.status[&pane].state, State::Idle);
+        assert_eq!(app.status[&pane].candidate, State::Done);
+        app.detect_tick(now + Duration::from_millis(2400));
+        assert_eq!(app.status[&pane].state, State::Idle);
+        app.detect_tick(now + QUIET_DWELL + Duration::from_millis(100));
         assert_eq!(app.status[&pane].state, State::Done);
-        // Focus wakes detection even after all ordinary dwell/activity is over.
+        // Focus wakes detection even after all ordinary dwell/activity is over,
+        // but publication still waits the same quiet dwell as heuristic state.
         app.layout_mut().focus = pane;
-        assert!(app.needs_fast_runtime_tick(now + Duration::from_secs(10)));
-        app.detect_tick(now + Duration::from_secs(10));
+        let read = now + Duration::from_secs(10);
+        assert!(app.needs_fast_runtime_tick(read));
+        app.detect_tick(read);
+        assert_eq!(app.status[&pane].state, State::Done);
+        assert_eq!(app.status[&pane].candidate, State::Idle);
+        app.detect_tick(read + Duration::from_millis(2400));
+        assert_eq!(app.status[&pane].state, State::Done);
+        app.detect_tick(read + QUIET_DWELL + Duration::from_millis(100));
         assert_eq!(app.status[&pane].state, State::Idle);
         assert_eq!(
             app.agent_explanation(pane)["program_status"][0]["state"],
@@ -11583,17 +11598,23 @@ mod tests {
             .unwrap()
             .advance(b"\x1b]7501;state=idle:id=worker\x07");
         app.handle_event(AppEvent::PtyData(pane));
-        app.detect_tick(now + Duration::from_secs(11));
+        app.detect_tick(now + Duration::from_secs(14));
         assert_eq!(app.status[&pane].state, State::Idle);
         engine
             .lock()
             .unwrap()
             .advance(b"\x1b]7501;state=done:app=pi\x07");
         app.handle_event(AppEvent::PtyData(pane));
-        app.detect_tick(now + Duration::from_secs(12));
+        let next = now + Duration::from_secs(15);
+        app.detect_tick(next);
+        assert_eq!(app.status[&pane].state, State::Idle);
+        app.detect_tick(next + QUIET_DWELL + Duration::from_millis(100));
         assert_eq!(app.status[&pane].state, State::Done);
         app.layout_mut().focus = pane;
-        app.detect_tick(now + Duration::from_secs(13));
+        let read = now + Duration::from_secs(18);
+        app.detect_tick(read);
+        assert_eq!(app.status[&pane].state, State::Done);
+        app.detect_tick(read + QUIET_DWELL + Duration::from_millis(100));
         assert_eq!(app.status[&pane].state, State::Idle);
         // Completion arriving while already focused is read immediately too.
         engine
@@ -11601,8 +11622,66 @@ mod tests {
             .unwrap()
             .advance(b"\x1b]7501;state=done:app=pi\x07");
         app.handle_event(AppEvent::PtyData(pane));
-        app.detect_tick(now + Duration::from_secs(14));
+        app.detect_tick(now + Duration::from_secs(22));
         assert_eq!(app.status[&pane].state, State::Idle);
+    }
+
+    #[test]
+    fn osc7501_quiet_dwell_cancels_when_active_state_returns() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-quiet-dwell");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        app.split_pane(pane, crate::layout::Axis::Col, true)
+            .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        let start = Instant::now();
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=working\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(start);
+        assert_eq!(app.status[&pane].state, State::Working);
+        engine.lock().unwrap().advance(b"\x1b]7501;state=done\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let quiet = start + Duration::from_millis(200);
+        app.detect_tick(quiet);
+        assert_eq!(app.status[&pane].state, State::Working);
+        assert_eq!(app.status[&pane].candidate, State::Done);
+        assert!(app.next_runtime_deadline(quiet, false).is_some());
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=working\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(quiet + Duration::from_millis(500));
+        app.detect_tick(quiet + QUIET_DWELL + Duration::from_millis(100));
+        assert_eq!(app.status[&pane].state, State::Working);
+        engine.lock().unwrap().advance(b"\x1b]7501;state=done\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let next = quiet + QUIET_DWELL + Duration::from_millis(300);
+        app.detect_tick(next);
+        app.detect_tick(next + QUIET_DWELL + Duration::from_millis(100));
+        assert_eq!(app.status[&pane].state, State::Done);
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(next + QUIET_DWELL + Duration::from_millis(300));
+        assert_eq!(app.status[&pane].state, State::Blocked);
     }
 
     #[test]
