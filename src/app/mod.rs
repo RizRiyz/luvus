@@ -11540,6 +11540,72 @@ mod tests {
     }
 
     #[test]
+    fn osc7501_done_uses_the_existing_focus_read_behavior() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-done-read");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let other = app
+            .split_pane(pane, crate::layout::Axis::Col, true)
+            .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=done:app=pi\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let now = Instant::now();
+        app.detect_tick(now);
+        assert_eq!(app.status[&pane].state, State::Done);
+        // Focus wakes detection even after all ordinary dwell/activity is over.
+        app.layout_mut().focus = pane;
+        assert!(app.needs_fast_runtime_tick(now + Duration::from_secs(10)));
+        app.detect_tick(now + Duration::from_secs(10));
+        assert_eq!(app.status[&pane].state, State::Idle);
+        assert_eq!(
+            app.agent_explanation(pane)["program_status"][0]["state"],
+            "done"
+        );
+        app.layout_mut().focus = other;
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=idle:id=worker\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_secs(11));
+        assert_eq!(app.status[&pane].state, State::Idle);
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=done:app=pi\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_secs(12));
+        assert_eq!(app.status[&pane].state, State::Done);
+        app.layout_mut().focus = pane;
+        app.detect_tick(now + Duration::from_secs(13));
+        assert_eq!(app.status[&pane].state, State::Idle);
+        // Completion arriving while already focused is read immediately too.
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=done:app=pi\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_secs(14));
+        assert_eq!(app.status[&pane].state, State::Idle);
+    }
+
+    #[test]
     fn pane_osc52_store_queues_pending_clipboard() {
         let _env = crate::persist::test_env("pane-osc52-clipboard");
         let (tx, _rx) = std::sync::mpsc::channel();

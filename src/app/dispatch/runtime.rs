@@ -78,6 +78,13 @@ impl App {
 
     fn detection_work_pending(&self, now: Instant) -> bool {
         !self.detection_dirty.is_empty()
+            || self
+                .workspaces
+                .get(self.active_ws)
+                .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+                .and_then(|tab| self.status.get(&tab.layout.focus))
+                .and_then(|status| status.program_status.as_ref())
+                .is_some_and(|store| store.has_unread_done())
             || self.status.values().any(|status| {
                 status.force_detect
                     || status.candidate != status.state
@@ -535,6 +542,11 @@ impl App {
                     || self.status.get(id).is_some_and(|status| {
                         status.force_detect
                             || status.candidate != status.state
+                            || (*id == focus
+                                && status
+                                    .program_status
+                                    .as_ref()
+                                    .is_some_and(|store| store.has_unread_done()))
                             || status.agent_report.is_some()
                             || status.last_resize.is_some_and(|t| now >= t + RESIZE_GRACE)
                             || (status.state == State::Working
@@ -593,6 +605,15 @@ impl App {
                 .status
                 .get(&id)
                 .and_then(|status| status.agent_report.clone());
+            if id == focus {
+                if let Some(store) = self
+                    .status
+                    .get_mut(&id)
+                    .and_then(|status| status.program_status.as_mut())
+                {
+                    store.acknowledge_done();
+                }
+            }
             let program_status = self
                 .status
                 .get(&id)

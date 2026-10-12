@@ -74,6 +74,9 @@ pub struct ProgramStatusRecord {
     pub title: Option<String>,
     pub message: Option<String>,
     updated_at: Instant,
+    // App-local presentation acknowledgement. The VT copy stays unacknowledged
+    // so a raw record is never changed by display-client focus.
+    done_read: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -88,6 +91,33 @@ impl ProgramStatusStore {
 
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// Carry acknowledgement across snapshots only for the exact same report.
+    pub(crate) fn preserve_done_reads(&mut self, previous: &Self) {
+        for (id, record) in &mut self.records {
+            record.done_read = previous
+                .records
+                .get(id)
+                .is_some_and(|old| old.done_read && old.updated_at == record.updated_at);
+        }
+    }
+
+    pub(crate) fn has_unread_done(&self) -> bool {
+        self.records
+            .values()
+            .any(|record| record.state == ProgramState::Done && !record.done_read)
+    }
+
+    pub(crate) fn acknowledge_done(&mut self) -> bool {
+        let mut changed = false;
+        for record in self.records.values_mut() {
+            if record.state == ProgramState::Done && !record.done_read {
+                record.done_read = true;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn clear_transient(&mut self) {
@@ -136,10 +166,12 @@ impl ProgramStatusStore {
                 title: report.title,
                 message: report.message,
                 updated_at: Instant::now(),
+                done_read: false,
             },
         );
     }
 
+    #[cfg(test)]
     pub fn effective(&self) -> Option<&ProgramStatusRecord> {
         self.records.values().max_by_key(|record| {
             (
@@ -151,7 +183,14 @@ impl ProgramStatusStore {
     }
 
     pub fn effective_projection(&self) -> Option<(State, Option<&str>, Option<&str>)> {
-        let record = self.effective()?;
+        let record = self.records.values().max_by_key(|record| {
+            let priority = if record.state == ProgramState::Done && record.done_read {
+                ProgramState::Idle.priority()
+            } else {
+                record.state.priority()
+            };
+            (priority, record.updated_at, record.id.as_str())
+        })?;
         let app = record.app.as_deref().or_else(|| {
             let mut parent = record.id.as_str();
             while let Some((prefix, _)) = parent.rsplit_once('/') {
@@ -169,7 +208,12 @@ impl ProgramStatusStore {
             }
             None
         });
-        Some((record.state.projected(), app, record.message.as_deref()))
+        let state = if record.state == ProgramState::Done && record.done_read {
+            State::Idle
+        } else {
+            record.state.projected()
+        };
+        Some((state, app, record.message.as_deref()))
     }
 }
 
@@ -486,6 +530,42 @@ mod tests {
         assert_eq!(report.state, Some(ProgramState::Idle));
         assert_eq!(report.progress, None);
         assert_eq!(report.app, None);
+    }
+
+    #[test]
+    fn read_done_is_presentation_only_and_new_reports_rearm_it() {
+        let mut store = ProgramStatusStore::default();
+        store.apply(parse_report(b"state=done:id=one").unwrap());
+        assert!(store.has_unread_done());
+        assert_eq!(
+            store.effective_projection().unwrap().0,
+            crate::ui::theme::State::Done
+        );
+        assert!(store.acknowledge_done());
+        assert_eq!(
+            store.effective_projection().unwrap().0,
+            crate::ui::theme::State::Idle
+        );
+        assert_eq!(store.records().next().unwrap().state, ProgramState::Done);
+        // A fresh VT snapshot of the same report must not resurrect unread.
+        let mut snapshot = store.clone();
+        snapshot.records.get_mut("one").unwrap().done_read = false;
+        snapshot.preserve_done_reads(&store);
+        assert!(!snapshot.has_unread_done());
+        snapshot.apply(parse_report(b"state=working:id=two").unwrap());
+        assert_eq!(
+            snapshot.effective_projection().unwrap().0,
+            crate::ui::theme::State::Working
+        );
+        snapshot.apply(parse_report(b"state=blocked:id=three").unwrap());
+        snapshot.acknowledge_done();
+        assert_eq!(
+            snapshot.effective_projection().unwrap().0,
+            crate::ui::theme::State::Blocked
+        );
+        snapshot.apply(parse_report(b"state=done:id=one").unwrap());
+        snapshot.preserve_done_reads(&store);
+        assert!(snapshot.has_unread_done());
     }
 
     #[test]

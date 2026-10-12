@@ -135,6 +135,15 @@ metadata. A shell without OSC 133 prompt markers cannot signal the end of an
 arbitrary child command; explicit reports/clears remain necessary in that case.
 No heartbeat or new process polling is added.
 
+Protocol `done` follows the existing focus/read behavior: a completion in an
+unfocused pane shows `done`; focusing that pane acknowledges it at the next
+state detection and shows `idle`, without a timer. Completions in an already
+focused pane are read immediately. Acknowledgement does not modify the raw
+record returned by `agent.explain.program_status`. A new completion report
+re-arms the unread indicator; unrelated record updates do not. Active child
+records still determine the displayed state. This does not dismiss `blocked`
+or `error` reports.
+
 The existing four-state Luvus presentation maps protocol `error` to `done`;
 `agent.explain.program_status` preserves the original `error` state. Consumers
 that need to distinguish failed results should inspect those records rather
