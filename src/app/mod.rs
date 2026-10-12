@@ -1971,6 +1971,24 @@ pub struct PaneStatus {
 }
 
 impl PaneStatus {
+    fn sync_program_status(
+        &mut self,
+        mut store: crate::terminal::program_status::ProgramStatusStore,
+        manifests: &crate::detect::Manifests,
+    ) {
+        if let Some(previous) = self.program_status.as_ref() {
+            store.preserve_done_reads(previous);
+        }
+        self.program_status = (!store.is_empty()).then_some(store);
+        if self.program_status.is_none() {
+            self.program_status_agent = None;
+        } else if self.identity_source == "process_tree" && manifests.is_agent(&self.agent) {
+            self.program_status_agent = Some(self.agent.clone());
+        }
+        // Detection owns published identity/state and transition side effects.
+        self.force_detect = true;
+    }
+
     fn new(agent: String) -> Self {
         PaneStatus {
             state: State::Idle,
@@ -5184,17 +5202,20 @@ impl App {
     /// owe one more render for the tail of a burst. Non-short-circuiting `|`:
     /// every flag must be consumed.
     pub fn rearm_pty_notify(&mut self) -> bool {
-        let pending = self
-            .panes
-            .iter()
-            .filter_map(|(id, pane)| pane.take_data_pending().then_some(*id))
-            .collect::<Vec<_>>();
-        for id in &pending {
-            if let Some(store) = self.panes[id].take_pending_program_status() {
-                self.sync_program_status(*id, store);
+        let mut changed = false;
+        for (id, pane) in &self.panes {
+            if !pane.take_data_pending() {
+                continue;
+            }
+            changed = true;
+            if let Some(store) = pane.take_pending_program_status() {
+                if let Some(status) = self.status.get_mut(id) {
+                    status.sync_program_status(store, &self.manifests);
+                    self.detection_dirty.insert(*id);
+                }
             }
         }
-        !pending.is_empty()
+        changed
     }
 
     /// Re-arm PTY notifications while distinguishing output visible in the
@@ -8818,7 +8839,7 @@ impl App {
             if let Some(pane) = self.panes.get(id) {
                 pane.program_status_process_exited();
                 if let Some(store) = pane.take_pending_program_status() {
-                    st.program_status = (!store.is_empty()).then_some(store);
+                    st.sync_program_status(store, &self.manifests);
                 }
             }
             st.force_detect = true;
@@ -11409,6 +11430,17 @@ mod tests {
         assert_eq!(app.status[&pane].state_source, "program_status");
         assert_eq!(app.status[&pane].state, State::Blocked);
         assert_eq!(app.status[&pane].blocked_hint.as_deref(), Some("Approve?"));
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked:msg=4oCuQUJD\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_millis(100));
+        assert_eq!(app.status[&pane].blocked_hint.as_deref(), Some("ABC"));
+        assert_eq!(
+            app.agent_explanation(pane)["program_status"][0]["message"],
+            "\u{202e}ABC"
+        );
         // A changed message while still blocked must refresh without scraping.
         engine
             .lock()
@@ -11472,8 +11504,9 @@ mod tests {
             2
         );
         // Ordinary detection between confirmations changes the displayed name
-        // to the shell but must not forget the original producer identity.
-        app.detect_tick(Instant::now());
+        // to the shell but must not forget producer identity or completion reads.
+        let now = Instant::now();
+        app.detect_tick(now);
         app.apply_proc_scan(Some(HashMap::from([(root, vec![shell])])));
         assert_eq!(
             app.status[&pane]
@@ -11484,6 +11517,18 @@ mod tests {
                 .count(),
             1
         );
+        assert!(!app.status[&pane]
+            .program_status
+            .as_ref()
+            .unwrap()
+            .has_unread_done());
+        let other = app
+            .split_pane(pane, crate::layout::Axis::Col, true)
+            .unwrap();
+        assert_eq!(app.layout().focus, other);
+        app.detect_tick(now + Duration::from_millis(200));
+        app.detect_tick(now + QUIET_DWELL + Duration::from_millis(300));
+        assert_eq!(app.status[&pane].state, State::Idle);
         // A later terminal snapshot must not resurrect the exited agent state.
         engine
             .lock()

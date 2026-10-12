@@ -125,7 +125,10 @@ unavailable, bounded title/screen identity detection remains available.
 Agent-specific input-composer checks remain independent: a protocol `idle` or
 `done` does not prove that the program can receive a prompt, and a fresh
 protocol `blocked` report rejects submission even before the normal detection
-pass. Clearing all records restores the heuristic state path.
+pass. Clearing all records restores the heuristic state path. Messages shown
+outside the terminal grid (such as blocked hints in Mission Control) disarm
+invisible/directional formatting; `agent.explain.program_status` retains the
+raw decoded data.
 
 Reports support `idle`, `working`, `blocked`, `done`, `error`, and `clear`, with
 nested `id` records, optional progress, titles, and messages. Malformed or

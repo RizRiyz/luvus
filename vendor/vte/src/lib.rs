@@ -440,7 +440,12 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     fn advance_osc_string<P: Perform>(&mut self, performer: &mut P, byte: u8) {
         self.osc_wire_len = self.osc_wire_len.saturating_add(1);
         let program_status = self.is_program_status();
-        if program_status && self.osc_wire_len > 4096 {
+        // A missing/late separator must not turn a malformed 7501 candidate
+        // into an unbounded generic OSC allocation. Keep other OSC behavior,
+        // especially large clipboard payloads, unchanged.
+        let program_status_candidate = program_status
+            || (self.osc_num_params == 0 && self.osc_raw.starts_with(b"7501"));
+        if program_status_candidate && self.osc_wire_len > 4096 {
             self.osc_overflowed = true;
         }
         match byte {
@@ -615,7 +620,10 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 
     fn osc_end<P: Perform>(&mut self, performer: &mut P, byte: u8) {
         let program_status = self.is_program_status();
-        if !(program_status && (self.osc_overflowed || self.osc_invalid || self.osc_wire_len > 4096)) {
+        let program_status_candidate = program_status
+            || (self.osc_num_params == 0 && self.osc_raw.starts_with(b"7501"));
+        if !(program_status_candidate && self.osc_overflowed)
+            && !(program_status && (self.osc_invalid || self.osc_wire_len > 4096)) {
             self.action_osc_put_param();
             self.osc_dispatch(performer, byte);
         }
@@ -1161,6 +1169,22 @@ mod tests {
             },
             _ => panic!("expected osc sequence"),
         }
+    }
+
+    #[test]
+    fn malformed_program_status_prefix_has_bounded_storage() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+        parser.advance(&mut dispatcher, b"\x1b]7501");
+        for _ in 0..16 {
+            parser.advance(&mut dispatcher, &[b'x'; 4096]);
+        }
+        assert!(parser.osc_raw.len() <= 4096);
+        assert!(parser.osc_overflowed);
+        parser.advance(&mut dispatcher, b";state=done\x07");
+        assert!(dispatcher.dispatched.is_empty());
+        parser.advance(&mut dispatcher, b"\x1b]7501;state=idle\x07");
+        assert!(matches!(&dispatcher.dispatched[..], [Sequence::Osc(_, true)]));
     }
 
     #[test]

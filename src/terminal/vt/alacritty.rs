@@ -3391,6 +3391,24 @@ mod tests {
     }
 
     #[test]
+    fn osc7501_non_utf8_ids_cannot_clear_root() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));
+        engine.advance(b"\x1b]7501;state=working\x07");
+        engine.take_pending_program_status();
+        engine.advance(b"\x1b]7501;state=clear:id=\xff\x07");
+        assert!(engine.take_pending_program_status().is_none());
+        let mut bytes = b"\x1b]7501;state=done:msg=".to_vec();
+        bytes.extend(std::iter::repeat_n(0xff, 2733));
+        bytes.push(7);
+        engine.advance(&bytes);
+        assert!(engine.take_pending_program_status().is_none());
+        engine.advance(b"\x1b]7501;state=idle:id=child\x07");
+        let store = engine.take_pending_program_status().unwrap();
+        assert_eq!(store.records().count(), 2);
+    }
+
+    #[test]
     fn osc7501_reset_prompt_alternate_and_exit_lifetimes() {
         use crate::terminal::program_status::ProgramState;
         let (tx, _rx) = std::sync::mpsc::channel();

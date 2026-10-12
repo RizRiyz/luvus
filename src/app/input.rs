@@ -552,23 +552,12 @@ impl App {
     pub(crate) fn sync_program_status(
         &mut self,
         id: PaneId,
-        mut store: crate::terminal::program_status::ProgramStatusStore,
+        store: crate::terminal::program_status::ProgramStatusStore,
     ) {
         let Some(status) = self.status.get_mut(&id) else {
             return;
         };
-        if let Some(previous) = status.program_status.as_ref() {
-            store.preserve_done_reads(previous);
-        }
-        status.program_status = (!store.is_empty()).then_some(store);
-        if status.program_status.is_none() {
-            status.program_status_agent = None;
-        } else if status.identity_source == "process_tree" && self.manifests.is_agent(&status.agent)
-        {
-            status.program_status_agent = Some(status.agent.clone());
-        }
-        // Detection owns published identity/state and transition side effects.
-        status.force_detect = true;
+        status.sync_program_status(store, &self.manifests);
         self.detection_dirty.insert(id);
     }
 

@@ -244,11 +244,8 @@ pub fn parse_report(body: &[u8]) -> Option<ProgramStatusReport> {
         let Ok(key) = std::str::from_utf8(&pair[..separator]) else {
             continue;
         };
-        let Ok(value) = std::str::from_utf8(&pair[separator + 1..]) else {
-            continue;
-        };
         let key = key.trim_matches(|character: char| character.is_ascii_whitespace());
-        let value = value.trim_matches(|character: char| character.is_ascii_whitespace());
+        let value_bytes = pair[separator + 1..].trim_ascii();
         if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_lowercase()) {
             continue;
         }
@@ -258,12 +255,19 @@ pub fn parse_report(body: &[u8]) -> Option<ProgramStatusReport> {
         // Validate every occurrence before applying last-value-wins, so an
         // oversized or invalid earlier value cannot be hidden by a duplicate.
         match key {
-            "app" if value.len() > MAX_APP => return None,
-            "id" if value.len() > MAX_ID => return None,
-            "msg" if value.len() > MAX_MSG_ENCODED => return None,
-            "title" if value.len() > MAX_TITLE_ENCODED => return None,
+            "app" if value_bytes.len() > MAX_APP => return None,
+            "id" if value_bytes.len() > MAX_ID => return None,
+            "msg" if value_bytes.len() > MAX_MSG_ENCODED => return None,
+            "title" if value_bytes.len() > MAX_TITLE_ENCODED => return None,
             _ => {}
         }
+        let Ok(value) = std::str::from_utf8(value_bytes) else {
+            // An invalid id cannot be repaired into an absent/root id.
+            if key == "id" {
+                return None;
+            }
+            continue;
+        };
         if !value.bytes().all(is_value_byte) {
             // Invalid ids must never accidentally address the root record.
             if key == "id" {
@@ -388,6 +392,18 @@ fn decode_text(
         return None;
     }
     Some(Some(text))
+}
+
+/// Plain display text for status shown outside the terminal grid. Raw records
+/// remain unchanged for API consumers; directional/invisible formatting must
+/// not spoof Mission Control or create extra display rows.
+pub(crate) fn display_message(text: &str) -> String {
+    text.chars()
+        .filter(|character| {
+            !matches!(*character, '\u{00ad}' | '\u{061c}' | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+        })
+        .collect()
 }
 
 fn decode_base64(input: &[u8]) -> Option<Vec<u8>> {
@@ -566,6 +582,29 @@ mod tests {
         snapshot.apply(parse_report(b"state=done:id=one").unwrap());
         snapshot.preserve_done_reads(&store);
         assert!(snapshot.has_unread_done());
+    }
+
+    #[test]
+    fn invalid_utf8_cannot_bypass_ids_or_byte_limits() {
+        assert!(parse_report(b"state=clear:id=\xff").is_none());
+        assert!(parse_report(b"state=done:id=\xff:id=valid").is_none());
+        for (key, size) in [("app", 33), ("id", 129), ("msg", 2733), ("title", 257)] {
+            let mut body = format!("state=done:{key}=").into_bytes();
+            body.extend(std::iter::repeat_n(0xff, size));
+            assert!(parse_report(&body).is_none(), "{key}");
+        }
+        // Unknown malformed pairs remain skippable, not blanket failures.
+        assert!(parse_report(b"state=idle:x=\xff").is_some());
+    }
+
+    #[test]
+    fn outside_grid_messages_disarm_formatting_without_changing_records() {
+        let text = "\u{202e}ABC\u{2066}\u{200b}\u{2028} text";
+        assert_eq!(super::display_message(text), "ABC text");
+        assert_eq!(
+            super::decode_text(Some("4oCuQUJD"), 2732, 2048).unwrap(),
+            Some("\u{202e}ABC".to_string())
+        );
     }
 
     #[test]

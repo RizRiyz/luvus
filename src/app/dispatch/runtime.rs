@@ -624,7 +624,8 @@ impl App {
                 });
             let program_message = program_status
                 .as_ref()
-                .and_then(|(_, _, message)| message.clone());
+                .and_then(|(_, _, message)| message.as_deref())
+                .map(crate::terminal::program_status::display_message);
             let known_agent = self
                 .status
                 .get(&id)
