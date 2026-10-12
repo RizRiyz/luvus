@@ -151,6 +151,7 @@ impl ProgramStatusStore {
     /// Confirmed producer exit only ends reports at/before the first absent
     /// process observation. Later reports can belong to its replacement.
     pub(crate) fn clear_transient_through(&mut self, boundary: u64) {
+        self.mark_left_behind_through(boundary);
         self.records.retain(|_, r| {
             r.update_sequence > boundary
                 || !matches!(r.state, ProgramState::Working | ProgramState::Blocked)
@@ -175,11 +176,11 @@ impl ProgramStatusStore {
             .max()
     }
 
-    pub fn clear_transient(&mut self) {
+    fn mark_left_behind_through(&mut self, boundary: u64) {
         let apps: Vec<_> = self
             .records
             .values()
-            .filter(|r| r.state.is_result())
+            .filter(|r| r.state.is_result() && r.update_sequence <= boundary)
             .map(|r| (r.id.clone(), self.inherited_app(r).map(str::to_string)))
             .collect();
         for (id, app) in apps {
@@ -187,6 +188,10 @@ impl ProgramStatusStore {
             record.left_behind = true;
             record.shown_app = app;
         }
+    }
+
+    pub fn clear_transient(&mut self) {
+        self.mark_left_behind_through(self.last_sequence);
         self.records.retain(|_, record| {
             matches!(
                 record.state,
@@ -755,6 +760,29 @@ mod tests {
         store.command_start();
         assert_eq!(store.records().count(), 1);
         assert_eq!(store.records().next().unwrap().id, "fresh");
+    }
+
+    #[test]
+    fn boundary_cleanup_preserves_names_and_marks_only_old_results() {
+        let mut store = ProgramStatusStore::default();
+        store.apply(parse_report(b"state=working:app=build").unwrap());
+        store.apply(parse_report(b"state=done:id=test").unwrap());
+        let boundary = store.revision();
+        store.apply(parse_report(b"state=error:id=replacement:app=codex").unwrap());
+        store.clear_transient_through(boundary);
+        let old = store.records().find(|r| r.id == "test").unwrap();
+        assert_eq!(store.inherited_app(old), Some("build"));
+        assert!(old.left_behind);
+        assert!(
+            !store
+                .records()
+                .find(|r| r.id == "replacement")
+                .unwrap()
+                .left_behind
+        );
+        store.command_start();
+        assert_eq!(store.records().count(), 1);
+        assert_eq!(store.records().next().unwrap().id, "replacement");
     }
 
     #[test]
