@@ -5640,7 +5640,7 @@ fn encode_key(
     encode_key_with_modes(key, newline, app_cursor, protocol)
 }
 
-fn encode_key_with_modes(
+pub(super) fn encode_key_with_modes(
     key: &KeyEvent,
     newline: &[u8],
     app_cursor: bool,
