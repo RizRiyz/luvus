@@ -44,3 +44,4 @@
 {"id":"bad-worktree-remove-force","method":"worktree.remove","params":{"path":"/workspace/topic","force":"yes"}}
 {"id":"transpose-extra","method":"pane.transpose","params":{"pane":"7","all":true}}
 {"id":"transpose-bool","method":"pane.transpose","params":{"pane":true}}
+{"id":"transpose-out-of-range-pane","method":"pane.transpose","params":{"pane":"4294967296"}}

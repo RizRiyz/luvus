@@ -18696,13 +18696,20 @@ fi
         );
         app.close_folder_picker();
 
-        // The `?` cheat-sheet body (command labels) is translated.
+        // The cheat sheet grows with the command registry. Verify the translated
+        // close label on whichever scroll page contains it, not just page one.
         app.help_open = true;
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
-        assert!(
-            text(&term).contains("Cerrar panel"),
-            "cheat-sheet command labels translated"
-        );
+        let mut translated = text(&term).contains("Cerrar panel");
+        for scroll in 1..=app.help_scroll_max {
+            if translated {
+                break;
+            }
+            app.help_scroll = scroll;
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            translated = text(&term).contains("Cerrar panel");
+        }
+        assert!(translated, "cheat-sheet command labels translated");
     }
 
     #[test]
