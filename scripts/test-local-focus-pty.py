@@ -78,13 +78,23 @@ def main():
                 assert b"WORKSPACES" in output, "focus recovery did not fully repaint"
 
                 # Exercise the reported feature path with a real terminal input
-                # stream, then focus recovery again. Keep draining the PTY.
-                for chord in (b"\x00v", b"\x00T", b"\x00T", b"\x00s", b"\x00T", b"\x1b[I"):
+                # stream, then focus recovery again. Wait for each resulting frame
+                # instead of sleeping for a fixed duration on loaded CI hosts.
+                for chord in (b"\x00v", b"\x00T", b"\x00T", b"\x00s", b"\x00T"):
+                    before = len(output)
                     os.write(master, chord)
-                    deadline = time.monotonic() + 0.15
-                    while time.monotonic() < deadline:
+                    deadline = time.monotonic() + 3
+                    while len(output) == before and time.monotonic() < deadline:
                         pump()
                         assert_alive()
+                    assert len(output) > before, "chord produced no observable redraw"
+                os.write(master, b"\x1b[I")
+                deadline = time.monotonic() + 3
+                before = len(output)
+                while len(output) == before and time.monotonic() < deadline:
+                    pump()
+                    assert_alive()
+                assert len(output) > before, "focus recovery produced no observable redraw"
                 assert b"\x1b[6n" not in output, "split/transpose queried the host cursor"
 
                 os.write(master, b"\x00q")

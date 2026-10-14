@@ -2014,7 +2014,6 @@ fn handle_conn(
             | "pane.neighbor"
             | "pane.edges"
             | "pane.swap"
-            | "pane.transpose"
             | "pane.focus_direction"
             | "pane.resize"
             | "pane.zoom"
