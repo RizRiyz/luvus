@@ -1685,7 +1685,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
         // A forced redraw (resize / regained focus) wipes the terminal so the next
         // draw repaints every cell, healing damage ratatui's own diff can't see.
         if std::mem::take(&mut app.force_redraw) {
-            terminal.clear()?;
+            clear_local_fullscreen(terminal)?;
         }
         // Don't touch the cursor here — ratatui shows + positions it once per
         // draw. A per-frame `Hide` flickered it on any activity.
@@ -1699,6 +1699,20 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     let detached = app.detach_requested;
     app.finish_session_persistence();
     Ok(detached)
+}
+
+/// Invalidate the fullscreen display without a synchronous cursor query.
+/// `Terminal::clear` queries the cursor, competing with the already-running
+/// input thread for the reply. The next draw owns cursor positioning anyway.
+fn clear_local_fullscreen<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+) -> std::result::Result<(), B::Error> {
+    terminal.backend_mut().clear()?;
+    // Reset both buffers while keeping the current-buffer index unchanged.
+    // Otherwise an unchanged cell could be skipped after the physical clear.
+    terminal.swap_buffers();
+    terminal.swap_buffers();
+    Ok(())
 }
 
 fn flush_local_commander_clipboard(app: &mut App) {
@@ -1786,6 +1800,20 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;
+
+    #[test]
+    fn local_fullscreen_clear_repaints_unchanged_cells() {
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        let draw = |frame: &mut ratatui::Frame| {
+            frame.render_widget(ratatui::widgets::Paragraph::new("unchanged"), frame.area());
+        };
+        terminal.draw(draw).unwrap();
+        let expected = terminal.backend().buffer().clone();
+        clear_local_fullscreen(&mut terminal).unwrap();
+        assert_ne!(terminal.backend().buffer(), &expected);
+        terminal.draw(draw).unwrap();
+        assert_eq!(terminal.backend().buffer(), &expected);
+    }
 
     #[test]
     fn host_keyboard_protocol_requests_only_crossterm_lossless_flags() {
