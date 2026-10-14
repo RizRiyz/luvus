@@ -17,6 +17,25 @@ env:
   CARGO_HTTP_MULTIPLEXING: "false"
 
 jobs:
+  npm:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            website/package-lock.json
+      - name: Audit web dependencies
+        run: npm --prefix web audit --package-lock-only --ignore-scripts
+      - name: Audit website dependencies
+        run: npm --prefix website audit --package-lock-only --ignore-scripts
+
   test:
     name: fmt · clippy · test
     runs-on: ubuntu-latest
@@ -44,6 +63,11 @@ jobs:
       # RUSTFLAGS, which would also fail on harmless dependency warnings.
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Validate detached server lifecycle
+        run: |
+          cargo build --locked
+          python3 tests/server_detach_pty.py --luvus target/debug/luvus
+          python3 scripts/test-terminal-colors-pty.py --luvus target/debug/luvus
       - name: Validate web client and bridge
         run: |
           cargo build --locked
@@ -51,6 +75,7 @@ jobs:
           npm --prefix web test
           npm --prefix web run test:integration
           LUVUS_BIN="$PWD/target/debug/luvus" npm --prefix web run test:native
+          LUVUS_BIN="$PWD/target/debug/luvus" LUVUS_BROWSER_BIN=/usr/bin/google-chrome npm --prefix web run test:browser-pairing
       - name: Validate terminal backend contract
         run: |
           python3 examples/uhp/terminal/consumer.py --fixtures
@@ -86,6 +111,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
+      - name: Validate detached server lifecycle
+        run: |
+          cargo build --locked
+          python3 tests/server_detach_pty.py --luvus target/debug/luvus
+          python3 scripts/test-terminal-colors-pty.py --luvus target/debug/luvus
       - name: Validate terminal backend contract
         run: |
           python3 examples/uhp/terminal/consumer.py --fixtures
@@ -94,45 +124,6 @@ jobs:
           cargo build --locked
           python3 examples/uhp/terminal/live_conformance.py --luvus target/debug/luvus
           python3 examples/uhp/terminal/failure_conformance.py --luvus target/debug/luvus
-
-  # Native build and portable contract coverage. The full runtime suite still
-  # needs FreeBSD process inspection and PTY lifecycle support; do not advertise
-  # full platform parity or automatic remote provisioning from this job.
-  freebsd:
-    name: freebsd amd64 test
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
-      - name: Build and test on FreeBSD
-        uses: vmactions/freebsd-vm@f0552d3b69211736abd97f02ff3d4674c56b73b1 # v1.5.5
-        with:
-          release: '14.4'
-          arch: x86_64
-          mem: 6144
-          envs: 'CARGO_TERM_COLOR CARGO_NET_RETRY CARGO_HTTP_MULTIPLEXING'
-          copyback: false
-          prepare: |
-            set -eu
-            pkg install -y rust git python3 pkgconf sqlite3
-          run: |
-            set -eu
-            freebsd-version
-            rustc --version
-            cargo --version
-            cargo test --locked --no-run
-            cargo test --locked ipc::protocol::
-            cargo test --locked machine::catalog::
-            cargo test --locked machine::api::
-            cargo test --locked layout::
-            cargo test --locked platform::unix_clipboard::tests
-            cargo build --release --locked
-            ./target/release/luvus --version
-            python3 examples/uhp/terminal/consumer.py --fixtures
-            python3 examples/uhp/terminal/mock_conformance.py
-            python3 examples/uhp/consumer.py
 
   binary-size:
     name: macos binary size

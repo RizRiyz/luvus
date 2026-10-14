@@ -107,19 +107,8 @@ pub(super) fn draw(
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let footer = if let Some(search) = &view.search {
-            if search.editing {
-                format!(" /{}", search.query)
-            } else if search.matches.is_empty() {
-                format!(" /{} · no matches", search.query)
-            } else {
-                format!(
-                    " /{} · {}/{}",
-                    search.query,
-                    search.current + 1,
-                    search.matches.len()
-                )
-            }
+        let footer = if let Some(search) = view.search.as_ref() {
+            super::local_search_footer(search)
         } else {
             format!(
                 " {name} · {} preview · / search · y copy source",
@@ -169,18 +158,17 @@ fn draw_search(f: &mut RenderTarget, body: Rect, view: &DocumentView, theme: &Th
         width: body.width.max(1),
         ascii: false,
     };
-    let Some(layout) = view.layout(key) else {
+    if view.layout(key).is_none() {
         return;
-    };
+    }
     let buffer = f.buffer_mut();
-    for (match_index, (row, byte_column)) in search.matches.iter().enumerate() {
-        if *row < view.scroll || *row >= view.scroll + body.height as usize {
+    for (match_index, search_match) in search.matches.iter().enumerate() {
+        if search_match.row < view.scroll || search_match.row >= view.scroll + body.height as usize
+        {
             continue;
         }
-        let text = layout.rows[*row].plain_text();
-        let start = text[..(*byte_column).min(text.len())].width();
-        let end_byte = (*byte_column + search.query.len()).min(text.len());
-        let width = text[*byte_column..end_byte].width().max(1);
+        let start = search_match.column;
+        let width = search_match.width;
         let background = if match_index == search.current {
             theme.accent
         } else {
@@ -188,7 +176,7 @@ fn draw_search(f: &mut RenderTarget, body: Rect, view: &DocumentView, theme: &Th
         };
         for column in start..start + width {
             let x = body.x.saturating_add(column as u16);
-            let y = body.y + (*row - view.scroll) as u16;
+            let y = body.y + (search_match.row - view.scroll) as u16;
             if x < body.right() {
                 if let Some(cell) = buffer.cell_mut((x, y)) {
                     cell.set_bg(background);

@@ -127,7 +127,9 @@ test("agent title events update the live snapshot without gateway requests", asy
   const bridge = new FakeBridge();
   const session = new LiveSession(bridge);
   let rendered = 0;
+  const titleBatches = [];
   session.addEventListener("snapshot", () => { rendered += 1; });
+  session.addEventListener("titles", (event) => { titleBatches.push(event.detail); });
   await session.start();
 
   bridge.emitEvent("terminal.output_ready");
@@ -143,7 +145,42 @@ test("agent title events update the live snapshot without gateway requests", asy
   assert.equal(session.snapshot.workspaces[0].tabs[0].panes[0].agent_session_title, null);
   assert.equal(bridge.snapshotRequests, 1);
   await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.equal(rendered, 2);
+  assert.equal(rendered, 1, "a title change never rebuilds from a full snapshot");
+  assert.deepEqual(titleBatches, [["1"]], "one batched in-place update names the pane");
+  session.stop();
+});
+
+test("unchanged titles advance the event sequence without redrawing or reconnecting", async () => {
+  const { LiveSession } = await import("../dist/index.js");
+  const bridge = new FakeBridge();
+  let capabilityRequests = 0;
+  const request = bridge.request.bind(bridge);
+  bridge.request = (method, ...rest) => {
+    if (method === "uhp.capabilities") capabilityRequests += 1;
+    return request(method, ...rest);
+  };
+  const session = new LiveSession(bridge);
+  let snapshots = 0;
+  let titleEvents = 0;
+  session.addEventListener("snapshot", () => { snapshots += 1; });
+  session.addEventListener("titles", () => { titleEvents += 1; });
+  await session.start();
+
+  // An agent animating an icon in its terminal title resends the same text.
+  for (let index = 0; index < 50; index += 1) {
+    bridge.emitEvent("agent.title_changed", { pane: "1", title: "Old title" });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(snapshots, 1, "no redraw");
+  assert.equal(titleEvents, 0, "nothing changed");
+  assert.equal(bridge.snapshotRequests, 1, "no snapshot request");
+
+  // The next structural event is in sequence: a refresh, not a resync.
+  bridge.emitEvent("pane.renamed", { pane: "1" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(bridge.snapshotRequests, 2);
+  assert.equal(capabilityRequests, 1, "the stream was never reconnected");
+  assert.equal(session.state, "ready");
   session.stop();
 });
 

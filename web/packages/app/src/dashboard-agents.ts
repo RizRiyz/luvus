@@ -1,0 +1,61 @@
+import type { PaneSnapshot, SessionSnapshot } from "@luvus/uhp-client";
+
+export interface DashboardAgentCard {
+  pane: PaneSnapshot;
+  context: string;
+  title: string;
+  state: string;
+  titleAbsent: boolean;
+  available: boolean;
+}
+
+export function dashboardAgents(snapshot: SessionSnapshot, showShells: boolean): {
+  agentCount: number;
+  workingCount: number;
+  cards: DashboardAgentCard[];
+} {
+  const terminals = snapshot.workspaces.flatMap((workspace, workspaceIndex) =>
+    workspace.tabs.flatMap((tab) => tab.panes
+      .filter((pane) => pane.kind === "terminal")
+      .map((pane) => ({ pane, workspace: displayText(workspace.name, `Workspace ${workspaceIndex + 1}`) }))),
+  );
+  const agents = terminals.filter(({ pane }) => pane.is_agent === true);
+  return {
+    agentCount: agents.length,
+    workingCount: agents.filter(({ pane }) => pane.agent_status === "working").length,
+    cards: (showShells ? terminals : agents).map(({ pane, workspace }) => {
+      const isAgent = pane.is_agent === true;
+      return {
+        pane,
+        context: isAgent
+          ? `${displayText(pane.agent_name, displayText(pane.agent, "Agent"))} · ${workspace}`
+          : `Shell · ${workspace}`,
+        ...agentCardTitle(pane),
+        state: isAgent ? displayText(pane.agent_status, "unknown") : "shell",
+        available: Boolean(pane.terminal_id),
+      };
+    }),
+  };
+}
+
+/** The title an agent card shows, shared by full renders and in-place title updates. */
+export function agentCardTitle(pane: PaneSnapshot): { title: string; titleAbsent: boolean } {
+  const isAgent = pane.is_agent === true;
+  const sessionTitle = displayText(pane.agent_session_title, "");
+  return {
+    title: isAgent ? sessionTitle || "Untitled session" : `Pane ${pane.pane_id}`,
+    titleAbsent: isAgent && !sessionTitle,
+  };
+}
+
+/** Shared status classes keep dashboard and terminal navigation colors aligned. */
+export function paneStateClass(state: string): string {
+  const normalized = state.toLowerCase();
+  return ["working", "blocked", "done", "idle"].includes(normalized) ? normalized : "terminal";
+}
+
+export function displayText(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const text = value.trim();
+  return text && text.toLowerCase() !== "null" ? text : fallback;
+}

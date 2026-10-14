@@ -42,6 +42,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
             recent: sessions::recent,
             latest: sessions::latest,
             list: None,
+            titled: None,
         }),
         resume: |session| format!("copilot --resume={session}\r"),
         fork: None,

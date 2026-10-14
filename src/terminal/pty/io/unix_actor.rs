@@ -274,7 +274,7 @@ fn actor_loop(
             thread::yield_now();
         }
     }
-    let _ = app_tx.send(AppEvent::PtyExit(id));
+    let _ = app_tx.send(AppEvent::PtyIoClosed(id));
 }
 
 fn drain_input(input: &mpsc::Receiver<QueuedInput>, pending: &mut VecDeque<PendingWrite>) {

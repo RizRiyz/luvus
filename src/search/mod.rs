@@ -1,11 +1,13 @@
-//! Shared global-finder domain and dependency-free fuzzy matching (docs/90).
+//! Shared global-finder domain and deterministic fuzzy matching (docs/90).
 //!
 //! App state, rendering, files, and IPC all use these types so ranking and
 //! activation never depend on parsing a displayed label.
 
+mod casefold;
 pub mod federation;
 pub mod files;
 mod fuzzy;
+pub mod local;
 
 pub use fuzzy::{FuzzyField, FuzzyQuery, PreparedText};
 

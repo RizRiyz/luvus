@@ -145,6 +145,14 @@ impl App {
         if let Some(exp) = self.bar.notifications.iter().map(|n| n.expires_at).min() {
             consider(exp, true);
         }
+        if let Some(exp) = self
+            .pending_pty_exits
+            .values()
+            .map(|pending| pending.deadline)
+            .min()
+        {
+            consider(exp, true);
+        }
 
         if self.detection_work_pending(now) {
             consider(self.last_detect_at + DETECTION_INTERVAL, true);
@@ -411,7 +419,8 @@ impl App {
 
     pub(crate) fn detect_tick_with(&mut self, now: Instant, clients_attached: bool) -> bool {
         self.runtime_clients_attached = clients_attached;
-        let repaired_location = self.repair_active_location();
+        let exited = self.tick_pty_exits(now);
+        let repaired_location = self.repair_active_location() || exited;
         self.schedule_config_save(now);
         self.schedule_automation_save(now);
         // No node open (docs/43 §3.3 — the session was closed). Closing the last
@@ -419,23 +428,29 @@ impl App {
         // `layout()` below would index an empty `workspaces`. The server keeps
         // ticking here with no clients attached, so this is a live path, not a
         // theoretical one.
-        if self.workspaces.is_empty() || self.workspaces[self.active_ws].tabs.is_empty() {
-            return repaired_location;
-        }
-        self.schedule_runtime_scans(now, clients_attached);
+        let has_active_workspace =
+            !self.workspaces.is_empty() && !self.workspaces[self.active_ws].tabs.is_empty();
+        let repaired_location = if has_active_workspace {
+            let repaired_location = self.follow_active_file_root() || repaired_location;
+            self.schedule_runtime_scans(now, clients_attached);
+            repaired_location
+        } else {
+            repaired_location
+        };
         // Mission Control usage is demand-driven. Opening/focusing the dashboard,
         // changing scope, or pressing/clicking refresh queues one worker scan;
         // merely retaining a hidden mission tab performs no usage IO.
         self.sync_mission_usage_visibility();
-        if self.mission_usage_requested.is_some() && !self.usage_scan_inflight {
+        if self.mission_usage_requested.is_some() && self.mission_usage_inflight.is_none() {
             let request = self
                 .mission_usage_requested
                 .take()
                 .expect("usage request checked above");
-            self.usage_scan_inflight = true;
-            let targets = self.mission_usage_targets_for(request.scope, request.workspace);
+            self.mission_usage_requested = self.mission_usage_queued.pop_front();
+            self.mission_usage_inflight = Some(request.clone());
+            let workspace = self.mission_usage_workspace(&request);
+            let targets = self.mission_usage_targets_for(request.scope, workspace);
             let scanned = targets.keys().cloned().collect::<Vec<_>>();
-            let scope = request.scope;
             let overrides = self.config.mission_pricing.clone();
             // Previous results let an explicit refresh reuse unchanged transcripts:
             // one stat per idle session, with no read or parse.
@@ -483,13 +498,16 @@ impl App {
                     }
                 }
                 let _ = tx.send(AppEvent::UsageScanned {
-                    scope,
+                    request,
                     scanned,
                     usage,
                     mtimes,
                     report_owned,
                 });
             });
+        }
+        if !has_active_workspace {
+            return repaired_location;
         }
         // The per-pane classification below locks each pane's VT engine + scans its
         // grid; agent state (blocked/working/done) is human-paced, so ~100ms is
@@ -595,15 +613,32 @@ impl App {
                 &self.manifests,
             );
             let probe_arc_studio = running_for_detection.is_empty();
-            let inspect_codex_composer = known_agent.eq_ignore_ascii_case("codex")
-                || self
-                    .manifests
-                    .process_has_agent(running_for_detection, "codex");
-            let (last_generation, force_detect) = self
+            let composer_agent = if detect::prompt_requires_positive_evidence(&known_agent) {
+                Some(known_agent.as_str())
+            } else if self
+                .manifests
+                .process_has_agent(running_for_detection, "codex")
+            {
+                Some("codex")
+            } else if self
+                .manifests
+                .process_has_agent(running_for_detection, "claude")
+            {
+                Some("claude")
+            } else {
+                None
+            };
+            let (last_generation, force_detect, claude_semantic_ready) = self
                 .status
                 .get(&id)
-                .map(|s| (s.last_detect_generation, s.force_detect))
-                .unwrap_or((None, true));
+                .map(|s| {
+                    (
+                        s.last_detect_generation,
+                        s.force_detect,
+                        s.claude_prompt_semantic_ready,
+                    )
+                })
+                .unwrap_or((None, true, false));
             let inspected = if report.is_some() {
                 // An explicit lease is the state authority. Keep the cached
                 // screen untouched and avoid a needless VT lock/extraction.
@@ -619,13 +654,14 @@ impl App {
                                 non_empty_rows,
                                 probe_arc_studio,
                             );
-                            let codex_composer_ready = inspect_codex_composer
-                                .then(|| engine.codex_composer_region().is_some());
+                            let composer_ready = composer_agent.and_then(|agent| {
+                                detect::live_composer_ready(agent, &*engine, claude_semantic_ready)
+                            });
                             Some((
                                 generation,
                                 engine.title().map(Arc::<str>::from),
                                 Arc::<str>::from(text),
-                                codex_composer_ready,
+                                composer_ready,
                             ))
                         } else {
                             None
@@ -638,7 +674,7 @@ impl App {
                 .as_ref()
                 .and_then(|(_, _, _, composer_ready)| *composer_ready);
             if let Some(s) = self.status.get_mut(&id) {
-                if let Some((generation, title, bottom, _)) = inspected {
+                if let Some((generation, title, bottom, composer_ready)) = inspected {
                     if audit_only {
                         self.detection_audit_recoveries =
                             self.detection_audit_recoveries.saturating_add(1);
@@ -647,17 +683,24 @@ impl App {
                     presentation_metadata_changed |= s.detected_title != title;
                     s.detected_title = title;
                     s.detected_bottom = bottom;
+                    s.detected_composer_ready = composer_ready;
                     s.force_detect = false;
                     self.detection_extractions = self.detection_extractions.saturating_add(1);
                 } else {
                     self.detection_skips = self.detection_skips.saturating_add(1);
                 }
             }
-            let (title, bottom) = self
+            let (title, bottom, detected_composer_ready) = self
                 .status
                 .get(&id)
-                .map(|s| (s.detected_title.clone(), s.detected_bottom.clone()))
-                .unwrap_or_else(|| (None, Arc::from("")));
+                .map(|s| {
+                    (
+                        s.detected_title.clone(),
+                        s.detected_bottom.clone(),
+                        s.detected_composer_ready,
+                    )
+                })
+                .unwrap_or_else(|| (None, Arc::from(""), None));
             let base = pane.command.as_str();
             let recent = self
                 .status
@@ -674,7 +717,7 @@ impl App {
             // What this pane is already known to be: the last resolved agent, or
             // the one a hook/disk-discovery bound to it. Keeps identity stable
             // across frames where the agent's UI doesn't show its own name.
-            let known = known_agent;
+            let known = known_agent.as_str();
             // Ground truth for identity, when the last scan could see this pane.
             let running = self.running_for_detection(id);
             let det = match report.as_ref() {
@@ -683,25 +726,27 @@ impl App {
                     agent: report.agent.clone(),
                     prompt_evidence: if report.state == State::Blocked {
                         detect::PromptEvidence::Blocked
-                    } else if report.agent.eq_ignore_ascii_case("codex") {
-                        detect::PromptEvidence::Unknown
                     } else {
-                        detect::PromptEvidence::Ready
+                        detect::PromptEvidence::Unknown
                     },
                     identity_source: "integration_report",
                     state_source: "integration_report",
                     rule_priority: None,
                     rule_region: None,
                 },
-                None => detect::classify(
+                None => detect::classify_with_composer(
                     title.as_deref(),
                     &bottom,
                     recent,
                     recent_input,
                     base,
-                    &known,
+                    known,
                     running,
                     &self.manifests,
+                    // Only Claude's own probe can vouch for Claude's screen.
+                    composer_agent
+                        .filter(|agent| agent.eq_ignore_ascii_case("claude"))
+                        .and(detected_composer_ready),
                 ),
             };
 
@@ -710,17 +755,6 @@ impl App {
                 s.state_source = det.state_source;
                 s.rule_priority = det.rule_priority;
                 s.rule_region = det.rule_region;
-                s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
-                    detect::PromptEvidence::Blocked
-                } else if det.agent.eq_ignore_ascii_case("codex") {
-                    match inspected_composer_ready {
-                        Some(true) => detect::PromptEvidence::Ready,
-                        Some(false) => detect::PromptEvidence::Unknown,
-                        None => s.prompt_evidence,
-                    }
-                } else {
-                    det.prompt_evidence
-                };
                 let focused = id == focus;
                 if focused {
                     s.seen = true;
@@ -738,6 +772,11 @@ impl App {
                 if s.last_resize
                     .is_some_and(|t| now.duration_since(t) < RESIZE_GRACE)
                 {
+                    s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
+                        detect::PromptEvidence::Blocked
+                    } else {
+                        detect::PromptEvidence::Unknown
+                    };
                     continue;
                 }
                 s.last_resize = None;
@@ -768,6 +807,27 @@ impl App {
                     || s.agent_session.is_some()
                     || s.agent_report.is_some();
                 s.agent = detected;
+                if agent_changed && !s.agent.eq_ignore_ascii_case("claude") {
+                    s.claude_prompt_semantic_ready = false;
+                }
+                let composer_ready = composer_agent
+                    .filter(|agent| agent.eq_ignore_ascii_case(&s.agent))
+                    .and(inspected_composer_ready);
+                s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
+                    detect::PromptEvidence::Blocked
+                } else if detect::prompt_requires_positive_evidence(&s.agent) {
+                    match composer_ready {
+                        Some(true) => detect::PromptEvidence::Ready,
+                        Some(false) => detect::PromptEvidence::Unknown,
+                        None if agent_changed => {
+                            s.force_detect = true;
+                            detect::PromptEvidence::Unknown
+                        }
+                        None => s.prompt_evidence,
+                    }
+                } else {
+                    det.prompt_evidence
+                };
                 if agent_changed {
                     log_agent_identity(id, &s.agent, s.identity_source);
                     visible_identity_changed |= was_visible_agent || is_visible_agent;

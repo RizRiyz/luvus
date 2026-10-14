@@ -30,6 +30,16 @@ pub(crate) struct Commander {
     pub(crate) read_scroll: usize,
     /// Picker selection is independent of the typed slash name while browsing.
     pub(crate) slash_selection: Option<usize>,
+    /// Only refreshed on open or module-registry mutation, never by painting.
+    pub(crate) module_commands: Vec<super::ModuleCommandSpec>,
+    pub(crate) module_selection: Option<usize>,
+    pub(crate) pending_module_confirmation: Option<super::modules::ModuleInvocation>,
+    /// Commander-started module actions still running, as `(log id, label)`.
+    /// A list, so starting another action never forgets an earlier one.
+    pub(crate) running_modules: Vec<(u64, String)>,
+    /// Results of actions that finished while a confirmation prompt owned the
+    /// footer. The renderer shows them once the prompt is gone, never over it.
+    pub(crate) held_receipts: Vec<String>,
     /// A Tab-selected target or field choice awaits Space/Enter confirmation.
     pub(crate) pending_completion: bool,
     /// UTC identity of a Tab-suggested one-time schedule, until that value is edited.
@@ -138,7 +148,39 @@ impl Commander {
         true
     }
 
+    /// A confirmation prompt currently owns the footer and Enter will act on it.
+    pub(crate) fn confirming(&self) -> bool {
+        self.pending_module_confirmation.is_some() || self.pending_working_confirmation.is_some()
+    }
+
+    /// Keep a result that arrived under a confirmation prompt. Bounded: only the
+    /// most recent few are kept here, and every result stays in the module log.
+    pub(crate) fn hold_receipt(&mut self, receipt: String) {
+        const HELD_LIMIT: usize = 3;
+        self.held_receipts.push(receipt);
+        if self.held_receipts.len() > HELD_LIMIT {
+            self.held_receipts.remove(0);
+        }
+    }
+
+    /// Held results as one footer line, oldest first.
+    pub(crate) fn held_summary(&self) -> Option<String> {
+        (!self.held_receipts.is_empty()).then(|| self.held_receipts.join(" · "))
+    }
+
+    /// Consume the held results so they can lead a new receipt.
+    pub(crate) fn take_held(&mut self) -> Option<String> {
+        let summary = self.held_summary();
+        self.held_receipts.clear();
+        summary
+    }
+
     pub(crate) fn clear_receipt(&mut self) {
+        // The clear that dismisses a prompt keeps the held results, so they can
+        // be shown in its place. Any later clear means they have been on screen.
+        if !self.confirming() {
+            self.held_receipts.clear();
+        }
         self.pending_completion = false;
         if self
             .once_schedule_suggestion
@@ -153,6 +195,8 @@ impl Commander {
         self.read_output = None;
         self.read_scroll = 0;
         self.slash_selection = None;
+        self.module_selection = None;
+        self.pending_module_confirmation = None;
     }
 
     pub(crate) fn insert(&mut self, input: &str) -> bool {

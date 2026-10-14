@@ -305,6 +305,19 @@ pub struct RetainedRowLayout {
     has_text: bool,
 }
 
+/// Terminal-only evidence for Claude's live composer.
+///
+/// A full-width divider typed inside a multiline prompt has the same terminal
+/// geometry as a stale compact composer. Keep that case explicit so callers
+/// can require a trusted Claude lifecycle signal instead of guessing from
+/// visible text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClaudeComposerEvidence {
+    Absent,
+    Ready,
+    Ambiguous,
+}
+
 impl RetainedRowLayout {
     pub(crate) fn new(whitespace: Vec<bool>, has_text: bool) -> Self {
         Self {
@@ -360,6 +373,12 @@ pub trait VtEngine: Send {
     /// scrollback, unrelated terminal content, or an incomplete layout.
     fn codex_composer_region(&self) -> Option<CodexComposerRegion>;
 
+    /// Inspect Claude's live input bounded by composer rails, not a menu choice.
+    fn claude_composer_evidence(&self) -> ClaudeComposerEvidence;
+
+    /// Inspect OpenCode's live input box around the cursor.
+    fn opencode_composer_ready(&self) -> bool;
+
     /// Visit every visible cell as `(row, col, symbol, style)`. `symbol` is the
     /// cell's full grapheme cluster (base char + any combining/VS16/ZWJ chars),
     /// so emoji and accented text render whole. Wide-char spacer cells are
@@ -398,15 +417,35 @@ pub trait VtEngine: Send {
         self.detection_text(n)
     }
 
-    /// Every visible row as normalized plain text. Wide-character spacer cells
-    /// are omitted, so callers must not use string indexes as terminal columns.
+    /// Every row of the **live** screen as normalized plain text, independent
+    /// of the user's scroll position — the same frame [`Self::detection_text`]
+    /// reads, returned row by row. Wide-character spacer cells are omitted, so
+    /// callers must not use string indexes as terminal columns.
+    ///
+    /// Plain text describes what the program is painting *now*; there is no
+    /// viewport-relative sibling on purpose. Scrollback preserves old prompts,
+    /// composers, and dialogs, so a read that followed the user's scroll
+    /// position would describe a frame that is no longer on the terminal while
+    /// the `content_revision` it is fenced against keeps advancing (docs/07,
+    /// #395). Rendering and column-addressed text use
+    /// [`Self::visible_rows_aligned`] and `for_each_cell`, which are
+    /// viewport-relative because they draw what the user is looking at.
+    fn screen_rows(&self) -> Vec<String>;
+
+    /// Every row the user is currently looking at, as normalized plain text —
+    /// [`Self::screen_rows`] read through the scrollback viewport, so a scrolled
+    /// pane returns history. Tests assert viewport behavior with it; production
+    /// code reads the live screen or renders through
+    /// [`Self::visible_rows_aligned`].
+    #[cfg(test)]
     fn visible_rows(&self) -> Vec<String>;
 
-    /// Like [`Self::visible_rows`], but every terminal column contributes exactly
-    /// one `char`. A wide glyph's continuation cell is represented by
+    /// Every row the user is currently looking at, with every terminal column
+    /// contributing exactly one `char`. Unlike [`Self::screen_rows`] this follows
+    /// the scrollback viewport, so a scrolled pane reports history. A wide glyph's continuation cell is represented by
     /// [`ALIGNED_WIDE_CELL`], so callers can preserve both cell coordinates and
     /// the distinction between a continuation and an actual space. Use this
-    /// (never `visible_rows`) when a screen column must address text — e.g. the
+    /// when a screen column must address text — e.g. the
     /// token under a double-click, or the link under a `Ctrl`-hover.
     fn visible_rows_aligned(&self) -> AlignedRows;
 
@@ -473,7 +512,19 @@ pub trait VtEngine: Send {
 
     /// Visit retained rows oldest-first using one reusable line buffer. The
     /// callback must not retain the borrowed text after it returns.
-    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str));
+    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str)) {
+        self.try_for_each_retained_row(&mut |index, line| {
+            f(index, line);
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+
+    /// Visit retained rows as above, allowing the callback to stop before the
+    /// engine formats any remaining rows.
+    fn try_for_each_retained_row(
+        &self,
+        f: &mut dyn FnMut(usize, &str) -> std::ops::ControlFlow<()>,
+    );
 
     /// Extract an inclusive linear retained-row selection using terminal cell
     /// coordinates. Implementations must preserve complete wide glyphs and
@@ -562,7 +613,7 @@ mod tests {
         );
         let mut engine = engine.lock().expect("engine lock");
         engine.advance(b"hi");
-        assert_eq!(engine.visible_rows()[0].trim_end(), "hi");
+        assert_eq!(engine.screen_rows()[0].trim_end(), "hi");
         assert_eq!(engine.cursor().x, 2);
     }
 }

@@ -3,45 +3,27 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 
-test("service worker clones a response before returning it to the browser", async () => {
+test("the service worker only removes its own caches and unregisters itself", async () => {
   const handlers = new Map();
-  let releaseCache;
-  const cacheReady = new Promise((resolve) => { releaseCache = resolve; });
-  let cached;
-  const response = {
-    bodyUsed: false,
-    ok: true,
-    clone() {
-      assert.equal(this.bodyUsed, false);
-      return { copy: true };
-    },
-  };
+  const deleted = [];
+  let unregistered = false;
   const scope = {
-    URL,
     self: {
-      location: { origin: "http://127.0.0.1:4174" },
       addEventListener: (type, handler) => handlers.set(type, handler),
+      skipWaiting: () => {},
+      registration: { unregister: async () => { unregistered = true; return true; } },
     },
-    fetch: async () => response,
     caches: {
-      open: async () => {
-        await cacheReady;
-        return { put: async (_request, copy) => { cached = copy; } };
-      },
+      keys: async () => ["luvus-web-v2", "luvus-web-v1", "someone-else"],
+      delete: async (key) => { deleted.push(key); return true; },
     },
   };
   runInNewContext(await readFile(new URL("../public/sw.js", import.meta.url), "utf8"), scope);
-  let responsePromise;
-  let cachePromise;
-  handlers.get("fetch")({
-    request: { method: "GET", url: "http://127.0.0.1:4174/app.js" },
-    respondWith: (promise) => { responsePromise = promise; },
-    waitUntil: (promise) => { cachePromise = promise; },
-  });
 
-  assert.equal(await responsePromise, response);
-  response.bodyUsed = true;
-  releaseCache();
-  await cachePromise;
-  assert.deepEqual(cached, { copy: true });
+  assert.equal(handlers.has("fetch"), false, "requests always go to the network");
+  let activation;
+  handlers.get("activate")({ waitUntil: (promise) => { activation = promise; } });
+  await activation;
+  assert.deepEqual(deleted.sort(), ["luvus-web-v1", "luvus-web-v2"]);
+  assert.equal(unregistered, true);
 });

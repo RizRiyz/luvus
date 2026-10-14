@@ -18,8 +18,8 @@ open_in="${LUVUS_SETTING_OPEN_IN:-pane}"
 first_pane() { sed -n 's/.*"pane": *"\([0-9][0-9]*\)".*/\1/p' | head -1; }
 
 if [ "$open_in" = "tab" ]; then
-  "$luvus" tab new >/dev/null 2>&1 || true
-  pid=$("$luvus" pane list | first_pane)
+  "$luvus" tab new >/dev/null 2>&1 || { "$luvus" ui toast "could not open a tab"; exit 1; }
+  pid=$("$luvus" pane list --current-tab | first_pane)
 else
   pid=$("$luvus" pane split | first_pane)
 fi

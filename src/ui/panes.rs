@@ -3,8 +3,35 @@
 
 use super::*;
 
-/// Draw the dot + path (+ ✕ for the focused pane) as a title ON each pane's top
-/// border row, after the borders are drawn, so it lands on the tab bar edge.
+/// Resolve one terminal pane title for both the lone-pane header and split-pane
+/// border renderers. The pane's explicit name wins; otherwise its stable
+/// lifetime ID remains visible and addressable. Path visibility is a separate
+/// presentation choice shared by both renderers.
+fn terminal_pane_title(app: &App, id: PaneId, cwd: &Path, max_width: u16) -> String {
+    let identity = app
+        .agent_name_for(id)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format!("p{}", id.0));
+    let max_width = max_width as usize;
+    if !app.config.layout.pane_title_path {
+        return truncate(&identity, max_width);
+    }
+
+    const SEPARATOR: &str = " · ";
+    let identity_width = display_width(&identity);
+    let separator_width = display_width(SEPARATOR);
+    if identity_width.saturating_add(separator_width) >= max_width {
+        return truncate(&identity, max_width);
+    }
+
+    let path_width = max_width - identity_width - separator_width;
+    let path = short_path(cwd, path_width.min(u16::MAX as usize) as u16);
+    truncate(&format!("{identity}{SEPARATOR}{path}"), max_width)
+}
+
+/// Draw the dot + pane identity (+ ✕ for the focused pane) as a title ON each
+/// pane's top border row, after the borders are drawn, so it lands on the tab
+/// bar edge.
 pub(super) fn draw_pane_titles(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
@@ -82,24 +109,8 @@ pub(super) fn draw_pane_titles(
         let inner_w = rect.width - 2; // inside the two corner cells
         let btn_w = title_buttons_w(focused, rect.width);
         let title_w = inner_w.saturating_sub(btn_w);
-        // A named pane (via `pane name` / `agent name`) shows its name here; an
-        // unnamed pane shows its cwd path. So naming a pane visibly renames it.
-        // With `pane_title_path` on, a named pane shows `name  path` (both).
-        let label = match app.agent_name_for(*id) {
-            Some(name) if app.config.layout.pane_title_path => {
-                let path = short_path(&pane.cwd, title_w.saturating_sub(4 + name.len() as u16 + 2));
-                format!("{name}  {path}")
-                    .chars()
-                    .take(title_w.saturating_sub(4) as usize)
-                    .collect::<String>()
-            }
-            Some(name) => name
-                .chars()
-                .take(title_w.saturating_sub(4) as usize)
-                .collect::<String>(),
-            None => short_path(&pane.cwd, title_w.saturating_sub(4)),
-        };
-        let text_w = (3 + label.chars().count() as u16).min(title_w);
+        let label = terminal_pane_title(app, *id, &pane.cwd, title_w.saturating_sub(4));
+        let text_w = (3 + display_width(&label) as u16).min(title_w);
         let title = Line::from(vec![
             Span::styled(
                 format!(" {} ", st.dot()),
@@ -170,6 +181,7 @@ fn draw_title_buttons(
 
 struct PaneRenderContext<'a> {
     app: &'a App,
+    lone_header: bool,
     diff_source_rects: &'a mut Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
     diff_note_rects: &'a mut Vec<(PaneId, String, Rect)>,
     preview_link_rects: &'a mut Vec<(PaneId, String, Rect)>,
@@ -310,6 +322,7 @@ pub(super) fn draw_panes(
     f: &mut RenderTarget,
     rects: &[(PaneId, Rect)],
     bordered: bool,
+    lone_header: bool,
     app: &mut App,
     t: &Theme,
 ) -> Option<(u16, u16, bool)> {
@@ -322,6 +335,7 @@ pub(super) fn draw_panes(
     {
         let mut context = PaneRenderContext {
             app,
+            lone_header,
             diff_source_rects: &mut diff_source_rects,
             diff_note_rects: &mut diff_note_rects,
             preview_link_rects: &mut preview_link_rects,
@@ -446,10 +460,11 @@ fn draw_one_pane(
     context: &mut PaneRenderContext<'_>,
     t: &Theme,
 ) -> Option<(u16, u16, bool)> {
+    let lone_header = context.lone_header;
     let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
     if let Some(view) = app.views.get(&id) {
-        let content = pane_content(area, bordered, app.compact)?;
+        let content = pane_content(area, bordered, app.compact, lone_header)?;
         match view {
             crate::app::ViewKind::File(v) => {
                 let sel = app.selection.filter(|s| s.pane == id);
@@ -484,37 +499,37 @@ fn draw_one_pane(
     }
     let pane = app.panes.get(&id)?;
     let st = pane_state(app, id);
-    let content = pane_content(area, bordered, app.compact)?;
+    let content = pane_content(area, bordered, app.compact, lone_header)?;
 
     // A lone pane has no border, so it shows a header bar on its top row.
     // Bordered panes instead get their dot+path+close as a title ON the top
     // border row (see `draw_pane_titles`), so it touches the tab bar.
-    if !bordered && !app.compact {
+    if lone_header {
         // Match the content's horizontal pad so the header bar aligns with the
         // tab bar and the terminal text below it.
         let pad = lone_pad(area.width);
         let header = Rect::new(area.x + pad, area.y, area.width.saturating_sub(2 * pad), 1);
         let hbg = if focused { t.surface1 } else { t.surface0 };
-        let path_fg = if focused { t.accent } else { t.overlay1 };
+        let title_fg = if focused { t.accent } else { t.overlay1 };
         f.render_widget(Block::new().style(Style::new().bg(hbg)), header);
         // When this lone pane is a *zoomed* split (not just the only pane), show a
         // ⤡ restore button so a phone can un-zoom without a keyboard (docs/18).
         let show_restore = app.zoomed && header.width >= 8;
-        let path_budget = header
+        let title_budget = header
             .width
             .saturating_sub(if show_restore { 8 } else { 5 });
-        let title = Line::from(vec![
-            Span::styled("▎", Style::new().fg(t.accent).bg(hbg)),
-            Span::styled(
-                format!(" {} ", st.dot()),
-                Style::new().fg(st.color(t)).bg(hbg),
-            ),
-            Span::styled(
-                short_path(&pane.cwd, path_budget),
-                Style::new().fg(path_fg).bg(hbg),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(title), header);
+        if app.config.layout.show_titles {
+            let label = terminal_pane_title(app, id, &pane.cwd, title_budget);
+            let title = Line::from(vec![
+                Span::styled("▎", Style::new().fg(t.accent).bg(hbg)),
+                Span::styled(
+                    format!(" {} ", st.dot()),
+                    Style::new().fg(st.color(t)).bg(hbg),
+                ),
+                Span::styled(label, Style::new().fg(title_fg).bg(hbg)),
+            ]);
+            f.render_widget(Paragraph::new(title), header);
+        }
         if show_restore {
             let r = super::lone_zoom_rect(area);
             f.render_widget(
@@ -548,6 +563,11 @@ fn draw_one_pane(
         .as_ref()
         .filter(|fl| fl.pane == id)
         .map(|fl| (fl.row, fl.scroll));
+    let pane_search = app
+        .pane_search
+        .as_ref()
+        .filter(|search| search.pane == id && !search.editing && !search.query.is_empty());
+    let mut retained_top = 0usize;
     let mut scrolled = 0usize;
     let agent = app.status.get(&id).map(|s| s.agent.as_str()).unwrap_or("");
     let is_codex = agent == "codex";
@@ -628,6 +648,7 @@ fn draw_one_pane(
                     }
                 });
             }
+            retained_top = engine.history_len().saturating_sub(engine.scroll_offset());
             scrolled = engine.scroll_offset();
             if is_codex {
                 composer_region = engine.codex_composer_region();
@@ -656,11 +677,12 @@ fn draw_one_pane(
         );
     }
 
-    // The search-jump flash band (docs/63): recolor the landed row's background
-    // full width, keeping the text, so it reads as a highlighted line. Only while
-    // the pane is still at the offset we jumped to, so a scroll or new output
-    // (which changes `scrolled`) hides it instead of banding the wrong line.
-    if let Some((fr, fscroll)) = flash {
+    // Pane-local search uses retained-row and display-cell coordinates captured
+    // by the committed scan. The current hit uses accent; other visible hits use
+    // amber. Global finder jumps keep their existing transient row band.
+    if let Some(search) = pane_search {
+        draw_pane_search_matches(f.buffer_mut(), content, retained_top, search, t);
+    } else if let Some((fr, fscroll)) = flash {
         if fr < content.height && scrolled == fscroll {
             let y = content.y + fr;
             let buf = f.buffer_mut();
@@ -705,6 +727,49 @@ fn pane_ime_cursor(content: Rect, cur: crate::terminal::vt::Cursor) -> Option<(u
         return None;
     }
     Some((content.x + cur.x, content.y + cur.y, cur.visible))
+}
+
+fn draw_pane_search_matches(
+    buf: &mut ratatui::buffer::Buffer,
+    content: Rect,
+    retained_top: usize,
+    search: &crate::app::PaneSearch,
+    t: &Theme,
+) {
+    let visible = visible_pane_search_range(&search.matches, retained_top, content.height);
+    for (relative, search_match) in search.matches[visible.clone()].iter().enumerate() {
+        let index = visible.start + relative;
+        let screen_row = search_match.row - retained_top;
+        let start = content
+            .x
+            .saturating_add(search_match.col.min(u16::MAX as usize) as u16);
+        let end = start
+            .saturating_add(search_match.width.min(u16::MAX as usize) as u16)
+            .min(content.right());
+        let background = if index == search.current {
+            t.accent
+        } else {
+            t.amber
+        };
+        let y = content.y + screen_row as u16;
+        for x in start..end {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_bg(background);
+                cell.set_fg(t.base);
+            }
+        }
+    }
+}
+
+fn visible_pane_search_range(
+    matches: &[crate::app::PaneSearchMatch],
+    retained_top: usize,
+    height: u16,
+) -> std::ops::Range<usize> {
+    let start = matches.partition_point(|search_match| search_match.row < retained_top);
+    let bottom = retained_top.saturating_add(usize::from(height));
+    let end = start + matches[start..].partition_point(|search_match| search_match.row < bottom);
+    start..end
 }
 
 fn terminal_cell_style(
@@ -821,6 +886,35 @@ fn draw_codex_composer(
 mod tests {
     use super::*;
     use crate::terminal::vt::CodexComposerRegion;
+
+    #[test]
+    fn pane_search_rendering_limits_iteration_to_visible_matches() {
+        let matches = vec![
+            crate::app::PaneSearchMatch {
+                row: 1,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 5,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 6,
+                col: 0,
+                width: 1,
+            },
+            crate::app::PaneSearchMatch {
+                row: 8,
+                col: 0,
+                width: 1,
+            },
+        ];
+
+        assert_eq!(visible_pane_search_range(&matches, 5, 2), 1..3);
+        assert_eq!(visible_pane_search_range(&matches, 9, 3), 4..4);
+    }
 
     #[test]
     fn composer_uses_only_a_subtle_theme_fill_and_preserves_geometry() {
@@ -965,9 +1059,7 @@ mod tests {
                 uri,
             },
         ];
-
         clip_rendered_hyperlinks(&mut links, pane, Rect::new(12, 3, 6, 1));
-
         assert_eq!(links.len(), 2);
         let clipped = links.iter().find(|link| link.pane == pane).unwrap();
         assert_eq!((clipped.start, clipped.end), (4, 12));
@@ -975,5 +1067,44 @@ mod tests {
             links.iter().find(|link| link.pane == other).unwrap().end,
             18
         );
+    }
+
+    #[test]
+    fn pane_search_highlights_words_by_retained_row() {
+        let t = Theme::noir();
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let search = crate::app::PaneSearch {
+            pane: PaneId(1),
+            owner: crate::app::PaneSearchOwner::Scroll,
+            local: crate::search::local::LocalSearch {
+                query: "needle".into(),
+                editing: false,
+                case_sensitive: false,
+                matches: vec![
+                    crate::app::PaneSearchMatch {
+                        row: 10,
+                        col: 1,
+                        width: 3,
+                    },
+                    crate::app::PaneSearchMatch {
+                        row: 11,
+                        col: 6,
+                        width: 6,
+                    },
+                ],
+                current: 1,
+                truncated: false,
+            },
+            saved_scroll: 0,
+        };
+        draw_pane_search_matches(&mut buf, area, 10, &search, &t);
+        assert_eq!(buf[(0, 0)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(1, 0)].bg, t.amber);
+        assert_eq!(buf[(3, 0)].bg, t.amber);
+        assert_eq!(buf[(6, 1)].bg, t.accent);
+        assert_eq!(buf[(11, 1)].bg, t.accent);
+        assert_eq!(buf[(12, 1)].bg, ratatui::style::Color::Reset);
+        assert_eq!(buf[(6, 1)].fg, t.base);
     }
 }

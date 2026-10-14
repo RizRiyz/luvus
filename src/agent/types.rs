@@ -19,12 +19,18 @@ pub(crate) struct IdentityDescriptor {
     pub overlap_priority: u8,
 }
 
+/// `(base, cwd, pane title)` to the one session that title names.
+pub(crate) type TitledSession = fn(&Path, &Path, &str) -> Option<String>;
+
 #[derive(Clone, Copy)]
 pub(crate) struct DiscoveryOperations {
     pub base: fn() -> PathBuf,
     pub recent: fn(&Path, usize) -> Vec<SessionInfo>,
     pub latest: fn(&Path, &Path) -> Option<String>,
     pub list: Option<fn(&Path, &Path) -> Vec<String>>,
+    /// The one session in `cwd` whose name leads the pane's terminal title,
+    /// for an agent that shows its conversation name there.
+    pub titled: Option<TitledSession>,
 }
 
 #[derive(Clone, Copy)]

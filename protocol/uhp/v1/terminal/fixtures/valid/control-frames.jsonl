@@ -9,3 +9,5 @@
 {"id":"input-3","action":"send_key","params":{"key":"escape"}}
 {"id":"input-4","action":"send_key","params":{"key":"ctrl-k"}}
 {"id":"input-5","action":"send_key","params":{"key":"alt-d"}}
+{"id":"input-6","action":"send_key","params":{"key":"ctrl-r"}}
+{"id":"size-1","action":"set_viewport","params":{"cols":40,"rows":18}}

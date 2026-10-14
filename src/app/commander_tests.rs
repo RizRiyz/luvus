@@ -3,6 +3,562 @@
 use super::*;
 use crate::commander::Commander;
 
+fn add_commander_test_module(
+    app: &mut App,
+    module_id: &str,
+    name: &str,
+    target: &str,
+    input: &str,
+    confirmation: &str,
+    argv: &[&str],
+) {
+    let manifest: crate::module::manifest::ModuleManifest = toml::from_str(&format!(
+        "id = {module_id:?}\nname = {module_id:?}\nversion = \"0.1.0\"\nmin_luvus_version = \"0.1.0\"\n[[actions]]\nid = \"run\"\ntitle = \"Run test action\"\ncommand = {}\ncommander = {{ name = {name:?}, target = {target:?}, input = {input:?}, confirmation = {confirmation:?} }}\n",
+        serde_json::to_string(argv).unwrap()
+    ))
+    .unwrap();
+    manifest.validate().unwrap();
+    let root = crate::persist::config_dir()
+        .join("commander-module-tests")
+        .join(module_id);
+    std::fs::create_dir_all(&root).unwrap();
+    app.modules.modules.push(crate::module::InstalledModule {
+        id: module_id.into(),
+        root,
+        enabled: true,
+        source: None,
+        git_ref: None,
+        manifest,
+        warning: None,
+    });
+    app.module_tokens
+        .insert(module_id.into(), "test-token".into());
+    app.refresh_commander_module_catalog();
+}
+
+#[test]
+fn module_commands_resolve_collisions_and_keep_body_mentions_literal() {
+    let _env = crate::persist::test_env("commander-module-parse");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    add_commander_test_module(
+        &mut app,
+        "one",
+        "review",
+        "pane",
+        "text",
+        "required",
+        &["unused"],
+    );
+    add_commander_test_module(
+        &mut app,
+        "two",
+        "review",
+        "none",
+        "none",
+        "none",
+        &["unused"],
+    );
+    app.open_commander();
+    let commander = app.commander.as_mut().unwrap();
+    commander.clear_all();
+    commander.insert("$rev");
+    let (matches, _) = commander.module_menu().unwrap();
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0].command, "$one/review");
+    assert_eq!(matches[1].command, "$two/review");
+    assert!(app
+        .commander_parse_module_command("$review")
+        .unwrap()
+        .unwrap_err()
+        .contains("ambiguous"));
+    let draft = format!("$one/review @p{} Check @p999 literally", pane.0);
+    let invocation = app.commander_parse_module_command(&draft).unwrap().unwrap();
+    assert_eq!(invocation.text, "Check @p999 literally");
+    assert_eq!(invocation.target.label(), format!("p{}", pane.0));
+    assert!(app
+        .commander_parse_module_command(&format!("@p{} echo $HOME", pane.0))
+        .is_none());
+    assert!(app.commander_parse_module_command("/focus @p1").is_none());
+    assert!(app
+        .commander_parse_module_command("$two/review extra")
+        .unwrap()
+        .is_err());
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander.as_mut().unwrap().insert("$one/review @");
+    app.refresh_commander_preview();
+    app.commander_key(ratatui::crossterm::event::KeyEvent::new(
+        ratatui::crossterm::event::KeyCode::Tab,
+        ratatui::crossterm::event::KeyModifiers::NONE,
+    ));
+    let completed = app.commander.as_ref().unwrap().draft.clone();
+    assert!(completed.starts_with("$one/review @"), "{completed}");
+    assert!(
+        app.commander_parse_module_command(&completed)
+            .unwrap()
+            .is_ok(),
+        "{completed}: {:?}, receipt: {:?}",
+        app.commander_parse_module_command(&completed)
+            .unwrap()
+            .unwrap_err(),
+        app.commander.as_ref().unwrap().receipt
+    );
+    let other_platform = if crate::module::manifest::current_platform() == "macos" {
+        "linux"
+    } else {
+        "macos"
+    };
+    app.modules.modules[1].manifest.actions[0].platforms = Some(vec![other_platform.into()]);
+    app.refresh_commander_module_catalog();
+    assert!(app
+        .commander_parse_module_command(&format!("$review @p{} hello", pane.0))
+        .unwrap()
+        .is_ok());
+    app.modules.modules[0].manifest.actions[0].platforms = Some(vec![other_platform.into()]);
+    let draft = format!("$one/review @p{} hello", pane.0);
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander.as_mut().unwrap().insert(&draft);
+    app.commander_prepare();
+    assert!(app.module_logs.is_empty());
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("unavailable on this platform"));
+}
+
+#[test]
+fn module_targets_are_exact_and_confirmation_fails_closed_on_disable() {
+    let _env = crate::persist::test_env("commander-module-targets");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.workspaces[0].name = "first".into();
+    app.workspaces[0].tabs[0].name = Some("main".into());
+    add_commander_test_module(
+        &mut app,
+        "one",
+        "review",
+        "pane",
+        "text",
+        "required",
+        &["unused"],
+    );
+    add_commander_test_module(
+        &mut app,
+        "tabs",
+        "inspect",
+        "tab",
+        "none",
+        "none",
+        &["unused"],
+    );
+    add_commander_test_module(
+        &mut app,
+        "spaces",
+        "sync",
+        "workspace",
+        "none",
+        "none",
+        &["unused"],
+    );
+    add_commander_test_module(
+        &mut app,
+        "agents",
+        "ask",
+        "agent",
+        "text",
+        "none",
+        &["unused"],
+    );
+    app.open_commander();
+    assert!(app
+        .commander_parse_module_command(&format!("$agents/ask @p{} hi", pane.0))
+        .unwrap()
+        .is_err());
+    let tab = app
+        .commander_parse_module_command("$tabs/inspect @workspace:first/tab:main")
+        .unwrap()
+        .unwrap();
+    assert!(format!("{:?}", tab.target).starts_with("Tab"));
+    let ws = app
+        .commander_parse_module_command("$spaces/sync @workspace:first")
+        .unwrap()
+        .unwrap();
+    assert!(format!("{:?}", ws.target).starts_with("Workspace"));
+    assert!(app
+        .commander_parse_module_command("$spaces/sync @workspace:first/tab:main")
+        .unwrap()
+        .is_err());
+    let draft = format!("$one/review @p{} hi", pane.0);
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander.as_mut().unwrap().insert(&draft);
+    app.commander_prepare();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .pending_module_confirmation
+        .is_some());
+    assert!(app.module_logs.is_empty());
+    app.module_set_enabled("one", false).unwrap();
+    app.commander_prepare();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("module command"));
+    assert!(app.module_logs.is_empty());
+    assert_eq!(app.commander.as_ref().unwrap().draft, draft);
+}
+
+#[test]
+fn module_picker_cycles_and_accepts_one_separator_without_running() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let _env = crate::persist::test_env("commander-module-picker");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    add_commander_test_module(
+        &mut app,
+        "one",
+        "alpha",
+        "none",
+        "none",
+        "none",
+        &["unused"],
+    );
+    add_commander_test_module(&mut app, "two", "beta", "none", "none", "none", &["unused"]);
+    app.open_commander();
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander.as_mut().unwrap().insert("$");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "$alpha");
+    app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "$beta");
+    app.commander_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "$beta ");
+    assert!(app.module_logs.is_empty());
+
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander.as_mut().unwrap().insert("$");
+    app.commander_area = Some(Rect::new(3, 20, 74, 4));
+    app.last_pane_area = Rect::new(3, 11, 74, 9);
+    let (popup, _, _) = app.commander_module_popup().unwrap();
+    let mouse = |kind, row| {
+        AppEvent::Mouse(MouseEvent {
+            kind,
+            column: popup.x + 4,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    assert!(app.handle_event(mouse(MouseEventKind::ScrollDown, popup.y + 1)));
+    assert_eq!(app.commander.as_ref().unwrap().module_selection, Some(1));
+    assert!(app.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), popup.y + 1)));
+    assert_eq!(app.commander.as_ref().unwrap().module_selection, Some(0));
+    assert!(app.module_logs.is_empty());
+}
+
+#[test]
+fn module_tab_confirmation_does_not_retarget_after_rename() {
+    let _env = crate::persist::test_env("commander-module-rename");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.workspaces[0].tabs[0].name = Some("before".into());
+    add_commander_test_module(
+        &mut app,
+        "example",
+        "inspect",
+        "tab",
+        "none",
+        "required",
+        &["unused"],
+    );
+    app.open_commander();
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander
+        .as_mut()
+        .unwrap()
+        .insert("$inspect @tab:before");
+    app.commander_prepare();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .pending_module_confirmation
+        .is_some());
+    app.workspaces[0].tabs[0].name = Some("after".into());
+    app.commander_prepare();
+    assert!(app.module_logs.is_empty());
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        "$inspect @tab:before"
+    );
+}
+
+#[test]
+fn linked_module_catalog_refreshes_on_enable_and_unlink() {
+    let _env = crate::persist::test_env("commander-module-link");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.open_commander();
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander.as_mut().unwrap().insert("$");
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .module_menu()
+        .unwrap()
+        .0
+        .is_empty());
+
+    let root = crate::persist::config_dir().join("linked-commander-module");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(crate::module::manifest::MANIFEST_FILE),
+        "id = \"example.linked\"\nname = \"Linked\"\nversion = \"0.1.0\"\nmin_luvus_version = \"0.1.0\"\n[[actions]]\nid = \"run\"\ntitle = \"Run\"\ncommand = [\"unused\"]\ncommander = { name = \"linked\", target = \"none\", input = \"none\" }\n",
+    )
+    .unwrap();
+    app.module_link_with(&root, true, None).unwrap();
+    assert_eq!(
+        app.commander
+            .as_ref()
+            .unwrap()
+            .module_menu()
+            .unwrap()
+            .0
+            .len(),
+        1
+    );
+    let info = {
+        let (reply, _) = std::sync::mpsc::channel();
+        let response = app.handle_api(&ApiRequest {
+            id: "module-info".into(),
+            method: "module.info".into(),
+            params: serde_json::json!({"id":"example.linked"}),
+            reply,
+        });
+        serde_json::from_str::<serde_json::Value>(&response).unwrap()
+    };
+    assert_eq!(info["result"]["actions"][0]["commander"]["name"], "linked");
+    let actions = {
+        let (reply, _) = std::sync::mpsc::channel();
+        let response = app.handle_api(&ApiRequest {
+            id: "module-actions".into(),
+            method: "module.action.list".into(),
+            params: serde_json::json!({}),
+            reply,
+        });
+        serde_json::from_str::<serde_json::Value>(&response).unwrap()
+    };
+    assert_eq!(
+        actions["result"]["actions"][0]["commander"]["name"],
+        "linked"
+    );
+    app.module_set_enabled("example.linked", false).unwrap();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .module_menu()
+        .unwrap()
+        .0
+        .is_empty());
+    app.module_set_enabled("example.linked", true).unwrap();
+    assert_eq!(
+        app.commander
+            .as_ref()
+            .unwrap()
+            .module_menu()
+            .unwrap()
+            .0
+            .len(),
+        1
+    );
+    app.module_unlink("example.linked").unwrap();
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .module_menu()
+        .unwrap()
+        .0
+        .is_empty());
+}
+
+#[cfg(unix)]
+fn recv_module_completion(
+    rx: &std::sync::mpsc::Receiver<crate::event::AppEvent>,
+    expected: u64,
+) -> (Option<i32>, String, String) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let event = rx
+            .recv_timeout(remaining)
+            .expect("module command did not report completion");
+        if let crate::event::AppEvent::ModuleCommandFinished {
+            log_id,
+            code,
+            out,
+            err,
+        } = event
+        {
+            assert_eq!(log_id, expected);
+            return (code, out, err);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn commander_module_action_writes_versioned_json_once_and_receives_completion() {
+    let _env = crate::persist::test_env("commander-module-run");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    add_commander_test_module(
+        &mut app,
+        "example",
+        "review",
+        "pane",
+        "text",
+        "required",
+        &["sh", "-c", "cat"],
+    );
+    app.open_commander();
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander
+        .as_mut()
+        .unwrap()
+        .insert(&format!("$review @p{} Check\n@p999 is text", pane.0));
+    app.commander_prepare();
+    assert!(app.module_logs.is_empty());
+    app.commander_prepare();
+    assert_eq!(app.module_logs.len(), 1);
+    let log = &app.module_logs[0];
+    assert_eq!(log.argv, vec!["sh", "-c", "cat"]);
+    let log_id = log.id;
+    let (code, out, err) = recv_module_completion(&rx, log_id);
+    let payload: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(payload["version"], 1);
+    assert_eq!(payload["command"], "review");
+    assert_eq!(payload["target"]["pane_id"], pane.0.to_string());
+    assert_eq!(payload["text"], "Check\n@p999 is text");
+    app.module_command_finished(log_id, code, out, err);
+    assert_eq!(
+        app.module_logs[0].status,
+        crate::module::runtime::ModuleStatus::Succeeded
+    );
+    assert!(app
+        .commander
+        .as_ref()
+        .unwrap()
+        .receipt
+        .as_deref()
+        .unwrap()
+        .contains("succeeded"));
+    assert!(app.commander.as_ref().unwrap().draft.is_empty());
+    app.commander_prepare();
+    assert_eq!(
+        app.module_logs.len(),
+        1,
+        "an empty draft must not replay the action"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn commander_module_context_uses_the_target_workspace_not_active_workspace() {
+    let _env = crate::persist::test_env("commander-module-cross-workspace");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let other = crate::persist::config_dir().join("other-project");
+    std::fs::create_dir_all(&other).unwrap();
+    assert!(app.create_workspace_at(other));
+    app.workspaces[1].name = "other".into();
+    app.workspaces[1].tabs[0].name = Some("work".into());
+    let pane = app.workspaces[1].tabs[0].layout.focus;
+    app.active_ws = 0;
+    add_commander_test_module(
+        &mut app,
+        "example",
+        "inspect",
+        "pane",
+        "text",
+        "none",
+        &[
+            "sh",
+            "-c",
+            "printf '%s\\n' \"$LUVUS_MODULE_CONTEXT_JSON\"; cat",
+        ],
+    );
+    app.open_commander();
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander.as_mut().unwrap().insert(&format!(
+        "$inspect @workspace:other/tab:work/pane:p{} status",
+        pane.0
+    ));
+    app.commander_prepare();
+    assert_eq!(app.module_logs.len(), 1);
+    let log_id = app.module_logs[0].id;
+    let (code, out, err) = recv_module_completion(&rx, log_id);
+    assert_eq!(code, Some(0), "{err}");
+    let (context, input) = out.split_once('\n').unwrap();
+    let context: serde_json::Value = serde_json::from_str(context).unwrap();
+    let input: serde_json::Value = serde_json::from_str(input).unwrap();
+    assert_eq!(context["workspace"]["id"], "1");
+    assert_eq!(context["tab"]["index"], "1");
+    assert_eq!(context["pane"]["id"], pane.0.to_string());
+    assert_eq!(input["target"]["pane_id"], pane.0.to_string());
+    assert_eq!(app.active_ws, 0);
+    app.module_command_finished(log_id, code, out, err);
+}
+
+#[cfg(unix)]
+#[test]
+fn commander_module_failure_receipt_uses_the_matching_log() {
+    let _env = crate::persist::test_env("commander-module-failure");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    add_commander_test_module(
+        &mut app,
+        "example",
+        "fail",
+        "none",
+        "none",
+        "none",
+        &["sh", "-c", "echo expected-failure >&2; exit 7"],
+    );
+    app.open_commander();
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander.as_mut().unwrap().insert("$fail");
+    app.commander_prepare();
+    assert_eq!(app.module_logs.len(), 1);
+    let log_id = app.module_logs[0].id;
+    let (code, out, err) = recv_module_completion(&rx, log_id);
+    assert_ne!(code, Some(0));
+    app.commander.as_mut().unwrap().insert("next draft");
+    app.module_command_finished(log_id, code, out, err);
+    assert_eq!(
+        app.module_logs[0].status,
+        crate::module::runtime::ModuleStatus::Failed
+    );
+    let receipt = app.commander.as_ref().unwrap().receipt.as_deref().unwrap();
+    assert!(receipt.contains("failed"), "{receipt}");
+    assert!(receipt.contains("expected-failure"), "{receipt}");
+    assert_eq!(app.commander.as_ref().unwrap().draft, "next draft");
+}
+
 #[test]
 fn unicode_editing_and_word_delete_keep_valid_boundaries() {
     let mut commander = Commander::default();
@@ -826,6 +1382,8 @@ fn slash_key_and_tab_complete_the_action_before_a_target() {
     let (tx, _) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    assert!(app.commander.as_ref().unwrap().draft.is_empty());
     app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     assert_eq!(app.commander.as_ref().unwrap().draft, "/");
     app.commander_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -846,11 +1404,78 @@ fn slash_key_and_tab_complete_the_action_before_a_target() {
 }
 
 #[test]
+fn slash_after_target_stays_literal_and_reaches_the_pane() {
+    let _env = crate::persist::test_env("commander-targeted-slash");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "zsh".into();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+
+    app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(
+        app.commander.as_ref().unwrap().draft,
+        format!("@p{} /", pane.0)
+    );
+    app.commander_paste("status");
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let crate::terminal::pty::InputAction::Submit { paste, .. } = input_rx.try_recv().unwrap()
+    else {
+        panic!("targeted slash command must reach the pane");
+    };
+    assert_eq!(String::from_utf8_lossy(&paste), "/status");
+
+    let commander = app.commander.as_mut().unwrap();
+    commander.clear_all();
+    commander.insert("@reviewer ");
+    app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(app.commander.as_ref().unwrap().draft, "@reviewer /");
+}
+
+#[test]
+fn slash_after_target_reaches_a_ready_agent_pane() {
+    let _env = crate::persist::test_env("commander-agent-targeted-slash");
+    let (tx, _) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    let generation = app.panes[&pane].engine.lock().unwrap().output_generation();
+    let status = app.status.get_mut(&pane).unwrap();
+    status.agent = "claude".into();
+    status.state = crate::ui::theme::State::Idle;
+    status.prompt_evidence = crate::detect::PromptEvidence::Ready;
+    status.last_detect_generation = Some(generation);
+    status.force_detect = false;
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+
+    app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    app.commander_paste("status");
+    app.commander_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let crate::terminal::pty::InputAction::Submit { paste, .. } = input_rx.try_recv().unwrap()
+    else {
+        panic!("targeted slash command must reach the ready agent");
+    };
+    assert_eq!(paste, b"/status");
+    assert!(input_rx.try_recv().is_err());
+}
+
+#[test]
 fn slash_enter_accepts_a_suggestion_before_dispatching() {
     let _env = crate::persist::test_env("commander-slash-enter");
     let (tx, _) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     app.commander_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     app.commander_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
@@ -871,6 +1496,7 @@ fn slash_picker_arrows_pages_and_enter_select_without_editing_the_draft() {
     let (tx, _) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     for _ in 0..8 {
         app.commander_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -899,6 +1525,7 @@ fn slash_picker_mouse_wheel_and_row_click_stay_out_of_underlying_panes() {
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
     app.open_commander();
+    app.commander_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
     app.commander_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
     app.commander_area = Some(Rect::new(3, 20, 74, 4));
     app.last_pane_area = Rect::new(3, 11, 74, 9);
@@ -1303,6 +1930,11 @@ fn agent_prompt_and_shell_command_do_not_leak_across_segments() {
     app.new_tab();
     let shell = app.layout().focus;
     app.status.get_mut(&agent).unwrap().agent = "claude".into();
+    let rail = "─".repeat(80);
+    app.panes[&agent].engine.lock().unwrap().advance(
+        format!("\x1b[2J\x1b[H\x1b[20;1H{rail}\x1b[21;1H❯\u{a0} \x1b[22;1H{rail}\x1b[21;3H")
+            .as_bytes(),
+    );
     let (agent_tx, agent_rx) = std::sync::mpsc::channel();
     let (shell_tx, shell_rx) = std::sync::mpsc::channel();
     app.panes
@@ -2073,4 +2705,188 @@ fn clicking_another_tab_works_while_the_strip_stays_open() {
     assert_eq!(app.ws().active_tab, 1);
     assert!(!app.commander.as_ref().unwrap().focused);
     assert_eq!(app.commander.as_ref().unwrap().draft, draft);
+}
+
+/// Draws the app and returns the whole screen as text.
+#[cfg(unix)]
+fn screen_text(app: &mut App) -> String {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut term = Terminal::new(TestBackend::new(160, 30)).unwrap();
+    term.draw(|f| crate::ui::render(f, app)).unwrap();
+    term.backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect()
+}
+
+/// Starts action A, then arms a confirmation for B while A is still running.
+/// Returns A's log id and B's confirmation prompt.
+#[cfg(unix)]
+fn run_a_then_arm_b(app: &mut App) -> (u64, String) {
+    let pane = app.layout().focus;
+    add_commander_test_module(
+        app,
+        "example",
+        "review",
+        "pane",
+        "text",
+        "required",
+        &["sh", "-c", "cat"],
+    );
+    app.open_commander();
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander
+        .as_mut()
+        .unwrap()
+        .insert(&format!("$review @p{} first", pane.0));
+    app.commander_prepare();
+    app.commander_prepare();
+    assert_eq!(app.module_logs.len(), 1, "action A started");
+    let first = app.module_logs[0].id;
+
+    app.commander.as_mut().unwrap().clear_all();
+    app.commander
+        .as_mut()
+        .unwrap()
+        .insert(&format!("$review @p{} second", pane.0));
+    app.commander_prepare();
+    let commander = app.commander.as_ref().unwrap();
+    assert!(commander.confirming(), "B awaits Enter");
+    (
+        first,
+        commander.receipt.clone().expect("B shows its prompt"),
+    )
+}
+
+/// While B's confirmation is armed, A's result must not touch B's prompt: the
+/// prompt is drawn whole and alone, and the result is held rather than
+/// appended where a long prompt would push it off the one-line footer.
+#[cfg(unix)]
+#[test]
+fn module_completion_never_shares_the_footer_with_an_armed_prompt() {
+    let _env = crate::persist::test_env("commander-held-armed");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(160, 30, tx).unwrap();
+    let (first, prompt) = run_a_then_arm_b(&mut app);
+
+    app.module_command_finished(first, Some(0), String::new(), String::new());
+
+    let commander = app.commander.as_ref().unwrap();
+    assert!(commander.confirming(), "B is still armed");
+    assert_eq!(commander.receipt.as_deref(), Some(prompt.as_str()));
+    let screen = screen_text(&mut app);
+    assert!(screen.contains("Enter again"), "the prompt is drawn");
+    assert!(
+        !screen.contains("succeeded"),
+        "A's result stays off the prompt"
+    );
+    assert_eq!(app.module_logs.len(), 1, "B has not run");
+}
+
+/// Editing the draft dismisses B's prompt, and A's held result is drawn.
+#[cfg(unix)]
+#[test]
+fn held_module_result_is_shown_once_an_edit_dismisses_the_prompt() {
+    let _env = crate::persist::test_env("commander-held-edit");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(160, 30, tx).unwrap();
+    let (first, _) = run_a_then_arm_b(&mut app);
+    app.module_command_finished(first, Some(0), String::new(), String::new());
+
+    app.commander.as_mut().unwrap().insert("!");
+
+    assert!(!app.commander.as_ref().unwrap().confirming());
+    let screen = screen_text(&mut app);
+    assert!(
+        screen.contains("$example/review succeeded"),
+        "A's result shown"
+    );
+    assert!(!screen.contains("Enter again"), "no stale prompt");
+}
+
+/// Confirming B starts it and still reports A's result alongside the start.
+#[cfg(unix)]
+#[test]
+fn held_module_result_is_reported_when_the_confirmed_action_starts() {
+    let _env = crate::persist::test_env("commander-held-enter");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(160, 30, tx).unwrap();
+    let (first, _) = run_a_then_arm_b(&mut app);
+    app.module_command_finished(first, Some(0), String::new(), String::new());
+
+    app.commander_prepare();
+
+    assert_eq!(app.module_logs.len(), 2, "B ran");
+    let receipt = app.commander.as_ref().unwrap().receipt.clone().unwrap();
+    assert!(receipt.contains("started"), "{receipt:?}");
+    assert!(receipt.contains("succeeded"), "{receipt:?}");
+}
+
+/// Esc cancels B: its prompt goes away with it and A's result is shown.
+#[cfg(unix)]
+#[test]
+fn escape_dismisses_the_prompt_and_shows_the_held_result() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let _env = crate::persist::test_env("commander-held-esc");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(160, 30, tx).unwrap();
+    let (first, _) = run_a_then_arm_b(&mut app);
+    app.module_command_finished(first, Some(0), String::new(), String::new());
+
+    app.commander_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(!app.commander.as_ref().unwrap().confirming());
+    let screen = screen_text(&mut app);
+    assert!(
+        !screen.contains("Enter again"),
+        "the cancelled prompt is gone"
+    );
+    assert!(
+        screen.contains("$example/review succeeded"),
+        "A's result shown"
+    );
+}
+
+/// Starting B while A is still running must not forget A.
+#[cfg(unix)]
+#[test]
+fn an_earlier_running_action_still_reports_after_another_starts() {
+    let _env = crate::persist::test_env("commander-overlap");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(160, 30, tx).unwrap();
+    let (first, _) = run_a_then_arm_b(&mut app);
+
+    app.commander_prepare();
+    assert_eq!(app.module_logs.len(), 2, "B started while A still runs");
+
+    app.module_command_finished(first, Some(1), String::new(), "boom".into());
+
+    let receipt = app.commander.as_ref().unwrap().receipt.clone().unwrap();
+    assert!(
+        receipt.contains("failed"),
+        "A's result was dropped: {receipt:?}"
+    );
+    assert!(receipt.contains("boom"), "{receipt:?}");
+}
+
+/// Esc cancels a confirmation with nothing held: the prompt must still go, since
+/// it would otherwise keep offering an Enter that no longer confirms anything.
+#[cfg(unix)]
+#[test]
+fn escape_removes_a_cancelled_confirmation_prompt() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let _env = crate::persist::test_env("commander-esc-prompt");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(160, 30, tx).unwrap();
+    let _ = run_a_then_arm_b(&mut app);
+    assert!(
+        screen_text(&mut app).contains("Enter again"),
+        "armed prompt drawn"
+    );
+
+    app.commander_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(!screen_text(&mut app).contains("Enter again"));
 }

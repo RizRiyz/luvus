@@ -1,16 +1,25 @@
 import { BridgeClient, BridgeError, LiveSession, type PaneSnapshot, type SessionSnapshot } from "@luvus/uhp-client";
+import { BrowserTickets, TICKET_KEY } from "./browser-tickets.js";
 import { button, element } from "./dom.js";
+import { accessProblem, pairingCredential, parsePairingInput, type SentCredential } from "./pairing.js";
 import { pairingQrDataUrl } from "./pairing-qr.js";
+import { RenderScheduler } from "./render-scheduler.js";
+import { navigationBrand, navigationDot, refreshButton, trapNavigationFocus, type SidebarControls } from "./sidebar-controls.js";
 import { supportsFileUpload } from "./terminal-capabilities.js";
-import { TerminalView, type TerminalPaneOption } from "./terminal-view.js";
-
-const TICKET_KEY = "luvus.web.ticket";
+import { viewportSizingAvailable } from "./terminal-viewport.js";
+import { filterWorkspacePanes, TerminalPaneRecency, TerminalWorkspaceSelection, terminalWorkspaceOptions, type TerminalPaneOption } from "./terminal-pane-options.js";
+import { TerminalPaneSidebar } from "./terminal-pane-sidebar.js";
+import { TerminalWorkspaceSidebar } from "./terminal-workspace-sidebar.js";
+import { TerminalView } from "./terminal-view.js";
+import { markFieldSaved, rebuildPreservingView } from "./view-state.js";
 
 type DeviceStatus = {
   type: "browser_device_status";
   paired_devices: number;
   pending_pairings: number;
   max_devices: number;
+  /** The operator's --max-devices; a browser may not choose more. */
+  limit_ceiling?: number;
   public_url: string | null;
 };
 
@@ -40,33 +49,140 @@ export class WebApp {
   #sessions: BrowserSession[] | undefined;
   #sessionPanelOpen = false;
   #sessionLoading = false;
+  #showShells = false;
+  readonly #paneRecency = new TerminalPaneRecency();
+  readonly #workspaceSelection = new TerminalWorkspaceSelection();
+  readonly #dashboardWorkspaces: TerminalWorkspaceSidebar;
+  readonly #dashboardPanes: TerminalPaneSidebar;
+  readonly #overlays = element("div", { className: "web-overlays" });
+  readonly #dashboardNavigation = element("div", { className: "terminal-navigation", attrs: { id: "dashboard-navigation", "aria-label": "Workspaces and panes" } });
+  #dashboardNavigationOpen = false;
+  readonly #dashboardOpenButton = navigationDot("Open navigation", "dashboard-navigation", () => this.#openDashboardNavigation());
+  readonly #dashboardCloseButton: HTMLButtonElement;
+  readonly #dashboardHeader: HTMLElement;
+  readonly #desktopSidebars = matchMedia("(min-width: 1024px)");
+  readonly #sidebarControls: SidebarControls = {
+    collapsed: { workspaces: false, panes: false },
+    toggle: (side) => {
+      this.#sidebarControls.collapsed[side] = !this.#sidebarControls.collapsed[side];
+      if (this.#terminal) this.#terminal.updateSidebarLayout();
+      else this.#render();
+    },
+    refresh: () => void this.#session.refresh().catch((error) => this.#showError(error)),
+    footer: () => this.#sidebarFooter(),
+  };
+  /** This tab's own pairing code, from its link or pasted on the access screen. */
+  #tabCode: string | undefined;
+  /** What this tab last presented, so a rejection can be explained truthfully. */
+  #sent: SentCredential = { ticket: false, code: false };
+  #pairError: string | undefined;
+  readonly #tickets = new BrowserTickets();
+  #sentTicket: string | null = null;
+  /** Redraws caused by live updates, as opposed to the person's own actions. */
+  readonly #renders = new RenderScheduler(() => this.#renderNow());
 
   constructor(private readonly root: HTMLElement) {
-    const pair = consumePairingFragment();
-    if (pair) sessionStorage.removeItem(TICKET_KEY);
+    const openPane = (pane: PaneSnapshot) => {
+      const snapshot = this.#session.snapshot;
+      if (snapshot) this.#openTerminal(snapshot, pane);
+    };
+    const overview = () => {
+      this.#closeDashboardNavigation(true);
+      this.root.querySelector<HTMLElement>(".dashboard")?.scrollTo({ top: 0, behavior: "smooth" });
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    };
+    this.#dashboardWorkspaces = new TerminalWorkspaceSidebar(openPane, overview, () => this.#sidebarControls.toggle("workspaces"));
+    this.#dashboardPanes = new TerminalPaneSidebar(openPane, {
+      showShells: this.#showShells,
+      onChange: (showShells) => { this.#showShells = showShells; this.#render(); },
+    }, () => this.#closeDashboardNavigation(true), () => this.#sidebarControls.toggle("panes"));
+    this.#dashboardCloseButton = this.#dashboardPanes.closeButton;
+    this.#dashboardCloseButton.setAttribute("aria-label", "Close navigation");
+    this.#dashboardCloseButton.setAttribute("aria-controls", "dashboard-navigation");
+    this.#dashboardCloseButton.title = "Close navigation";
+    this.#dashboardOpenButton.setAttribute("aria-haspopup", "dialog");
+    this.#dashboardHeader = element("header", { className: "dashboard-header" }, navigationBrand(overview), this.#dashboardOpenButton);
+    this.#dashboardNavigation.append(
+      element("header", { className: "terminal-navigation-header" }, navigationBrand(overview), this.#dashboardCloseButton),
+      this.#dashboardWorkspaces.root, this.#dashboardPanes.root,
+    );
+    this.#desktopSidebars.addEventListener("change", () => {
+      if (this.#desktopSidebars.matches) this.#dashboardNavigationOpen = false;
+      this.#render();
+    });
+    document.addEventListener("keydown", (event) => {
+      const dialog = this.#devicePanelOpen ? this.#overlays.querySelector<HTMLElement>(".device-panel")
+        : !this.#terminal && this.#dashboardNavigationOpen ? this.#dashboardNavigation : undefined;
+      if (!dialog) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (this.#devicePanelOpen) this.#closeDevicePanel();
+        else this.#closeDashboardNavigation(true);
+      } else trapNavigationFocus(event, dialog);
+    });
+    // Hold live redraws while a pointer is pressed, so the pressed element
+    // is still there when it is released and the click is delivered.
+    root.addEventListener("pointerdown", (event) => this.#renders.hold(event.pointerId), true);
+    for (const type of ["pointerup", "pointercancel"] as const) {
+      window.addEventListener(type, (event) => this.#renders.release(event.pointerId), true);
+    }
+    // A mouse that moves with no button pressed was released where this page
+    // could not see it, for example outside the window.
+    window.addEventListener("pointermove", (event) => {
+      if (event.buttons === 0) this.#renders.release(event.pointerId);
+    }, true);
+    window.addEventListener("blur", () => this.#renders.releaseAll());
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) this.#renders.releaseAll();
+    });
+    this.#tabCode = consumePairingFragment();
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    this.#bridge = new BridgeClient(`${scheme}//${location.host}/bridge`, () => ({
-      ...(sessionStorage.getItem(TICKET_KEY) ? { ticket: sessionStorage.getItem(TICKET_KEY)! } : {}),
-      ...(!sessionStorage.getItem(TICKET_KEY) && pair ? { code: pair } : {}),
-    }), (ticket) => sessionStorage.setItem(TICKET_KEY, ticket));
+    this.#bridge = new BridgeClient(`${scheme}//${location.host}/bridge`, () => {
+      this.#sentTicket = this.#tickets.get();
+      const credential = pairingCredential(this.#sentTicket, this.#tabCode);
+      this.#sent = { ticket: Boolean(credential.ticket), code: Boolean(credential.code) };
+      return credential;
+    }, (ticket) => {
+      this.#tickets.set(ticket);
+      this.#sentTicket = ticket;
+      // The code was spent to issue this ticket.
+      this.#tabCode = undefined;
+    });
     this.#bridge.addEventListener("devices", (event) => {
       try {
         this.#devices = asDeviceStatus((event as CustomEvent).detail);
         if (this.#pairingCode) this.#pairingUrl = this.#pairingLink(this.#pairingCode);
-        this.#render();
+        this.#renders.request();
       } catch (error) {
         this.#showError(error);
       }
     });
     this.#session = new LiveSession(this.#bridge);
     this.#session.addEventListener("state", () => {
-      this.#render();
+      if (this.#session.state === "ready") this.#tabCode = undefined; // authorized; no longer needed
+      if (this.#session.state === "expired" && this.#terminal) {
+        // Access ended while a terminal was open. Leave it, or the terminal
+        // would sit on a dead connection with no way forward.
+        this.#terminal.destroy();
+        this.#terminal = undefined;
+      }
+      this.#renders.request();
       if (this.#session.state === "ready" && !this.#devices) void this.#refreshDevices();
     });
     this.#session.addEventListener("snapshot", () => {
       const snapshot = this.#session.snapshot;
       if (snapshot) this.#terminal?.updateSnapshot(snapshot);
-      this.#render();
+      this.#renders.request();
+    });
+    this.#session.addEventListener("titles", (event) => this.#updateTitles((event as CustomEvent<string[]>).detail));
+    window.addEventListener("storage", (event) => {
+      // Pairing or forgetting in another tab updates this tab too. Transient
+      // disconnects do not erase access, and there is no idle polling.
+      if ((event.key === TICKET_KEY || event.key === null) && this.#tickets.get() !== this.#sentTicket) {
+        // Replace the old connection and any in-flight synchronization as one
+        // lifecycle; late results from the old authority cannot restore its UI.
+        location.reload();
+      }
     });
   }
 
@@ -75,29 +191,120 @@ export class WebApp {
     try {
       await this.#session.start();
     } catch (error) {
-      this.#showError(error);
+      // The access screen already explains a rejection.
+      if (this.#session.state !== "expired") this.#showError(error);
     }
   }
 
+  /**
+   * Redraw now, unless a pointer is pressed on the page: then the redraw is
+   * queued until release, so a request that completes mid-press (device or
+   * session lists, for example) cannot replace the pressed element.
+   */
   #render(): void {
-    if (this.#terminal) return;
+    if (this.#renders.holding) this.#renders.request();
+    else this.#renderNow();
+  }
+
+  #renderNow(): void {
+    if (this.#terminal) {
+      this.#terminal.root.inert = this.#devicePanelOpen;
+      this.#updateConnectionStatus();
+      rebuildPreservingView(this.#overlays, () => this.#overlays.replaceChildren(...(this.#devicePanelOpen ? [this.#devicePanel()] : [])));
+      return;
+    }
     const snapshot = this.#session.snapshot;
-    this.root.replaceChildren(
-      element("div", { className: "shell" },
-        snapshot
-          ? this.#dashboard(snapshot)
-          : element("div", { className: "dashboard loading-dashboard" }, this.#missionDock(false), this.#connecting()),
-        snapshot && this.#devicePanelOpen ? this.#devicePanel() : undefined,
-      ),
-    );
+    // Without authority nothing on the dashboard can act, so show the access
+    // screen instead of a stale dashboard or a loading state that never ends.
+    const expired = this.#session.state === "expired";
+    if (expired) {
+      this.#dashboardNavigationOpen = false;
+      this.#devicePanelOpen = false;
+    }
+    rebuildPreservingView(this.root, () => {
+      this.#overlays.replaceChildren(...(!expired && snapshot && this.#devicePanelOpen ? [this.#devicePanel()] : []));
+      this.root.replaceChildren(
+        element("div", { className: "shell" },
+          expired
+            ? element("div", { className: "dashboard loading-dashboard" }, this.#accessScreen())
+            : snapshot
+              ? this.#dashboardLayout(snapshot)
+              : element("div", { className: "dashboard loading-dashboard" }, this.#connecting()),
+          this.#overlays,
+        ),
+      );
+    });
+    const layout = this.root.querySelector<HTMLElement>(".dashboard-layout");
+    if (layout) layout.inert = this.#devicePanelOpen;
+  }
+
+  /** Update changed agent titles in place, leaving every other element as it is. */
+  #updateTitles(paneIds: string[]): void {
+    const snapshot = this.#session.snapshot;
+    if (!snapshot) return;
+    if (this.#terminal) {
+      this.#terminal.updateTitles(paneIds);
+      return;
+    }
+    if ((this.#desktopSidebars.matches || this.#dashboardNavigationOpen) && this.#session.state !== "expired") {
+      this.#dashboardPanes.update(this.#terminalPaneOptions(), undefined, this.#showShells);
+    }
   }
 
   #connecting(): HTMLElement {
     return element("section", { className: "empty-state" },
       element("div", { className: "pulse" }),
-      element("h1", { text: this.#session.state === "expired" ? "Access expired" : "Connecting to Luvus" }),
-      element("p", { text: this.#session.state === "expired" ? "This device ticket expired, or this one-use pairing link was already used. Ask a connected device to create a new link." : "Authenticating and reconciling the live session." }),
+      element("h1", { text: "Connecting to Luvus" }),
+      element("p", { text: "Authenticating and reconciling the live session." }),
     );
+  }
+
+  /** Why this tab has no access, and a way to fix it without leaving the page. */
+  #accessScreen(): HTMLElement {
+    const problem = accessProblem(this.#sent);
+    const input = element("input", {
+      className: "pair-input",
+      attrs: {
+        type: "text",
+        placeholder: "Paste a pairing link",
+        "aria-label": "Pairing link or code",
+        autocomplete: "off",
+        autocapitalize: "off",
+        spellcheck: "false",
+      },
+    });
+    const form = element("form", {
+      className: "pair-form",
+      on: {
+        submit: (event) => {
+          event.preventDefault();
+          this.#pairWith(input.value);
+        },
+      },
+    },
+      input,
+      element("button", { className: "primary", text: "Connect", attrs: { type: "submit" } }),
+    );
+    return element("section", { className: "empty-state access-problem", attrs: { role: "alert" } },
+      element("h1", { text: problem.title }),
+      element("p", { text: problem.body }),
+      form,
+      this.#pairError ? element("p", { className: "pair-error", text: this.#pairError }) : undefined,
+    );
+  }
+
+  #pairWith(value: string): void {
+    const code = parsePairingInput(value);
+    if (!code) {
+      this.#pairError = "That is not a Luvus pairing link or code.";
+      this.#render();
+      return;
+    }
+    // A ticket the bridge just rejected can never work again.
+    if (this.#sent.ticket) this.#tickets.clear(this.#sentTicket);
+    this.#tabCode = code;
+    this.#pairError = undefined;
+    void this.start();
   }
 
   #devicePanel(): HTMLElement {
@@ -108,7 +315,10 @@ export class WebApp {
       attrs: { "aria-label": "Maximum paired devices", ...(this.#deviceLoading ? { disabled: "" } : {}) },
       on: { change: (event) => void this.#setDeviceLimit(Number((event.currentTarget as HTMLSelectElement).value)) },
     });
-    for (let limit = 1; limit <= 8; limit += 1) {
+    // The bridge refuses a limit above the operator's --max-devices, so only
+    // offer what it will accept.
+    const ceiling = status?.limit_ceiling ?? 8;
+    for (let limit = 1; limit <= ceiling; limit += 1) {
       select.append(element("option", {
         text: String(limit),
         attrs: {
@@ -141,6 +351,8 @@ export class WebApp {
     });
     const savePublicUrl = button("Save address", "ghost device-url-save", () => void this.#setPublicUrl(publicUrl.value));
     savePublicUrl.disabled = this.#deviceLoading || !status;
+    const disconnectButton = button("Disconnect this browser", "ghost device-disconnect", () => void this.#disconnectBrowser());
+    disconnectButton.disabled = this.#deviceLoading || !status;
     const panel = element("section", { className: "device-panel", attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "device-title" } },
       element("div", { className: "device-panel-head" },
         element("div", {},
@@ -164,8 +376,13 @@ export class WebApp {
         savePublicUrl,
       ),
       element("p", { className: "device-help", text: "Use your HTTPS tunnel address for phone links. Clear it to use this browser's address. This changes links only, not network exposure or origin permissions." }),
-      element("p", { className: "device-help", text: "Each device receives its own ticket. Pairing links work once and expire after five minutes." }),
+      element("p", { className: "device-help", text: "Pair each browser once. Access is remembered across tabs and browser restarts. "
+        + (this.#bridge.ready?.expires_at
+          ? `This browser's access expires at ${new Date(this.#bridge.ready.expires_at * 1000).toLocaleString()}. `
+          : "Access lasts until the bridge stops or this browser is revoked. ")
+        + "Pairing links expire after five minutes." }),
       this.#pairingUrl ? this.#pairingCard(this.#pairingUrl) : pairButton,
+      disconnectButton,
     );
     const overlay = element("div", {
       className: "device-overlay",
@@ -219,6 +436,22 @@ export class WebApp {
     if (failure) this.#showError(failure);
   }
 
+  async #disconnectBrowser(): Promise<void> {
+    if (this.#deviceLoading || !confirm("Disconnect this browser in every tab? You'll need a new QR/code to reconnect. Other browsers and running terminals are not affected.")) return;
+    this.#deviceLoading = true;
+    const ticket = this.#sentTicket;
+    try {
+      await this.#bridge.request("web.devices.forget");
+      this.#tickets.clear(ticket);
+      location.reload();
+    } catch (error) {
+      this.#showError(error);
+    } finally {
+      this.#deviceLoading = false;
+      this.#render();
+    }
+  }
+
   async #setDeviceLimit(limit: number): Promise<void> {
     if (this.#deviceLoading) return;
     this.#deviceLoading = true;
@@ -243,6 +476,11 @@ export class WebApp {
       const url = rawUrl.trim();
       this.#devices = asDeviceStatus(await this.#bridge.request("web.devices.set_public_url", { url: url || null }));
       if (this.#pairingCode) this.#pairingUrl = this.#pairingLink(this.#pairingCode);
+      // The bridge may normalize the address; show what it saved rather than
+      // carrying the typed spelling into the rebuilt field. Text typed after
+      // this save was sent is newer than the save, so it is kept.
+      const field = this.root.querySelector<HTMLInputElement>(".device-url-input");
+      if (field) markFieldSaved(field, rawUrl);
       this.#render();
     } catch (error) {
       failure = error;
@@ -293,6 +531,16 @@ export class WebApp {
   #closeDevicePanel(): void {
     this.#devicePanelOpen = false;
     this.#render();
+    this.root.querySelector<HTMLButtonElement>(this.#desktopSidebars.matches ? '[data-view-key="mission-nav:devices"]' : '[aria-label="Open navigation"]')?.focus({ preventScroll: true });
+  }
+
+  #openDevicePanel(): void {
+    this.#dashboardNavigationOpen = false;
+    this.#terminal?.closeNavigation();
+    this.#devicePanelOpen = true;
+    this.#render();
+    this.#overlays.querySelector<HTMLButtonElement>(".device-close")?.focus({ preventScroll: true });
+    void this.#refreshDevices();
   }
 
   #openSessionPanel(): void {
@@ -353,7 +601,7 @@ export class WebApp {
       ),
       this.#sessionLoading || !this.#sessions
         ? element("p", { className: "session-menu-empty", text: "Loading sessions…" })
-        : element("div", { className: "session-menu-list" }, ...this.#sessions.map((session) => {
+        : element("div", { className: "session-menu-list", attrs: { "data-scroll-key": "sessions" } }, ...this.#sessions.map((session) => {
           const active = session.name === current;
           const disabled = active || (!session.running && !canStart);
           const option = element("button", {
@@ -369,15 +617,10 @@ export class WebApp {
     );
   }
 
-  #missionDock(interactive = true): HTMLElement {
-    return element("nav", { className: "mission-dock", attrs: { "aria-label": "Mission control sections" } },
-      missionNavButton("Overview", "luvus", () => window.scrollTo({ top: 0, behavior: "smooth" }), true),
-      missionNavButton("Workspaces", "workspaces", () => document.querySelector("#mission-workspaces")?.scrollIntoView({ behavior: "smooth", block: "start" }), false, !interactive),
-      missionNavButton("Devices", "devices", () => {
-        this.#devicePanelOpen = true;
-        this.#render();
-        void this.#refreshDevices();
-      }, false, !interactive),
+  #sidebarFooter(): HTMLElement {
+    return element("nav", { className: "mission-dock", attrs: { "aria-label": "Devices and connection" } },
+      missionNavButton("Devices", "devices", () => this.#openDevicePanel()),
+      refreshButton(this.#sidebarControls.refresh),
       element("span", {
         className: `mission-nav-status ${this.#session.state}`,
         attrs: { role: "status", "aria-label": `Connection ${this.#session.state}`, title: this.#session.state },
@@ -385,55 +628,68 @@ export class WebApp {
     );
   }
 
+  #updateConnectionStatus(): void {
+    for (const status of this.root.querySelectorAll<HTMLElement>(".mission-nav-status")) {
+      status.className = `mission-nav-status ${this.#session.state}`;
+      status.setAttribute("aria-label", `Connection ${this.#session.state}`);
+      status.title = this.#session.state;
+    }
+  }
+
+  #openDashboardNavigation(): void {
+    if (this.#terminal || this.#desktopSidebars.matches || !this.#session.snapshot || this.#session.state === "expired") return;
+    this.#dashboardNavigationOpen = true;
+    this.#sessionPanelOpen = false;
+    this.#render();
+    this.#dashboardCloseButton.focus({ preventScroll: true });
+  }
+
+  #closeDashboardNavigation(restoreFocus = false): void {
+    if (!this.#dashboardNavigationOpen) return;
+    this.#dashboardNavigationOpen = false;
+    this.#render();
+    if (restoreFocus && !this.#desktopSidebars.matches) this.#dashboardOpenButton.focus({ preventScroll: true });
+  }
+
+  #dashboardLayout(snapshot: SessionSnapshot): HTMLElement {
+    const desktop = this.#desktopSidebars.matches;
+    const navigationVisible = desktop || this.#dashboardNavigationOpen;
+    const selected = this.#workspaceSelection.resolve(snapshot);
+    this.#dashboardWorkspaces.update(navigationVisible ? terminalWorkspaceOptions(snapshot, selected?.pane) : []);
+    this.#dashboardWorkspaces.setFooter(this.#sidebarFooter());
+    this.#dashboardWorkspaces.setCollapsed(this.#sidebarControls.collapsed.workspaces);
+    this.#dashboardPanes.update(navigationVisible ? this.#terminalPaneOptions() : [], undefined, this.#showShells);
+    this.#dashboardPanes.setCollapsed(this.#sidebarControls.collapsed.panes);
+    const { workspaces, panes } = this.#sidebarControls.collapsed;
+    if (this.#dashboardNavigationOpen) {
+      this.#dashboardNavigation.setAttribute("role", "dialog");
+      this.#dashboardNavigation.setAttribute("aria-modal", "true");
+    } else {
+      this.#dashboardNavigation.removeAttribute("role");
+      this.#dashboardNavigation.removeAttribute("aria-modal");
+    }
+    this.#dashboardOpenButton.setAttribute("aria-expanded", String(this.#dashboardNavigationOpen));
+    this.#dashboardHeader.inert = this.#dashboardNavigationOpen;
+    const dashboard = this.#dashboard(snapshot);
+    dashboard.inert = this.#dashboardNavigationOpen;
+    const frame = element("div", { className: "web-content-frame" }, this.#dashboardHeader, dashboard);
+    // Reuse the same sidebar nodes beside the desktop frame and in the mobile drawer.
+    // Moving them preserves row identity, focus, and independent scroll state.
+    if (!desktop && this.#dashboardPanes.root.parentElement !== this.#dashboardNavigation) this.#dashboardNavigation.append(this.#dashboardPanes.root);
+    return element("div", { className: `dashboard-layout${workspaces ? " workspaces-collapsed" : ""}${panes ? " panes-collapsed" : ""}${this.#dashboardNavigationOpen ? " pane-navigation-open" : ""}` },
+      this.#dashboardNavigation, frame, desktop ? this.#dashboardPanes.root : undefined,
+    );
+  }
+
   #dashboard(snapshot: SessionSnapshot): HTMLElement {
-    const agents = snapshot.workspaces.flatMap((workspace, workspaceIndex) => workspace.tabs.flatMap((tab) => tab.panes.map((pane) => ({
-      pane,
-      workspace: displayText(workspace.name, `Workspace ${workspaceIndex + 1}`),
-    })))).filter(({ pane }) => displayText(pane.agent, "") !== "");
-    const workingAgents = agents.filter(({ pane }) => pane.agent_status === "working").length;
+    const agents = snapshot.workspaces.flatMap((workspace) => workspace.tabs.flatMap((tab) => tab.panes))
+      .filter((pane) => pane.kind === "terminal" && pane.is_agent === true);
+    const agentCount = agents.length;
+    const workingCount = agents.filter((pane) => pane.agent_status === "working").length;
     const tabCount = snapshot.workspaces.reduce((total, workspace) => total + workspace.tabs.length, 0);
     const paneCount = snapshot.workspaces.reduce((total, workspace) => total
       + workspace.tabs.reduce((tabTotal, tab) => tabTotal + tab.panes.length, 0), 0);
-    const workspaces = snapshot.workspaces.map((workspace, workspaceIndex) => {
-      const workspaceName = displayText(workspace.name, `Workspace ${workspaceIndex + 1}`);
-      const workspacePath = displayText(workspace.cwd, "Path unavailable");
-      const branch = displayText(workspace.branch, "");
-      return element("article", { className: `workspace-card${workspace.active ? " active" : ""}` },
-        element("header", { className: "workspace-head" },
-          element("div", { className: "workspace-title" },
-            element("div", { className: "workspace-name-row" },
-              element("span", { className: `workspace-presence${workspace.active ? " active" : ""}`, attrs: { "aria-label": workspace.active ? "Active workspace" : "Workspace" } }),
-              element("h3", { text: workspaceName }),
-              branch ? element("span", { className: "workspace-branch", text: branch }) : undefined,
-            ),
-            element("p", { text: workspacePath }),
-          ),
-          element("span", { className: "workspace-tab-total", text: `${workspace.tabs.length} tab${workspace.tabs.length === 1 ? "" : "s"}` }),
-        ),
-        element("div", { className: "workspace-tabs" },
-          ...workspace.tabs.map((tab, tabIndex) => {
-            const tabName = displayText(tab.name, `Tab ${tabIndex + 1}`);
-            return element("section", { className: `workspace-tab${tab.active ? " active" : ""}` },
-              element("div", { className: "workspace-tab-head" },
-                element("span", { className: "tab-presence", attrs: { "aria-hidden": "true" } }),
-                element("strong", { text: tabName }),
-                element("span", {
-                  className: "tab-pane-total",
-                  text: String(tab.panes.length),
-                  attrs: { "aria-label": `${tab.panes.length} pane${tab.panes.length === 1 ? "" : "s"}` },
-                }),
-              ),
-              element("div", { className: "pane-grid" }, ...tab.panes.map((pane, paneIndex) => this.#paneButton(snapshot, pane, paneIndex))),
-            );
-          }),
-          workspace.tabs.length === 0
-            ? element("p", { className: "workspace-empty", text: "No tabs in this workspace" })
-            : undefined,
-        ),
-      );
-    });
-    return element("div", { className: "dashboard" },
-      this.#missionDock(),
+    return element("div", { className: "dashboard", attrs: { "data-scroll-key": "dashboard-main" } },
       element("section", { className: "mission-hero", attrs: { id: "mission-overview" } },
         element("div", { className: "hero-layout" },
           element("div", { className: "hero-stat-column stats-left" },
@@ -446,7 +702,7 @@ export class WebApp {
               element("div", { className: "orbit orbit-outer" }),
               element("div", { className: "orbit orbit-inner" }),
               element("div", { className: "core-mark" }, element("img", { attrs: { src: "/mark.svg", alt: "" } })),
-              element("div", { className: "core-label" }, element("strong", { text: "SYSTEM ONLINE" }), element("small", { text: `${workingAgents} executing` })),
+              element("div", { className: "core-label" }, element("strong", { text: "SYSTEM ONLINE" }), element("small", { text: `${workingCount} executing` })),
             ),
             element("div", { className: "hero-session-wrap" },
               element("button", {
@@ -466,61 +722,10 @@ export class WebApp {
           ),
           element("div", { className: "hero-stat-column stats-right" },
             missionStat(String(paneCount).padStart(2, "0"), "Live panes"),
-            missionStat(String(agents.length).padStart(2, "0"), "Agents"),
+            missionStat(String(agentCount).padStart(2, "0"), "Agents"),
           ),
         ),
-        button("Refresh telemetry", "ghost hero-refresh", () => void this.#session.refresh().catch((error) => this.#showError(error))),
       ),
-      agents.length ? element("section", { className: "section" },
-        element("div", { className: "section-heading", attrs: { id: "mission-agents" } },
-          element("h2", { className: "section-title", text: "Agents" }),
-          element("span", { className: "section-status", text: workingAgents ? `${workingAgents} executing` : "All standing by" }),
-        ),
-        element("div", { className: "agent-grid" }, ...agents.map(({ pane, workspace }) => element("button", {
-          className: "agent-card",
-          attrs: { type: "button" },
-          on: { click: () => this.#openTerminal(snapshot, pane) },
-        },
-        element("div", { className: "agent-copy" },
-          element("small", { className: "agent-context", text: `${displayText(pane.agent_name, displayText(pane.agent, "Agent"))} · ${workspace}` }),
-          element("strong", { className: `agent-session-title${displayText(pane.agent_session_title, "") ? "" : " absent"}`, text: displayText(pane.agent_session_title, "Untitled session") }),
-        ),
-        element("span", { className: "agent-state", text: displayText(pane.agent_status, "unknown") }),
-        missionIcon("arrow"),
-        ))),
-      ) : undefined,
-      element("section", { className: "section" },
-        element("div", { className: "section-heading", attrs: { id: "mission-workspaces" } },
-          element("h2", { className: "section-title", text: "Workspaces" }),
-          element("span", { className: "section-status", text: `${snapshot.workspaces.length} connected` }),
-        ),
-        element("div", { className: "workspace-grid" }, ...workspaces),
-      ),
-    );
-  }
-
-  #paneButton(snapshot: SessionSnapshot, pane: PaneSnapshot, paneIndex: number): HTMLElement {
-    if (pane.kind !== "terminal" || !pane.terminal_id) return element("span", { className: "pane-tile view" },
-      element("span", { className: "pane-presence" }),
-      element("span", { className: "pane-copy" },
-        element("strong", { text: "View" }),
-        element("small", { text: "Native pane" }),
-      ),
-    );
-    const agent = displayText(pane.agent_name, displayText(pane.agent, ""));
-    const state = displayText(pane.agent_status, agent ? "Agent" : "Shell");
-    const stateClass = paneStateClass(state);
-    return element("button", {
-      className: `pane-tile ${stateClass}${pane.focused ? " focused" : ""}`,
-      attrs: { type: "button" },
-      on: { click: () => this.#openTerminal(snapshot, pane) },
-    },
-    element("span", { className: "pane-presence" }),
-    element("span", { className: "pane-copy" },
-      element("strong", { text: agent || `Terminal ${paneIndex + 1}` }),
-      element("small", { text: state }),
-    ),
-    missionIcon("arrow"),
     );
   }
 
@@ -528,11 +733,15 @@ export class WebApp {
     const allowed = this.#session.allowedMethods;
     const control = allowed.has("terminal.backend.control");
     if (!control && !allowed.has("terminal.backend.observe")) return;
+    this.#dashboardNavigationOpen = false;
+    this.#workspaceSelection.select(snapshot, pane);
+    this.#paneRecency.opened(snapshot, pane);
     this.#terminal?.destroy();
     const streamCursor = this.#session.capabilities?.terminal?.features?.includes("stream_cursor") ?? false;
     const canUploadFiles = control && supportsFileUpload(
       this.#session.capabilities?.terminal?.capabilities,
     );
+    const viewportSizing = viewportSizingAvailable(this.#session.capabilities?.terminal?.capabilities, control);
     const terminal = new TerminalView(
       this.#bridge,
       snapshot,
@@ -540,6 +749,7 @@ export class WebApp {
       control,
       canUploadFiles,
       streamCursor,
+      viewportSizing,
       () => this.#terminalPaneOptions(),
       (selectedPane) => {
         const currentSnapshot = this.#session.snapshot;
@@ -550,31 +760,17 @@ export class WebApp {
         this.#terminal = undefined;
         this.#render();
       },
+      { showShells: this.#showShells, onChange: (showShells) => { this.#showShells = showShells; } },
+      this.#sidebarControls,
     );
     this.#terminal = terminal;
-    this.root.replaceChildren(terminal.root);
+    this.root.replaceChildren(terminal.root, this.#overlays);
     void terminal.start().catch((error) => this.#showError(error));
   }
 
   #terminalPaneOptions(): TerminalPaneOption[] {
     const snapshot = this.#session.snapshot;
-    if (!snapshot) return [];
-    return snapshot.workspaces.flatMap((workspace, workspaceIndex) => {
-      const workspaceName = displayText(workspace.name, `Workspace ${workspaceIndex + 1}`);
-      return workspace.tabs.flatMap((tab, tabIndex) => {
-        const tabName = displayText(tab.name, `Tab ${tabIndex + 1}`);
-        return tab.panes.flatMap((pane, paneIndex) => {
-          if (pane.kind !== "terminal" || !pane.terminal_id) return [];
-          const agent = displayText(pane.agent_name, displayText(pane.agent, ""));
-          return [{
-            pane,
-            title: agent || `Terminal ${paneIndex + 1}`,
-            context: `${workspaceName} / ${tabName}`,
-            path: displayText(pane.cwd, displayText(workspace.cwd, "Terminal")),
-          }];
-        });
-      });
-    });
+    return snapshot ? filterWorkspacePanes(this.#paneRecency.options(snapshot), this.#workspaceSelection.resolve(snapshot)?.workspace) : [];
   }
 
   #showError(error: unknown): void {
@@ -603,7 +799,8 @@ function asDeviceStatus(value: unknown): DeviceStatus {
   if (!status || status.type !== "browser_device_status"
     || !Number.isSafeInteger(status.paired_devices) || !Number.isSafeInteger(status.pending_pairings)
     || !Number.isSafeInteger(status.max_devices)
-    || (status.public_url !== null && typeof status.public_url !== "string")) {
+    || (status.public_url !== null && typeof status.public_url !== "string")
+    || (status.limit_ceiling !== undefined && !Number.isSafeInteger(status.limit_ceiling))) {
     throw new BridgeError("Invalid browser device status", "invalid_response");
   }
   return status as DeviceStatus;
@@ -634,24 +831,13 @@ function asBrowserSessions(value: unknown): BrowserSession[] {
   });
 }
 
-function displayText(value: unknown, fallback: string): string {
-  if (typeof value !== "string") return fallback;
-  const text = value.trim();
-  return text && text.toLowerCase() !== "null" ? text : fallback;
-}
-
-function paneStateClass(state: string): string {
-  const normalized = state.toLowerCase();
-  return ["working", "blocked", "done", "idle"].includes(normalized) ? normalized : "terminal";
-}
-
 type MissionIconName = "overview" | "workspaces" | "devices" | "status" | "arrow";
 type MissionNavIconName = MissionIconName | "luvus";
 
 function missionNavButton(label: string, icon: MissionNavIconName, onClick: () => void, active = false, disabled = false): HTMLButtonElement {
   const control = element("button", {
     className: `mission-nav-button${icon === "luvus" ? " logo" : ""}${active ? " active" : ""}`,
-    attrs: { type: "button", "aria-label": label, title: label, ...(disabled ? { disabled: "" } : {}) },
+    attrs: { type: "button", "aria-label": label, title: label, "data-view-key": `mission-nav:${icon}`, ...(disabled ? { disabled: "" } : {}) },
     on: { click: onClick },
   }, icon === "luvus"
     ? element("img", { className: "mission-nav-logo", attrs: { src: "/mark.svg", alt: "" } })

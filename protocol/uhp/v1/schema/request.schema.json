@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://luvus.dev/protocol/uhp/v1/request.schema.json",
   "title": "Luvus Universal Harness Protocol request",
-  "$comment": "agent.prompt preserves target/text/wait/until/timeout_s. No-wait returns queue admission immediately. wait=true requires a new working or blocked transition before matching until, bounded by timeout_s (default 300). until and timeout_s require wait=true. agent.wait remains a current-state matcher.",
+  "$comment": "agent.prompt preserves target/text/strict/wait/until/timeout_s and accepts an optional terminal_id fence. strict defaults false and requires positive live composer evidence; agents without a detector reject in strict mode. No-wait returns queue admission immediately. wait=true requires a new working or blocked transition before matching until, bounded by timeout_s (default 300). until and timeout_s require wait=true. agent.wait remains a current-state matcher.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "method", "params"],
@@ -31,7 +31,7 @@
         "task.add", "task.list", "task.get", "task.claim", "task.next", "task.start", "task.heartbeat", "task.update", "task.done", "task.retry", "task.merge", "task.release", "task.delete",
         "automation.create", "automation.list", "automation.get", "automation.update", "automation.enable", "automation.disable", "automation.rebind", "automation.delete", "automation.run", "automation.history", "automation.preview", "automation.health",
         "lease.acquire", "lease.list", "lease.release",
-        "module.list", "module.info", "module.link", "module.unlink", "module.uninstall", "module.enable", "module.disable", "module.action.list", "module.action.invoke", "module.pane.open", "module.pane.focus", "module.pane.close", "module.config_dir", "module.settings.list", "module.settings.get", "module.settings.set", "module.log.list",
+        "module.list", "module.info", "module.link", "module.update", "module.unlink", "module.uninstall", "module.enable", "module.disable", "module.action.list", "module.action.invoke", "module.pane.open", "module.pane.focus", "module.pane.close", "module.config_dir", "module.settings.list", "module.settings.get", "module.settings.set", "module.log.list",
         "theme.list", "theme.path", "theme.use", "theme.reload", "manifest.reload",
         "ui.sidebar", "ui.agent_title.push", "ui.agent_title.clear", "ui.dock.push", "ui.dock.list", "ui.dock.move", "ui.bar.push", "ui.bar.list", "ui.bar.move", "ui.bar.remove", "ui.notification.push", "ui.notification.clear", "ui.toast",
         "terminal.backend.inventory", "terminal.backend.snapshot", "terminal.backend.validate", "terminal.backend.processes", "terminal.backend.capture", "terminal.backend.observe", "terminal.backend.control", "terminal.backend.type_literal", "terminal.backend.paste_text", "terminal.backend.submit_text", "terminal.backend.send_key", "terminal.backend.set_title", "terminal.backend.notify", "terminal.backend.create", "terminal.backend.close", "terminal.backend.wait_change", "terminal.backend.wait_output", "terminal.backend.events.subscribe"
@@ -41,6 +41,23 @@
   },
   "$defs": {
     "emptyParams": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
+    "moduleUpdateParams": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "path", "source", "expected_root", "expected_source"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "expected_root": { "type": "string", "minLength": 1 },
+        "expected_source": { "type": "string", "minLength": 1 },
+        "expected_ref": { "type": ["string", "null"], "minLength": 1 },
+        "git_ref": { "type": ["string", "null"], "minLength": 1 }
+      }
+    },
+    "paneListParams": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "all_tabs": { "type": "boolean", "default": true } }
+    },
     "machineIdParams": {
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": { "id": { "type": "string", "minLength": 1, "maxLength": 48, "pattern": "^[a-z0-9][a-z0-9._-]*$" } }
@@ -117,6 +134,29 @@
         { "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F\\uD800-\\uDFFF]$" }
       ]
     },
+    "agentPromptParams": {
+      "type": "object", "additionalProperties": false, "required": ["target", "text"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 262144 },
+        "strict": { "type": "boolean" },
+        "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "wait": { "type": "boolean" },
+        "until": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "enum": ["idle", "working", "blocked", "done"] } },
+        "timeout_s": { "type": "number", "minimum": 0, "maximum": 3600 }
+      },
+      "if": { "anyOf": [{ "required": ["until"] }, { "required": ["timeout_s"] }] },
+      "then": { "required": ["wait"], "properties": { "wait": { "const": true } } }
+    },
+    "agentSendParams": {
+      "type": "object", "additionalProperties": false, "required": ["target", "text"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "text": { "type": "string", "minLength": 1 },
+        "strict": { "type": "boolean" },
+        "terminal_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" }
+      }
+    },
     "agentKeysParams": {
       "type": "object", "additionalProperties": false, "required": ["target", "keys"],
       "dependentRequired": {
@@ -182,8 +222,21 @@
             "cost": { "type": ["number", "null"], "minimum": 0, "maximum": 1000000000000 },
             "updated_at": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
           }
-        }
-      }
+        },
+        "reporter_pid": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "evidence": {
+          "type": "object", "additionalProperties": false, "required": ["cwd", "prompt"],
+          "properties": {
+            "cwd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "prompt": { "type": "string", "maxLength": 16384 }
+          }
+        },
+        "dry_run": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "required": ["evidence"] }, "then": { "not": { "anyOf": [ { "required": ["pane"] }, { "required": ["reporter_pid"] } ] } } },
+        { "if": { "required": ["dry_run"], "properties": { "dry_run": { "const": true } } }, "then": { "required": ["evidence"] } }
+      ]
     },
     "paneReleaseSessionParams": {
       "type": "object", "additionalProperties": false, "required": ["agent", "session_id"],
@@ -219,6 +272,13 @@
       "type": "object", "additionalProperties": false, "required": ["id"],
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "worktreeRemoveParams": {
+      "type": "object", "additionalProperties": false, "required": ["path"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "force": { "type": "boolean" }
       }
     },
     "taskStartParams": {
@@ -357,10 +417,14 @@
     }
   },
   "allOf": [
+    { "if": { "properties": { "method": { "const": "module.update" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/moduleUpdateParams" } } } },
     { "if": { "properties": { "method": { "enum": ["host.capabilities", "host.info", "host.doctor", "host.update.check", "skill.status", "integration.status", "uhp.capabilities", "uhp.stats", "uhp.token.list", "session.list"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
     { "if": { "properties": { "method": { "const": "machine.list" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/emptyParams" } } } },
+    { "if": { "properties": { "method": { "const": "pane.list" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/paneListParams" } } } },
     { "if": { "properties": { "method": { "enum": ["machine.get", "machine.status", "machine.sessions"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/machineIdParams" } } } },
     { "if": { "properties": { "method": { "const": "machine.add" } } },
@@ -381,6 +445,10 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/agentWaitParams" } } } },
     { "if": { "properties": { "method": { "const": "agent.keys" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/agentKeysParams" } } } },
+    { "if": { "properties": { "method": { "const": "agent.prompt" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/agentPromptParams" } } } },
+    { "if": { "properties": { "method": { "const": "agent.send" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/agentSendParams" } } } },
     { "if": { "properties": { "method": { "enum": ["mission.snapshot", "mission.refresh"] } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/missionQueryParams" } } } },
     { "if": { "properties": { "method": { "enum": ["session.status", "session.start", "session.stop", "session.restart"] } } },
@@ -401,6 +469,8 @@
       "then": { "properties": { "params": { "$ref": "#/$defs/taskUpdateParams" } } } },
     { "if": { "properties": { "method": { "const": "task.retry" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskRetryParams" } } } },
+    { "if": { "properties": { "method": { "const": "worktree.remove" } } },
+      "then": { "properties": { "params": { "$ref": "#/$defs/worktreeRemoveParams" } } } },
     { "if": { "properties": { "method": { "const": "task.start" } } },
       "then": { "properties": { "params": { "$ref": "#/$defs/taskStartParams" } } } },
     { "if": { "properties": { "method": { "const": "task.next" } } },

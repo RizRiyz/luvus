@@ -73,6 +73,7 @@ impl App {
                 self.close_commander();
             } else {
                 self.commander.as_mut().unwrap().focused = true;
+                self.refresh_commander_module_catalog();
                 self.refresh_commander_preview();
             }
             return;
@@ -88,6 +89,7 @@ impl App {
             commander.cursor = commander.draft.len();
         }
         self.commander = Some(commander);
+        self.refresh_commander_module_catalog();
         self.refresh_commander_preview();
     }
 
@@ -188,8 +190,19 @@ impl App {
         }
         if key.code == KeyCode::Esc {
             let commander = self.commander.as_mut().unwrap();
+            if commander.confirming() {
+                // The receipt holds the prompt, which would otherwise keep
+                // saying "Enter again" after Enter no longer confirms anything.
+                commander.receipt = None;
+            }
             commander.pending_working_confirmation = None;
+            commander.pending_module_confirmation = None;
             commander.focused = false;
+            return true;
+        }
+        // Tab completes or cycles targets while the strip keeps focus; a held
+        // Tab runs once. Text editing and caret motion repeat.
+        if crate::app::is_key_repeat(&key) && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
             return true;
         }
         if key.code == KeyCode::Enter {
@@ -201,7 +214,16 @@ impl App {
             } else {
                 if self.commander.as_ref().unwrap().pending_completion {
                     let commander = self.commander.as_mut().unwrap();
-                    commander.insert(" ");
+                    if let Some(space) = commander.draft[commander.cursor..]
+                        .chars()
+                        .next()
+                        .filter(|c| c.is_whitespace())
+                    {
+                        commander.move_cursor(commander.cursor + space.len_utf8(), false);
+                    } else {
+                        commander.insert(" ");
+                    }
+                    commander.pending_completion = false;
                     commander.retime_suggested_once_schedule();
                     return true;
                 }
@@ -225,6 +247,8 @@ impl App {
                 });
                 if let Some((name, exact)) = complete_name {
                     self.commander_accept_slash_name(name, exact);
+                } else if let Some(command) = self.commander_module_suggestion_to_accept() {
+                    self.commander_accept_module_name(&command, true);
                 } else {
                     self.commander_prepare();
                 }
@@ -278,9 +302,14 @@ impl App {
             let page = self
                 .commander
                 .as_ref()
-                .and_then(|commander| commander.slash_menu())
-                .and_then(|(matches, _)| {
-                    slash_popup_layout(self.commander_area?, self.last_pane_area.y, matches.len())
+                .and_then(|commander| {
+                    commander
+                        .slash_menu()
+                        .map(|(matches, _)| matches.len())
+                        .or_else(|| commander.module_menu().map(|(matches, _)| matches.len()))
+                })
+                .and_then(|matches| {
+                    slash_popup_layout(self.commander_area?, self.last_pane_area.y, matches)
                         .map(|(_, visible)| visible as isize)
                 })
                 .unwrap_or(5);
@@ -294,10 +323,22 @@ impl App {
             if delta.is_some_and(|delta| self.commander_move_slash_selection(delta)) {
                 return true;
             }
+            if delta.is_some_and(|delta| self.commander_move_module_selection(delta)) {
+                return true;
+            }
             if key.code == KeyCode::Char(' ') {
                 if self.commander.as_ref().unwrap().pending_completion {
                     let commander = self.commander.as_mut().unwrap();
-                    commander.insert(" ");
+                    if let Some(space) = commander.draft[commander.cursor..]
+                        .chars()
+                        .next()
+                        .filter(|c| c.is_whitespace())
+                    {
+                        commander.move_cursor(commander.cursor + space.len_utf8(), false);
+                    } else {
+                        commander.insert(" ");
+                    }
+                    commander.pending_completion = false;
                     commander.retime_suggested_once_schedule();
                     return true;
                 }
@@ -307,6 +348,14 @@ impl App {
                 });
                 if let Some(name) = name {
                     self.commander_accept_slash_name(name, true);
+                    return true;
+                }
+                let module_command = self.commander.as_ref().and_then(|commander| {
+                    let (matches, selected) = commander.module_menu()?;
+                    matches.get(selected).map(|entry| entry.command.clone())
+                });
+                if let Some(command) = module_command {
+                    self.commander_accept_module_name(&command, true);
                     return true;
                 }
                 let editing_timezone = self.commander.as_ref().is_some_and(|commander| {
@@ -320,25 +369,6 @@ impl App {
                     commander.retime_suggested_once_schedule();
                     return true;
                 }
-            }
-        }
-        if key.code == KeyCode::Char('/')
-            && !key.modifiers.intersects(
-                KeyModifiers::CONTROL
-                    | KeyModifiers::ALT
-                    | KeyModifiers::SUPER
-                    | KeyModifiers::META,
-            )
-        {
-            let focused = self.layout().focus;
-            let commander = self.commander.as_mut().unwrap();
-            if commander.cursor == commander.draft.len()
-                && commander.draft == format!("@p{} ", focused.0)
-            {
-                commander.clear_all();
-                commander.insert("/");
-                self.refresh_commander_preview();
-                return true;
             }
         }
         let commander = self.commander.as_mut().unwrap();
@@ -555,6 +585,31 @@ impl App {
         if self.commander_complete_slash_action(backward) {
             return;
         }
+        if self.commander_complete_module_command(backward) {
+            return;
+        }
+        if self
+            .commander
+            .as_ref()
+            .is_some_and(|commander| commander.draft.starts_with('$'))
+        {
+            let commander = self.commander.as_ref().unwrap();
+            let token_end = commander
+                .draft
+                .find(char::is_whitespace)
+                .unwrap_or(commander.draft.len());
+            let remainder = &commander.draft[token_end..];
+            let start = token_end + remainder.len() - remainder.trim_start().len();
+            let target_end = commander.draft[start..]
+                .find(char::is_whitespace)
+                .map_or(commander.draft.len(), |end| start + end);
+            if !commander.draft[start..target_end].starts_with('@')
+                || commander.cursor < start
+                || commander.cursor > target_end
+            {
+                return;
+            }
+        }
         let editing = {
             let commander = self.commander.as_ref().unwrap();
             target_spans(&commander.draft)
@@ -743,6 +798,105 @@ impl App {
         true
     }
 
+    fn commander_module_suggestion_to_accept(&self) -> Option<String> {
+        let commander = self.commander.as_ref()?;
+        let (matches, selected) = commander.module_menu()?;
+        let entry = matches.get(selected)?;
+        let current = commander.draft.split_whitespace().next().unwrap_or("");
+        (current != entry.command
+            || entry.spec.target != crate::module::manifest::CommanderTarget::None)
+            .then(|| entry.command.clone())
+    }
+
+    fn commander_complete_module_command(&mut self, backward: bool) -> bool {
+        let Some(commander) = self.commander.as_ref() else {
+            return false;
+        };
+        let Some((matches, selected)) = commander.module_menu() else {
+            return false;
+        };
+        if matches.is_empty() {
+            self.commander.as_mut().unwrap().receipt = Some("No matching module command".into());
+            return true;
+        }
+        let end = commander
+            .draft
+            .find(char::is_whitespace)
+            .unwrap_or(commander.draft.len());
+        let typed = &commander.draft[..end];
+        let exact = matches.iter().any(|entry| entry.command == typed);
+        let next = if commander.module_selection.is_some() {
+            selected
+        } else if exact {
+            if backward {
+                (selected + matches.len() - 1) % matches.len()
+            } else {
+                (selected + 1) % matches.len()
+            }
+        } else if backward {
+            matches.len() - 1
+        } else {
+            0
+        };
+        let command = matches[next].command.clone();
+        self.commander_accept_module_name(&command, false);
+        true
+    }
+
+    fn commander_accept_module_name(&mut self, command: &str, add_space: bool) {
+        let commander = self.commander.as_mut().unwrap();
+        let end = commander
+            .draft
+            .find(char::is_whitespace)
+            .unwrap_or(commander.draft.len());
+        commander.draft.replace_range(..end, command);
+        commander.cursor = command.len();
+        commander.selection_anchor = None;
+        commander.clear_receipt();
+        if add_space {
+            if let Some(space) = commander.draft[command.len()..]
+                .chars()
+                .next()
+                .filter(|c| c.is_whitespace())
+            {
+                commander.cursor += space.len_utf8();
+            } else {
+                commander.insert(" ");
+            }
+        }
+        self.refresh_commander_preview();
+    }
+
+    pub(crate) fn commander_move_module_selection(&mut self, delta: isize) -> bool {
+        let Some(commander) = self.commander.as_mut() else {
+            return false;
+        };
+        let Some((matches, selected)) = commander.module_menu() else {
+            return false;
+        };
+        if matches.is_empty() {
+            return false;
+        }
+        commander.module_selection =
+            Some(selected.saturating_add_signed(delta).min(matches.len() - 1));
+        true
+    }
+
+    pub(crate) fn commander_module_popup(&self) -> Option<(ratatui::layout::Rect, usize, usize)> {
+        let commander = self
+            .commander
+            .as_ref()
+            .filter(|commander| commander.focused)?;
+        let (matches, selected) = commander.module_menu()?;
+        let (rect, visible) =
+            slash_popup_layout(self.commander_area?, self.last_pane_area.y, matches.len())?;
+        Some((
+            rect,
+            super::slash_window_start(selected, matches.len(), visible),
+            matches.len(),
+        ))
+    }
+
     pub(crate) fn commander_slash_popup(&self) -> Option<(ratatui::layout::Rect, usize, usize)> {
         let commander = self
             .commander
@@ -762,6 +916,18 @@ impl App {
         let Some(commander) = self.commander.as_ref() else {
             return;
         };
+        if commander.draft.starts_with('$') {
+            let ids = self
+                .commander_parse_module_command(&commander.draft)
+                .and_then(Result::ok)
+                .and_then(|invocation| match invocation.target {
+                    super::modules::ModuleTarget::Pane { id, .. } => Some(vec![id]),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            self.commander.as_mut().unwrap().preview = ids;
+            return;
+        }
         let mut ids = Vec::new();
         if let Some(Ok((id, _))) = self.commander_parse_split_action(&commander.draft) {
             ids.push(id);
@@ -784,6 +950,10 @@ impl App {
             .unwrap()
             .retime_suggested_once_schedule();
         let draft = self.commander.as_ref().unwrap().draft.clone();
+        if draft.starts_with('$') {
+            self.commander_prepare_module(&draft);
+            return;
+        }
         if let Some(action) = self.commander_parse_slash_action(&draft) {
             let result = action.and_then(|action| self.commander_dispatch_slash_action(action));
             if let Err(error) = result {
@@ -856,7 +1026,7 @@ impl App {
                     id.0
                 ));
             }
-            if !self.agent_prompt_is_ready(id) {
+            if !self.agent_prompt_is_ready(id, false) {
                 return Err(format!("p{} has no ready agent input yet", id.0));
             }
             if state == Some(crate::ui::theme::State::Working) {

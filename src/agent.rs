@@ -42,7 +42,7 @@ pub(crate) mod registry;
 pub(crate) mod shared;
 pub(crate) mod types;
 mod usage;
-pub use usage::{session_mtime, session_usage};
+pub use usage::{session_mtime, session_usage, supports_session_usage};
 
 /// A resumable agent session discovered on disk.
 #[derive(Clone)]
@@ -107,6 +107,14 @@ pub fn sessions_for(agent: &str, cwd: &Path) -> Vec<String> {
         Some(list) => list(&base, cwd),
         None => (d.latest)(&base, cwd).into_iter().collect(),
     }
+}
+
+/// The session a pane's terminal title names, for an agent that shows its
+/// conversation name there, provided exactly one session in `cwd` has it.
+pub fn session_for_title(agent: &str, cwd: &Path, title: &str) -> Option<String> {
+    let d = source(agent).and_then(|s| s.discovery.as_ref())?;
+    let titled = d.titled?;
+    titled(&(d.base)(), cwd, title).filter(|session| safe_session_id(session))
 }
 
 /// The shell command that resumes an agent's native session, if supported.

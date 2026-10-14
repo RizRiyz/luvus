@@ -4,6 +4,7 @@ import { deletionInputKey, logicalKey } from "./native-keymap.js";
 export type TerminalAction =
   | "type_literal"
   | "paste_text"
+  | "set_viewport"
   | "paste_image"
   | "send_key"
   | "upload_start"

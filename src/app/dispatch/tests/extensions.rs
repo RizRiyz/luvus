@@ -2,6 +2,117 @@ use super::super::*;
 use crate::app::App;
 
 #[test]
+fn module_update_adopts_only_fenced_managed_replacements_and_keeps_settings() {
+    let _env = crate::persist::test_env("module-update-api");
+    let old = crate::module::paths::git_dir("fixture", "old");
+    let fresh = crate::module::paths::git_dir("fixture", "new");
+    let manifest = |version| {
+        format!("id = \"you.update\"\nname = \"Update\"\nversion = \"{version}\"\nmin_luvus_version = \"0.1.0\"\n[[settings]]\nkey = \"token\"\ntitle = \"Token\"\ntype = \"string\"\n")
+    };
+    for (root, version) in [(&old, "0.1.0"), (&fresh, "0.2.0")] {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("luvus-module.toml"), manifest(version)).unwrap();
+    }
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    app.dispatch(
+        "module.link",
+        &json!({"path":old, "source":"owner/repo/sub@old", "git_ref":"v1", "disabled":true}),
+    )
+    .unwrap();
+    let info = app
+        .dispatch("module.info", &json!({"id":"owner/repo/sub"}))
+        .unwrap();
+    assert_eq!(info["git_ref"], "v1");
+    let old_token = app.module_tokens["you.update"].clone();
+    app.module_set_setting("you.update", "token", "secret".into())
+        .unwrap();
+    let config_dir = app.module_config_dir("you.update").unwrap();
+    let state = crate::module::paths::state_dir("you.update");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("sentinel"), "state").unwrap();
+    let params = json!({"id":"owner/repo/sub", "path":fresh, "source":"owner/repo/sub@new", "git_ref":"v2", "expected_root":info["root"], "expected_source":info["source"], "expected_ref":info["git_ref"]});
+    for (key, value) in [
+        ("expected_source", json!("owner/repo/sub@stale")),
+        ("source", json!("other/repo@new")),
+        ("expected_ref", json!("wrong")),
+        ("path", info["root"].clone()),
+        ("unknown", json!(true)),
+        ("git_ref", json!(false)),
+    ] {
+        let mut invalid = params.clone();
+        invalid[key] = value;
+        assert!(app.dispatch("module.update", &invalid).is_err(), "{key}");
+        assert_eq!(
+            app.modules.find("you.update").unwrap().manifest.version,
+            "0.1.0"
+        );
+        assert_eq!(app.module_tokens["you.update"], old_token);
+    }
+    std::fs::write(
+        fresh.join("luvus-module.toml"),
+        manifest("0.2.0").replace("you.update", "you.changed"),
+    )
+    .unwrap();
+    assert!(app.dispatch("module.update", &params).is_err());
+    std::fs::write(fresh.join("luvus-module.toml"), manifest("0.2.0")).unwrap();
+    // Persistence failure must leave the live registry/credential untouched.
+    let registry_path = crate::module::paths::registry_path();
+    std::fs::remove_file(&registry_path).unwrap();
+    std::fs::create_dir(&registry_path).unwrap();
+    assert!(app.dispatch("module.update", &params).is_err());
+    assert_eq!(app.module_tokens["you.update"], old_token);
+    assert_eq!(
+        app.modules.find("you.update").unwrap().manifest.version,
+        "0.1.0"
+    );
+    std::fs::remove_dir(&registry_path).unwrap();
+    assert_eq!(
+        app.dispatch("module.update", &params).unwrap(),
+        json!({"type":"module", "id":"you.update"})
+    );
+    let module = app.modules.find("you.update").unwrap();
+    assert_eq!(module.manifest.version, "0.2.0");
+    assert!(!module.enabled);
+    assert_eq!(module.git_ref.as_deref(), Some("v2"));
+    assert_ne!(app.module_tokens["you.update"], old_token);
+    assert_eq!(
+        app.module_settings("you.update")
+            .unwrap()
+            .get("token")
+            .unwrap(),
+        "secret"
+    );
+    assert_eq!(app.module_config_dir("you.update").unwrap(), config_dir);
+    assert!(state.join("sentinel").exists());
+    assert!(old.exists(), "old live process CWD remains available");
+    assert!(
+        app.dispatch("module.update", &params).is_err(),
+        "concurrent/repeated stale update rejected"
+    );
+    let restored = crate::module::registry::load();
+    let mut legacy = serde_json::to_value(restored.find("you.update").unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("git_ref");
+    let legacy: crate::module::InstalledModule = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.git_ref.is_none(), "old registries remain loadable");
+    assert_eq!(
+        restored.find("you.update").unwrap().manifest.version,
+        "0.2.0"
+    );
+    // A local link cannot be passed off as an updateable checkout.
+    app.module_unlink("you.update").unwrap();
+    let local = crate::persist::config_dir().join("local");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(local.join("luvus-module.toml"), manifest("0.1.0")).unwrap();
+    app.module_link_with(&local, true, None).unwrap();
+    assert!(crate::module::install::UpdateTarget::from_module(
+        app.modules.find("you.update").unwrap()
+    )
+    .is_err());
+    assert!(app.dispatch("module.update", &params).is_err());
+}
+
+#[test]
 fn mission_open_targets_a_workspace_and_rejects_missing_ones() {
     let _env = crate::persist::test_env("mission-open-api");
     let (tx, _rx) = std::sync::mpsc::channel();
@@ -58,6 +169,8 @@ fn mission_snapshot_and_refresh_are_read_only_ui_independent_controls() {
     assert_eq!(snapshot["type"], "mission_snapshot");
     assert_eq!(snapshot["rows"][0]["kind"], "resumable");
     assert_eq!(snapshot["rows"][0]["usage"]["total_tokens"], 150);
+    assert_eq!(snapshot["rows"][0]["usage_status"], "available");
+    assert_eq!(snapshot["summary"]["usage_coverage"]["available"], 1);
     assert!(
         snapshot["rows"][0].get("session_id").is_none(),
         "read scope does not expose native session identifiers"
@@ -72,11 +185,18 @@ fn mission_snapshot_and_refresh_are_read_only_ui_independent_controls() {
         .dispatch("mission.refresh", &json!({"scope":"all"}))
         .unwrap();
     assert_eq!(refreshed["type"], "mission_refresh");
+    assert_eq!(refreshed["refresh_id"], "1");
+    assert_eq!(
+        refreshed["server_generation"],
+        app.backend_server_generation
+    );
     assert_eq!(
         app.mission_usage_requested,
         Some(crate::mission::MissionUsageRequest {
+            id: 1,
             scope: crate::mission::MissionScope::All,
             workspace: 0,
+            workspace_id: None,
         })
     );
     assert_eq!(
@@ -95,6 +215,296 @@ fn mission_snapshot_and_refresh_are_read_only_ui_independent_controls() {
         .expect("all-workspace scope does not depend on its anchor index");
     assert_eq!(all["type"], "mission_snapshot");
     assert_eq!(all["rows"][0]["kind"], "resumable");
+    assert_eq!(all["refresh"]["completed_id"], "0");
+    assert_eq!(
+        all["refresh"]["server_generation"],
+        app.backend_server_generation
+    );
+    assert_eq!(all["refreshing"], true);
+}
+
+#[test]
+fn mission_snapshot_explains_missing_usage_and_refresh_completion() {
+    let _env = crate::persist::test_env("mission-usage-status-api");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(100, 30, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+
+    let snapshot = app.dispatch("mission.snapshot", &json!({})).unwrap();
+    assert_eq!(snapshot["rows"][0]["usage_status"], "unbound");
+    assert_eq!(snapshot["summary"]["usage_coverage"]["available"], 0);
+
+    app.status.get_mut(&pane).unwrap().agent_session = Some(crate::app::AgentSession {
+        agent: "claude".into(),
+        session_id: "missing-ledger".into(),
+    });
+    let snapshot = app.dispatch("mission.snapshot", &json!({})).unwrap();
+    assert_eq!(snapshot["rows"][0]["usage_status"], "not_refreshed");
+
+    let refresh = app.dispatch("mission.refresh", &json!({})).unwrap();
+    assert_eq!(refresh["refresh_id"], "1");
+    let snapshot = app.dispatch("mission.snapshot", &json!({})).unwrap();
+    assert_eq!(snapshot["rows"][0]["usage_status"], "refreshing");
+    let request = app.mission_usage_requested.take().unwrap();
+    app.mission_usage_inflight = Some(request.clone());
+    app.handle_event(crate::event::AppEvent::UsageScanned {
+        request,
+        scanned: vec![crate::mission::UsageKey::new("claude", "missing-ledger")],
+        usage: Default::default(),
+        mtimes: Default::default(),
+        report_owned: Vec::new(),
+    });
+    let snapshot = app.dispatch("mission.snapshot", &json!({})).unwrap();
+    assert_eq!(snapshot["refresh"]["completed_id"], "1");
+    assert_eq!(snapshot["refreshing"], false);
+    assert_eq!(snapshot["rows"][0]["usage_status"], "unavailable");
+    assert!(snapshot["summary"]["burn_usd_per_hour"].is_null());
+
+    app.status.get_mut(&pane).unwrap().agent = "opencode".into();
+    app.status.get_mut(&pane).unwrap().agent_session = Some(crate::app::AgentSession {
+        agent: "opencode".into(),
+        session_id: "reported".into(),
+    });
+    let snapshot = app.dispatch("mission.snapshot", &json!({})).unwrap();
+    assert_eq!(snapshot["rows"][0]["usage_status"], "unsupported");
+    app.agent_usage.insert(
+        crate::mission::UsageKey::new("opencode", "reported"),
+        crate::mission::AgentUsage {
+            cost: Some(-0.0),
+            ..Default::default()
+        },
+    );
+    let snapshot = app.dispatch("mission.snapshot", &json!({})).unwrap();
+    assert_eq!(snapshot["rows"][0]["usage_status"], "available");
+    assert!(snapshot["summary"]["cost_usd"]
+        .as_f64()
+        .unwrap()
+        .is_sign_positive());
+}
+
+#[test]
+fn mission_refresh_preserves_distinct_pending_scopes() {
+    let _env = crate::persist::test_env("mission-refresh-queue-api");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(100, 30, tx).unwrap();
+    let first = app.dispatch("mission.refresh", &json!({})).unwrap();
+    let second = app
+        .dispatch("mission.refresh", &json!({"scope":"all"}))
+        .unwrap();
+    let repeated = app.dispatch("mission.refresh", &json!({})).unwrap();
+    assert_eq!(first["refresh_id"], "1");
+    assert_eq!(second["refresh_id"], "2");
+    assert_eq!(repeated["refresh_id"], "1");
+    assert_eq!(app.mission_usage_requested.as_ref().unwrap().id, 1);
+    assert_eq!(app.mission_usage_queued.front().unwrap().id, 2);
+
+    // Simulate the worker taking the first request. A new same-scope request
+    // needs a later ticket rather than claiming an already-running scan.
+    let first = app.mission_usage_requested.take().unwrap();
+    app.mission_usage_requested = app.mission_usage_queued.pop_front();
+    app.mission_usage_inflight = Some(first.clone());
+    let later = app.dispatch("mission.refresh", &json!({})).unwrap();
+    assert_eq!(later["refresh_id"], "3");
+
+    let stale = crate::mission::MissionUsageRequest {
+        id: 99,
+        ..first.clone()
+    };
+    assert!(!app.handle_event(crate::event::AppEvent::UsageScanned {
+        request: stale,
+        scanned: Vec::new(),
+        usage: Default::default(),
+        mtimes: Default::default(),
+        report_owned: Vec::new(),
+    }));
+    assert_eq!(app.mission_usage_inflight.as_ref().unwrap().id, 1);
+    assert_eq!(app.mission_usage_completed_id, 0);
+
+    app.handle_event(crate::event::AppEvent::UsageScanned {
+        request: first,
+        scanned: Vec::new(),
+        usage: Default::default(),
+        mtimes: Default::default(),
+        report_owned: Vec::new(),
+    });
+    assert_eq!(app.mission_usage_completed_id, 1);
+    assert!(app.mission_usage_refreshing());
+    assert_eq!(app.mission_usage_requested.as_ref().unwrap().id, 2);
+
+    // A queued workspace request must not follow a reused numeric index after
+    // its original workspace is removed or replaced.
+    let queued_workspace = app.mission_usage_queued.front().unwrap().clone();
+    assert_eq!(app.mission_usage_workspace(&queued_workspace), 0);
+    app.workspaces[0].id = "replacement-workspace".into();
+    assert_eq!(app.mission_usage_workspace(&queued_workspace), usize::MAX);
+}
+
+#[test]
+fn mission_refresh_workers_complete_queued_scopes() {
+    let _env = crate::persist::test_env("mission-refresh-queued-workers");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut app = App::new(100, 30, tx).unwrap();
+    app.dispatch("mission.refresh", &json!({})).unwrap();
+    app.dispatch("mission.refresh", &json!({"scope":"all"}))
+        .unwrap();
+
+    let wait_for_scan = || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = rx
+                .recv_timeout(remaining)
+                .expect("queued usage worker must finish");
+            if matches!(&event, crate::event::AppEvent::UsageScanned { .. }) {
+                break event;
+            }
+        }
+    };
+
+    app.detect_tick_with(std::time::Instant::now(), false);
+    let first = wait_for_scan();
+    assert!(matches!(
+        &first,
+        crate::event::AppEvent::UsageScanned { request, .. } if request.id == 1
+    ));
+    app.handle_event(first);
+    assert_eq!(app.mission_usage_completed_id, 1);
+
+    app.detect_tick_with(std::time::Instant::now(), false);
+    let second = wait_for_scan();
+    assert!(matches!(
+        &second,
+        crate::event::AppEvent::UsageScanned { request, .. } if request.id == 2
+    ));
+    app.handle_event(second);
+    let snapshot = app
+        .dispatch("mission.snapshot", &json!({"scope":"all"}))
+        .unwrap();
+    assert_eq!(snapshot["refresh"]["completed_id"], "2");
+    assert_eq!(snapshot["refreshing"], false);
+}
+
+#[test]
+fn mission_burn_ignores_cost_only_corrections_with_other_usage() {
+    let _env = crate::persist::test_env("mission-burn-correction");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(100, 30, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    app.status.get_mut(&pane).unwrap().agent_session = Some(crate::app::AgentSession {
+        agent: "claude".into(),
+        session_id: "reported-usage".into(),
+    });
+    let reported = crate::mission::UsageKey::new("claude", "reported-usage");
+    app.reported_usage.insert(
+        reported.clone(),
+        crate::mission::ReportedUsage {
+            pane,
+            updated_at: 1,
+        },
+    );
+    app.agent_usage.insert(
+        reported.clone(),
+        crate::mission::AgentUsage {
+            model: "reported-model".into(),
+            tokens_in: 100,
+            cost: Some(1.0),
+            ..Default::default()
+        },
+    );
+    app.resumable.push(crate::agent::SessionInfo {
+        agent: "codex".into(),
+        session_id: "native-usage".into(),
+        cwd: app.ws().cwd.clone(),
+        updated: std::time::SystemTime::now(),
+    });
+    let native = crate::mission::UsageKey::new("codex", "native-usage");
+    let mut native_usage = crate::mission::AgentUsage {
+        model: "native-model".into(),
+        tokens_in: 100,
+        cost: Some(1.0),
+        ..Default::default()
+    };
+    let scanned = |native_usage| crate::event::AppEvent::UsageScanned {
+        request: crate::mission::MissionUsageRequest {
+            id: 0,
+            scope: crate::mission::MissionScope::All,
+            workspace: 0,
+            workspace_id: None,
+        },
+        scanned: vec![reported.clone(), native.clone()],
+        usage: [(native.clone(), native_usage)].into(),
+        mtimes: Default::default(),
+        report_owned: vec![reported.clone()],
+    };
+
+    app.handle_event(scanned(native_usage.clone()));
+    assert!(app.mission_last_cost.is_some());
+    app.mission_last_cost.as_mut().unwrap().at -= std::time::Duration::from_secs(2);
+
+    // The integration reprices one unchanged session while another session
+    // genuinely spends more. The correction must not inflate the fleet rate.
+    app.agent_usage.get_mut(&reported).unwrap().cost = Some(2.0);
+    native_usage.tokens_in += 10;
+    native_usage.cost = Some(1.1);
+    app.handle_event(scanned(native_usage.clone()));
+    assert!(app.mission_burn.is_none());
+    app.mission_last_cost.as_mut().unwrap().at -= std::time::Duration::from_secs(2);
+
+    native_usage.tokens_in += 10;
+    native_usage.cost = Some(1.2);
+    app.handle_event(scanned(native_usage));
+    assert!(app.mission_burn.is_some_and(|rate| rate > 0.0));
+}
+
+#[test]
+fn mission_burn_accepts_native_copilot_model_switch_without_overrides() {
+    let _env = crate::persist::test_env("mission-burn-copilot-model-switch");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(100, 30, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "copilot".into();
+    app.status.get_mut(&pane).unwrap().agent_session = Some(crate::app::AgentSession {
+        agent: "copilot".into(),
+        session_id: "mixed-models".into(),
+    });
+    let key = crate::mission::UsageKey::new("copilot", "mixed-models");
+    let scanned = |model: &str, tokens_in, cost| crate::event::AppEvent::UsageScanned {
+        request: crate::mission::MissionUsageRequest {
+            id: 0,
+            scope: crate::mission::MissionScope::All,
+            workspace: 0,
+            workspace_id: None,
+        },
+        scanned: vec![key.clone()],
+        usage: [(
+            key.clone(),
+            crate::mission::AgentUsage {
+                model: model.into(),
+                tokens_in,
+                cost: Some(cost),
+                ..Default::default()
+            },
+        )]
+        .into(),
+        mtimes: Default::default(),
+        report_owned: Vec::new(),
+    };
+
+    app.handle_event(scanned("model-a", 100, 1.0));
+    assert!(app.mission_last_cost.as_ref().unwrap().usage[&key].cost_additive_across_models);
+    app.mission_last_cost.as_mut().unwrap().at -= std::time::Duration::from_secs(2);
+    app.handle_event(scanned("model-b", 120, 1.3));
+    assert!(app.mission_burn.is_some_and(|rate| rate > 0.0));
+
+    // With overrides, a dominant-model change can reprice the whole session.
+    app.mission_last_cost.as_mut().unwrap().at -= std::time::Duration::from_secs(2);
+    app.config
+        .mission_pricing
+        .insert("model-b".into(), [1.0, 1.0, 1.0]);
+    app.handle_event(scanned("model-c", 130, 1.5));
+    assert!(app.mission_burn.is_none());
 }
 
 #[test]

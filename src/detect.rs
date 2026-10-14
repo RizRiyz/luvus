@@ -169,6 +169,11 @@ enum Cond {
     /// is a spinner. Some agents keep their brand before the live state glyph
     /// in the OSC title, so the generic start-of-line spinner rule cannot see it.
     SpinnerAfterPrefix(Vec<String>),
+    LastLine(Vec<String>),
+    /// The last non-empty line, or the non-empty line above one trailing row,
+    /// contains one of these substrings. A live menu footer can sit directly
+    /// above a model-status row.
+    LastTwoLines(Vec<String>),
 }
 
 impl Cond {
@@ -189,6 +194,17 @@ impl Cond {
                         .is_some_and(is_spinner_glyph)
                 })
             }),
+            Cond::LastLine(subs) => low
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .is_some_and(|line| subs.iter().any(|s| line.contains(s))),
+            Cond::LastTwoLines(subs) => low
+                .lines()
+                .rev()
+                .filter(|line| !line.trim().is_empty())
+                .take(2)
+                .any(|line| subs.iter().any(|s| line.contains(s))),
         }
     }
 }
@@ -294,10 +310,20 @@ impl Manifests {
             .map(|(_, agent)| agent)
     }
 
-    fn evaluate(&self, agent: &str, regions: &Regions) -> Option<RuleMatch> {
+    /// The highest-priority matching rule, optionally skipping blocked rules
+    /// that match screen text (see [`transcript_cannot_block`]).
+    fn evaluate_filtered(
+        &self,
+        agent: &str,
+        regions: &Regions,
+        skip_screen_blocked: bool,
+    ) -> Option<RuleMatch> {
         let mut best: Option<RuleMatch> = None;
         for r in &self.rules {
             if !(r.agent.is_empty() || r.agent == agent) {
+                continue;
+            }
+            if skip_screen_blocked && r.state == State::Blocked && r.region == Region::Screen {
                 continue;
             }
             let text = regions.get(r.region);
@@ -348,11 +374,12 @@ pub(crate) fn screen_rows(known_agent: &str, running: &[String], manifests: &Man
     }
 }
 
-/// Claude, Codex, Hermes, Devin, and Arc Studio can place an interaction above a
-/// tall blank footer. Keep their most recent non-empty live rows without pulling
-/// in scrollback. For Codex this also keeps the first-run sign-in chooser
-/// visible to prompt admission instead of mistaking its blank footer for a
-/// composer; for Devin, the first-run workspace-trust menu.
+/// Claude, Codex, Hermes, Devin, Arc Studio, and Antigravity can place an
+/// interaction above a tall blank footer. Keep their most recent non-empty
+/// live rows without pulling in scrollback. For Codex this also keeps the
+/// first-run sign-in chooser visible to prompt admission instead of mistaking
+/// its blank footer for a composer; for Devin and Antigravity, the first-run
+/// workspace-trust menu.
 pub(crate) fn screen_uses_non_empty_rows(
     known_agent: &str,
     running: &[String],
@@ -368,6 +395,8 @@ pub(crate) fn screen_uses_non_empty_rows(
         || manifests.process_has_agent(running, "hermes")
         || known_agent.eq_ignore_ascii_case("devin")
         || manifests.process_has_agent(running, "devin")
+        || known_agent.eq_ignore_ascii_case("antigravity")
+        || manifests.process_has_agent(running, "antigravity")
 }
 
 /// Probe a blank bottom window for Arc Studio's full live banner only while
@@ -844,6 +873,34 @@ fn builtin_rules() -> Vec<Rule> {
             Region::Screen,
             vec![any(&["esc again to interrupt", "esc twice to interrupt"])],
         ),
+        per(
+            "codex",
+            State::Blocked,
+            310,
+            Region::Screen,
+            vec![
+                all(&["trust this folder?", "trust and continue"]),
+                Cond::LastLine(vec!["enter continue".to_string()]),
+            ],
+        ),
+        // Antigravity's first-run workspace-trust screen ends on
+        // "↑/↓ Navigate · enter Confirm", sometimes with one model-status row
+        // after it. The footer has to be one of those last rows. The same
+        // menu text above the composer ends on the composer.
+        per(
+            "antigravity",
+            State::Blocked,
+            310,
+            Region::Screen,
+            vec![
+                all(&[
+                    "do you trust the contents of this project?",
+                    "yes, i trust this folder",
+                    "enter confirm",
+                ]),
+                Cond::LastTwoLines(vec!["enter confirm".to_string()]),
+            ],
+        ),
     ]
 }
 
@@ -1082,9 +1139,8 @@ impl Regions {
     }
 }
 
-/// Classify a pane from its title, bottom-buffer text, whether it produced
-/// output recently, whether the user typed into it recently, and the active
-/// rule set. `base_command` is the spawned program, used as a fallback label.
+/// [`classify_with_composer`] without an input-box probe.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn classify(
     title: Option<&str>,
@@ -1098,6 +1154,109 @@ pub fn classify(
     // failed), never "nothing is running".
     running: &[String],
     manifests: &Manifests,
+) -> Detection {
+    classify_with_composer(
+        title,
+        bottom,
+        recent_activity,
+        recent_input,
+        base_command,
+        known_agent,
+        running,
+        manifests,
+        None,
+    )
+}
+
+/// Claude Code's menus, permission prompts, and plan approvals replace its
+/// input box. While the live input box is on screen (`live_composer`, from
+/// [`live_composer_ready`]), Claude is at its prompt, so blocked phrases found
+/// in the screen text belong to the transcript above it, such as a diff of a
+/// page whose UI says "Enter to select · Esc to cancel", and are not a menu.
+fn transcript_cannot_block(agent: &str, live_composer: Option<bool>) -> bool {
+    agent.eq_ignore_ascii_case("claude") && live_composer == Some(true)
+}
+
+/// Glyphs that start Claude Code's status line at column 0: its animated busy
+/// spinner and the `✻ Worked for …` line it leaves when a turn ends.
+const CLAUDE_STATUS_GLYPHS: &[char] = &['·', '✢', '✳', '✶', '✻', '✽', '*', '◐', '◑', '◒', '◓'];
+
+/// The part of a Claude screen that describes its state once its live input
+/// box is confirmed: the status line, when shown, through the input box and
+/// the rows below it. Transcript output above the status line (tool results,
+/// diffs, `!` command output) is left out, so words like "esc to cancel" in it
+/// cannot read as a working hint either. `None` when no input box is found in
+/// the text, leaving the whole screen in use.
+fn claude_live_screen(screen: &str) -> Option<&str> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let is_rail = |line: &str| {
+        let line = line.trim();
+        !line.is_empty() && line.chars().all(|c| c == '─')
+    };
+    let is_prompt = |line: &str| line.chars().take(3).any(|c| matches!(c, '❯' | '>'));
+    let rail = (0..lines.len().saturating_sub(1))
+        .rev()
+        .find(|&i| is_rail(lines[i]) && is_prompt(lines[i + 1]))?;
+    // Claude's status block is its status line followed only by indented
+    // detail (tips, to-dos). A column-0 line nearer the input box is
+    // conversation, so nothing above it can be the live status line.
+    let mut start = rail;
+    for i in (0..rail).rev() {
+        let line = lines[i];
+        if is_claude_status_line(line) {
+            start = i;
+            break;
+        }
+        if !line.starts_with(char::is_whitespace) {
+            break;
+        }
+    }
+    let offset: usize = lines[..start].iter().map(|line| line.len() + 1).sum();
+    screen.get(offset..)
+}
+
+/// Whether `line` has the shape of Claude's status line: a status or braille
+/// spinner glyph and a space, then either a busy verb with an ellipsis
+/// (`✢ Inferring… (12s …)`, `⠹ Thinking… (esc to interrupt)`) or a finished
+/// turn (`✻ Worked for 11s · done 7:27 AM`). A conversation line that merely
+/// starts with `*` or `·`, like `* Esc to cancel`, is neither.
+fn is_claude_status_line(line: &str) -> bool {
+    let mut chars = line.trim_start().chars();
+    if !chars
+        .next()
+        .is_some_and(|c| CLAUDE_STATUS_GLYPHS.contains(&c) || is_spinner_glyph(c))
+        || chars.next() != Some(' ')
+    {
+        return false;
+    }
+    let mut words = chars.as_str().split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    let busy = first.ends_with('…');
+    let done = first.chars().all(char::is_alphabetic)
+        && words.next() == Some("for")
+        && words
+            .next()
+            .is_some_and(|time| time.starts_with(|c: char| c.is_ascii_digit()));
+    busy || done
+}
+
+/// Classify a pane from its title, bottom-buffer text, whether it produced
+/// output recently, whether the user typed into it recently, and the active
+/// rule set. `base_command` is the spawned program, used as a fallback label.
+/// `live_composer` is the pane's live input-box probe, when one was taken.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn classify_with_composer(
+    title: Option<&str>,
+    bottom: &str,
+    recent_activity: bool,
+    recent_input: bool,
+    base_command: &str,
+    known_agent: &str,
+    running: &[String],
+    manifests: &Manifests,
+    live_composer: Option<bool>,
 ) -> Detection {
     let regions = Regions {
         screen: bottom.to_lowercase(),
@@ -1144,7 +1303,19 @@ pub fn classify(
     } else {
         State::Idle
     };
-    let matched = manifests.evaluate(&agent, &regions);
+    let live = transcript_cannot_block(&agent, live_composer);
+    let live_regions;
+    let state_regions = match live.then(|| claude_live_screen(bottom)).flatten() {
+        Some(screen) => {
+            live_regions = Regions {
+                screen: screen.to_lowercase(),
+                title: regions.title.clone(),
+            };
+            &live_regions
+        }
+        None => &regions,
+    };
+    let matched = manifests.evaluate_filtered(&agent, state_regions, live);
     let (state, state_source, rule_priority, rule_region, prompt_blocked) = match matched {
         Some(rule) => (
             rule.state,
@@ -1160,15 +1331,12 @@ pub fn classify(
         None => (fallback, "no_positive_state_evidence", None, None, false),
     };
 
+    // A missing blocked rule is not positive evidence of an input box. Only
+    // agent-specific live composer probes can promote Unknown to Ready.
     let prompt_evidence = if prompt_blocked {
         PromptEvidence::Blocked
-    } else if agent.eq_ignore_ascii_case("codex") {
-        // Text alone cannot distinguish Codex's live composer from a prompt
-        // marker retained in the transcript. The app combines this raw state
-        // evidence with the VT engine's bounded composer geometry.
-        PromptEvidence::Unknown
     } else {
-        PromptEvidence::Ready
+        PromptEvidence::Unknown
     };
     Detection {
         state,
@@ -1181,36 +1349,74 @@ pub fn classify(
     }
 }
 
-/// Codex can be identified from its process/title before its startup chooser or
-/// composer exists. Server-owned launches keep prompt admission closed until
-/// the screen proves which surface won that race.
+/// These agents can be identified before their startup chooser or composer
+/// exists. Keep prompt admission closed until the live screen proves readiness.
 pub(crate) fn prompt_requires_positive_evidence(agent: &str) -> bool {
     agent.eq_ignore_ascii_case("codex")
+        || agent.eq_ignore_ascii_case("claude")
+        || agent.eq_ignore_ascii_case("opencode")
+}
+
+/// Probe composer geometry only for agents requiring positive evidence.
+pub(crate) fn live_composer_ready(
+    agent: &str,
+    engine: &dyn VtEngine,
+    claude_semantic_ready: bool,
+) -> Option<bool> {
+    if agent.eq_ignore_ascii_case("codex") {
+        Some(engine.codex_composer_region().is_some())
+    } else if agent.eq_ignore_ascii_case("claude") {
+        Some(match engine.claude_composer_evidence() {
+            crate::terminal::vt::ClaudeComposerEvidence::Absent => false,
+            crate::terminal::vt::ClaudeComposerEvidence::Ready => true,
+            crate::terminal::vt::ClaudeComposerEvidence::Ambiguous => claude_semantic_ready,
+        })
+    } else if agent.eq_ignore_ascii_case("opencode") {
+        Some(engine.opencode_composer_ready())
+    } else {
+        None
+    }
 }
 
 /// Re-evaluate raw prompt readiness from the current bounded screen. This
 /// deliberately reuses manifest state rules instead of teaching API dispatch
 /// about individual agents, and runs only when output changed after the normal
 /// detection pass.
+#[cfg(test)]
 pub(crate) fn prompt_evidence(
     title: Option<&str>,
     bottom: &str,
     agent: &str,
     manifests: &Manifests,
 ) -> PromptEvidence {
+    prompt_evidence_with_composer(title, bottom, agent, manifests, None)
+}
+
+/// [`prompt_evidence`] with the pane's live input-box probe, when one was taken.
+pub(crate) fn prompt_evidence_with_composer(
+    title: Option<&str>,
+    bottom: &str,
+    agent: &str,
+    manifests: &Manifests,
+    live_composer: Option<bool>,
+) -> PromptEvidence {
+    let agent = agent.to_lowercase();
+    let live = transcript_cannot_block(&agent, live_composer);
+    let screen = live
+        .then(|| claude_live_screen(bottom))
+        .flatten()
+        .unwrap_or(bottom);
     let regions = Regions {
-        screen: bottom.to_lowercase(),
+        screen: screen.to_lowercase(),
         title: title.map(str::to_lowercase).unwrap_or_default(),
     };
     let blocked = manifests
-        .evaluate(&agent.to_lowercase(), &regions)
+        .evaluate_filtered(&agent, &regions, live)
         .is_some_and(|rule| rule.state == State::Blocked);
     if blocked {
         PromptEvidence::Blocked
-    } else if agent.eq_ignore_ascii_case("codex") {
-        PromptEvidence::Unknown
     } else {
-        PromptEvidence::Ready
+        PromptEvidence::Unknown
     }
 }
 
@@ -2586,6 +2792,227 @@ Would you like to proceed?
         );
     }
 
+    /// The idle prompt from issue #461: a diff of a page whose UI says
+    /// "Enter to select · Esc to cancel" is still on screen above it.
+    const CLAUDE_IDLE_BELOW_MENU_WORDS: &str = "⏺ Update(players.html)\n  12 +  <p class=\"hint\">Enter to select · Esc to cancel</p>\n  40 +    // enter to confirm, esc to cancel\n✻ Worked for 11s · done 7:27 AM\n────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────\n  Opus 5.5 | high\n  563.3K | ~/fleet\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ⧉ players · ← for agents";
+
+    fn claude_detection(bottom: &str, title: &str, live_composer: Option<bool>) -> Detection {
+        classify_with_composer(
+            Some(title),
+            bottom,
+            false,
+            false,
+            "claude",
+            "claude",
+            &["/usr/local/bin/claude".to_string()],
+            &Manifests::builtin(),
+            live_composer,
+        )
+    }
+
+    #[test]
+    fn menu_words_in_claude_transcript_do_not_block_its_live_prompt() {
+        // "esc to cancel" is also a generic working hint, so the transcript
+        // must be left out entirely, not only skipped for blocked rules.
+        let live = claude_detection(CLAUDE_IDLE_BELOW_MENU_WORDS, "✳ Claude Code", Some(true));
+        assert_eq!(live.state, State::Idle);
+        assert_eq!(live.prompt_evidence, PromptEvidence::Unknown);
+        assert_eq!(
+            prompt_evidence_with_composer(
+                Some("✳ Claude Code"),
+                CLAUDE_IDLE_BELOW_MENU_WORDS,
+                "claude",
+                &Manifests::builtin(),
+                Some(true),
+            ),
+            PromptEvidence::Unknown,
+            "queued input is not held for a menu that is not there"
+        );
+
+        // Without a live input box the same words are still read as a menu,
+        // exactly as before; the probe is what tells the two apart.
+        let unproven = claude_detection(CLAUDE_IDLE_BELOW_MENU_WORDS, "✳ Claude Code", None);
+        assert_eq!(unproven.state, State::Blocked);
+        assert_eq!(unproven.rule_priority, Some(320));
+    }
+
+    #[test]
+    fn claude_still_reads_working_from_its_status_line_above_the_prompt() {
+        let prompt = "────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)";
+        let transcript =
+            "⏺ Bash(echo 'Enter to select · Esc to cancel')\n  ⎿  Enter to select · Esc to cancel";
+        for status in [
+            "⠹ Thinking… (esc to interrupt)",        // braille spinner builds
+            "✢ Inferring… (12s · ↓ 3.2k tokens)",    // current builds: token counter
+            "✳ Cogitating… (4s · esc to interrupt)", // older builds: interrupt hint
+            "◐ Thinking… (3s)",                      // half-circle spinner builds
+        ] {
+            let screen =
+                format!("{transcript}\n{status}\n  ⎿  Tip: press ? for shortcuts\n{prompt}");
+            let detection = claude_detection(&screen, "✳ Claude Code", Some(true));
+            assert_eq!(detection.state, State::Working, "{status}");
+        }
+        // The same screen after the turn: the done line is not a working hint.
+        let done = format!("{transcript}\n✻ Worked for 11s · done 7:27 AM\n{prompt}");
+        assert_eq!(
+            claude_detection(&done, "✳ Claude Code", Some(true)).state,
+            State::Idle
+        );
+        // No status line at all: only the input box and the rows below it.
+        let bare = format!("{transcript}\n{prompt}");
+        assert_eq!(
+            claude_detection(&bare, "✳ Claude Code", Some(true)).state,
+            State::Idle
+        );
+    }
+
+    /// The reporter's second screen in #461: an earlier message relays another
+    /// agent's prompt footer while Claude is thinking. That is working, not a
+    /// menu.
+    #[test]
+    fn a_relayed_prompt_footer_does_not_block_a_thinking_claude() {
+        let screen = "> Worker 3 is waiting: Enter to confirm · Esc to cancel\n\
+            ⏺ I'll look at worker 3's screen.\n\
+            ✶ Pondering… (6s · ↓ 1.1k tokens)\n\
+            ────────────────────────────────────────\n\
+            ❯ \n\
+            ────────────────────────────────────────\n  \
+            ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents";
+        let detection = claude_detection(screen, "✳ Claude Code", Some(true));
+        assert_eq!(detection.state, State::Working);
+        assert_eq!(
+            claude_detection(screen, "✳ Claude Code", None).state,
+            State::Blocked
+        );
+    }
+
+    /// A conversation line that only starts with a status glyph is not the
+    /// live status line (#465 review): `* Esc to cancel` must not read as a
+    /// working hint when Claude shows no status line.
+    #[test]
+    fn a_glyph_led_conversation_line_is_not_claude_status() {
+        let prompt = "────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)";
+        for old in [
+            "* Esc to cancel",
+            "· Esc to cancel",
+            "✻ esc to cancel",
+            "* Worked on esc to cancel",
+        ] {
+            let screen = format!("{old}\n{prompt}");
+            let detection = claude_detection(&screen, "✳ Claude Code", Some(true));
+            assert_eq!(detection.state, State::Idle, "{old}");
+            // Even a real-looking status line is ignored when conversation
+            // (a column-0 entry) sits between it and the input box.
+            let screen = format!("✢ Inferring… (esc to interrupt)\n⏺ Done.\n{prompt}");
+            assert_eq!(
+                claude_detection(&screen, "✳ Claude Code", Some(true)).state,
+                State::Idle
+            );
+        }
+        for status in [
+            "✻ Worked for 11s · done 7:27 AM",
+            "✻ Cooked for 6s · done 12:25 PM",
+            "✢ Inferring… (12s · ↓ 3.2k tokens)",
+            "· Pondering… (6s · esc to interrupt)",
+            "⠹ Thinking… (esc to interrupt)",
+            "  ✢ Inferring… (2s)",
+            "◐ Thinking… (3s)",
+        ] {
+            assert!(is_claude_status_line(status), "{status}");
+        }
+    }
+
+    #[test]
+    fn a_blocked_title_still_blocks_claude_with_a_live_prompt() {
+        let detection =
+            claude_detection(CLAUDE_IDLE_BELOW_MENU_WORDS, "Action required", Some(true));
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.rule_region, Some("title"));
+    }
+
+    #[test]
+    fn only_claude_skips_transcript_menu_words() {
+        let bottom = "Enter to select · Esc to cancel";
+        let detection = classify_with_composer(
+            Some("Codex"),
+            bottom,
+            false,
+            false,
+            "codex",
+            "codex",
+            &["/usr/local/bin/codex".to_string()],
+            &Manifests::builtin(),
+            Some(true),
+        );
+        assert_eq!(detection.state, State::Blocked);
+    }
+
+    /// The probe that vouches for the prompt: Claude's idle screen with its
+    /// cursor in the input box is a live composer, while its real menus, which
+    /// replace the input box, are not.
+    #[test]
+    fn claude_menus_are_never_a_live_composer() {
+        let probe = |screen: &str, cursor: Option<(usize, usize)>| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut engine = AlacrittyEngine::new(80, 30, tx, 1024 * 1024);
+            let screen = screen.replace('\n', "\r\n");
+            engine.advance(format!("\x1b[2J\x1b[H{screen}").as_bytes());
+            if let Some((row, col)) = cursor {
+                engine.advance(format!("\x1b[{row};{col}H").as_bytes());
+            }
+            engine.claude_composer_evidence()
+        };
+        use crate::terminal::vt::ClaudeComposerEvidence;
+        // Row 6 (1-based) is the `❯` prompt line of the idle screen.
+        assert_eq!(
+            probe(CLAUDE_IDLE_BELOW_MENU_WORDS, Some((6, 3))),
+            ClaudeComposerEvidence::Ready
+        );
+        for menu in [CLAUDE_COMMAND_APPROVAL_SCREEN, CLAUDE_PLAN_APPROVAL_SCREEN] {
+            assert_eq!(probe(menu, None), ClaudeComposerEvidence::Absent);
+        }
+    }
+
+    #[test]
+    fn claude_theme_picker_is_unknown_without_a_live_composer() {
+        let manifests = Manifests::builtin();
+        let bottom = "Let's get started.\nChoose the text style that looks best with your terminal\n❯ 2. Dark mode";
+        let detection = classify(
+            Some("Claude Code"),
+            bottom,
+            false,
+            false,
+            "claude",
+            "claude",
+            &["/usr/local/bin/claude".to_string()],
+            &manifests,
+        );
+        assert!(prompt_requires_positive_evidence("claude"));
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Unknown);
+        assert_eq!(
+            prompt_evidence(Some("Claude Code"), bottom, "claude", &manifests),
+            PromptEvidence::Unknown
+        );
+    }
+
+    #[test]
+    fn opencode_requires_live_composer_evidence() {
+        let manifests = Manifests::builtin();
+        let detection = classify(
+            Some("OpenCode"),
+            "Starting OpenCode...",
+            false,
+            false,
+            "opencode",
+            "opencode",
+            &["/usr/local/bin/opencode --standalone".to_string()],
+            &manifests,
+        );
+        assert!(prompt_requires_positive_evidence("opencode"));
+        assert_eq!(detection.state, State::Idle);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Unknown);
+    }
+
     #[test]
     fn claude_plan_approval_screen_is_blocked() {
         let detection = detection_from_claude_screen(CLAUDE_PLAN_APPROVAL_SCREEN);
@@ -3466,5 +3893,213 @@ For security, devin.exe should not be run in directories with untrusted content.
         );
         assert_eq!(detection.state, State::Blocked);
         assert_eq!(detection.state_source, "manifest_rule");
+    }
+
+    const CODEX_FOLDER_TRUST_SCREEN: &str = r#"
+  Folder access
+  /home/user/project
+
+  Trust this folder? Codex can read, edit, and run files here, subject to your
+  permission settings. Folder settings can run code automatically, even
+  without a model request. Continue only if you trust these files. Your trust
+  decision will be saved.
+
+› 1. Trust and continue
+  2. Back to Agent Command Center
+
+  enter continue · esc back"#;
+
+    #[test]
+    fn codex_folder_trust_screen_is_blocked() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/local/bin/codex".to_string()];
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 24, tx, 1024 * 1024);
+        let screen = CODEX_FOLDER_TRUST_SCREEN.replace('\n', "\r\n");
+        engine.advance(format!("\x1b[2J\x1b[H{screen}").as_bytes());
+        let detect = |bottom: &str| {
+            classify(
+                Some("codex"),
+                bottom,
+                false,
+                false,
+                "codex",
+                "codex",
+                &running,
+                &manifests,
+            )
+        };
+
+        let bottom = engine.detection_text_non_empty(screen_rows("codex", &running, &manifests));
+        let detection = detect(&bottom);
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+        assert_eq!(detection.rule_priority, Some(310));
+        assert_eq!(
+            detect(
+                "Trust this folder? Codex can read, edit, and run files here … \
+                 › 1. Trust and continue  2. Quit · enter continue · esc quit"
+            )
+            .state,
+            State::Blocked
+        );
+        assert_eq!(
+            detect(
+                "• The prompt asks \"Trust this folder?\", offers \"Trust and continue\", \
+                 and ends with \"enter continue · esc quit\".\n\n\
+                 › Summarize recent commits\n\n  100% context left"
+            )
+            .state,
+            State::Idle
+        );
+    }
+
+    // The first launch in an untrusted folder, from issue #477. Antigravity
+    // paints this menu on the first rows and leaves a blank footer under it,
+    // with the model status on the last row.
+    const ANTIGRAVITY_WORKSPACE_TRUST_SCREEN: &str = r#"Accessing workspace:
+/tmp/example-project
+Do you trust the contents of this project?
+Antigravity CLI requires permission to read, edit, and execute files here.
+> Yes, I trust this folder
+  No, exit
+  ↑/↓ Navigate · enter Confirm"#;
+
+    fn antigravity_detection(bottom: &str, running: &[String]) -> Detection {
+        classify(
+            Some("agy"),
+            bottom,
+            true,
+            false,
+            "agy",
+            "antigravity",
+            running,
+            &Manifests::builtin(),
+        )
+    }
+
+    #[test]
+    fn antigravity_workspace_trust_screen_is_blocked() {
+        let running = ["/usr/bin/agy --model gemini-3.8-flash-low -i Reply ok.".to_string()];
+        let trust = antigravity_detection(ANTIGRAVITY_WORKSPACE_TRUST_SCREEN, &running);
+        assert_eq!(trust.agent, "antigravity");
+        assert_eq!(trust.state, State::Blocked);
+        assert_eq!(trust.state_source, "manifest_rule");
+        assert_eq!(trust.prompt_evidence, PromptEvidence::Blocked);
+        assert_eq!(trust.rule_priority, Some(310));
+        assert_eq!(trust.rule_region, Some("screen"));
+
+        // The model status can sit on its own last row. The menu is still blocked.
+        let with_status = antigravity_detection(
+            &format!("{ANTIGRAVITY_WORKSPACE_TRUST_SCREEN}\nGemini 3.5 Flash (High)"),
+            &running,
+        );
+        assert_eq!(with_status.state, State::Blocked);
+        assert_eq!(with_status.prompt_evidence, PromptEvidence::Blocked);
+        // Moving the cursor to the exit row leaves the same menu on screen.
+        assert_eq!(
+            antigravity_detection(
+                "Do you trust the contents of this project?\n  Yes, I trust this folder\n> No, exit\n  ↑/↓ Navigate · enter Confirm",
+                &running,
+            )
+            .state,
+            State::Blocked
+        );
+
+        // A trusted folder's composer and an in-progress turn keep their readings.
+        let idle = antigravity_detection(
+            "────────────────────────────────\n>\n────────────────────────────────\n? for shortcuts",
+            &running,
+        );
+        assert_eq!(idle.state, State::Idle);
+        assert_eq!(idle.state_source, "no_positive_state_evidence");
+        assert_eq!(
+            antigravity_detection("⣾ Working...\nesc to cancel", &running).state,
+            State::Working
+        );
+        // Quoting the question, or the menu without its confirm hint, is not
+        // the live trust screen.
+        assert_eq!(
+            antigravity_detection(
+                "The CLI asked \"Do you trust the contents of this project?\" before the turn.\n>\n? for shortcuts",
+                &running,
+            )
+            .state,
+            State::Idle
+        );
+        assert_eq!(
+            antigravity_detection(
+                "Do you trust the contents of this project?\n> Yes, I trust this folder\n>\n? for shortcuts",
+                &running,
+            )
+            .state,
+            State::Idle
+        );
+        // The full menu can remain above the composer after it is dismissed.
+        // The live rows are the composer, so this is idle.
+        let inactive = antigravity_detection(
+            "Do you trust the contents of this project?\n\
+             Antigravity CLI requires permission to read, edit, and execute files here.\n\
+             > Yes, I trust this folder\n\
+               No, exit\n\
+               ↑/↓ Navigate · enter Confirm\n\
+             ────────────────────────────────\n\
+             >\n\
+             ────────────────────────────────\n\
+             ? for shortcuts",
+            &running,
+        );
+        assert_eq!(inactive.state, State::Idle);
+        assert_eq!(inactive.state_source, "no_positive_state_evidence");
+        assert_eq!(inactive.prompt_evidence, PromptEvidence::Unknown);
+    }
+
+    #[test]
+    fn antigravity_trust_screen_sits_above_the_bottom_rows() {
+        let manifests = Manifests::builtin();
+        let running = ["/usr/bin/agy".to_string()];
+        assert!(screen_uses_non_empty_rows("", &running, &manifests));
+        assert!(screen_uses_non_empty_rows("antigravity", &[], &manifests));
+        assert!(screen_uses_non_empty_rows(
+            "",
+            &[r"C:\Users\me\AppData\Local\agy\bin\agy.exe".to_string()],
+            &manifests
+        ));
+
+        let rows = screen_rows("antigravity", &running, &manifests);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(80, 30, tx, 1024 * 1024);
+        let screen = ANTIGRAVITY_WORKSPACE_TRUST_SCREEN.replace('\n', "\r\n");
+        engine
+            .advance(format!("\x1b[2J\x1b[H{screen}\x1b[30;1HGemini 3.5 Flash (High)").as_bytes());
+
+        let bottom = engine.detection_text(rows);
+        assert!(
+            !bottom.to_lowercase().contains("yes, i trust this folder"),
+            "the trust menu is above the ordinary bottom-row window"
+        );
+        assert_eq!(antigravity_detection(&bottom, &running).state, State::Idle);
+
+        let visible = engine.detection_text_non_empty(rows);
+        let detection = antigravity_detection(&visible, &running);
+        assert_eq!(detection.state, State::Blocked);
+        assert_eq!(detection.state_source, "manifest_rule");
+        assert_eq!(detection.prompt_evidence, PromptEvidence::Blocked);
+
+        // A bottom-aligned working footer and a trusted composer stay put when
+        // the same non-empty window is used.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut working = AlacrittyEngine::new(80, 30, tx, 1024 * 1024);
+        working.advance("\x1b[2J\x1b[28;1H⠹ Working...\r\nesc to cancel".as_bytes());
+        assert_eq!(
+            antigravity_detection(&working.detection_text_non_empty(rows), &running).state,
+            State::Working
+        );
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut idle = AlacrittyEngine::new(80, 30, tx, 1024 * 1024);
+        idle.advance(b"\x1b[2J\x1b[28;1H>\r\n? for shortcuts");
+        let idle_detection = antigravity_detection(&idle.detection_text_non_empty(rows), &running);
+        assert_eq!(idle_detection.state, State::Idle);
+        assert_eq!(idle_detection.state_source, "no_positive_state_evidence");
     }
 }

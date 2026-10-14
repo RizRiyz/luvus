@@ -23,17 +23,128 @@ fn task_retry_api_queues_a_new_attempt_and_projects_history() {
     app.orch
         .add_task("retry".into(), vec![], vec![], None)
         .unwrap();
+    app.orch.claim("t1", 7).unwrap();
+    app.orch.bind_worktree(
+        "t1",
+        Some("/repo/.luvus/worktrees/t1".into()),
+        Some("luvus/t1".into()),
+    );
     app.orch
         .set_status("t1", crate::orch::TaskStatus::Failed)
         .unwrap();
 
+    let finished = app.dispatch("task.get", &json!({"id":"t1"})).unwrap();
+    assert!(finished["task"]["attempt_started_at"].is_u64());
+    assert!(finished["task"]["attempt_finished_at"].is_u64());
+
     let result = app.dispatch("task.retry", &json!({"id":"t1"})).unwrap();
     assert_eq!(result["task"]["status"], "queued");
     assert_eq!(result["task"]["attempt"], 2);
+    assert!(result["task"].get("attempt_started_at").is_none());
+    assert!(result["task"].get("attempt_finished_at").is_none());
+    assert!(result["task"]["branch"].is_null());
+    assert!(result["task"]["worktree"].is_null());
     assert_eq!(
         result["task"]["previous_attempts"][0]["final_status"],
         "failed"
     );
+    assert_eq!(result["task"]["previous_attempts"][0]["branch"], "luvus/t1");
+    assert_eq!(
+        result["task"]["previous_attempts"][0]["worktree"],
+        "/repo/.luvus/worktrees/t1"
+    );
+    assert!(result["task"]["previous_attempts"][0]["started_at"].is_u64());
+    assert!(result["task"]["previous_attempts"][0]["finished_at"].is_u64());
+}
+
+#[test]
+fn task_release_api_invalidates_a_running_gate_result() {
+    let (_env, mut app) = app("socket-task-release-gate");
+    app.orch
+        .add_task("release".into(), vec![], vec![], Some("true".into()))
+        .unwrap();
+
+    let result = app.dispatch("task.done", &json!({"id":"t1"})).unwrap();
+    assert_eq!(result["gate_running"], true);
+    let run = app.task_gates_inflight["t1"].run;
+
+    let released = app.dispatch("task.release", &json!({"id":"t1"})).unwrap();
+    assert_eq!(released["task"]["status"], "queued");
+    assert!(app.task_gates_inflight["t1"]
+        .cancelled
+        .load(std::sync::atomic::Ordering::Acquire));
+
+    app.task_gate_finished("t1", run, None, "gate cancelled".into());
+    assert_eq!(
+        app.orch.task("t1").unwrap().status,
+        crate::orch::TaskStatus::Queued
+    );
+}
+
+#[test]
+fn task_delete_api_cancels_a_blocked_tasks_running_gate() {
+    let (_env, mut app) = app("socket-task-delete-gate");
+    app.orch
+        .add_task("delete".into(), vec![], vec![], Some("true".into()))
+        .unwrap();
+
+    app.dispatch("task.done", &json!({"id":"t1"})).unwrap();
+    let run = app.task_gates_inflight["t1"].run;
+    app.orch
+        .set_status("t1", crate::orch::TaskStatus::Blocked)
+        .unwrap();
+
+    let deleted = app.dispatch("task.delete", &json!({"id":"t1"})).unwrap();
+    assert_eq!(deleted["task"]["id"], "t1");
+    assert!(app.orch.task("t1").is_none());
+    assert!(app.task_gates_inflight["t1"]
+        .cancelled
+        .load(std::sync::atomic::Ordering::Acquire));
+
+    app.task_gate_finished("t1", run, None, "gate cancelled".into());
+    assert!(!app.task_gates_inflight.contains_key("t1"));
+    assert!(app.orch.task("t1").is_none());
+}
+
+#[test]
+fn task_update_and_retry_fence_the_previous_gate_attempt() {
+    let (_env, mut app) = app("socket-task-retry-gate");
+    app.orch
+        .add_task("retry".into(), vec![], vec![], Some("true".into()))
+        .unwrap();
+
+    app.dispatch("task.done", &json!({"id":"t1"})).unwrap();
+    let first_run = app.task_gates_inflight["t1"].run;
+    app.dispatch("task.update", &json!({"id":"t1", "status":"failed"}))
+        .unwrap();
+    assert!(app.task_gates_inflight["t1"]
+        .cancelled
+        .load(std::sync::atomic::Ordering::Acquire));
+
+    let retry = app.dispatch("task.retry", &json!({"id":"t1"})).unwrap();
+    assert_eq!(retry["task"]["attempt"], 2);
+    app.task_gate_finished("t1", first_run, None, "gate cancelled".into());
+    assert_eq!(
+        app.orch.task("t1").unwrap().status,
+        crate::orch::TaskStatus::Queued
+    );
+}
+
+#[test]
+fn task_attempt_timestamps_are_omitted_until_the_attempt_starts() {
+    let (_env, mut app) = app("socket-task-attempt-times");
+    app.orch
+        .add_task("timed".into(), vec![], vec![], None)
+        .unwrap();
+
+    let queued = app.dispatch("task.get", &json!({"id":"t1"})).unwrap();
+    assert!(queued["task"].get("attempt_started_at").is_none());
+    assert!(queued["task"].get("attempt_finished_at").is_none());
+
+    app.orch.claim("t1", 7).unwrap();
+    let running = app.dispatch("task.list", &json!({})).unwrap();
+    assert!(running["tasks"][0]["attempt_started_at"].is_u64());
+    assert!(running["tasks"][0].get("attempt_finished_at").is_none());
 }
 
 #[test]
@@ -191,6 +302,23 @@ fn automation_api_validates_targets_and_is_idempotent() {
         }),
     );
     assert_eq!(bad_access.unwrap_err().0, "unsupported_automation_access");
+
+    let devin_workspace = app.dispatch(
+        "automation.create",
+        &json!({
+            "name":"devin-workspace",
+            "trigger":{"kind":"daily","timezone":"UTC","second_of_day":0},
+            "task":{
+                "title":"bad", "prompt":"bad", "agent_id":"devin",
+                "workspace_id":workspace_id, "access":"workspace"
+            }
+        }),
+    );
+    assert_eq!(
+        devin_workspace.unwrap_err().0,
+        "unsupported_automation_access"
+    );
+    assert_eq!(app.automation.automations.len(), 1);
 
     let automation_id = first["automation"]["id"].as_str().unwrap();
     let run_params = json!({"id":automation_id, "idempotency_key":"run-1"});

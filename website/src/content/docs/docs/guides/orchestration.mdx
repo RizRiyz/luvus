@@ -290,6 +290,21 @@ task creates a new automation run from the original run's captured contract
 while preserving the original records. Retrying from `review` or `blocked`
 finishes the superseded run as cancelled without closing its worker pane.
 
+The top-level `branch`, `worktree`, `attempt_started_at`, and
+`attempt_finished_at` always describe the current attempt. On a newly queued
+retry, `attempt_started_at` appears when the attempt starts and
+`attempt_finished_at` when it finishes. `branch` and `worktree` receive values
+only when a worktree is assigned; workspace mode has no branch. The superseded
+attempt remains available as the final `previous_attempts` entry, including
+its branch, worktree, start time, and finish time. A `task.retried` event tells
+event-stream consumers to refresh that task; the event itself carries only its
+ID and new attempt number.
+
+Releasing or retrying a task while its quality gate is running cancels the
+contained gate process tree and invalidates that run's ownership. Luvus waits
+for cancellation to settle before accepting another gate for the same task, so
+the commands cannot overlap and a late result cannot complete newer work.
+
 - **Only armed agent automations spawn unattended.** Manual tasks still start
   only when you press `s` or run `task start`. Every automation stores one
   explicit agent, workspace, prompt, worker mode, access policy, and bounded schedule.
@@ -333,4 +348,6 @@ finishes the superseded run as cancelled without closing its worker pane.
 | Scheduled worker still needs attention | ORCH marks the automation task `blocked` and records the detected prompt. Resolve it in the visible pane; Luvus does not approve unknown requests automatically. |
 
 Clean up a finished worker with `luvus worktree remove <path>` (the branch is
-kept).
+kept). Luvus refuses removal while a working or blocked agent pane, unfinished
+task, or lease still owns that worktree. Use `--force` only after explicitly
+confirming that those panes may be stopped and their worktree removed.

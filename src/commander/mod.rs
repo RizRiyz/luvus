@@ -4,11 +4,14 @@
 mod actions;
 mod app;
 mod composer;
+mod modules;
 mod orch;
 mod targets;
 
 pub(crate) use actions::SLASH_ACTIONS;
 pub(crate) use composer::{line_end, line_start, next_word, previous_word, Commander};
+pub(crate) use modules::ModuleCommandSpec;
+pub(crate) use modules::MAX_INVOCATION_BYTES;
 pub(crate) use targets::{
     encode_component, parse_scoped_target, target_lookup, target_spans, unescape_pane_mentions,
     DeliveryPlan, ExactTarget, ScopedTarget, MAX_TARGETS,

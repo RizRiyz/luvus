@@ -176,6 +176,51 @@ macro_rules! tr {
 /// Entries are matched only as a complete line or a whitespace-delimited line
 /// suffix, so canonical syntax at the start of a row is never rewritten.
 static HELP: &[Translation] = &[
+    tr!("update an installed module", "actualizar un módulo instalado", "atualizar um módulo instalado", "mettre à jour un module installé", "ein installiertes Modul aktualisieren", "perbarui modul terpasang", "更新已安装的模块", "インストール済みモジュールを更新", "설치된 모듈 업데이트"),
+    tr!(
+        "Pairing links work once and expire after five minutes.",
+        "Los enlaces de vinculación se usan una vez y caducan a los cinco minutos.",
+        "Os links de pareamento funcionam uma vez e expiram após cinco minutos.",
+        "Les liens d’association sont à usage unique et expirent après cinq minutes.",
+        "Kopplungslinks sind einmalig und laufen nach fünf Minuten ab.",
+        "Tautan pemasangan berlaku sekali dan kedaluwarsa setelah lima menit.",
+        "配对链接只能使用一次，五分钟后失效。",
+        "ペアリングリンクは一度だけ使用でき、5 分後に失効します。",
+        "페어링 링크는 한 번만 사용할 수 있으며 5분 후 만료됩니다."
+    ),
+    tr!(
+        "Paired browsers remember access across tabs and browser restarts until the bridge stops.",
+        "Los navegadores vinculados conservan el acceso entre pestañas y reinicios hasta que se detiene el puente.",
+        "Os navegadores pareados mantêm o acesso entre abas e reinicializações até a ponte parar.",
+        "Les navigateurs associés conservent l’accès entre onglets et redémarrages jusqu’à l’arrêt du pont.",
+        "Gekoppelte Browser behalten den Zugriff über Tabs und Browserneustarts hinweg bis zum Stopp der Bridge.",
+        "Browser yang dipasangkan mengingat akses antar tab dan setelah dimulai ulang hingga bridge berhenti.",
+        "已配对的浏览器可跨标签页和浏览器重启保留访问权限，直到桥接器停止。",
+        "ペアリング済みブラウザーはタブ間や再起動後もアクセスを保持し、ブリッジ停止時に失効します。",
+        "페어링된 브라우저는 탭과 브라우저 재시작 간에 접근을 유지하며 브리지가 중지되면 만료됩니다."
+    ),
+    tr!(
+        "Press Enter in this terminal while the bridge runs to print a new one.",
+        "Pulsa Enter en esta terminal mientras funciona el puente para imprimir uno nuevo.",
+        "Pressione Enter neste terminal enquanto a ponte estiver ativa para imprimir um novo.",
+        "Appuyez sur Enter dans ce terminal pendant le fonctionnement du pont pour en afficher un nouveau.",
+        "Drücken Sie bei laufender Bridge in diesem Terminal Enter, um einen neuen Link auszugeben.",
+        "Tekan Enter di terminal ini saat bridge berjalan untuk mencetak tautan baru.",
+        "桥接器运行时，在此终端按 Enter 可显示新链接。",
+        "ブリッジ実行中にこのターミナルで Enter を押すと、新しいリンクを表示します。",
+        "브리지가 실행 중일 때 이 터미널에서 Enter를 누르면 새 링크가 출력됩니다."
+    ),
+    tr!(
+        "expire browser access after 1-86400 seconds (default: until bridge stops)",
+        "caducar el acceso del navegador tras 1-86400 segundos (predeterminado: hasta detener el puente)",
+        "expirar o acesso do navegador após 1-86400 segundos (padrão: até a ponte parar)",
+        "faire expirer l’accès après 1-86400 secondes (défaut : jusqu’à l’arrêt du pont)",
+        "Browserzugriff nach 1-86400 Sekunden beenden (Standard: bis zum Stopp der Bridge)",
+        "akhiri akses browser setelah 1-86400 detik (bawaan: hingga bridge berhenti)",
+        "在 1-86400 秒后使浏览器访问失效（默认：桥接器停止时）",
+        "1-86400 秒後にブラウザーのアクセスを失効（既定：ブリッジ停止時）",
+        "1-86400초 후 브라우저 접근 만료(기본값: 브리지 중지 시)"
+    ),
     tr!(
         "Serve the optional browser client",
         "Servir el cliente web opcional",
@@ -1430,6 +1475,17 @@ static HELP: &[Translation] = &[
         "列出当前标签页中的窗格和只读历史指标",
         "現在のタブのペインと読み取り専用履歴メトリクスを一覧表示",
         "현재 탭의 패널과 읽기 전용 기록 지표 나열"
+    ),
+    tr!(
+        "list panes across every workspace and tab",
+        "listar paneles de todos los espacios de trabajo y pestañas",
+        "listar painéis de todos os espaços de trabalho e abas",
+        "lister les volets de tous les espaces de travail et onglets",
+        "Bereiche aus allen Arbeitsbereichen und Tabs auflisten",
+        "daftar panel di semua ruang kerja dan tab",
+        "列出所有工作区和标签页中的窗格",
+        "すべてのワークスペースとタブのペインを一覧表示",
+        "모든 작업 공간과 탭의 패널 나열"
     ),
     tr!(
         "split a pane (default: auto by size, creates a workspace if empty)",
@@ -2845,6 +2901,105 @@ static HELP: &[Translation] = &[
 /// labels such as `name` can never be mistaken for a help-row description.
 static TEXT: &[Translation] = &[
     tr!(
+        "Pair this browser once within 5 minutes. Access is remembered across tabs and browser restarts.",
+        "Vincula este navegador una vez en 5 minutos. El acceso se conserva entre pestañas y reinicios.",
+        "Pareie este navegador uma vez em 5 minutos. O acesso é mantido entre abas e reinicializações.",
+        "Associez ce navigateur une fois dans les 5 minutes. L’accès est conservé entre onglets et redémarrages.",
+        "Koppeln Sie diesen Browser einmal innerhalb von 5 Minuten. Der Zugriff bleibt über Tabs und Browserneustarts erhalten.",
+        "Pasangkan browser ini sekali dalam 5 menit. Akses diingat antar tab dan setelah browser dimulai ulang.",
+        "请在 5 分钟内配对此浏览器。访问权限可跨标签页和浏览器重启保留。",
+        "5 分以内にこのブラウザーを一度ペアリングしてください。タブ間や再起動後もアクセスが保持されます。",
+        "5분 이내에 이 브라우저를 한 번 페어링하세요. 탭과 브라우저 재시작 간에 접근이 유지됩니다."
+    ),
+    tr!(
+        "Browser access expires after {seconds} seconds.",
+        "El acceso del navegador caduca tras {seconds} segundos.",
+        "O acesso do navegador expira após {seconds} segundos.",
+        "L’accès du navigateur expire après {seconds} secondes.",
+        "Der Browserzugriff läuft nach {seconds} Sekunden ab.",
+        "Akses browser kedaluwarsa setelah {seconds} detik.",
+        "浏览器访问将在 {seconds} 秒后失效。",
+        "ブラウザーのアクセスは {seconds} 秒後に失効します。",
+        "브라우저 접근은 {seconds}초 후 만료됩니다."
+    ),
+    tr!(
+        "Browser access lasts until this bridge stops or you forget this browser.",
+        "El acceso dura hasta detener este puente u olvidar este navegador.",
+        "O acesso dura até esta ponte parar ou você esquecer este navegador.",
+        "L’accès dure jusqu’à l’arrêt de ce pont ou à l’oubli de ce navigateur.",
+        "Der Zugriff gilt, bis diese Bridge stoppt oder Sie diesen Browser vergessen.",
+        "Akses berlaku hingga bridge ini berhenti atau Anda melupakan browser ini.",
+        "访问权限持续到此桥接器停止或您取消此浏览器的配对。",
+        "アクセスはブリッジ停止時、またはこのブラウザーの登録解除時まで有効です。",
+        "접근은 이 브리지가 중지되거나 이 브라우저를 잊을 때까지 유지됩니다."
+    ),
+    tr!(
+        "--ticket-ttl requires a value",
+        "--ticket-ttl requiere un valor",
+        "--ticket-ttl requer um valor",
+        "--ticket-ttl exige une valeur",
+        "--ticket-ttl erfordert einen Wert",
+        "--ticket-ttl memerlukan nilai",
+        "--ticket-ttl 需要一个值",
+        "--ticket-ttl には値が必要です",
+        "--ticket-ttl에는 값이 필요합니다"
+    ),
+    tr!(
+        "--ticket-ttl must be an integer from 1 through 86400",
+        "--ticket-ttl debe ser un entero entre 1 y 86400",
+        "--ticket-ttl deve ser um inteiro de 1 a 86400",
+        "--ticket-ttl doit être un entier compris entre 1 et 86400",
+        "--ticket-ttl muss eine ganze Zahl von 1 bis 86400 sein",
+        "--ticket-ttl harus berupa bilangan bulat dari 1 hingga 86400",
+        "--ticket-ttl 必须是 1 到 86400 之间的整数",
+        "--ticket-ttl は 1 から 86400 までの整数で指定してください",
+        "--ticket-ttl은 1에서 86400 사이의 정수여야 합니다"
+    ),
+    tr!(
+        "No room for another device: every allowed device is still connected. Forget a browser in Devices, close all its tabs, or restart with a larger --max-devices.",
+        "No hay espacio para otro dispositivo: todos siguen conectados. Olvida un navegador en Devices, cierra todas sus pestañas o reinicia con un --max-devices mayor.",
+        "Não há espaço para outro dispositivo: todos continuam conectados. Esqueça um navegador em Devices, feche todas as suas abas ou reinicie com --max-devices maior.",
+        "Aucune place pour un autre appareil : tous restent connectés. Oubliez un navigateur dans Devices, fermez tous ses onglets ou redémarrez avec --max-devices plus grand.",
+        "Kein Platz für ein weiteres Gerät: Alle sind noch verbunden. Vergessen Sie einen Browser in Devices, schließen Sie alle seine Tabs oder starten Sie mit größerem --max-devices neu.",
+        "Tidak ada ruang untuk perangkat lain: semuanya masih terhubung. Lupakan browser di Devices, tutup semua tabnya, atau mulai ulang dengan --max-devices lebih besar.",
+        "无法添加设备：所有允许的设备仍已连接。请在 Devices 中取消一个浏览器的配对，关闭其所有标签页，或使用更大的 --max-devices 重启。",
+        "追加のデバイス用の空きがありません。Devices でブラウザーの登録を解除するか、その全タブを閉じるか、--max-devices を増やして再起動してください。",
+        "다른 기기를 위한 자리가 없습니다. 모두 연결되어 있습니다. Devices에서 브라우저를 잊거나 모든 탭을 닫거나 --max-devices를 늘려 다시 시작하세요."
+    ),
+    tr!(
+        "--cwd may be passed only once",
+        "--cwd solo puede especificarse una vez",
+        "--cwd só pode ser especificado uma vez",
+        "--cwd ne peut être spécifié qu'une seule fois",
+        "--cwd darf nur einmal angegeben werden",
+        "--cwd hanya boleh diberikan sekali",
+        "--cwd 只能指定一次",
+        "--cwd は一度だけ指定できます",
+        "--cwd는 한 번만 지정할 수 있습니다"
+    ),
+    tr!(
+        "--cwd must be valid UTF-8",
+        "--cwd debe ser UTF-8 válido",
+        "--cwd deve ser UTF-8 válido",
+        "--cwd doit être un UTF-8 valide",
+        "--cwd muss gültiges UTF-8 sein",
+        "--cwd harus berupa UTF-8 yang valid",
+        "--cwd 必须是有效的 UTF-8",
+        "--cwd は有効な UTF-8 である必要があります",
+        "--cwd는 유효한 UTF-8이어야 합니다"
+    ),
+    tr!(
+        "exact search query must be at most 4096 bytes",
+        "la búsqueda exacta no puede superar los 4096 bytes",
+        "a busca exata não pode exceder 4096 bytes",
+        "la recherche exacte ne doit pas dépasser 4096 octets",
+        "die exakte Suchanfrage darf höchstens 4096 Bytes lang sein",
+        "kueri pencarian persis maksimal 4096 byte",
+        "精确搜索查询不得超过 4096 字节",
+        "完全一致検索のクエリは 4096 バイト以下にしてください",
+        "정확 검색어는 4096바이트를 초과할 수 없습니다"
+    ),
+    tr!(
         "Could not authorize UHP access.",
         "No se pudo autorizar el acceso UHP.",
         "Não foi possível autorizar o acesso UHP.",
@@ -3025,6 +3180,9 @@ static TEXT: &[Translation] = &[
         "생성됨"),
     tr!("valid theme", "tema válido", "tema válido", "thème valide", "gültiges Theme", "tema valid", "有效主题", "有効なテーマ",
         "유효한 테마"),
+    tr!("Update module from", "Actualizar módulo desde", "Atualizar módulo de", "Mettre à jour le module depuis", "Modul aktualisieren von", "Perbarui modul dari", "更新模块，来源", "モジュールの更新元", "모듈 업데이트 출처"),
+    tr!("selected server does not support module.update", "el servidor seleccionado no admite module.update", "o servidor selecionado não suporta module.update", "le serveur sélectionné ne prend pas en charge module.update", "der ausgewählte Server unterstützt module.update nicht", "server yang dipilih tidak mendukung module.update", "所选服务器不支持 module.update", "選択したサーバーは module.update をサポートしていません", "선택한 서버가 module.update를 지원하지 않습니다"),
+    tr!("linked modules must be updated in their own working directory", "los módulos vinculados deben actualizarse en su propio directorio de trabajo", "módulos vinculados devem ser atualizados em seu próprio diretório de trabalho", "les modules liés doivent être mis à jour dans leur propre répertoire de travail", "verknüpfte Module müssen in ihrem eigenen Arbeitsverzeichnis aktualisiert werden", "modul tertaut harus diperbarui di direktori kerjanya sendiri", "本地链接模块必须在其工作目录中更新", "リンク済みモジュールは自身の作業ディレクトリで更新してください", "연결된 모듈은 자체 작업 디렉터리에서 업데이트해야 합니다"),
     tr!("installed", "instalado", "instalado", "installé", "installiert", "terpasang", "已安装", "インストール済み",
         "설치됨"),
     tr!("from", "desde", "de", "depuis", "von", "dari", "来源", "取得元",
@@ -3236,6 +3394,44 @@ mod tests {
             assert_eq!(Language::from_code(code).code(), *code);
         }
         assert_eq!(Language::from_code("unknown"), Language::En);
+    }
+
+    #[test]
+    fn exact_search_limit_diagnostic_is_localized() {
+        let source = "exact search query must be at most 4096 bytes";
+        for code in crate::i18n::LANGS {
+            let language = Language::from_code(code);
+            assert_eq!(diagnostic(source, language), text(source, language));
+            if language != Language::En {
+                assert_ne!(diagnostic(source, language), source);
+            }
+        }
+    }
+
+    #[test]
+    fn pane_split_cwd_diagnostics_are_localized() {
+        for source in ["--cwd may be passed only once", "--cwd must be valid UTF-8"] {
+            for code in crate::i18n::LANGS {
+                let language = Language::from_code(code);
+                let translated = diagnostic(source, language);
+                assert!(translated.contains("--cwd"));
+                if source.contains("UTF-8") {
+                    assert!(translated.contains("UTF-8"));
+                }
+                if language != Language::En {
+                    assert_ne!(translated, source, "{code} kept the English diagnostic");
+                }
+            }
+        }
+        let usage = "usage: luvus pane split [<id>] [--cwd <path>]";
+        for code in crate::i18n::LANGS {
+            let language = Language::from_code(code);
+            let translated = diagnostic(usage, language);
+            assert!(translated.contains("luvus pane split [<id>] [--cwd <path>]"));
+            if language != Language::En {
+                assert_ne!(translated, usage, "{code} kept the English usage label");
+            }
+        }
     }
 
     #[test]

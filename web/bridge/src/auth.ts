@@ -17,20 +17,22 @@ export class BrowserAuthority {
   readonly initialPairing: BrowserPairing;
   #maxDevices: number;
   #pairings = new Map<string, number>();
-  #tickets = new Map<string, number>();
+  #tickets = new Map<string, number | undefined>();
 
-  constructor(private readonly ticketSeconds: number, maxDevices: number) {
+  constructor(private readonly ticketSeconds: number | undefined, maxDevices: number) {
     this.#maxDevices = maxDevices;
     const initial = this.createPairing();
     if (!initial) throw new Error("browser device limit must allow initial pairing");
     this.initialPairing = initial;
   }
 
-  authenticate(input: { code?: string; ticket?: string }): { accepted: boolean; ticket?: string; expiresAt?: number } {
+  authenticate(input: { code?: string; ticket?: string }):
+    | { accepted: false }
+    | { accepted: true; ticket?: string; ticketDigest: string; expiresAt: number | undefined } {
     this.#purge();
     if (input.ticket) {
-      const expiresAt = this.#tickets.get(digest(input.ticket));
-      if (expiresAt && expiresAt > unixNow()) return { accepted: true, expiresAt };
+      const ticketDigest = digest(input.ticket);
+      if (this.isValid(ticketDigest)) return { accepted: true, ticketDigest, expiresAt: this.#tickets.get(ticketDigest) };
     }
     if (!input.code) return { accepted: false };
     const pairingKey = digest(input.code);
@@ -39,9 +41,10 @@ export class BrowserAuthority {
     this.#pairings.delete(pairingKey);
     if (this.#tickets.size >= this.#maxDevices) return { accepted: false };
     const ticket = randomBytes(32).toString("base64url");
-    const expiresAt = unixNow() + this.ticketSeconds;
-    this.#tickets.set(digest(ticket), expiresAt);
-    return { accepted: true, ticket, expiresAt };
+    const expiresAt = this.ticketSeconds === undefined ? undefined : unixNow() + this.ticketSeconds;
+    const ticketDigest = digest(ticket);
+    this.#tickets.set(ticketDigest, expiresAt);
+    return { accepted: true, ticket, ticketDigest, expiresAt };
   }
 
   createPairing(): BrowserPairing | undefined {
@@ -74,13 +77,22 @@ export class BrowserAuthority {
     this.#tickets.clear();
   }
 
+  isValid(ticketDigest: string): boolean {
+    const expiresAt = this.#tickets.get(ticketDigest);
+    return this.#tickets.has(ticketDigest) && (expiresAt === undefined || expiresAt > unixNow());
+  }
+
+  revoke(ticketDigest: string): void {
+    this.#tickets.delete(ticketDigest);
+  }
+
   #purge(): void {
     const now = unixNow();
     for (const [key, expiresAt] of this.#pairings) {
       if (expiresAt <= now) this.#pairings.delete(key);
     }
     for (const [key, expiresAt] of this.#tickets) {
-      if (expiresAt <= now) this.#tickets.delete(key);
+      if (expiresAt !== undefined && expiresAt <= now) this.#tickets.delete(key);
     }
   }
 }

@@ -107,6 +107,9 @@ luvus session delete <name>
 luvus --session <name> pane list
 ```
 
+`pane list` discovers pane IDs across all workspaces and tabs in that session
+without changing focus. Add `--current-tab` to limit the result to the active tab.
+
 `session attach` launches or attaches the TUI. Never run it merely to test
 whether a session exists. `session stop` ends every pane in that named server.
 Before deletion, list sessions once, require the exact stopped name, and obtain
@@ -289,13 +292,12 @@ Without `--wait`, the immediate `submitted:true`, `evidence:"queued"` response i
 unchanged and omits `observed_state`. Submission still means queue admission;
 state transitions do not confirm consumption of the prompt text. Do not resend
 automatically after a timeout or lost response because queued input may execute.
-For `agent.send` and `agent.prompt`, detected blocked prompt evidence—including
-in non-Codex panes—returns `agent_not_ready` and queues no input. Startup,
-sign-in, selection, and approval screens are examples, not an exhaustive list.
-A server-launched or restored Codex pane with an `agent_session` also returns
-`agent_not_ready` when prompt evidence is Unknown, unless live Codex composer
-geometry reports Ready. Existing Codex panes without that requirement retain the
-permissive Unknown-evidence fallback. Read the visible screen before deciding
+For `agent.send` and `agent.prompt`, detected blocked prompt evidence returns
+`agent_not_ready` and queues no input. Claude and Codex also require positive
+evidence of their live input composers. Use `--strict` (UHP `strict:true`) to
+require positive composer evidence for any agent; agents without a detector
+then return `agent_not_ready`. Without strict mode, other agents retain their
+legacy Unknown-evidence fallback. Read the visible screen before deciding
 whether an explicit `agent keys` action is authorized.
 
 When waiting was requested, keep it bounded and read a bounded result:
@@ -305,9 +307,10 @@ luvus agent send reviewer "Review the diff" --wait --timeout 300
 luvus agent read reviewer --lines 120
 ```
 
-Treat `idle`, `done`, `working`, and `blocked` as ready once the requested agent
-identity is recognized. `unknown` is not proof of completion, but it does not
-undo a matching identity. When `agent start` returns `ready: true`, accept its
+For `agent start` identity, treat `idle`, `done`, `working`, and `blocked` as
+recognized states; they do not by themselves prove prompt readiness. `unknown`
+is not proof of completion, but it does not undo a matching identity. When
+`agent start` returns `ready: true`, accept its
 name, pane, and kind without another status lookup. Use `wait agent-status` for
 a requested lifecycle transition after work is sent, not for startup identity.
 Repeat `--status` or pass a comma-separated set when any of several terminal
@@ -327,7 +330,9 @@ invalid entry sends nothing, and a closed target returns `send_failed`.
 
 For UHP interactions that must match the inspected screen, use `agent.read`
 with `source:"visible"` and pass its `content_revision` as `if_content_revision`
-together with its `terminal_id` in `agent.keys` params. The revision is a
+together with its `terminal_id` in `agent.keys` params. A `visible` read is the
+live screen, not the pane's scrollback viewport, so it stays valid while someone
+is scrolled back through an earlier turn. The revision is a
 non-negative integer; the terminal ID is exactly 32 lowercase hex characters.
 Both fields are optional as a pair; a one-sided or malformed pair is
 `invalid_request`. A deferred pane has `terminal_id:null` and cannot be fenced.
@@ -448,7 +453,9 @@ surface:
   resolving, removing, applying, or sending a review note. Removing a note and
   sending feedback to an agent require explicit authorization.
 - List worktrees before creating, opening, or removing one. Removal requires
-  explicit authorization and an exact path.
+  explicit authorization and an exact path. If removal returns
+  `worktree_in_use`, report its panes, tasks, and leases. Never retry with
+  `--force` unless the user explicitly authorizes stopping that listed work.
 - Inspect task and lease ownership, dependencies, gates, assignees, and path
   leases before claiming, starting, updating, completing, releasing, deleting,
   or merging. `task merge` is serialized into
@@ -515,7 +522,11 @@ surface:
   workspace scope (the default) or explicit all-workspace scope to inspect
   data without changing the UI,
   `mission.refresh` for an explicit usage refresh, and `mission.open` only to
-  change the visible tab.
+  change the visible tab. Keep the `refresh_id` from `mission.refresh` and read
+  `mission.snapshot` until `refresh.completed_id` reaches it in the same
+  `server_generation`. `usage:null` is unknown, not zero; use `usage_status`
+  and `summary.usage_coverage` to explain partial results. `scope:"all"` stays
+  inside the selected named session.
 - Agent detection is built into Luvus. `luvus integration install` manages
   optional native session-resume hooks and must not be used merely to make an
   agent appear in the sidebar. Install or remove an integration only when the
@@ -528,9 +539,11 @@ surface:
   contract.
   `opencode2` is a compatibility alias for the canonical `opencode` agent.
   Never infer V2 session IDs from its live database.
-- Devin has native detection and exact-ID resume only. Do not infer session
-  IDs from its private database; `luvus agent resume <id>` cannot find Devin
-  sessions, so bind a pane with `luvus pane report --agent devin --session
+- For Devin, `luvus integration install devin` adds one session-start hook
+  that reports only the exact session ID for restart resume. Detection remains
+  native. Do not infer session IDs from its private database;
+  `luvus agent resume <id>` cannot find Devin sessions, so without the
+  integration bind a pane with `luvus pane report --agent devin --session
   <id>` when the exact id is known.
 - For Hermes, `luvus integration install hermes` adds exact per-pane session
   ownership for restart resume. Detection remains native, but Luvus does not

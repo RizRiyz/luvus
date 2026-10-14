@@ -3,6 +3,10 @@
 use super::*;
 use super::{params::*, projection::*};
 
+fn valid_worktree_remove_path(path: &str) -> bool {
+    !path.is_empty() && path.chars().count() <= 4096
+}
+
 impl App {
     // ── worktrees (docs/18 WT-3) ──
     pub(super) fn api_worktree_list(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -50,15 +54,36 @@ impl App {
     pub(super) fn api_worktree_remove(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
-            let path = param_path(p)?;
+            reject_api_fields(p, &["path", "force"])?;
+            let path = p
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|path| valid_worktree_remove_path(path))
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| {
+                    (
+                        "invalid_request".to_string(),
+                        "path must be a non-empty string of at most 4096 characters".to_string(),
+                    )
+                })?;
+            let force = match p.get("force") {
+                None => false,
+                Some(Value::Bool(force)) => *force,
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "force must be a boolean".to_string(),
+                    ));
+                }
+            };
             // Run from the repo's **main** worktree — git refuses to remove a
             // worktree from inside it, and the active workspace may be unrelated.
             let repo = crate::git::local::worktrees(&path)
                 .ok()
                 .and_then(|wts| wts.into_iter().find(|w| w.is_main).map(|w| w.path))
                 .unwrap_or_else(|| self.ws().cwd.clone());
-            self.remove_worktree_explicit(&repo, &path, false)
-                .map_err(git_err)?;
+            self.remove_worktree_explicit(&repo, &path, force)
+                .map_err(WorktreeRemoveError::into_dispatch)?;
             Ok(json!({"type":"ok"}))
         }
     }
@@ -490,6 +515,9 @@ impl App {
             }
             if let Some(st) = status {
                 self.orch.set_status(&id, st).map_err(orch_err)?;
+                if st != crate::orch::TaskStatus::Running {
+                    self.invalidate_task_gate(&id);
+                }
             }
             if let Some(o) = p.get("output").and_then(|v| v.as_str()) {
                 self.orch.add_output(&id, o.to_string()).map_err(orch_err)?;
@@ -658,7 +686,7 @@ impl App {
         let _ = (method, p);
         {
             let id = req_str(p, "id")?.to_string();
-            let task = self.orch.delete_task(&id).map_err(orch_err)?;
+            let task = self.delete_task_and_gate(&id).map_err(orch_err)?;
             self.orch.save();
             self.emit_event("task.deleted", json!({ "id": id }));
             Ok(json!({ "type": "task", "task": task_json(&task) }))
@@ -669,7 +697,7 @@ impl App {
         let _ = (method, p);
         {
             let id = req_str(p, "id")?.to_string();
-            let task = self.orch.release_task(&id).map_err(orch_err)?;
+            let task = self.release_task_to_queue(&id).map_err(orch_err)?;
             let released = self.orch.release_task_leases(&id);
             self.orch.save();
             self.emit_event("task.released", task_json(&task));
@@ -1228,5 +1256,17 @@ impl App {
                     "no pane id — run inside a luvus pane or pass a pane id".to_string(),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_worktree_remove_path;
+
+    #[test]
+    fn worktree_remove_path_limit_counts_unicode_characters() {
+        assert!(valid_worktree_remove_path("é"));
+        assert!(valid_worktree_remove_path(&"é".repeat(4096)));
+        assert!(!valid_worktree_remove_path(&"é".repeat(4097)));
     }
 }

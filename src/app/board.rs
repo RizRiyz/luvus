@@ -88,6 +88,7 @@ impl App {
             );
             self.start_automation_run(&run.id, now);
             let run = self.automation.run(&run.id).cloned().unwrap_or(run);
+            self.invalidate_task_gate(id);
             return Ok(TaskRetryResult::AutomationRun(run));
         }
 
@@ -99,11 +100,38 @@ impl App {
             .try_save()
             .map_err(|error| ("persist_failed".to_string(), error.to_string()))?;
         self.orch = candidate;
+        self.invalidate_task_gate(id);
         self.emit_event(
             "task.retried",
             serde_json::json!({"id": task.id, "attempt": task.attempt}),
         );
         Ok(TaskRetryResult::Task(task))
+    }
+
+    pub(crate) fn invalidate_task_gate(&mut self, id: &str) {
+        if let Some(active) = self.task_gates_inflight.get(id) {
+            active
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    pub(crate) fn release_task_to_queue(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::orch::Task, crate::orch::Reject> {
+        let task = self.orch.release_task(id)?;
+        self.invalidate_task_gate(id);
+        Ok(task)
+    }
+
+    pub(crate) fn delete_task_and_gate(
+        &mut self,
+        id: &str,
+    ) -> Result<crate::orch::Task, crate::orch::Reject> {
+        let task = self.orch.delete_task(id)?;
+        self.invalidate_task_gate(id);
+        Ok(task)
     }
 
     /// Open (or focus, if already open) the orchestration board in the active
@@ -1392,6 +1420,14 @@ impl App {
             .task(id)
             .cloned()
             .ok_or_else(|| ("not_found".to_string(), format!("no such task: {id}")))?;
+        if let Some(active) = self.task_gates_inflight.get(id) {
+            let message = if active.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                format!("quality gate is stopping for {id}")
+            } else {
+                format!("quality gate is already running for {id}")
+            };
+            return Err(("gate_running".to_string(), message));
+        }
         if matches!(
             task.status,
             crate::orch::TaskStatus::Merging | crate::orch::TaskStatus::Merged
@@ -1441,13 +1477,58 @@ impl App {
             "task.gate_running",
             serde_json::json!({ "id": id, "gate": gate }),
         );
-        spawn_gate(id.to_string(), cwd, gate, self.app_tx.clone());
+        self.task_gate_generation = self.task_gate_generation.wrapping_add(1);
+        let run = TaskGateRun {
+            generation: self.task_gate_generation,
+            attempt: task.attempt,
+        };
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.task_gates_inflight.insert(
+            id.to_string(),
+            ActiveTaskGate {
+                run,
+                cancelled: cancelled.clone(),
+            },
+        );
+        spawn_gate(
+            id.to_string(),
+            run,
+            cancelled,
+            cwd,
+            gate,
+            self.app_tx.clone(),
+        );
         Ok(true)
     }
 
     /// Apply a finished gate (ORCH-5): exit 0 → Done (+ dependents announced);
     /// non-zero → held at `Review` with the tail of the output captured.
-    pub fn task_gate_finished(&mut self, id: &str, code: Option<i32>, out: String) {
+    pub(crate) fn task_gate_finished(
+        &mut self,
+        id: &str,
+        run: TaskGateRun,
+        code: Option<i32>,
+        out: String,
+    ) {
+        if self.task_gates_inflight.get(id).map(|active| active.run) != Some(run) {
+            return;
+        }
+        let Some(active) = self.task_gates_inflight.remove(id) else {
+            return;
+        };
+        if active.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let is_current = self.orch.task(id).is_some_and(|task| {
+            task.attempt == run.attempt
+                && matches!(
+                    task.status,
+                    crate::orch::TaskStatus::Running | crate::orch::TaskStatus::Blocked
+                )
+        });
+        if !is_current {
+            return;
+        }
         if code == Some(0) {
             self.finalize_task_done(id, TaskCompletionSource::Gate);
             self.emit_event("task.gate_passed", serde_json::json!({ "id": id }));
@@ -1531,6 +1612,16 @@ impl App {
                 crate::app::OrchView::Automations => crate::app::OrchView::Tasks,
             };
             self.orch_scroll = 0;
+            return;
+        }
+        // Toggle, run, delete, start, done, retry, merge, and release act
+        // on the selected row while the board stays open: once per press.
+        if super::is_key_repeat(&key)
+            && matches!(
+                key.code,
+                KeyCode::Delete | KeyCode::Char('e' | 'r' | 'D' | 's' | 'd' | 'm' | 'x')
+            )
+        {
             return;
         }
         if self.orch_view == crate::app::OrchView::Automations {
@@ -1679,6 +1770,26 @@ impl App {
         let Some(form) = self.orch_form.as_mut() else {
             return;
         };
+        // Choice fields cycle once per press; text fields keep repeating.
+        let choice_field = matches!(
+            form.field,
+            crate::app::OrchFormField::Target
+                | crate::app::OrchFormField::ActiveAgent
+                | crate::app::OrchFormField::Start
+                | crate::app::OrchFormField::Agent
+                | crate::app::OrchFormField::RunIn
+                | crate::app::OrchFormField::Access
+        );
+        if super::is_key_repeat(&key)
+            && (matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+                || (choice_field
+                    && matches!(
+                        key.code,
+                        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+                    )))
+        {
+            return;
+        }
         match key.code {
             KeyCode::Tab | KeyCode::BackTab => form.toggle_kind(),
             KeyCode::Down => form.cycle_field(false),
@@ -2435,6 +2546,10 @@ impl App {
             .as_ref()
             .is_some_and(|start| start.step == crate::app::OrchStartStep::Mode)
         {
+            // Two modes: each press flips once; a held key must not oscillate.
+            if super::is_key_repeat(&key) {
+                return;
+            }
             match key.code {
                 KeyCode::Esc => self.orch_start = None,
                 KeyCode::Char('j')
@@ -2608,7 +2723,7 @@ impl App {
         let Some(id) = self.orch_selected_id() else {
             return;
         };
-        match self.orch.delete_task(&id) {
+        match self.delete_task_and_gate(&id) {
             Ok(_) => {
                 self.orch.save();
                 self.emit_event("task.deleted", serde_json::json!({ "id": id }));
@@ -2662,7 +2777,7 @@ impl App {
         let Some(id) = self.orch_selected_id() else {
             return;
         };
-        match self.orch.release_task(&id) {
+        match self.release_task_to_queue(&id) {
             Ok(_) => {
                 self.orch.release_task_leases(&id);
                 self.orch.save();
@@ -3036,27 +3151,72 @@ fn spawn_task_merge(job: TaskMergeJob) -> Result<(), String> {
 /// responsive while a `cargo test` / `npm test` gate runs.
 fn spawn_gate(
     task: String,
+    run: TaskGateRun,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cwd: std::path::PathBuf,
     gate: String,
     app_tx: std::sync::mpsc::Sender<crate::event::AppEvent>,
 ) {
     std::thread::spawn(move || {
-        let (code, out) = run_gate_command(&cwd, &gate);
-        let _ = app_tx.send(crate::event::AppEvent::TaskGateFinished { task, code, out });
+        let (code, out) = run_gate_command(&cwd, &gate, &cancelled);
+        let _ = app_tx.send(crate::event::AppEvent::TaskGateFinished {
+            task,
+            generation: run.generation,
+            attempt: run.attempt,
+            code,
+            out,
+        });
     });
 }
 
 /// Run `gate` through the platform shell in `cwd`; returns its exit code and the
 /// combined stdout+stderr.
-fn run_gate_command(cwd: &std::path::Path, gate: &str) -> (Option<i32>, String) {
+fn run_gate_command(
+    cwd: &std::path::Path,
+    gate: &str,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> (Option<i32>, String) {
+    use std::io::Read;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    const OUTPUT_CAP: usize = 64 * 1024;
+
+    fn read_tail_capped<R: Read>(reader: &mut R) -> String {
+        let mut kept = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let overflow = kept.len().saturating_add(read).saturating_sub(OUTPUT_CAP);
+                    if overflow > 0 {
+                        kept.drain(..overflow);
+                    }
+                    kept.extend_from_slice(&chunk[..read]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&kept).into_owned()
+    }
+
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(gate);
         c
     } else {
         let mut c = Command::new("sh");
-        c.arg("-c").arg(gate);
+        // Keep the shell alive briefly while its EXIT trap runs so the parent
+        // can observe direct background children before Unix reparents them.
+        // The gate remains in an environment value so its own positional
+        // parameters retain the same meaning as a plain `sh -c` invocation.
+        c.env("LUVUS_GATE_COMMAND", gate).args([
+            "-c",
+            "trap 'sleep 0.05' EXIT; eval \"unset LUVUS_GATE_COMMAND; $LUVUS_GATE_COMMAND\"",
+        ]);
         c
     };
     cmd.current_dir(cwd)
@@ -3064,13 +3224,82 @@ fn run_gate_command(cwd: &std::path::Path, gate: &str) -> (Option<i32>, String) 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::platform::no_window(&mut cmd);
-    match cmd.output() {
-        Ok(o) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-            s.push_str(&String::from_utf8_lossy(&o.stderr));
-            (o.status.code(), s)
+    crate::platform::suspend_for_child_tree(&mut cmd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return (None, format!("failed to run gate: {error}")),
+    };
+    let mut tree_guard = match crate::platform::ChildTreeGuard::attach(&mut child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return (None, format!("failed to contain gate process: {error}"));
         }
-        Err(e) => (None, format!("failed to run gate: {e}")),
+    };
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let stdout =
+        std::thread::spawn(move || stdout.as_mut().map(read_tail_capped).unwrap_or_default());
+    let stderr =
+        std::thread::spawn(move || stderr.as_mut().map(read_tail_capped).unwrap_or_default());
+
+    let (status, was_cancelled) = loop {
+        tree_guard.refresh_descendants();
+        if cancelled.load(Ordering::Acquire) {
+            tree_guard.terminate();
+            let _ = child.kill();
+            break (child.wait(), true);
+        }
+        #[cfg(unix)]
+        match crate::platform::child_exited_unreaped(&child) {
+            Ok(true) => {
+                // Keep the exited shell waitable until its original process
+                // group is gone. Reaping first would allow the group ID to be
+                // reused before cleanup can safely signal it.
+                if let Err(error) = tree_guard.terminate_unreaped_root(&child) {
+                    break (Err(error), false);
+                }
+                break (child.wait(), false);
+            }
+            Ok(false) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => break (Err(error), false),
+        }
+        #[cfg(not(unix))]
+        match child.try_wait() {
+            Ok(Some(status)) => break (Ok(status), false),
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => break (Err(error), false),
+        }
+    };
+
+    // A shell may exit after leaving descendants behind. End the contained
+    // group before joining the pipe readers so a background child cannot keep
+    // this gate registered forever.
+    tree_guard.terminate();
+    let mut out = stdout.join().unwrap_or_default();
+    out.push_str(&stderr.join().unwrap_or_default());
+    if was_cancelled {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("gate cancelled");
+        return (None, out);
+    }
+    match status {
+        Ok(status) => (status.code(), out),
+        Err(error) => {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("failed to wait for gate: {error}"));
+            (None, out)
+        }
     }
 }
 
@@ -4443,6 +4672,15 @@ mod tests {
         );
         assert!(agent_automation_command("opencode2", AutomationAccess::ReadOnly).is_err());
         assert!(agent_automation_command("opencode2", AutomationAccess::Workspace).is_err());
+        assert_eq!(
+            agent_automation_command("devin", AutomationAccess::ReadOnly).unwrap(),
+            "devin --respect-workspace-trust false --permission-mode auto -p"
+        );
+        assert_eq!(
+            agent_automation_command("devin", AutomationAccess::FullAccess).unwrap(),
+            "devin --respect-workspace-trust false --permission-mode dangerous -p"
+        );
+        assert!(agent_automation_command("devin", AutomationAccess::Workspace).is_err());
         assert!(agent_automation_command("aider", AutomationAccess::Workspace).is_err());
         assert!(agent_automation_command("antigravity", AutomationAccess::Workspace).is_err());
 
@@ -4499,12 +4737,70 @@ mod tests {
 
     #[test]
     fn gate_command_runner_reports_exit_and_output() {
-        let dir = std::env::temp_dir();
-        assert_eq!(run_gate_command(&dir, "exit 0").0, Some(0));
-        assert_eq!(run_gate_command(&dir, "exit 7").0, Some(7));
-        let (code, out) = run_gate_command(&dir, "echo hello");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(run_gate_command(dir, "exit 0", &cancelled).0, Some(0));
+        assert_eq!(run_gate_command(dir, "exit 7", &cancelled).0, Some(7));
+        let (code, out) = run_gate_command(dir, "echo hello", &cancelled);
         assert_eq!(code, Some(0));
         assert!(out.contains("hello"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn gate_command_runner_terminates_a_detached_session() {
+        let executable = shell_quote(&std::env::current_exe().unwrap().to_string_lossy());
+        let command = format!(
+            "LUVUS_GATE_DETACH_HELPER=1 {executable} --exact app::board::tests::gate_detached_child_helper & sleep 0.05; exit 0"
+        );
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            let (code, out) = run_gate_command(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+                &command,
+                &cancelled,
+            );
+            assert_eq!(code, Some(0));
+            assert!(out.contains("detached-helper-ready"));
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "an escaped descendant kept the gate output pipe open"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn gate_detached_child_helper() {
+        use std::io::Write;
+
+        if std::env::var_os("LUVUS_GATE_DETACH_HELPER").is_none() {
+            return;
+        }
+        assert!(unsafe { libc::setsid() } >= 0);
+        writeln!(std::io::stdout(), "detached-helper-ready").unwrap();
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn gate_command_cancellation_terminates_the_process_tree() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        let command = if cfg!(windows) {
+            "ping -n 31 127.0.0.1 >NUL"
+        } else {
+            "sleep 30"
+        };
+        let started = std::time::Instant::now();
+        let (code, out) = run_gate_command(dir, command, &cancelled);
+        assert_eq!(code, None);
+        assert!(out.contains("gate cancelled"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "cancellation must not wait for the gate command"
+        );
     }
 
     #[test]
@@ -4533,12 +4829,21 @@ mod tests {
             .unwrap();
         app.orch.claim("t1", focus.0).unwrap();
         assert_eq!(app.complete_task("t1"), Ok(true));
+        let passing_run = app.task_gates_inflight["t1"].run;
+        assert_eq!(
+            app.complete_task("t1"),
+            Err((
+                "gate_running".into(),
+                "quality gate is already running for t1".into()
+            ))
+        );
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Running
         );
         // A passing gate finalizes it to Done.
-        app.task_gate_finished("t1", Some(0), String::new());
+        app.task_gate_finished("t1", passing_run, Some(0), String::new());
+        assert!(!app.task_gates_inflight.contains_key("t1"));
         assert_eq!(
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Done
@@ -4548,10 +4853,231 @@ mod tests {
         app.orch
             .add_task("y".into(), vec![], vec![], Some("false".into()))
             .unwrap();
-        app.task_gate_finished("t2", Some(1), "boom\n".into());
+        assert_eq!(app.complete_task("t2"), Ok(true));
+        let failing_run = app.task_gates_inflight["t2"].run;
+        app.task_gate_finished("t2", failing_run, Some(1), "boom\n".into());
         let t2 = app.orch.task("t2").unwrap();
         assert_eq!(t2.status, crate::orch::TaskStatus::Review);
         assert!(t2.outputs.iter().any(|o| o.contains("gate failed")));
+    }
+
+    #[test]
+    fn stale_gate_result_cannot_finish_a_retried_attempt() {
+        let _env = crate::persist::test_env("gate-retry-fence");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("retry".into(), vec![], vec![], Some("true".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let first_run = app.task_gates_inflight["t1"].run;
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Review)
+            .unwrap();
+        let retry = app.retry_task("t1").unwrap();
+        assert!(matches!(retry, TaskRetryResult::Task(_)));
+        assert!(app.task_gates_inflight["t1"]
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            app.complete_task("t1"),
+            Err((
+                "gate_running".into(),
+                "quality gate is stopping for t1".into()
+            ))
+        );
+
+        app.task_gate_finished("t1", first_run, None, "gate cancelled".into());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Queued
+        );
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let second_run = app.task_gates_inflight["t1"].run;
+        assert_ne!(second_run, first_run);
+        app.task_gate_finished("t1", first_run, Some(0), String::new());
+        assert_eq!(
+            app.task_gates_inflight.get("t1").map(|active| active.run),
+            Some(second_run)
+        );
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Running
+        );
+        app.task_gate_finished("t1", second_run, Some(0), String::new());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Done
+        );
+    }
+
+    /// Issue #429, cause 2: a second `task done` while the first gate is still
+    /// running must not start another gate for the same task.
+    #[test]
+    fn a_second_done_while_a_gate_runs_is_refused() {
+        let _env = crate::persist::test_env("gate-429-second-done");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("gate race".into(), vec![], vec![], Some("true".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let first_run = app.task_gates_inflight["t1"].run;
+        assert_eq!(
+            app.complete_task("t1"),
+            Err((
+                "gate_running".into(),
+                "quality gate is already running for t1".into()
+            ))
+        );
+        assert_eq!(
+            app.task_gates_inflight["t1"].run, first_run,
+            "the refused call must not replace the running gate"
+        );
+
+        app.task_gate_finished("t1", first_run, Some(0), String::new());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Done
+        );
+        assert!(app.task_gates_inflight.is_empty());
+    }
+
+    /// Issue #429, cause 1: a gate result that lands after its task merged must
+    /// leave the task merged. A failing result used to reopen it for review,
+    /// and a passing one must not re-complete it either. Neither may add a
+    /// "gate failed" note to a task that was integrated.
+    #[test]
+    fn a_gate_result_after_merge_leaves_the_task_merged() {
+        for (code, outcome) in [(Some(1), "failing"), (Some(0), "passing")] {
+            let _env = crate::persist::test_env("gate-429-after-merge");
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            app.orch
+                .add_task("gate race".into(), vec![], vec![], Some("true".into()))
+                .unwrap();
+            assert_eq!(app.complete_task("t1"), Ok(true));
+            let run = app.task_gates_inflight["t1"].run;
+            let outputs_before = app.orch.task("t1").unwrap().outputs.len();
+
+            // The task is integrated while this gate is still in flight.
+            app.orch
+                .set_status("t1", crate::orch::TaskStatus::Merged)
+                .unwrap();
+            app.task_gate_finished("t1", run, code, "late gate output".into());
+
+            let task = app.orch.task("t1").unwrap();
+            assert_eq!(
+                task.status,
+                crate::orch::TaskStatus::Merged,
+                "a late {outcome} gate changed a merged task"
+            );
+            assert_eq!(
+                task.outputs.len(),
+                outputs_before,
+                "a late {outcome} gate annotated a merged task"
+            );
+            assert!(
+                app.task_gates_inflight.is_empty(),
+                "the finished gate must not stay registered"
+            );
+        }
+    }
+
+    #[test]
+    fn releasing_a_task_invalidates_its_running_gate() {
+        let _env = crate::persist::test_env("gate-release-fence");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("release".into(), vec![], vec![], Some("true".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let released_run = app.task_gates_inflight["t1"].run;
+        app.release_task_to_queue("t1").unwrap();
+        assert!(app.task_gates_inflight["t1"]
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            app.complete_task("t1"),
+            Err((
+                "gate_running".into(),
+                "quality gate is stopping for t1".into()
+            ))
+        );
+        app.task_gate_finished("t1", released_run, None, "gate cancelled".into());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Queued
+        );
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let current_run = app.task_gates_inflight["t1"].run;
+        app.task_gate_finished("t1", released_run, Some(0), String::new());
+        assert_eq!(
+            app.task_gates_inflight.get("t1").map(|active| active.run),
+            Some(current_run)
+        );
+        app.task_gate_finished("t1", current_run, Some(0), String::new());
+        assert_eq!(
+            app.orch.task("t1").unwrap().status,
+            crate::orch::TaskStatus::Done
+        );
+    }
+
+    #[test]
+    fn deleting_a_blocked_task_cancels_its_running_gate() {
+        let _env = crate::persist::test_env("gate-delete-fence");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("delete".into(), vec![], vec![], Some("true".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let run = app.task_gates_inflight["t1"].run;
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Blocked)
+            .unwrap();
+
+        app.orch_cursor = 0;
+        app.orch_action_delete();
+
+        assert!(app.orch.task("t1").is_none());
+        assert!(app.task_gates_inflight["t1"]
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire));
+        app.task_gate_finished("t1", run, None, "gate cancelled".into());
+        assert!(!app.task_gates_inflight.contains_key("t1"));
+        assert!(app.orch.task("t1").is_none());
+    }
+
+    #[test]
+    fn matching_gate_result_settles_a_temporarily_blocked_task() {
+        let _env = crate::persist::test_env("gate-blocked-result");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.orch
+            .add_task("blocked".into(), vec![], vec![], Some("false".into()))
+            .unwrap();
+
+        assert_eq!(app.complete_task("t1"), Ok(true));
+        let run = app.task_gates_inflight["t1"].run;
+        app.orch
+            .set_status("t1", crate::orch::TaskStatus::Blocked)
+            .unwrap();
+        app.task_gate_finished("t1", run, Some(7), "failed while blocked".into());
+
+        let task = app.orch.task("t1").unwrap();
+        assert_eq!(task.status, crate::orch::TaskStatus::Review);
+        assert!(task
+            .outputs
+            .iter()
+            .any(|line| line.contains("failed while blocked")));
     }
 
     #[test]
@@ -4867,8 +5393,9 @@ mod tests {
     fn automation_agent_picker_keeps_all_launch_capable_agents_visible() {
         use crate::automation::AutomationAccess;
 
-        assert_eq!(automation_agent_choices().len(), 18);
+        assert_eq!(automation_agent_choices().len(), 19);
         assert!(automation_agent_choices().contains(&"kilo"));
+        assert!(automation_agent_choices().contains(&"devin"));
         assert!(automation_agent_choices().contains(&"pi"));
         assert!(!automation_agent_choices().contains(&"antigravity"));
         assert!(!automation_agent_choices().contains(&"amp"));

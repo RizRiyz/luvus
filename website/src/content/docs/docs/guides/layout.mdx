@@ -22,6 +22,10 @@ like, and luvus tiles them automatically.
 | Zoom (fullscreen) a pane | n/a | `Ctrl+Space z` |
 | Close a pane | the `×` on its title, or right-click → **Close** | `Ctrl+Space x` |
 
+Right-click opens the pane menu anywhere in a pane, including one running a
+mouse-aware application such as an agent. Plain clicks and drags inside such an
+application go to it; hold `Shift` to select text with Luvus.
+
 Each split pane shows a title bar with a **status dot** and its working
 directory. The focused pane's frame is brighter.
 
@@ -89,8 +93,10 @@ Closing the final workspace leaves the client attached with the normal Luvus
 chrome instead of closing the app or showing a separate landing screen. Luvus
 immediately replaces it with a neutral workspace and real terminal rooted at
 your home directory. You can type, change directory, create tabs or splits, and
-open the folder picker normally. The sidebar path remains the workspace root;
-pane titles show each terminal's live working directory.
+open the folder picker normally. The sidebar path remains the workspace root.
+Pane titles use an explicit pane name when one exists and otherwise show a
+stable `p<ID>` fallback. Enable **Show path in pane titles** under
+**Settings → Layout** to append each terminal's live working directory.
 
 - **Open one:** the `+` button above the list, or `Ctrl+Space N`, opens a
   **folder picker**. Browse with the arrows / wheel, use the **Home** row to jump
@@ -129,6 +135,11 @@ Right-click any workspace row for its menu:
 - **Hide Path** switches WORKSPACES to compact one-row entries. Right-click
   again and choose **Show Path** to restore the cwd rows. Luvus remembers this
   choice across restarts.
+- **Quick Actions** opens a submenu with **Copy Path**, which puts the
+  workspace's project root on your clipboard, and **Copy Branch**, which puts its
+  current git branch there. **Copy Branch** appears for workspaces inside a git
+  repo, including a detached HEAD's short SHA. Hover the row or press `Enter` to
+  open the submenu.
 - **New Git Worktree** creates a checkout on a new branch; **Open Worktree**
   lists every existing, non-bare checkout git knows about and opens (or
   focuses) one. Both appear for git repos only; see
@@ -314,7 +325,9 @@ paths may not exist on the client machine; let the click reach luvus so its
 server-aware native file view handles the target instead. Luvus also suppresses
 these projections for SSH and tmux clients, where the outer terminal may belong
 to a different filesystem. A direct local terminal must identify itself before
-Luvus exposes server file paths to its file handler.
+Luvus exposes server file paths to its file handler. Windows Terminal never gets
+them: it keeps `Ctrl`+click on any link for itself and does not open these file
+links, so luvus leaves the path unlinked there and handles the click itself.
 
 **A path only underlines if the file is really there.** Paths are resolved against
 that pane's working directory, so `src/main.rs` means what it means to the shell

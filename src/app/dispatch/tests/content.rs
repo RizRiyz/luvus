@@ -3,6 +3,20 @@ use super::support::*;
 use crate::app::App;
 
 #[test]
+fn exact_search_rejects_oversized_queries_before_scanning() {
+    let _env = crate::persist::test_env("search-query-bound");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(100, 30, tx).unwrap();
+    let query = "x".repeat(crate::search::local::LOCAL_QUERY_BYTES + 1);
+
+    let error = app
+        .dispatch("search", &serde_json::json!({"query": query}))
+        .expect_err("legacy exact search must enforce the local query bound");
+    assert_eq!(error.0, "invalid_request");
+    assert_eq!(error.1, "query must be at most 4096 bytes");
+}
+
+#[test]
 fn diff_api_validates_anchors_and_preserves_atomic_note_lifecycle() {
     let _env = crate::persist::test_env("diff-api");
     let repo = std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("repo");

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 /// Physical directory identity, used to reject a replacement checkout at an
 /// already-confirmed worktree path. Neither a path nor a Git branch alone is
 /// stable across removal and recreation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DirectoryIdentity {
     volume: u64,
     file: u64,
@@ -31,6 +31,64 @@ pub fn directory_identity(path: &Path) -> Option<DirectoryIdentity> {
     #[cfg(not(any(unix, windows)))]
     {
         None
+    }
+}
+
+/// Restore a staged directory without replacing any newly-created destination.
+/// Unsupported platforms fail closed, leaving the staged checkout recoverable.
+pub(crate) fn rename_directory_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let source = CString::new(source.as_os_str().as_bytes())?;
+        let destination = CString::new(destination.as_os_str().as_bytes())?;
+        // SAFETY: both paths are valid NUL-terminated strings. The exclusive
+        // rename flag prevents replacing a directory created during rollback.
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let result =
+            unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileW;
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: both paths are NUL-terminated. MoveFileW does not replace an
+        // existing destination, unlike replace-existing rename helpers.
+        if unsafe { MoveFileW(source.as_ptr(), destination.as_ptr()) } != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (source, destination);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "exclusive directory restoration is unavailable",
+        ))
     }
 }
 
@@ -216,12 +274,20 @@ pub fn suspend_for_child_tree(cmd: &mut std::process::Command) {
 
 /// Own a spawned process tree so dropping the guard terminates descendants.
 ///
-/// Windows descendants can retain inherited output handles after their direct
-/// parent exits. A kill-on-close Job Object gives bounded command runners a
-/// stable tree handle instead of relying on an already-reaped parent PID.
+/// Windows uses a kill-on-close Job Object. Linux, macOS, and FreeBSD retain
+/// PID-reuse-safe identities for descendants while their parent relationship is
+/// visible, so later session or process-group changes cannot escape cleanup.
 pub struct ChildTreeGuard {
     #[cfg(windows)]
     handle: Option<windows_sys::Win32::Foundation::HANDLE>,
+    #[cfg(unix)]
+    root_pid: u32,
+    #[cfg(unix)]
+    root_marker: Option<String>,
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    descendants: std::collections::HashMap<u32, String>,
+    #[cfg(unix)]
+    terminated: bool,
 }
 
 impl ChildTreeGuard {
@@ -259,10 +325,43 @@ impl ChildTreeGuard {
             }
             Ok(guard)
         }
-        #[cfg(not(windows))]
+        #[cfg(unix)]
+        {
+            let root_pid = child.id();
+            let mut guard = Self {
+                root_pid,
+                root_marker: process_start_marker(root_pid),
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+                descendants: std::collections::HashMap::new(),
+                terminated: false,
+            };
+            guard.refresh_descendants();
+            Ok(guard)
+        }
+        #[cfg(not(any(windows, unix)))]
         {
             let _ = child;
             Ok(Self {})
+        }
+    }
+
+    /// Remember live Unix descendants while their parent relationship is still
+    /// observable. A child that later creates a new session can then still be
+    /// terminated without relying on the original process group.
+    pub fn refresh_descendants(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+        if !self.terminated && self.root_is_current() {
+            let discovered: Vec<_> = unix_descendant_pids(self.root_pid)
+                .into_iter()
+                .filter_map(|pid| process_start_marker(pid).map(|marker| (pid, marker)))
+                .collect();
+            // The root can exit while its tree is being scanned. Do not retain
+            // anything observed through a PID that changed owners mid-scan.
+            if self.root_is_current() {
+                for (pid, marker) in discovered {
+                    self.descendants.entry(pid).or_insert(marker);
+                }
+            }
         }
     }
 
@@ -270,6 +369,248 @@ impl ChildTreeGuard {
         #[cfg(windows)]
         if let Some(handle) = self.handle.take() {
             unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+        }
+        #[cfg(unix)]
+        self.terminate_unix(false);
+    }
+
+    /// Terminate a Unix tree while its exited root is still owned and
+    /// unreaped by `child`.
+    ///
+    /// That ownership keeps the root PID, and therefore its process-group ID,
+    /// from being reused even on systems that stop exposing a zombie's start
+    /// marker. The caller must reap `child` after this returns.
+    #[cfg(unix)]
+    pub fn terminate_unreaped_root(&mut self, child: &std::process::Child) -> std::io::Result<()> {
+        if child.id() != self.root_pid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "child does not own this process tree",
+            ));
+        }
+        if !child_exited_unreaped(child)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "child has not exited",
+            ));
+        }
+        self.terminate_unix(true);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn terminate_unix(&mut self, root_identity_is_owned: bool) {
+        if self.terminated {
+            return;
+        }
+        if self.root_is_current() {
+            self.refresh_descendants();
+        }
+        let root_is_current = root_identity_is_owned || self.root_is_current();
+        self.terminated = true;
+
+        // The direct child is created as its own process group. Kill that
+        // group first, then any PID-reuse-safe descendants observed before
+        // they escaped it with setsid(2) or setpgid(2). The group ID is the
+        // root PID, so do not signal it without either a matching marker or an
+        // unreaped Child that still owns that PID.
+        if root_is_current {
+            unsafe {
+                let _ = libc::kill(-(self.root_pid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+        for (&pid, marker) in &self.descendants {
+            if process_start_marker(pid).as_deref() == Some(marker.as_str()) {
+                unsafe {
+                    let _ = libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn root_is_current(&self) -> bool {
+        self.root_marker
+            .as_deref()
+            .is_some_and(|marker| process_start_marker(self.root_pid).as_deref() == Some(marker))
+    }
+}
+
+/// Report whether a Unix child has exited without reaping it.
+///
+/// Keeping an exited process waitable preserves its PID identity until its
+/// process group has been terminated. The caller must still call `wait`.
+#[cfg(unix)]
+pub fn child_exited_unreaped(child: &std::process::Child) -> std::io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+#[cfg(target_os = "linux")]
+fn unix_descendant_pids(root: u32) -> Vec<u32> {
+    collect_descendant_pids(root, |pid| {
+        let mut found = Vec::new();
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            return found;
+        };
+        for task in tasks.flatten() {
+            let path = task.path().join("children");
+            let Ok(children) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            found.extend(
+                children
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse::<u32>().ok()),
+            );
+        }
+        found
+    })
+}
+
+#[cfg(target_os = "freebsd")]
+fn unix_descendant_pids(root: u32) -> Vec<u32> {
+    use std::collections::HashMap;
+
+    let Some(processes) = freebsd_processes() else {
+        return vec![root];
+    };
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, ppid) in processes {
+        children.entry(ppid).or_default().push(pid);
+    }
+    collect_descendant_pids(root, |pid| children.get(&pid).cloned().unwrap_or_default())
+}
+
+#[cfg(target_os = "macos")]
+fn unix_descendant_pids(root: u32) -> Vec<u32> {
+    collect_descendant_pids(root, macos_child_pids)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+fn collect_descendant_pids(root: u32, mut children_for: impl FnMut(u32) -> Vec<u32>) -> Vec<u32> {
+    use std::collections::HashSet;
+
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        found.push(pid);
+        stack.extend(children_for(pid));
+    }
+    found
+}
+
+/// Command lines of `pid`'s ancestors, nearest first, excluding `pid` itself.
+/// Empty when this platform cannot read the process table.
+#[cfg(unix)]
+pub fn ancestor_commands(pid: u32) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+    let Some((commands, children)) = ps_table() else {
+        return Vec::new();
+    };
+    let parents: HashMap<u32, u32> = children
+        .iter()
+        .flat_map(|(parent, kids)| kids.iter().map(move |kid| (*kid, *parent)))
+        .collect();
+    let mut ancestors = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = pid;
+    while let Some(&parent) = parents.get(&current) {
+        if !seen.insert(parent) || ancestors.len() >= 64 {
+            break;
+        }
+        if let Some(command) = commands.get(&parent) {
+            ancestors.push(command.clone());
+        }
+        current = parent;
+    }
+    ancestors
+}
+
+#[cfg(not(unix))]
+pub fn ancestor_commands(_pid: u32) -> Vec<String> {
+    Vec::new()
+}
+
+/// Whether process `pid` runs inside the process tree rooted at `root`, the
+/// root included. `None` when this platform cannot inspect process trees.
+pub fn process_is_within(root: u32, pid: u32) -> Option<bool> {
+    if pid == root {
+        return Some(true);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+    {
+        Some(unix_descendant_pids(root).contains(&pid))
+    }
+    #[cfg(windows)]
+    {
+        Some(
+            windows::process_tree(root)
+                .iter()
+                .any(|info| info.pid == pid),
+        )
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        windows
+    )))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_child_pids(pid: u32) -> Vec<u32> {
+    let required = unsafe { libc::proc_listchildpids(pid as libc::pid_t, std::ptr::null_mut(), 0) };
+    if required <= 0 {
+        return Vec::new();
+    }
+
+    // The child count may grow between sizing and reading. Retry whenever the
+    // buffer fills so cleanup never silently drops the tail of the process
+    // list. The kernel's process limit bounds the resulting allocation.
+    let mut capacity = required as usize;
+    loop {
+        let mut children = vec![0 as libc::pid_t; capacity];
+        let child_count = unsafe {
+            libc::proc_listchildpids(
+                pid as libc::pid_t,
+                children.as_mut_ptr().cast(),
+                std::mem::size_of_val(children.as_slice()) as libc::c_int,
+            )
+        };
+        if child_count <= 0 {
+            return Vec::new();
+        }
+        let count = child_count as usize;
+        if count < children.len() {
+            children.truncate(count);
+            return children
+                .into_iter()
+                .filter_map(|pid| u32::try_from(pid).ok())
+                .collect();
+        }
+        capacity = capacity.saturating_mul(2);
+        if capacity == children.len() {
+            return Vec::new();
         }
     }
 }
@@ -558,13 +899,113 @@ pub fn process_start_marker(pid: u32) -> Option<String> {
     }
 }
 
+#[cfg(target_os = "freebsd")]
+pub fn process_start_marker(pid: u32) -> Option<String> {
+    use std::mem::{size_of, zeroed};
+
+    unsafe {
+        let mib = [
+            libc::CTL_KERN,
+            libc::KERN_PROC,
+            libc::KERN_PROC_PID,
+            libc::c_int::try_from(pid).ok()?,
+        ];
+        let mut info: libc::kinfo_proc = zeroed();
+        let expected = size_of::<libc::kinfo_proc>();
+        let mut len = expected;
+        if libc::sysctl(
+            mib.as_ptr(),
+            mib.len() as libc::c_uint,
+            (&mut info as *mut libc::kinfo_proc).cast(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        ) != 0
+            || len != expected
+            || info.ki_structsize != expected as libc::c_int
+            || info.ki_pid != pid as libc::pid_t
+        {
+            return None;
+        }
+        Some(format!(
+            "{}.{:06}",
+            info.ki_start.tv_sec, info.ki_start.tv_usec
+        ))
+    }
+}
+
 #[cfg(windows)]
 pub fn process_start_marker(pid: u32) -> Option<String> {
     windows::process_start_marker(pid)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    windows
+)))]
 pub fn process_start_marker(_pid: u32) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "freebsd")]
+fn freebsd_processes() -> Option<Vec<(u32, u32)>> {
+    use std::mem::size_of;
+
+    let mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL];
+    for _ in 0..3 {
+        let mut bytes = 0;
+        if unsafe {
+            libc::sysctl(
+                mib.as_ptr(),
+                mib.len() as libc::c_uint,
+                std::ptr::null_mut(),
+                &mut bytes,
+                std::ptr::null(),
+                0,
+            )
+        } != 0
+            || bytes == 0
+        {
+            return None;
+        }
+        let item_size = size_of::<libc::kinfo_proc>();
+        let capacity = bytes.div_ceil(item_size).saturating_add(16);
+        let mut entries = Vec::<libc::kinfo_proc>::with_capacity(capacity);
+        let mut filled = capacity.saturating_mul(item_size);
+        let result = unsafe {
+            libc::sysctl(
+                mib.as_ptr(),
+                mib.len() as libc::c_uint,
+                entries.as_mut_ptr().cast(),
+                &mut filled,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if result != 0 {
+            if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOMEM) {
+                continue;
+            }
+            return None;
+        }
+        if filled % item_size != 0 {
+            return None;
+        }
+        unsafe { entries.set_len(filled / item_size) };
+        return Some(
+            entries
+                .into_iter()
+                .filter(|entry| {
+                    entry.ki_structsize == item_size as libc::c_int
+                        && entry.ki_pid > 0
+                        && entry.ki_ppid >= 0
+                })
+                .map(|entry| (entry.ki_pid as u32, entry.ki_ppid as u32))
+                .collect(),
+        );
+    }
     None
 }
 
@@ -1166,8 +1607,9 @@ pub fn is_openable_url(url: &str) -> bool {
 ///
 /// Passed as a **separate argv entry**, never interpolated into a shell command,
 /// so a URL containing shell metacharacters is inert. Callers must have cleared
-/// it through [`is_openable_url`] first. Detached and never waited on, so a
-/// browser cold-start cannot stall the event loop.
+/// it through [`is_openable_url`] first. Started with [`spawn_reaped`], so a
+/// browser cold-start cannot stall the event loop and the opener leaves no
+/// zombie behind in a long-running client.
 pub fn open_url(url: &str) {
     use std::process::{Command, Stdio};
     if !is_openable_url(url) {
@@ -1184,20 +1626,28 @@ pub fn open_url(url: &str) {
         &[("xdg-open", &[]), ("gio", &["open"]), ("wslview", &[])]
     };
     for (cmd, args) in openers {
-        if no_window(
+        if spawn_reaped(no_window(
             Command::new(cmd)
                 .args(*args)
                 .arg(url)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
-        )
-        .spawn()
-        .is_ok()
+        ))
+        .is_some()
         {
             return;
         }
     }
+}
+
+/// Start a fire-and-forget helper and collect its exit status off the caller
+/// thread. Helpers share the event-driven PTY child reaper, so a long-running
+/// opener neither adds a waiting thread nor prevents later links from opening.
+/// Prepare and register with the reaper before spawning the child. Returns
+/// `None` if reaper setup, registration, or command startup fails.
+pub fn spawn_reaped(command: &mut std::process::Command) -> Option<u32> {
+    crate::terminal::pty::spawn_helper_reaped(command)
 }
 
 #[cfg(test)]
@@ -1210,6 +1660,140 @@ mod tests {
         let second = super::process_start_marker(pid).expect("same live process marker");
         assert_eq!(first, second);
         assert!(!first.is_empty());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn child_tree_guard_rejects_a_stale_root_identity() {
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().expect("spawn isolated child");
+        let pid = child.id();
+        let mut guard = super::ChildTreeGuard::attach(&mut child).expect("attach guard");
+
+        guard.root_marker = Some("stale-process-lifetime".into());
+        guard.descendants.clear();
+        guard.refresh_descendants();
+        assert!(guard.descendants.is_empty(), "stale root was scanned");
+        guard.terminate();
+        assert!(
+            child.try_wait().expect("query child").is_none(),
+            "stale root identity was signalled"
+        );
+
+        unsafe {
+            let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+        child.wait().expect("reap child");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn child_tree_guard_kills_the_group_before_reaping_an_exited_root() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 30 </dev/null >/dev/null 2>&1 & echo $!"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let mut child = command.spawn().expect("spawn isolated process group");
+        let mut guard = super::ChildTreeGuard::attach(&mut child).expect("attach guard");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().expect("shell output"))
+            .read_line(&mut line)
+            .expect("read background pid");
+        let background_pid: u32 = line.trim().parse().expect("background pid");
+        let background_marker =
+            super::process_start_marker(background_pid).expect("background process is live");
+
+        // Model a child created after the final tree scan. The process group
+        // still contains it, but PID-safe descendant tracking does not.
+        guard.descendants.clear();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !super::child_exited_unreaped(&child).expect("inspect child")
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            super::child_exited_unreaped(&child).expect("root remains waitable"),
+            "shell did not exit"
+        );
+        guard
+            .terminate_unreaped_root(&child)
+            .expect("owned unreaped root permits safe group cleanup");
+        child.wait().expect("reap root after group cleanup");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let group_child_stopped = loop {
+            if super::process_start_marker(background_pid).as_deref()
+                != Some(background_marker.as_str())
+            {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        if !group_child_stopped {
+            unsafe {
+                let _ = libc::kill(background_pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+        assert!(
+            group_child_stopped,
+            "background group member survived cleanup"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn descendant_walk_does_not_truncate_after_sixty_four_processes() {
+        let descendants = super::collect_descendant_pids(1, |pid| {
+            if pid == 1 {
+                (2..=71).collect()
+            } else {
+                Vec::new()
+            }
+        });
+        assert_eq!(descendants.len(), 71);
+        assert!((1..=71).all(|pid| descendants.contains(&pid)));
+    }
+
+    /// A fire-and-forget opener must not stay a zombie under a long-running
+    /// client once it exits.
+    #[cfg(unix)]
+    #[test]
+    fn spawned_helpers_are_reaped_after_they_exit() {
+        let pid = super::spawn_reaped(&mut std::process::Command::new("true"))
+            .expect("spawn a helper that exits at once");
+        // A zombie still answers signal 0; a reaped process no longer exists.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "helper {pid} exited but was never reaped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
 
     /// The hidden-window flag must not break output capture: a command routed

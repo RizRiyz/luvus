@@ -640,6 +640,10 @@ impl App {
             }
         }
         if self.picker.as_ref().is_some_and(|p| p.going_to.is_some()) {
+            // Tab completion schedules a directory scan; one per press.
+            if super::is_key_repeat(&key) && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+                return;
+            }
             match key.code {
                 KeyCode::Esc => {
                     self.invalidate_go_to_completion();
@@ -690,6 +694,16 @@ impl App {
                 }
                 _ => {}
             }
+            return;
+        }
+        // Browsing re-reads a directory on the app loop, and the hidden toggle
+        // and Home refresh too. Only cursor movement repeats while held.
+        if super::is_key_repeat(&key)
+            && !matches!(
+                key.code,
+                KeyCode::Char('j' | 'k') | KeyCode::Down | KeyCode::Up
+            )
+        {
             return;
         }
         match key.code {
@@ -1052,6 +1066,87 @@ mod tests {
         assert!(matches!(p.row(2), Row::Home));
         assert!(matches!(p.row(3), Row::Up));
         assert!(matches!(p.row(4), Row::Entry(0)));
+    }
+
+    #[test]
+    fn picker_home_navigates_once_per_press() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("picker-home-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let home = crate::platform::home_dir().expect("test home");
+        let elsewhere = complete_fixture("home-repeat");
+        app.open_folder_picker_at(elsewhere.clone());
+        let event = |kind| {
+            crate::event::AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Home,
+                KeyModifiers::NONE,
+                kind,
+            ))
+        };
+
+        app.handle_event(event(KeyEventKind::Press));
+        assert_eq!(app.picker.as_ref().unwrap().path, home);
+        // Browse elsewhere while Home stays held: its Repeat must not re-read.
+        app.picker.as_mut().unwrap().path = elsewhere.clone();
+        app.handle_event(event(KeyEventKind::Repeat));
+        assert_eq!(app.picker.as_ref().unwrap().path, elsewhere);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    #[test]
+    fn picker_word_delete_repeats_in_both_text_modes() {
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("picker-word-delete-repeat");
+        let tmp = complete_fixture("word-delete-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let event = |code, modifiers, kind| {
+            crate::event::AppEvent::Key(KeyEvent::new_with_kind(code, modifiers, kind))
+        };
+
+        app.open_folder_picker_at(tmp.clone());
+        app.picker.as_mut().unwrap().creating = Some("one/two/three".into());
+        app.handle_event(event(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        ));
+        app.handle_event(event(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Repeat,
+        ));
+        assert_eq!(
+            app.picker.as_ref().unwrap().creating.as_deref(),
+            Some("one/")
+        );
+        app.handle_event(event(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        ));
+
+        app.picker.as_mut().unwrap().creating = None;
+        app.picker.as_mut().unwrap().going_to = Some("one/two/three".into());
+        app.handle_event(event(
+            KeyCode::Backspace,
+            KeyModifiers::ALT,
+            KeyEventKind::Press,
+        ));
+        app.handle_event(event(
+            KeyCode::Backspace,
+            KeyModifiers::ALT,
+            KeyEventKind::Repeat,
+        ));
+        assert_eq!(
+            app.picker.as_ref().unwrap().going_to.as_deref(),
+            Some("one/")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

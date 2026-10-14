@@ -26,6 +26,7 @@ min_luvus_version = "0.14.1"
 [worktree_provider]
 command = ["./create-worktree"]
 remove_command = ["./remove-worktree"] # optional
+identity_bound_remove = true # if removal binds expected_identity
 ```
 
 ```json
@@ -57,7 +58,16 @@ deletes send:
 ```
 
 `force` is `true` for a confirmed sidebar deletion and `false` for the CLI/API
-command unless requested otherwise.
+command unless `--force` or `force: true` is explicitly requested. Normal
+CLI/API removal fails with `worktree_in_use` before deletion when the worktree
+has a working or blocked agent pane, an unfinished bound task, or a related
+lease. Finish or release the named work first. Forced removal bypasses that
+guard and stops panes in the removed workspace.
+Confirmed sidebar deletion also supplies `expected_identity` (`volume` and
+`file`). A removal provider must reject a target whose directory identity has
+changed and bind deletion to the checked directory, not just its path. Providers
+without `identity_bound_remove = true` use built-in Git removal for the confirmed
+sidebar action.
 
 Removal must write nothing to stdout, exit successfully, and
 both unregister the worktree and remove its directory. If a provider violates
@@ -112,10 +122,27 @@ would remove them) are left out, since there is nothing to open.
 Right-click a linked worktree in the sidebar, choose **Delete Worktree**, then
 confirm. Luvus validates that the target is a linked checkout (never the main
 checkout), closes its workspace, and removes it in bounded background work.
-The dialog closes immediately; a toast reports completion or failure. The Git
-branch is kept. If the background queue is full or validation fails, the
+The dialog closes immediately; the Luvus Bar shows deletion in progress and
+leaves a success or failure notification when it finishes. The Git branch is
+kept. If the background queue is full or validation fails, the
 workspace remains open. If removal fails after it starts, the directory may
 still exist and can be reopened from the main checkout.
+
+Unrelated workspaces and agent sessions remain usable during validation and
+removal. Before removal starts, Luvus checks again for other workspaces or panes
+using the checkout. If one opened while validation was running, deletion is
+cancelled and the checkout is preserved.
+
+**Delete Worktree** is hidden if the checkout's directory identity could not be
+captured. Built-in removal first moves the checkout to a private staging path
+and verifies its identity there before deleting it. A replacement created at
+the original path is left untouched. The Git branch is still kept.
+
+If removal fails, Luvus attempts to restore the checkout without replacing
+anything newly created at its original path. If restoration cannot be done
+safely, the error reports the retained staging path; its files are not discarded.
+Automatic restoration requires exclusive-rename support on macOS, Linux, or
+Windows. Other platforms retain the staged checkout for manual recovery.
 
 ## Why it's great with agents
 

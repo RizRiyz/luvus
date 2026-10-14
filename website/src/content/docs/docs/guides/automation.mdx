@@ -230,18 +230,28 @@ behalf.
 | Oh My Pi | yes | yes | yes |
 | Pi | yes | no | no |
 | fx | no | yes | yes |
+| Devin | yes | no | yes |
 
-Luvus also detects Antigravity, Amp, Devin, and Letta Code, but they are not
-available as new automation workers. Antigravity, Amp, and Letta Code do not
-expose a reviewed unattended permission mapping for Luvus access levels, and
-Devin's workspace-trust gate has not been validated for unattended runs. They
-can still appear when an automation targets a live agent that is already
-running in a pane.
+Luvus also detects Antigravity, Amp, and Letta Code, but they are not
+available as new automation workers because they do not expose a reviewed
+unattended permission mapping for Luvus access levels. They can still appear
+when an automation targets a live agent that is already running in a pane.
 
 Kilo Code currently exposes one reviewed unattended profile: **Full access**,
 launched as `kilo run --auto`. Kilo documents that `--auto` may approve actions
 not explicitly denied, so Luvus does not present it as read-only or workspace
 access and rejects those combinations before creating worker resources.
+
+Devin runs in print mode with `--respect-workspace-trust false`, because print
+mode refuses a directory Devin has not trusted and a task worktree is a new
+directory. The flag skips Devin's trust check for that run only and does not
+record the directory as trusted.
+**Read-only** adds `--permission-mode auto`, which approves only reads and
+read-only shell commands. **Full access** adds `--permission-mode dangerous`.
+Workspace access is rejected before Luvus creates worker resources: Devin's
+`accept-edits` mode refuses `git commit`, so a worktree worker could not commit
+the edits that task merge integrates. Devin exits successfully even when it
+refuses a tool call, so use a quality gate to confirm the expected result.
 
 ## Schedule types
 

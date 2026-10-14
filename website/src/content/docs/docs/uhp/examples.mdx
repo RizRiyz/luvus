@@ -126,8 +126,14 @@ For a narrower read:
 ```
 
 Mission Control reads do not open or focus its tab. `mission.refresh` schedules
-one bounded refresh; call `mission.snapshot` again after completion rather than
-polling continuously.
+one bounded refresh and returns a `refresh_id`. Read `mission.snapshot` again
+after the worker completes; its `refresh.server_generation` must match the
+refresh response and its numeric `refresh.completed_id` must be at least your
+requested ID. Use bounded client-side retries, not continuous server polling.
+Rows with `usage:null` carry `usage_status` so callers can distinguish an
+unrefreshed cache from a missing session identity, unsupported reader, or
+unavailable counters. Summary totals are known subtotals when coverage is
+incomplete. `scope:"all"` does not cross named-session boundaries.
 
 ## Start and prompt an agent atomically
 

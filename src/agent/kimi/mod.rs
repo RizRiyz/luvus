@@ -35,6 +35,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
             recent: sessions::recent,
             latest: sessions::latest,
             list: None,
+            titled: None,
         }),
         resume: |session| format!("kimi --resume {session}\r"),
         fork: None,

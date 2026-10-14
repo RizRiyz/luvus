@@ -56,6 +56,8 @@ impl App {
                             "pane": id.0.to_string(), "agent": s.agent,
                             "terminal_id": terminal_id,
                             "name": self.agent_name_for(id),
+                            // Display text only; target panes by id or alias.
+                            "agent_session_title": self.agent_session_title(id),
                             "status": state_str(s.state),
                             "authority":s.identity_source,
                             "state_source":s.state_source,
@@ -151,6 +153,7 @@ impl App {
     pub(super) fn api_agent_send(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
+            reject_api_fields(p, &["target", "text", "strict", "terminal_id"])?;
             let id = self.resolve_agent_target(p)?;
             if !self.is_agent_pane(id) {
                 return Err((
@@ -165,15 +168,26 @@ impl App {
                     "agent send text must not be empty".to_string(),
                 ));
             }
-            if !self.agent_prompt_is_ready(id) {
-                return Err(super::agent_workflow::agent_prompt_not_ready_error());
-            }
+            let strict = match p.get("strict") {
+                None | Some(Value::Bool(false)) => false,
+                Some(Value::Bool(true)) => true,
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "strict must be a boolean".to_string(),
+                    ));
+                }
+            };
             let pane = self.panes.get(&id).ok_or_else(|| {
                 (
                     "send_failed".to_string(),
                     "target pane closed before input was queued".to_string(),
                 )
             })?;
+            check_agent_terminal_id(p, pane)?;
+            if !self.agent_prompt_is_ready(id, strict) {
+                return Err(super::agent_workflow::agent_prompt_not_ready_error());
+            }
             pane.try_submit_text_with_settle(text, AGENT_MESSAGE_SETTLE)
                 .map_err(|message| ("send_failed".to_string(), message))?;
             let (agent, status) = self
@@ -295,6 +309,13 @@ impl App {
             let lines = p.get("lines").and_then(|v| v.as_u64()).unwrap_or(200) as u16;
             // `visible` = the current screen; anything else = recent output
             // (soft wraps joined), the default and best for transcripts.
+            //
+            // `screen_rows`, never `visible_rows`: the caller is inspecting what
+            // the agent is showing now, and fences `agent.keys` on the revision
+            // returned beside it. A viewport-relative read hands back an old
+            // composer or dialog whenever the pane is scrolled back, while the
+            // revision keeps advancing on live output — so every fenced key
+            // would be admitted against a frame that is not on the screen (#395).
             let source = p.get("source").and_then(|v| v.as_str()).unwrap_or("recent");
             let (text, content_revision, terminal_id) = self
                 .panes
@@ -302,7 +323,7 @@ impl App {
                 .and_then(|pane| {
                     pane.engine.lock().ok().map(|e| {
                         let text = if source == "visible" {
-                            e.visible_rows().join("\n")
+                            e.screen_rows().join("\n")
                         } else {
                             e.detection_text(lines)
                         };
@@ -347,6 +368,7 @@ impl App {
             let session = s.and_then(|s| s.agent_session.as_ref().map(|a| a.session_id.clone()));
             Ok(json!({"type":"agent","pane": id.0.to_string(),
                       "name": self.agent_name_for(id), "agent": agent,
+                      "agent_session_title": self.agent_session_title(id),
                       "status": status, "authority":authority,
                       "state_source":state_source, "session": session, "cwd": cwd}))
         }
@@ -471,6 +493,14 @@ impl App {
                 let changed = status.state != state || status.agent != agent;
                 status.agent = agent.to_string();
                 status.state = state;
+                // Reports can change admission without any new terminal bytes.
+                status.prompt_evidence = if state == State::Blocked {
+                    detect::PromptEvidence::Blocked
+                } else {
+                    detect::PromptEvidence::Unknown
+                };
+                status.force_detect = true;
+                status.last_detect_generation = None;
                 status.candidate = state;
                 status.candidate_since = now;
                 status.prev_working = state == State::Working;

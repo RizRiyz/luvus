@@ -116,6 +116,7 @@ removal command:
 [worktree_provider]
 command = ["./create-worktree"]
 remove_command = ["./remove-worktree"] # optional
+identity_bound_remove = true # only if remove_command binds expected_identity
 platforms = ["macos", "linux"] # optional
 ```
 
@@ -147,6 +148,17 @@ Removal receives:
   "force": false
 }
 ```
+
+Confirmed sidebar deletion also includes `expected_identity` with `volume` and
+`file` (the directory's device/inode on Unix or volume/file ID on Windows).
+Set `identity_bound_remove = true` only when the remove command binds its
+destructive operation to that directory identity and rejects a replaced target;
+checking the path only before deletion does not prevent a replacement race.
+One approach is to move the linked checkout to a unique sibling path, verify
+the moved directory's identity, then remove that moved checkout; restore it if
+the identity differs.
+Without this opt-in, confirmed sidebar deletion uses built-in Git removal. The
+field is absent for ordinary API removal, preserving existing provider requests.
 
 Creation returns exactly one JSON object on stdout:
 
@@ -186,6 +198,41 @@ command = ["bun", "run", "commit.ts"]
 
 Invoke with `luvus module run <module-id> <action-id>`. The qualified id is
 `{module-id}.{action-id}`.
+
+To expose that same fixed-argv action in Commander, add optional metadata:
+
+```toml
+[[actions]]
+id = "review"
+title = "Review a terminal pane"
+command = ["python3", "review.py"]
+commander = { name = "review", target = "pane", input = "text", confirmation = "required" }
+```
+
+This creates `$review` when its name is unique among runnable modules;
+`$<module-id>/review` always identifies it. The name must begin with a
+lowercase ASCII letter and contain only lowercase letters, digits, `_`, or `-`
+(maximum 64 bytes). Names must be unique within one module. `target` is `none`,
+`pane`, `agent`, `tab`, or `workspace`; non-`none` requires one exact `@`
+mention immediately after the command. `input` is `none` or `text`. With
+`text`, everything after the target is literal input; with `none`, extra text
+is rejected. `confirmation` defaults to `required`; `none` invokes on the first
+Enter. Installation preview displays the `$` exposure and policy alongside
+the action's argv. Non-opted-in actions keep their previous behavior.
+
+Only Commander invocations write a UTF-8 JSON document to the action's stdin,
+bounded to 64 KiB after serialization. Its version 1 shape is:
+
+```json
+{"version":1,"command":"review","target":{"kind":"pane","pane_id":"17"},"text":"Check the latest output"}
+```
+
+For `agent`, the target contains `kind: "agent"` and `pane_id`; for `tab`,
+`workspace_id` and `tab_id`; for `workspace`, `workspace_id`; and for no target,
+`kind: "none"`. The existing `LUVUS_MODULE_CONTEXT_JSON` and `LUVUS_*` context
+still describe the exact selected location. Text is never appended to argv or
+placed in the environment. CLI, UHP, menu, dock, and startup invocations of
+the action do not receive this stdin document.
 
 ### `contexts`: put an action in a right-click menu
 
@@ -629,6 +676,20 @@ For pipes or `$VAR`, invoke a shell explicitly:
 2. Your `command` spawns as a subprocess, **cwd = the module root**.
 3. stdout and stderr are captured (64 KiB each), the exit is recorded:
    `running` → `succeeded` / `failed`.
+
+A process your action starts in the background keeps running after the action
+exits. If it inherited stdout or stderr, luvus waits about 2 seconds for those
+streams to close, then records the action's own exit status with the output
+captured so far and a note that later output was not captured. Until that
+process closes the streams, the action still counts toward the 32-command
+in-flight limit. Redirect a background process's output (for example
+`server >server.log 2>&1 &`) when you want the action to finish immediately and
+free its slot.
+
+Commander input that your action exits without reading was not delivered. For
+an action that reads input, that makes the run fail even if it exited with 0.
+An action whose `commander` table sets `input = "none"` may leave its input
+unread.
 
 Caps: at most **32** module commands in flight, and the **200** most recent log
 entries are kept. Commands are isolated processes, so a crash or hang never

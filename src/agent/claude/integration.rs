@@ -37,7 +37,7 @@ fn install() -> Result<()> {
         .ok()
         .and_then(|contents| serde_json::from_str(&contents).ok())
         .unwrap_or_else(|| json!({}));
-    for event in ["Notification", "Stop"] {
+    for event in ["Notification", "Stop", "UserPromptSubmit"] {
         integration::register_hook(&mut value, event, None, &script.to_string_lossy(), None);
     }
     fs::write(config, serde_json::to_string_pretty(&value)?)?;
@@ -45,9 +45,9 @@ fn install() -> Result<()> {
 }
 
 fn uninstall() -> Result<()> {
-    integration::uninstall_shell_hook(spec(), &["Notification", "Stop"])
+    integration::uninstall_shell_hook(spec(), &["Notification", "Stop", "UserPromptSubmit"])
 }
 
 fn is_installed() -> bool {
-    integration::shell_hook_installed(spec(), &["Notification", "Stop"])
+    integration::shell_hook_installed(spec(), &["Notification", "Stop", "UserPromptSubmit"])
 }

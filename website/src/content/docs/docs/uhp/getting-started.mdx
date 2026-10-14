@@ -87,9 +87,11 @@ as `session.delete`, `skill.enable`, and `integration.install` require
 
 `mission.snapshot` returns read-only live and resumable agent rows plus usage
 totals without opening or focusing the dashboard. `mission.refresh` schedules
-one off-render-path usage scan; take another snapshot after the refresh
-completes. Both accept `scope:"workspace"` or `scope:"all"` and an optional
-workspace target.
+one off-render-path usage scan and returns `refresh_id`; take another snapshot
+once `refresh.completed_id` reaches that ID in the same `server_generation`.
+A row's `usage_status` explains missing counters, and
+`summary.usage_coverage` marks partial totals. Both accept
+`scope:"workspace"` or `scope:"all"` and an optional workspace target.
 
 ```json
 {"id":"mission","method":"mission.snapshot","params":{"scope":"all"}}

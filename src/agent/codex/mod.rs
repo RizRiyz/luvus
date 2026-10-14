@@ -43,6 +43,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
             recent: sessions::recent,
             latest: sessions::latest,
             list: Some(sessions::list),
+            titled: Some(sessions::titled),
         }),
         resume: |session| format!("codex resume {session}\r"),
         fork: Some(|session| format!("codex fork {session}\r")),

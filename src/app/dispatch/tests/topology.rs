@@ -288,6 +288,97 @@ fn stable_topology_ids_survive_reordering_and_address_mutations() {
 }
 
 #[test]
+fn pane_list_all_tabs_discovers_inactive_panes_without_changing_focus() {
+    let (_env, mut app) = app("pane-list-all-tabs");
+    let first = app.layout().focus;
+    let first_workspace_id = app.workspaces[0].id.clone();
+    let first_tab_id = app.workspaces[0].tabs[0].id.clone();
+
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let second = app.layout().focus;
+    let second_tab_id = app.workspaces[0].tabs[1].id.clone();
+    app.dispatch("workspace.new", &json!({})).unwrap();
+    let third = app.layout().focus;
+    let active_workspace = app.active_ws;
+    let active_focus = app.layout().focus;
+
+    let scoped = app
+        .dispatch("pane.list", &json!({"all_tabs": false}))
+        .unwrap();
+    assert_eq!(scoped["panes"].as_array().unwrap().len(), 1);
+    assert_eq!(scoped["panes"][0]["pane"], third.0.to_string());
+    let all = app.dispatch("pane.list", &json!({})).unwrap();
+    let explicitly_all = app
+        .dispatch("pane.list", &json!({"all_tabs": true}))
+        .unwrap();
+    assert_eq!(explicitly_all["panes"], all["panes"]);
+    let rows = all["panes"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    let row = |id: PaneId| {
+        rows.iter()
+            .find(|row| {
+                row["pane"]
+                    .as_str()
+                    .and_then(|pane| pane.parse::<u32>().ok())
+                    == Some(id.0)
+            })
+            .expect("pane remains discoverable")
+    };
+    assert_eq!(row(first)["workspace"], "0");
+    assert_eq!(row(first)["workspace_id"], first_workspace_id);
+    assert_eq!(row(first)["tab"], "1");
+    assert_eq!(row(first)["tab_id"], first_tab_id);
+    assert_eq!(row(second)["workspace"], "0");
+    assert_eq!(row(second)["tab"], "2");
+    assert_eq!(row(second)["tab_id"], second_tab_id);
+    assert_eq!(row(third)["workspace"], "1");
+    assert_eq!(row(third)["tab"], "1");
+    assert_eq!(rows.iter().filter(|row| row["focused"] == true).count(), 1);
+    assert_eq!(row(third)["focused"], true);
+    assert_eq!(app.active_ws, active_workspace);
+    assert_eq!(app.layout().focus, active_focus);
+
+    for params in [
+        json!({"all_tabs": null}),
+        json!({"all_tabs": "true"}),
+        json!({"all_tabs": 1}),
+        json!({"unknown": true}),
+    ] {
+        let error = app.dispatch("pane.list", &params).unwrap_err();
+        assert_eq!(error.0, "invalid_request", "params: {params}");
+    }
+}
+
+#[test]
+fn pane_list_excludes_dashboard_placeholder_leaves() {
+    let (_env, mut app) = app("pane-list-dashboard-placeholders");
+    let pane = app.layout().focus;
+    let repo = std::path::PathBuf::from(std::env::var_os("LUVUS_HOME").unwrap()).join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    run_git(&repo, &["init", "-q"]);
+    app.workspaces[0].cwd = repo;
+
+    app.open_git_tab(0);
+    let git_placeholder = app.layout().focus;
+    app.open_orch_board();
+    let orch_placeholder = app.layout().focus;
+    app.open_mission_control(0);
+    let mission_placeholder = app.layout().focus;
+    for placeholder in [git_placeholder, orch_placeholder, mission_placeholder] {
+        assert!(!app.panes.contains_key(&placeholder));
+    }
+
+    let all = app.dispatch("pane.list", &json!({})).unwrap();
+    assert_eq!(all["panes"].as_array().unwrap().len(), 1);
+    assert_eq!(all["panes"][0]["pane"], pane.0.to_string());
+    let current = app
+        .dispatch("pane.list", &json!({"all_tabs": false}))
+        .unwrap();
+    assert!(current["panes"].as_array().unwrap().is_empty());
+    assert_eq!(app.layout().focus, mission_placeholder);
+}
+
+#[test]
 fn pane_ids_are_checked_before_resolution_or_mutation() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
@@ -510,6 +601,81 @@ fn pane_split_null_pane_targets_the_focused_layout_pane() {
     assert_eq!(out["tab"], "1");
     assert_eq!(app.pane_location(split), Some((0, 0)));
     assert_eq!(app.layout().focus, base);
+}
+
+#[test]
+fn pane_split_cwd_overrides_pane_and_workspace_defaults() {
+    let (_env, mut app) = app("pane-split-cwd");
+    let cwd = crate::persist::config_dir().join("explicit cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let base = app.layout().focus;
+    for root_first in [false, true] {
+        app.config.layout.new_pane_to_workspace_root = root_first;
+        let out = app
+            .dispatch(
+                "pane.split",
+                &json!({
+                    "pane": base.0.to_string(), "cwd": cwd, "focus": false,
+                }),
+            )
+            .unwrap();
+        let split = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+        assert_eq!(app.panes[&split].cwd, cwd);
+        assert_eq!(app.layout().focus, base);
+    }
+}
+
+#[test]
+fn pane_split_invalid_cwd_never_creates_a_pane_or_workspace() {
+    let (_env, mut app) = app("pane-split-invalid-cwd");
+    let file = crate::persist::config_dir().join("file");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "not a directory").unwrap();
+    let mut too_long = file.to_string_lossy().into_owned();
+    too_long.push_str(&"x".repeat(4097 - too_long.len()));
+    let invalid = [
+        json!("relative"),
+        json!(file.with_file_name("missing")),
+        json!(file),
+        json!(false),
+        json!(42),
+        json!([]),
+        json!({}),
+        json!(""),
+        json!(too_long),
+    ];
+    for empty in [false, true] {
+        if empty {
+            app.workspaces.clear();
+            app.panes.clear();
+        }
+        let panes = app.panes.len();
+        let workspaces = app.workspaces.len();
+        for cwd in &invalid {
+            let error = app
+                .dispatch("pane.split", &json!({"cwd": cwd}))
+                .unwrap_err();
+            assert_eq!(error.0, "invalid_request", "cwd: {cwd}");
+            if cwd.as_str().is_some_and(|path| path.len() > 4096) {
+                assert_eq!(
+                    error.1,
+                    "cwd must be a non-empty path of at most 4096 bytes"
+                );
+            }
+            assert_eq!(app.panes.len(), panes);
+            assert_eq!(app.workspaces.len(), workspaces);
+        }
+    }
+}
+
+#[test]
+fn pane_split_null_cwd_keeps_inherited_directory() {
+    let (_env, mut app) = app("pane-split-null-cwd");
+    let base = app.layout().focus;
+    let cwd = app.panes[&base].cwd.clone();
+    let out = app.dispatch("pane.split", &json!({"cwd": null})).unwrap();
+    let split = PaneId(out["pane"].as_str().unwrap().parse().unwrap());
+    assert_eq!(app.panes[&split].cwd, cwd);
 }
 
 /// Background and default splits preserve their established focus behavior.

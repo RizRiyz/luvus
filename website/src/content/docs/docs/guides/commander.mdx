@@ -111,8 +111,10 @@ example `@tab:tests/pane:reviewer:sv`.
 
 ## Slash actions
 
-Type `/` at the start of the draft to use a Luvus action. If Commander still
-contains its initial `@pID` mention, typing `/` replaces that starter text.
+Type `/` at the start of the draft to use a Luvus action. Commander starts with
+an `@pID` target; clear it with `Ctrl+U` before typing a Luvus action. After an
+`@` target, `/` stays part of the message sent to that pane, so `@p17 /status`
+can run an agent's own slash command.
 The picker matches Commander's width and lists matching commands, their
 purpose, and the selected command's usage while you edit the slash name.
 Type more letters to filter. `Up`/`Down`, `PageUp`/`PageDown`, or the mouse
@@ -202,6 +204,36 @@ schedule is interpreted in the selected timezone. `/mission` opens Mission
 Control in the current workspace. `/diff` and `/files` focus their respective dock views.
 These navigation actions do not send terminal input. The picker contains only
 actions available in this version of Commander.
+
+## Module commands
+
+An enabled module can opt one of its existing actions into Commander as a `$`
+command. Clear the initial `@pID` with `Ctrl+U`, then type `$` to browse. The
+picker shows the action title and module; arrows, Page Up/Down, mouse wheel,
+click, `Tab`/`Shift+Tab`, Space, and Enter follow the slash picker's controls.
+Type a unique short name or its always-valid qualified form:
+
+```text
+$review @p17 Check the latest output
+$git-tools/review @p17
+$sync
+```
+
+The module decides whether its command needs one exact pane, agent, tab, or
+workspace target and whether it accepts trailing text. A target is never
+expanded into a broadcast. Text after the target is literal, including later
+`@` mentions, `$`, `/`, and newlines. `$` inside an ordinary targeted message
+such as `@p17 echo $HOME` stays ordinary pane input. Staged clipboard images
+are not passed to module commands.
+
+Actions default to a confirmation step: the first Enter shows the module,
+action, target, and input summary; a second Enter on the unchanged draft starts
+it. Editing or Esc cancels confirmation. An action may explicitly opt out of
+this step. Commander shows its log ID and then a success or failure receipt;
+full output is in `luvus module log <module-id>`. Module commands run asynchronously
+without changing pane focus or sending the draft to a terminal. They operate
+only in the selected local server session, not on saved SSH machines or other
+named sessions.
 
 `Enter` sends to all listed targets. `Shift+Enter` adds a visible new line;
 `Alt+Enter` is a fallback for terminals that cannot report Shift+Enter.

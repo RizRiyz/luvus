@@ -22,10 +22,12 @@ const METHOD_PATTERN = /^[a-z][a-z0-9_.]{0,127}$/;
 const TERMINAL_ACTIONS = new Set([
   "type_literal", "paste_text", "paste_image", "submit_text", "send_key",
   "upload_start", "upload_chunk", "upload_finish", "upload_cancel",
+  "set_viewport",
 ]);
 
 type ClientState = {
   authenticated: boolean;
+  ticketDigest?: string;
   pending: number;
   requests: number;
   terminalActions: number;
@@ -131,25 +133,30 @@ export class BridgeServer {
         ...(typeof frame.code === "string" ? { code: frame.code } : {}),
         ...(typeof frame.ticket === "string" ? { ticket: frame.ticket } : {}),
       });
-      if (!result.accepted || !result.expiresAt) {
+      if (!result.accepted || !result.ticketDigest) {
         send(socket, { type: "error", code: "forbidden", message: "Pairing or ticket was rejected" });
         return socket.close(1008, "authentication rejected");
       }
       state.authenticated = true;
-      const expiresInMs = Math.max(1, result.expiresAt * 1000 - Date.now());
-      state.expiryTimer = setTimeout(() => {
-        state.authenticated = false;
-        socket.close(1008, "browser ticket expired");
-        this.#broadcastDevices(socket);
-      }, expiresInMs);
+      state.ticketDigest = result.ticketDigest;
+      if (result.expiresAt !== undefined) {
+        const expiresInMs = Math.max(1, result.expiresAt * 1000 - Date.now());
+        state.expiryTimer = setTimeout(() => {
+          socket.close(1008, "browser ticket expired");
+          this.#broadcastDevices(socket);
+        }, expiresInMs);
+      }
       send(socket, {
         type: "ready",
         ...(result.ticket ? { ticket: result.ticket } : {}),
-        expires_at: result.expiresAt,
+        ...(result.expiresAt === undefined ? { expires_on_close: true } : { expires_at: result.expiresAt }),
         authority: this.uhp.authority,
       });
       this.#broadcastDevices(socket);
       return;
+    }
+    if (!state.ticketDigest || !this.authority.isValid(state.ticketDigest)) {
+      return socket.close(1008, "browser access revoked");
     }
     if (!rateAllowed(state, frame)) {
       const id = typeof frame.id === "string" && ID_PATTERN.test(frame.id) ? frame.id : undefined;
@@ -188,7 +195,7 @@ export class BridgeServer {
     const method = requiredString(frame, "method", METHOD_PATTERN);
     const params = objectField(frame, "params");
     if (method.startsWith("web.devices.")) {
-      return this.#deviceRequest(socket, id, method, params);
+      return this.#deviceRequest(socket, state, id, method, params);
     }
     if (method.startsWith("web.sessions.")) {
       if (state.pending >= MAX_PENDING) {
@@ -220,7 +227,13 @@ export class BridgeServer {
     }
   }
 
-  #deviceRequest(socket: WebSocket, id: string, method: string, params: Record<string, unknown>): void {
+  #deviceRequest(socket: WebSocket, state: ClientState, id: string, method: string, params: Record<string, unknown>): void {
+    if (method === "web.devices.forget" && Object.keys(params).length === 0 && state.ticketDigest) {
+      this.authority.revoke(state.ticketDigest);
+      send(socket, { type: "response", id, result: { type: "browser_device_forgotten" } });
+      this.#broadcastDevices();
+      return;
+    }
     if (method === "web.devices.status") {
       return send(socket, { type: "response", id, result: deviceStatus(this.authority.status(), this.#publicUrl) });
     }
@@ -308,7 +321,9 @@ export class BridgeServer {
   #broadcastDevices(except?: WebSocket): void {
     const devices = deviceStatus(this.authority.status(), this.#publicUrl);
     for (const [client, state] of this.#clients) {
-      if (client !== except && state.authenticated) send(client, { type: "devices", devices });
+      if (!state.authenticated) continue;
+      if (!state.ticketDigest || !this.authority.isValid(state.ticketDigest)) client.close(1008, "browser access revoked");
+      else if (client !== except) send(client, { type: "devices", devices });
     }
   }
 
@@ -433,9 +448,11 @@ export class BridgeServer {
     }
     setSecurityHeaders(response);
     response.setHeader("content-type", contentType(file));
+    // Hashed assets never change; everything else (the page itself) must
+    // never be kept, so an upgrade is never served from a stale copy.
     response.setHeader("cache-control", normalized.startsWith(`assets${path.sep}`)
       ? "public, max-age=31536000, immutable"
-      : "no-cache");
+      : "no-store");
     response.statusCode = 200;
     if (request.method === "HEAD") {
       response.end();

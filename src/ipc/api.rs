@@ -159,6 +159,10 @@ impl Drop for RequestMetrics {
 struct ConnectionPermit;
 
 impl ConnectionPermit {
+    #[allow(
+        deprecated,
+        reason = "AtomicUsize::try_update requires Rust 1.95; keep the Rust 1.88 MSRV"
+    )]
     fn acquire() -> Option<Self> {
         ACTIVE_CONNECTIONS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
@@ -172,6 +176,10 @@ impl ConnectionPermit {
 struct TerminalStreamPermit;
 
 impl TerminalStreamPermit {
+    #[allow(
+        deprecated,
+        reason = "AtomicUsize::try_update requires Rust 1.95; keep the Rust 1.88 MSRV"
+    )]
     fn acquire() -> Option<Self> {
         ACTIVE_TERMINAL_STREAMS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
@@ -1415,6 +1423,51 @@ fn control_action_response(
             .to_string();
         }
         return json!({"id":id,"result":{"type":"terminal_upload_cancelled"}}).to_string();
+    }
+    if action == "set_viewport" {
+        // Geometry is a stream-only action: only the terminal's single control
+        // lease may ask for it, and the app loop decides whether it applies.
+        let cols = crate::terminal::backend::viewport_dimension(
+            params.get("cols"),
+            crate::terminal::backend::MAX_VIEWPORT_COLS,
+        );
+        let rows = crate::terminal::backend::viewport_dimension(
+            params.get("rows"),
+            crate::terminal::backend::MAX_VIEWPORT_ROWS,
+        );
+        if params.len() != 2 || cols.is_none() || rows.is_none() {
+            return json!({"id":id,"error":{"code":"invalid_params",
+                "message":"set_viewport requires only bounded cols and rows"}})
+            .to_string();
+        }
+        params.insert(
+            "server_generation".into(),
+            Value::String(target.server_generation.clone()),
+        );
+        params.insert(
+            "terminal_id".into(),
+            Value::String(target.terminal_id.clone()),
+        );
+        params.insert("pane_id".into(), Value::String(target.pane_id.clone()));
+        let (reply, receiver) = mpsc::channel();
+        if event_tx
+            .send(AppEvent::BackendViewport {
+                params: Value::Object(params),
+                reply,
+            })
+            .is_err()
+        {
+            return json!({"id":id,"error":{"code":"unavailable","message":"app loop unavailable"}})
+                .to_string();
+        }
+        return match receiver.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(result)) => json!({"id":id,"result":result}).to_string(),
+            Ok(Err(error)) => error.envelope(id),
+            Err(_) => {
+                json!({"id":id,"error":{"code":"timeout","message":"control action timed out"}})
+                    .to_string()
+            }
+        };
     }
     let staged_upload = if action == "upload_finish" {
         let upload_id = params
@@ -3087,6 +3140,83 @@ mod tests {
         assert!(TerminalControlLease::acquire("lease-test-other").is_some());
         drop(first);
         assert!(TerminalControlLease::acquire("lease-test-terminal").is_some());
+    }
+
+    #[test]
+    fn set_viewport_is_a_stream_action_answered_by_the_app_loop() {
+        let _env = crate::persist::test_env("terminal-control-viewport");
+        let target = observe_target();
+        let mut uploads = crate::terminal::upload::UploadState::new();
+
+        let (event_tx, event_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let AppEvent::BackendViewport { params, reply } = event_rx.recv().unwrap() else {
+                panic!("set_viewport must not reuse a one-request terminal method");
+            };
+            assert_eq!(params["server_generation"], "generation");
+            assert_eq!(params["terminal_id"], "terminal");
+            assert_eq!(params["pane_id"], "7");
+            assert_eq!(params["cols"], 40);
+            assert_eq!(params["rows"], 18);
+            reply
+                .send(Ok(json!({"type":"terminal_backend_action",
+                    "state":"succeeded","dispatch":"executed"})))
+                .unwrap();
+        });
+        let response = control_action_response(
+            br#"{"id":"size-1","action":"set_viewport","params":{"cols":40,"rows":18}}"#,
+            &target,
+            &event_tx,
+            &mut uploads,
+        );
+        worker.join().unwrap();
+        let value: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(value["id"], "size-1");
+        assert_eq!(value["result"]["type"], "terminal_backend_action");
+        assert_eq!(value["result"]["dispatch"], "executed");
+
+        let (refused_tx, refused_rx) = mpsc::channel();
+        let refusing = thread::spawn(move || {
+            let AppEvent::BackendViewport { reply, .. } = refused_rx.recv().unwrap() else {
+                panic!("set_viewport must reach the app loop");
+            };
+            reply
+                .send(Err(crate::terminal::backend::BackendError::mutation(
+                    "unavailable",
+                    "a native client owns terminal geometry",
+                    crate::terminal::backend::DispatchEvidence::Rejected,
+                )))
+                .unwrap();
+        });
+        let refused = control_action_response(
+            br#"{"id":"size-2","action":"set_viewport","params":{"cols":40,"rows":18}}"#,
+            &target,
+            &refused_tx,
+            &mut uploads,
+        );
+        refusing.join().unwrap();
+        let refused: Value = serde_json::from_str(&refused).unwrap();
+        assert_eq!(refused["id"], "size-2");
+        assert_eq!(refused["error"]["code"], "unavailable");
+        assert_eq!(refused["error"]["dispatch"], "rejected");
+
+        let (strict_tx, strict_rx) = mpsc::channel();
+        for frame in [
+            br#"{"id":"size-3","action":"set_viewport","params":{"cols":1,"rows":18}}"#.as_slice(),
+            br#"{"id":"size-3","action":"set_viewport","params":{"cols":40}}"#.as_slice(),
+            br#"{"id":"size-3","action":"set_viewport","params":{"cols":"40","rows":18}}"#
+                .as_slice(),
+            br#"{"id":"size-3","action":"set_viewport","params":{"cols":40,"rows":18,"pane_id":"9"}}"#
+                .as_slice(),
+        ] {
+            let rejected = control_action_response(frame, &target, &strict_tx, &mut uploads);
+            let rejected: Value = serde_json::from_str(&rejected).unwrap();
+            assert_eq!(rejected["error"]["code"], "invalid_params");
+        }
+        assert!(
+            strict_rx.try_recv().is_err(),
+            "malformed viewports never reach the app loop"
+        );
     }
 
     #[test]

@@ -13,9 +13,9 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb
 use ratatui::style::{Color, Modifier};
 
 use super::{
-    AlignedRows, CodexComposerRegion, Cursor, DamageCell, DamageHyperlink, DamageKind, DamageRow,
-    DamageSnapshot, HistoryMetrics, LinkedCellVisitor, RenderCell, RetainedRowLayout, VtEngine,
-    ALIGNED_WIDE_CELL,
+    AlignedRows, ClaudeComposerEvidence, CodexComposerRegion, Cursor, DamageCell, DamageHyperlink,
+    DamageKind, DamageRow, DamageSnapshot, HistoryMetrics, LinkedCellVisitor, RenderCell,
+    RetainedRowLayout, VtEngine, ALIGNED_WIDE_CELL,
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
@@ -549,6 +549,113 @@ impl VtEngine for AlacrittyEngine {
         })
     }
 
+    fn claude_composer_evidence(&self) -> ClaudeComposerEvidence {
+        let grid = self.term.grid();
+        if grid.display_offset() != 0 {
+            return ClaudeComposerEvidence::Absent;
+        }
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        if rows < 3 || cols < 8 {
+            return ClaudeComposerEvidence::Absent;
+        }
+        let cursor = grid.cursor.point.line.0.max(0) as usize;
+        if cursor >= rows {
+            return ClaudeComposerEvidence::Absent;
+        }
+
+        // Claude's input is between two solid full-width rails. Its theme
+        // picker also has a selected `❯` item, but not this live geometry.
+        let row_is_rail = |row: usize| {
+            let mut rails = 0;
+            for col in 0..cols {
+                match grid[Line(row as i32)][Column(col)].c {
+                    '─' => rails += 1,
+                    ' ' | '\0' => {}
+                    _ => return false,
+                }
+            }
+            rails >= cols - 2
+        };
+        let row_has_prompt = |row: usize| {
+            (0..cols.min(3)).any(|col| matches!(grid[Line(row as i32)][Column(col)].c, '❯' | '>'))
+        };
+        // Bound the search by the visible grid, not an arbitrary input height.
+        // A typed divider is not an upper rail: the rail must be immediately
+        // followed by Claude's prompt marker. Continue past divider text.
+        let Some(top) = (0..cursor)
+            .rev()
+            .find(|&top| row_has_prompt(top + 1) && row_is_rail(top))
+        else {
+            return ClaudeComposerEvidence::Absent;
+        };
+        let prompt = top + 1;
+
+        if !((cursor + 1)..rows).any(row_is_rail) {
+            return ClaudeComposerEvidence::Absent;
+        }
+
+        // A rail between the prompt and cursor can be either the closing rail
+        // of a stale compact composer or literal divider text inside a current
+        // multiline input. Their VT cells are identical, so preserve the
+        // ambiguity for a trusted Claude lifecycle event to resolve.
+        if ((prompt + 1)..=cursor).any(row_is_rail) {
+            ClaudeComposerEvidence::Ambiguous
+        } else {
+            ClaudeComposerEvidence::Ready
+        }
+    }
+
+    fn opencode_composer_ready(&self) -> bool {
+        let grid = self.term.grid();
+        if grid.display_offset() != 0 || !self.term.mode().contains(TermMode::SHOW_CURSOR) {
+            return false;
+        }
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        if rows < 5 || cols < 16 {
+            return false;
+        }
+        let cursor = grid.cursor.point;
+        let row = cursor.line.0.max(0) as usize;
+        let col = cursor.column.0;
+        if row >= rows || col < 3 || col >= cols - 1 {
+            return false;
+        }
+        let symbol = |row: usize, col: usize| grid[Line(row as i32)][Column(col)].c;
+
+        // OpenCode draws a left rail beside the editable area and a wide
+        // lower edge. The cursor must be *inside* that live box: a welcome
+        // screen, old transcript, or partially painted frame is not enough.
+        for rail in (0..col).rev() {
+            if symbol(row, rail) != '┃' || col < rail + 2 {
+                continue;
+            }
+            let mut top = row;
+            while top > 0 && symbol(top - 1, rail) == '┃' {
+                top -= 1;
+            }
+            let mut bottom = row;
+            while bottom + 1 < rows && symbol(bottom + 1, rail) == '┃' {
+                bottom += 1;
+            }
+            if bottom - top < 2 || bottom + 1 >= rows {
+                continue;
+            }
+            let edge = bottom + 1;
+            let underline = (rail + 1..cols)
+                .take_while(|&col| symbol(edge, col) == '▀')
+                .count();
+            // A blank row can be an unfinished redraw, even when a transparent
+            // theme would also render a blank edge. Fail closed without a
+            // measured lower border, and keep the cursor inside that border.
+            if symbol(edge, rail) == '╹' && underline >= 16 && col <= rail + underline {
+                return true;
+            }
+        }
+        false
+    }
+
     fn for_each_cell(&self, f: &mut dyn FnMut(u16, u16, &str, RenderCell)) {
         // `display_iter` walks the *displayed* region, whose lines are *negative*
         // once scrolled into history (it starts at `Line(-display_offset)`).
@@ -847,10 +954,10 @@ impl VtEngine for AlacrittyEngine {
         selected.join("\n")
     }
 
+    #[cfg(test)]
     fn visible_rows(&self) -> Vec<String> {
         // Same offset shift as `for_each_cell` — these are the rows the user can
-        // see, so a selection made while scrolled back must copy the history
-        // text, not come back empty.
+        // see, so a scrolled viewport reports the history text it is showing.
         let grid = self.term.grid();
         let rows = grid.screen_lines();
         let offset = grid.display_offset() as i32;
@@ -867,6 +974,33 @@ impl VtEngine for AlacrittyEngine {
             lines[r as usize].push(if c == '\0' { ' ' } else { c });
         }
         lines
+    }
+
+    fn screen_rows(&self) -> Vec<String> {
+        // Index by `Line` rather than walking `display_iter`: line indexing is
+        // relative to the live screen (`Storage::compute_index` ignores
+        // `display_offset`), so this frame is what the child last painted, not
+        // wherever the user has scrolled to. Same rule as `detection_text`.
+        let grid = self.term.grid();
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        (0..rows)
+            .map(|r| {
+                let row = &grid[Line(r as i32)];
+                let mut line = String::with_capacity(cols);
+                for c in 0..cols {
+                    let cell = &row[Column(c)];
+                    if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                        continue;
+                    }
+                    line.push(if cell.c == '\0' { ' ' } else { cell.c });
+                    if let Some(zerowidth) = cell.zerowidth() {
+                        line.extend(zerowidth);
+                    }
+                }
+                line
+            })
+            .collect()
     }
 
     fn visible_rows_aligned(&self) -> AlignedRows {
@@ -1194,11 +1328,14 @@ impl VtEngine for AlacrittyEngine {
             .then_some(output)
     }
 
-    fn for_each_retained_row(&self, f: &mut dyn FnMut(usize, &str)) {
+    fn try_for_each_retained_row(
+        &self,
+        f: &mut dyn FnMut(usize, &str) -> std::ops::ControlFlow<()>,
+    ) {
         let mut output = String::with_capacity(self.term.grid().columns());
         for index in 0..self.retained_row_count() {
-            if self.write_retained_row(index, &mut output) {
-                f(index, &output);
+            if self.write_retained_row(index, &mut output) && f(index, &output).is_break() {
+                break;
             }
         }
     }
@@ -1530,6 +1667,59 @@ mod tests {
         assert_eq!(engine.history_metrics(), small);
     }
 
+    /// Opt-in measurement of the synchronous pane-search scan before deciding
+    /// whether it needs a worker. No server or production session is involved.
+    #[test]
+    #[ignore]
+    fn pane_search_scan_benchmark() {
+        use std::{hint::black_box, time::Instant};
+
+        let max_rows = history_rows_for_budget(crate::config::SCROLLBACK_BYTES_MAX, 80);
+        for rows in [1_000, 3_413, 10_000, 50_000, max_rows] {
+            let (tx, _rx) = channel();
+            let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, rows));
+            let padding = "x".repeat(64);
+            for row in 0..rows + 24 {
+                engine.advance(format!("line{row:05} {padding}\r\n").as_bytes());
+            }
+            engine.finish_output_batch();
+            let long_query = "q".repeat(crate::search::local::LOCAL_QUERY_BYTES);
+            for needle in ["absent-token", "line", long_query.as_str()] {
+                let matcher = crate::search::local::LiteralMatcher::new(needle, true).unwrap();
+                let mut samples = Vec::new();
+                for trial in 0..6 {
+                    let start = Instant::now();
+                    let mut hits = 0;
+                    let mut truncated = false;
+                    engine.try_for_each_retained_row(&mut |_row, line| {
+                        let remaining = crate::search::local::LOCAL_MATCH_CAP.saturating_sub(hits);
+                        if remaining == 0 {
+                            truncated = matcher.has_match(line);
+                        } else {
+                            let (found, more) = matcher.spans(line, remaining);
+                            hits += found.len();
+                            truncated = more;
+                        }
+                        if truncated {
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    });
+                    black_box((hits, truncated));
+                    if trial > 0 {
+                        samples.push(start.elapsed().as_secs_f64() * 1_000.0);
+                    }
+                }
+                samples.sort_by(f64::total_cmp);
+                eprintln!(
+                    "pane_search_scan rows={rows} query_bytes={} retained={} median_ms={:.3} max_ms={:.3}",
+                    needle.len(), engine.retained_row_count(), samples[samples.len() / 2], samples[samples.len() - 1],
+                );
+            }
+        }
+    }
+
     /// Opt-in inspection benchmark. No child processes or production sessions.
     #[test]
     #[ignore]
@@ -1782,6 +1972,31 @@ mod tests {
             damage.rows[0].hyperlinks[0].uri,
             "file:///repo/server/task.mjs"
         );
+    }
+
+    /// `screen_rows` reads the live frame; `visible_rows` follows the user.
+    #[test]
+    fn screen_rows_ignore_the_scrollback_viewport() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(24, 3, tx, budget_for_rows(24, 40));
+        engine.advance(b"old prompt\r\n");
+        for i in 0..10 {
+            engine.advance(format!("line {i}\r\n").as_bytes());
+        }
+        engine.advance(b"live prompt");
+
+        engine.scroll(10);
+        assert!(
+            engine.scroll_offset() > 0,
+            "precondition: the viewport is scrolled into history"
+        );
+        assert!(
+            engine.visible_rows().join("\n").contains("old prompt"),
+            "precondition: the user is looking at the old frame"
+        );
+        let screen = engine.screen_rows().join("\n");
+        assert!(screen.contains("live prompt"), "{screen}");
+        assert!(!screen.contains("old prompt"), "{screen}");
     }
 
     #[test]
@@ -2293,6 +2508,25 @@ mod tests {
     }
 
     #[test]
+    fn retained_row_visitor_stops_when_requested() {
+        let (tx, _rx) = channel();
+        let mut engine = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
+        feed_lines(&mut engine, 40);
+        let mut visited = 0usize;
+
+        engine.try_for_each_retained_row(&mut |_index, _line| {
+            visited += 1;
+            if visited == 3 {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        });
+
+        assert_eq!(visited, 3);
+    }
+
+    #[test]
     fn rows_text_dumps_full_history_oldest_first() {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(40, 6, tx, budget_for_rows(40, 2_000));
@@ -2641,6 +2875,169 @@ mod tests {
         // not be restyled as the active composer.
         e.advance(b"\x1b[1;1Htranscript\x1b[2;1H");
         assert_eq!(e.codex_composer_region(), None);
+    }
+
+    #[test]
+    fn claude_composer_requires_live_input_between_solid_rails() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 10, tx, budget_for_rows(40, 2_000));
+        let rail = "─".repeat(40);
+
+        // Claude Code 2.1.283 hides the terminal cursor while drawing its own.
+        e.advance(
+            format!("\x1b[?25l\x1b[6;1H{rail}\x1b[7;1H❯\u{a0} \x1b[8;1H{rail}\x1b[7;3H").as_bytes(),
+        );
+        assert_eq!(e.claude_composer_evidence(), ClaudeComposerEvidence::Ready);
+
+        e.advance("\x1b[2J\x1b[HChoose the text style that looks best\x1b[7;1H❯ 2. Dark mode\x1b[8;1H╌╌╌╌╌╌╌╌╌╌\x1b[7;4H".as_bytes());
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Absent,
+            "theme selection is not input"
+        );
+
+        e.advance(format!("\x1b[2J\x1b[H{rail}\x1b[2;1H❯ old prompt\x1b[3;1H{rail}\x1b[7;1HTrust this folder?\x1b[7;2H").as_bytes());
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Absent,
+            "old transcript is not input"
+        );
+    }
+
+    #[test]
+    fn claude_composer_marks_a_typed_divider_as_ambiguous() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 10, tx, budget_for_rows(40, 2_000));
+        let rail = "─".repeat(40);
+        e.advance(format!("\x1b[1;1H{rail}\x1b[2;1H❯ input\x1b[4;1H{rail}\x1b[5;3Hmore input\x1b[8;1H{rail}\x1b[5;13H").as_bytes());
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Ambiguous
+        );
+
+        // The divider may begin immediately after the prompt and still belong
+        // to a valid multiline input. VT geometry cannot distinguish it from
+        // the stale compact-composer case below.
+        e.advance(
+            format!("\x1b[2J\x1b[1;1H{rail}\x1b[2;1H❯ input\x1b[3;1H{rail}\x1b[5;3Hmore input\x1b[8;1H{rail}\x1b[5;13H")
+                .as_bytes(),
+        );
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Ambiguous
+        );
+
+        // Divider text alone must not establish a composer.
+        e.advance(b"\x1b[2;1H  input\x1b[5;13H");
+        assert_eq!(e.claude_composer_evidence(), ClaudeComposerEvidence::Absent);
+    }
+
+    #[test]
+    fn claude_composer_accepts_tall_multiline_input() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 40, tx, budget_for_rows(40, 2_000));
+        let rail = "─".repeat(40);
+        e.advance(format!("\x1b[1;1H{rail}\x1b[2;1H❯ input\x1b[38;1H{rail}").as_bytes());
+        for cursor_row in [2, 18, 19, 35] {
+            e.advance(format!("\x1b[{cursor_row};3H").as_bytes());
+            assert_eq!(
+                e.claude_composer_evidence(),
+                ClaudeComposerEvidence::Ready,
+                "cursor row {cursor_row}"
+            );
+        }
+        e.advance(b"\x1b[39;1Hother screen");
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Absent,
+            "cursor below composer"
+        );
+    }
+
+    #[test]
+    fn claude_composer_rejects_disconnected_stale_prompt_and_rail() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 40, tx, budget_for_rows(40, 2_000));
+        let rail = "─".repeat(40);
+
+        // Rows 1-3 are a completed old composer. The cursor and later rail
+        // belong to another interaction and must not revive that stale prompt.
+        e.advance(
+            format!(
+                "\x1b[1;1H{rail}\x1b[2;1H❯ old prompt\x1b[3;1H{rail}\x1b[32;1HUnrelated interaction\x1b[34;1H{rail}\x1b[32;8H"
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(
+            e.claude_composer_evidence(),
+            ClaudeComposerEvidence::Ambiguous
+        );
+    }
+
+    #[test]
+    fn opencode_composer_requires_live_cursor_and_complete_box() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 20, tx, budget_for_rows(40, 2_000));
+        e.advance(b"\x1b[?1049h\x1b[2J\x1b[11;8H");
+        assert!(!e.opencode_composer_ready(), "startup is blank");
+
+        for row in 10..=13 {
+            e.advance(format!("\x1b[{row};5H┃").as_bytes());
+        }
+        e.advance(b"\x1b[11;8H");
+        assert!(!e.opencode_composer_ready(), "box is incomplete");
+
+        e.advance(format!("\x1b[14;5H╹{}\x1b[11;8H", "▀".repeat(35)).as_bytes());
+        assert!(e.opencode_composer_ready(), "empty live composer");
+
+        e.advance(b"\x1b[11;8Hprefilled prompt\x1b[11;23H");
+        assert!(e.opencode_composer_ready(), "prefilled live composer");
+
+        e.advance(b"\x1b[?25l");
+        assert!(!e.opencode_composer_ready(), "hidden cursor during redraw");
+        e.advance(b"\x1b[?25h");
+
+        e.advance(b"\x1b[2;2H");
+        assert!(!e.opencode_composer_ready(), "old box is not live");
+    }
+
+    #[test]
+    fn opencode_composer_rejects_a_short_border() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(40, 20, tx, budget_for_rows(40, 2_000));
+        e.advance("\x1b[10;5H┃\x1b[11;5H┃\x1b[12;5H┃\x1b[13;5H┃\x1b[14;5H╹▀▀\x1b[11;8H".as_bytes());
+        assert!(!e.opencode_composer_ready());
+    }
+
+    #[test]
+    fn opencode_composer_accepts_a_centered_box_in_a_wide_pty() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(120, 32, tx, budget_for_rows(120, 2_000));
+        // Captured from OpenCode 2.0.3 at 120 columns. The prompt is centered,
+        // not anchored to the first few columns of the terminal.
+        for row in 18..=21 {
+            e.advance(format!("\x1b[{row};23H┃").as_bytes());
+        }
+        e.advance(format!("\x1b[22;23H╹{}\x1b[19;26H", "▀".repeat(80)).as_bytes());
+        assert!(e.opencode_composer_ready());
+
+        e.advance(b"\x1b[19;111H");
+        assert!(!e.opencode_composer_ready(), "cursor beyond the lower edge");
+    }
+
+    #[test]
+    fn opencode_composer_rejects_an_unproven_blank_edge() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 2_000));
+        for row in 12..=15 {
+            e.advance(format!("\x1b[{row};12H┃").as_bytes());
+        }
+        e.advance(b"\x1b[13;15H");
+        assert!(!e.opencode_composer_ready(), "undrawn edge is not proof");
+
+        e.advance(b"\x1b[16;13Hpartial edge\x1b[13;15H");
+        assert!(!e.opencode_composer_ready());
     }
 
     #[test]

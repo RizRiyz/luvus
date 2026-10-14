@@ -20,6 +20,7 @@ it conflicts with `SKILL.md`, follow `SKILL.md`.
 - Themes and UI: `luvus theme list`, `luvus bar list`,
   `luvus ui dock list`
 - Layout: `luvus workspace list`, `luvus tab list`, `luvus pane list`
+  (all tabs by default; `--current-tab` narrows the scope)
 - UHP: `luvus uhp capabilities`, `luvus uhp schema`,
   `luvus uhp snapshot`
 
@@ -33,7 +34,9 @@ remains compatible with older Luvus releases.
 - Inspect the exact DIFF layer and file before changing or sending review notes.
   Removing notes and messaging an agent require explicit authorization.
 - List worktrees before creating, opening, or removing one. Removal requires
-  explicit authorization and an exact path.
+  explicit authorization and an exact path. A `worktree_in_use` response names
+  protected panes, tasks, and leases; use `--force` only with explicit approval
+  to stop that work and remove its checkout.
 - Inspect task and lease ownership, dependencies, gates, assignees, and path
   leases before claiming, starting, updating, completing, releasing, deleting,
   or merging. A merge is serialized through `luvus/integration`; wait for the
@@ -46,8 +49,13 @@ remains compatible with older Luvus releases.
   Branch-backed dependencies unblock only after they are merged. Release
   requeues the task and releases leases without stopping its worker pane.
 - Inspect module metadata, actions, settings, and logs before changing module
-  state. Installation, uninstallation, and consequential setting changes need
-  clear authorization.
+  state. Installation, updates, uninstallation, and consequential setting
+  changes need clear authorization. Update a managed module with
+  `luvus module update <id|owner/repo[/sub]> [--ref REF] [--yes]` against its
+  running session. Omitted `--ref` retains a saved pin; use `--yes` only for
+  approved sources. Local links are updated in their own checkout. The command
+  preserves settings/enabled state and leaves existing panes running; reopen
+  old module panes if they need publisher credentials for the new version.
 - Validate theme sources before installation. CLI widgets use `luvus bar`; UHP
   widgets use `ui.bar.*`. Inspect current placement before moving or removing a
   widget or dock.

@@ -39,6 +39,7 @@ static INTEGRATIONS: &[&AgentDescriptor] = &[
     &super::grok::DESCRIPTOR,
     &super::hermes::DESCRIPTOR,
     &super::omp::DESCRIPTOR,
+    &super::devin::DESCRIPTOR,
 ];
 
 const _: () = assert!(
@@ -158,8 +159,12 @@ mod tests {
         assert!(find("antigravity").unwrap().automation.is_none());
         assert!(find("arc-studio").unwrap().automation.is_none());
         assert!(find("amp").unwrap().automation.is_none());
-        assert!(find("devin").unwrap().automation.is_none());
         assert!(find("letta").unwrap().automation.is_none());
+
+        let devin = find("devin").unwrap().automation.unwrap();
+        assert!(devin.supports(AutomationAccess::ReadOnly));
+        assert!(!devin.supports(AutomationAccess::Workspace));
+        assert!(devin.supports(AutomationAccess::FullAccess));
 
         let pi = find("pi").unwrap().automation.unwrap();
         assert!(pi.supports(AutomationAccess::ReadOnly));
@@ -372,6 +377,7 @@ mod tests {
                 "grok",
                 "hermes",
                 "omp",
+                "devin",
             ]
         );
     }

@@ -217,6 +217,15 @@ fn canonical(agent: &str) -> &str {
     registry::find(agent).map_or(agent, |descriptor| descriptor.id)
 }
 
+/// Whether a native, structured per-session usage reader exists. An agent
+/// without one may still report exact counters through an integration.
+pub fn supports_session_usage(agent: &str) -> bool {
+    matches!(
+        canonical(agent),
+        "claude" | "codex" | "copilot" | "kimi" | "grok" | "pi" | "omp" | "gemini" | "qwen" | "fx"
+    )
+}
+
 fn claude_path(base: &Path, cwd: &Path, session_id: &str) -> PathBuf {
     claude::sessions::project_dir(base, cwd).join(format!("{session_id}.jsonl"))
 }

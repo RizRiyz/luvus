@@ -22,9 +22,20 @@ test("desktop deletion chords preserve shell editing semantics", () => {
   assert.equal(logicalKey(key("k", { ctrlKey: true })), "ctrl-k");
 });
 
+test("shell and agent control chords reach the terminal instead of the browser", () => {
+  for (const letter of ["a", "b", "e", "f", "g", "l", "n", "o", "p", "r", "t", "y"]) {
+    assert.equal(logicalKey(key(letter, { ctrlKey: true })), `ctrl-${letter}`);
+  }
+  assert.equal(logicalKey(key("R", { ctrlKey: true })), "ctrl-r");
+  assert.equal(logicalKey(key("z", { ctrlKey: true })), undefined);
+  assert.equal(logicalKey(key("s", { ctrlKey: true })), undefined);
+  assert.equal(logicalKey(key("r", { ctrlKey: true, shiftKey: true })), undefined);
+});
+
 test("copy and paste remain browser-owned command shortcuts", () => {
   assert.equal(logicalKey(key("c", { metaKey: true })), undefined);
   assert.equal(logicalKey(key("v", { metaKey: true })), undefined);
+  assert.equal(logicalKey(key("v", { ctrlKey: true })), undefined);
 });
 
 test("beforeinput deletion intents cover words and both halves of a line", () => {

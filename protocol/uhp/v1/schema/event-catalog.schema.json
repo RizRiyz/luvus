@@ -124,9 +124,9 @@
     "task.retried": { "$ref": "#/$defs/task_retried" },
     "task.started": { "$ref": "#/$defs/task_started" },
     "task.updated": { "$ref": "#/$defs/task" },
-    "terminal.closed": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
+    "terminal.closed": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/$defs/closed_data" },
     "terminal.created": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
-    "terminal.exited": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
+    "terminal.exited": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/$defs/exited_data" },
     "terminal.metadata_changed": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
     "terminal.moved": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
     "terminal.output_ready": { "$ref": "https://luvus.dev/protocol/uhp/v1/schema/terminal/event.schema.json#/oneOf/1/properties/data" },
@@ -360,7 +360,8 @@
         "agent": { "type": "string" },
         "kind": { "type": "string" },
         "message": { "type": "string" },
-        "tool": { "type": "string" }
+        "tool": { "type": "string" },
+        "notification_type": { "type": "string" }
       }
     },
     "authority_reported": {
@@ -414,6 +415,8 @@
         "project": { "$ref": "#/$defs/task_project" },
         "context": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
         "attempt": { "type": "integer", "minimum": 1 },
+        "attempt_started_at": { "type": "integer", "minimum": 0 },
+        "attempt_finished_at": { "type": "integer", "minimum": 0 },
         "previous_attempts": {
           "type": "array",
           "maxItems": 16,

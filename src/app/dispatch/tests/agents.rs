@@ -387,8 +387,13 @@ fn agent_send_requires_a_live_agent() {
         .expect_err("shell is not an agent");
     assert_eq!(err.0, "agent_not_ready");
 
-    // Once detected as an agent, the send is accepted and echoes the pane.
+    // A detected agent also needs a live composer before it can accept input.
     app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let rail = "─".repeat(80);
+    app.panes[&pane].engine.lock().unwrap().advance(
+        format!("\x1b[2J\x1b[H\x1b[20;1H{rail}\x1b[21;1H❯\u{a0} \x1b[22;1H{rail}\x1b[21;3H")
+            .as_bytes(),
+    );
     let out = app
         .dispatch(
             "agent.send",
@@ -414,12 +419,96 @@ fn agent_send_requires_a_live_agent() {
 }
 
 #[test]
+fn prompt_terminal_id_fence_rejects_stale_routes_before_input() {
+    let _env = crate::persist::test_env("prompt-terminal-id-fence");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    mark_codex_prompt_ready(&mut app, pane);
+    let actual = app.panes[&pane].terminal_runtime().unwrap().terminal_id;
+    let stale = if actual == "00000000000000000000000000000000" {
+        "11111111111111111111111111111111"
+    } else {
+        "00000000000000000000000000000000"
+    };
+    let (input, received) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input);
+    let target = pane.0.to_string();
+
+    for terminal_id in [json!(stale), json!(null), json!("BAD")] {
+        let params = json!({"target":target,"text":"review","terminal_id":terminal_id});
+        let error = app.dispatch("agent.send", &params).unwrap_err();
+        assert_eq!(
+            error.0,
+            if terminal_id == json!(stale) {
+                "content_revision_conflict"
+            } else {
+                "invalid_request"
+            }
+        );
+        assert!(
+            received.try_recv().is_err(),
+            "agent.send queued stale input"
+        );
+
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "fenced".into(),
+            params,
+            reply,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        let value: Value = serde_json::from_str(&response.try_recv().unwrap()).unwrap();
+        assert_eq!(value["error"]["code"], error.0);
+        assert!(
+            received.try_recv().is_err(),
+            "agent.prompt queued stale input"
+        );
+        assert!(app.agent_prompts.is_empty());
+    }
+
+    assert_eq!(
+        app.dispatch(
+            "agent.send",
+            &json!({"target":target,"text":"review","unknown":true})
+        )
+        .unwrap_err()
+        .0,
+        "invalid_request"
+    );
+    assert!(received.try_recv().is_err());
+
+    let params = json!({"target":target,"text":"review","terminal_id":actual});
+    app.dispatch("agent.send", &params)
+        .expect("matching send fence");
+    assert!(received.try_recv().is_ok());
+    let (reply, response) = std::sync::mpsc::channel();
+    app.start_agent_prompt(
+        "matching".into(),
+        params,
+        reply,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let value: Value = serde_json::from_str(&response.try_recv().unwrap()).unwrap();
+    assert_eq!(value["result"]["submitted"], true);
+    assert!(received.try_recv().is_ok());
+}
+
+#[test]
 fn agent_send_admits_one_ordered_submission_and_reports_closed_queue() {
     let _env = crate::persist::test_env("agent-send-atomic");
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
     app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let rail = "─".repeat(80);
+    app.panes[&pane].engine.lock().unwrap().advance(
+        format!("\x1b[2J\x1b[H\x1b[20;1H{rail}\x1b[21;1H❯\u{a0} \x1b[22;1H{rail}\x1b[21;3H")
+            .as_bytes(),
+    );
     app.panes[&pane]
         .engine
         .lock()
@@ -453,6 +542,168 @@ fn agent_send_admits_one_ordered_submission_and_reports_closed_queue() {
         )
         .unwrap_err();
     assert_eq!(error.0, "send_failed");
+}
+
+#[test]
+fn prompt_readiness_uses_current_agent_over_stale_session() {
+    let _env = crate::persist::test_env("prompt-current-agent");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    let status = app.status.get_mut(&pane).unwrap();
+    status.agent = "gemini".into();
+    status.agent_session = Some(AgentSession {
+        agent: "claude".into(),
+        session_id: "old-session".into(),
+    });
+    status.prompt_evidence_required = true;
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+
+    assert!(!app.agent_prompt_is_ready(pane, true));
+    app.dispatch(
+        "agent.send",
+        &json!({"target":pane.0.to_string(),"text":"review"}),
+    )
+    .unwrap();
+    let (reply, response) = std::sync::mpsc::channel();
+    app.start_agent_prompt(
+        "current-agent".into(),
+        json!({"target":pane.0.to_string(),"text":"review"}),
+        reply,
+        Arc::new(AtomicBool::new(false)),
+    );
+    let response: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+    assert_eq!(response["result"]["submitted"], true);
+    assert_eq!(input_rx.try_iter().count(), 2);
+}
+
+#[test]
+fn prompt_readiness_tracks_reports_before_detection_or_output() {
+    let _env = crate::persist::test_env("prompt-report-readiness");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let rail = "─".repeat(80);
+    app.panes[&pane].engine.lock().unwrap().advance(
+        format!("\x1b[2J\x1b[20;1H{rail}\x1b[21;1H❯ \x1b[22;1H{rail}\x1b[21;3H").as_bytes(),
+    );
+    let generation = app.panes[&pane].engine.lock().unwrap().output_generation();
+    let status = app.status.get_mut(&pane).unwrap();
+    status.prompt_evidence = detect::PromptEvidence::Ready;
+    status.last_detect_generation = Some(generation);
+    status.force_detect = false;
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+
+    for state in ["blocked", "idle"] {
+        app.dispatch(
+            "agent.report",
+            &json!({
+                "pane":pane.0.to_string(), "source":"test/plugin", "agent":"claude", "status":state,
+            }),
+        )
+        .unwrap();
+        // Neither detection nor PTY output runs between the report and sends.
+        let sent = app.dispatch(
+            "agent.send",
+            &json!({"target":pane.0.to_string(),"text":"review"}),
+        );
+        let (reply, response) = std::sync::mpsc::channel();
+        app.start_agent_prompt(
+            "report-readiness".into(),
+            json!({"target":pane.0.to_string(),"text":"review"}),
+            reply,
+            Arc::new(AtomicBool::new(false)),
+        );
+        let response: Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+        if state == "blocked" {
+            assert_eq!(sent.unwrap_err().0, "agent_not_ready");
+            assert_eq!(response["error"]["code"], "agent_not_ready");
+            assert!(input_rx.try_recv().is_err());
+            // New terminal output must not bypass the still-active report.
+            app.panes[&pane]
+                .engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b[21;3H");
+            assert!(!app.agent_prompt_is_ready(pane, false));
+        } else {
+            assert!(sent.is_ok());
+            assert_eq!(response["result"]["submitted"], true);
+            assert_eq!(input_rx.try_iter().count(), 2);
+        }
+    }
+}
+
+#[test]
+fn strict_prompt_rejects_unverified_agents_without_changing_legacy_send() {
+    let _env = crate::persist::test_env("strict-agent-prompt");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let pane = app.layout().focus;
+    let target = pane.0.to_string();
+    app.status.get_mut(&pane).unwrap().agent = "gemini".into();
+    let (input_tx, input_rx) = std::sync::mpsc::channel();
+    app.panes
+        .get_mut(&pane)
+        .unwrap()
+        .replace_input_sender_for_test(input_tx);
+
+    let error = app
+        .dispatch(
+            "agent.send",
+            &json!({"target":target,"text":"review","strict":true}),
+        )
+        .unwrap_err();
+    assert_eq!(error.0, "agent_not_ready");
+    assert!(input_rx.try_recv().is_err());
+
+    let (reply, response) = std::sync::mpsc::channel();
+    app.start_agent_prompt(
+        "strict-test".into(),
+        json!({"target":target,"text":"review","strict":true}),
+        reply,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let result: serde_json::Value = serde_json::from_str(&response.recv().unwrap()).unwrap();
+    assert_eq!(result["error"]["code"], "agent_not_ready");
+    assert!(input_rx.try_recv().is_err());
+
+    for method in ["agent.send", "agent.prompt"] {
+        let params = json!({"target":target,"text":"review","strict":"yes"});
+        let error = if method == "agent.send" {
+            app.dispatch(method, &params).unwrap_err().0
+        } else {
+            let (reply, response) = std::sync::mpsc::channel();
+            app.start_agent_prompt(
+                "strict-type-test".into(),
+                params,
+                reply,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            );
+            serde_json::from_str::<serde_json::Value>(&response.recv().unwrap()).unwrap()["error"]
+                ["code"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(error, "invalid_request");
+    }
+
+    app.dispatch("agent.send", &json!({"target":target,"text":"review"}))
+        .expect("legacy send remains available without strict mode");
+    assert!(matches!(
+        input_rx.try_recv().unwrap(),
+        crate::terminal::pty::InputAction::Submit { .. }
+    ));
 }
 
 #[test]
@@ -1344,6 +1595,11 @@ fn runtime_snapshot_projects_agent_session_title_without_using_the_alias() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let mut app = App::new(80, 24, tx).unwrap();
     let pane = app.layout().focus;
+    let snapshot = app.runtime_snapshot();
+    assert_eq!(
+        snapshot["workspaces"][0]["tabs"][0]["panes"][0]["is_agent"],
+        false
+    );
     {
         let status = app.status.get_mut(&pane).unwrap();
         status.agent = "pi".into();
@@ -1361,6 +1617,7 @@ fn runtime_snapshot_projects_agent_session_title_without_using_the_alias() {
 
     let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
     let row = &snapshot["workspaces"][0]["tabs"][0]["panes"][0];
+    assert_eq!(row["is_agent"], true);
     assert_eq!(row["agent_name"], "web");
     assert_eq!(row["agent_session_title"], "Build the web dashboard");
 
@@ -2225,4 +2482,491 @@ fn content_fence_unavailable_engine_queues_nothing() {
     assert!(result["content_revision"].is_null());
     // Clear poison so unrelated teardown does not inherit the fixture failure.
     engine.clear_poison();
+}
+
+/// docs/07 / #395: `agent.read --source visible` describes the live screen.
+/// Scrollback keeps old composers and dialogs, and the `content_revision`
+/// returned with the text advances on live output, so a viewport-relative read
+/// would fence `agent.keys` against a frame that is no longer on the terminal.
+#[test]
+fn agent_read_visible_reports_the_live_screen_not_the_scrollback_viewport() {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(80, 24, tx).unwrap();
+    let id = app.layout().focus;
+    let pane = app.panes.get(&id).expect("focus pane");
+    {
+        let mut engine = pane.engine.lock().unwrap();
+        engine.advance(b"> STALE_COMPOSER\r\n");
+        for i in 0..60 {
+            engine.advance(format!("output line {i}\r\n").as_bytes());
+        }
+        engine.advance(b"> LIVE_COMPOSER");
+    }
+    // Scroll the old composer back into view, as a user inspecting an earlier
+    // turn leaves it.
+    pane.scroll(60);
+    assert!(
+        pane.engine
+            .lock()
+            .unwrap()
+            .visible_rows()
+            .join("\n")
+            .contains("STALE_COMPOSER"),
+        "precondition: the viewport is parked on the old frame"
+    );
+
+    let out = app
+        .dispatch(
+            "agent.read",
+            &json!({"target": id.0.to_string(), "source": "visible"}),
+        )
+        .expect("agent.read ok");
+    let text = out["text"].as_str().unwrap();
+    assert!(
+        text.contains("LIVE_COMPOSER"),
+        "visible read returns the live screen, got:\n{text}"
+    );
+    assert!(
+        !text.contains("STALE_COMPOSER"),
+        "visible read never returns the scrolled-back frame, got:\n{text}"
+    );
+}
+
+/// Give `pane` a VT engine the test can write OSC titles into directly.
+fn title_engine(
+    app: &mut App,
+    pane: PaneId,
+) -> std::sync::Arc<std::sync::Mutex<dyn crate::terminal::vt::VtEngine>> {
+    use crate::terminal::appearance::PaneAppearance;
+    use crate::terminal::vt::{create_engine, VtEngineKind};
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let engine = create_engine(
+        VtEngineKind::Alacritty,
+        80,
+        24,
+        tx,
+        1024 * 1024,
+        PaneAppearance::default(),
+    );
+    app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+    engine
+}
+
+/// The title each public projection reports for `pane`: its `agent.list`
+/// row, `agent.get`, and its `session.snapshot` row.
+fn title_projections(app: &mut App, pane: PaneId) -> (Option<Value>, Value, Value) {
+    let id = pane.0.to_string();
+    let list = app.dispatch("agent.list", &json!({})).unwrap();
+    let listed = list["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["pane"] == id)
+        .map(|row| {
+            assert!(
+                row.as_object().unwrap().contains_key("agent_session_title"),
+                "updated servers always emit the field"
+            );
+            row["agent_session_title"].clone()
+        });
+    let get = app
+        .dispatch("agent.get", &json!({"target": id}))
+        .map(|result| {
+            assert!(result
+                .as_object()
+                .unwrap()
+                .contains_key("agent_session_title"));
+            result["agent_session_title"].clone()
+        })
+        .unwrap_or(Value::Null);
+    let snapshot = app.dispatch("session.snapshot", &json!({})).unwrap();
+    let row = snapshot["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|workspace| workspace["tabs"].as_array().unwrap())
+        .flat_map(|tab| tab["panes"].as_array().unwrap())
+        .find(|row| row["pane_id"] == id)
+        .expect("snapshot row")
+        .clone();
+    (listed, get, row["agent_session_title"].clone())
+}
+
+/// `agent.list`, `agent.get`, and the snapshot report the same title for the
+/// same pane: from its OSC title, a module pane title, or a module title for
+/// its bound session, whether or not its tab is active and whether or not the
+/// sidebar shows titles. Aliases and native session IDs are unchanged.
+#[test]
+fn agent_list_get_and_snapshot_report_the_same_session_title() {
+    let _env = crate::persist::test_env("agent-session-title-parity");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    app.config.layout.agent_title = false; // metadata ignores the sidebar setting
+
+    // Tab 1: an OSC title with an animated status icon.
+    let osc = app.layout().focus;
+    app.status.get_mut(&osc).unwrap().agent = "claude".into();
+    let osc_engine = title_engine(&mut app, osc);
+    osc_engine
+        .lock()
+        .unwrap()
+        .advance("\x1b]2;✳ Ship the release\x07".as_bytes());
+    app.dispatch(
+        "agent.name",
+        &json!({"pane": osc.0.to_string(), "name": "shipper"}),
+    )
+    .unwrap();
+
+    // Tab 2: no OSC title, a module pane title with raw whitespace.
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let module = app.layout().focus;
+    app.status.get_mut(&module).unwrap().agent = "codex".into();
+    title_engine(&mut app, module);
+    crate::app::set_owned_agent_row_title(
+        &mut app.agent_title_panes,
+        module,
+        Some("  Review\tthe\nPR  ".into()),
+        None,
+    )
+    .unwrap();
+
+    // Tab 3: no pane title, a module title for its exact bound session.
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let session = app.layout().focus;
+    title_engine(&mut app, session);
+    {
+        let status = app.status.get_mut(&session).unwrap();
+        status.agent = "claude".into();
+        status.agent_session = Some(crate::app::AgentSession {
+            agent: "claude".into(),
+            session_id: "sess-7".into(),
+        });
+    }
+    crate::app::set_owned_agent_session_title(
+        &mut app.agent_title_sessions,
+        "claude".into(),
+        "sess-7".into(),
+        Some("Nightly triage".into()),
+        None,
+    )
+    .unwrap();
+
+    // Tab 4: a plain shell with an OSC title is still not an agent.
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let shell = app.layout().focus;
+    app.status.get_mut(&shell).unwrap().agent = "zsh".into();
+    title_engine(&mut app, shell)
+        .lock()
+        .unwrap()
+        .advance(b"\x1b]2;riz@host: ~/work\x07");
+
+    app.switch_tab(0); // tabs 2 and 3 are now inactive
+
+    let title = |text: &str| Some(json!(text));
+    for (pane, expected) in [
+        (osc, "Ship the release"),
+        (module, "Review the PR"),
+        (session, "Nightly triage"),
+    ] {
+        let (listed, got, snapshot) = title_projections(&mut app, pane);
+        assert_eq!(listed, title(expected), "agent.list for {pane:?}");
+        assert_eq!(got, json!(expected), "agent.get for {pane:?}");
+        assert_eq!(snapshot, json!(expected), "snapshot for {pane:?}");
+    }
+
+    let list = app.dispatch("agent.list", &json!({})).unwrap();
+    let shell_id = shell.0.to_string();
+    assert!(
+        !list["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["pane"] == shell_id.as_str()),
+        "a titled shell does not join agent.list"
+    );
+    let (_, _, shell_snapshot) = title_projections(&mut app, shell);
+    assert_eq!(shell_snapshot, Value::Null);
+
+    // Existing fields keep their meaning: the alias is `name`, the native
+    // session ID is `session`, and neither is replaced by the title.
+    let got = app
+        .dispatch("agent.get", &json!({"target": "shipper"}))
+        .unwrap();
+    assert_eq!(got["name"], "shipper");
+    assert_eq!(got["session"], Value::Null);
+    let got = app
+        .dispatch("agent.get", &json!({"target": session.0.to_string()}))
+        .unwrap();
+    assert_eq!(got["session"], "sess-7");
+}
+
+/// Clearing an OSC title reveals a module fallback, a missing title is
+/// `null` (never a substitute), and long Unicode titles keep the same bound
+/// as the snapshot.
+#[test]
+fn agent_session_title_falls_back_clears_and_bounds_like_the_snapshot() {
+    let _env = crate::persist::test_env("agent-session-title-fallback");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let engine = title_engine(&mut app, pane);
+
+    let (listed, got, snapshot) = title_projections(&mut app, pane);
+    assert_eq!(
+        (listed, got, snapshot),
+        (Some(Value::Null), Value::Null, Value::Null)
+    );
+
+    crate::app::set_owned_agent_row_title(
+        &mut app.agent_title_panes,
+        pane,
+        Some("Module title".into()),
+        None,
+    )
+    .unwrap();
+    engine
+        .lock()
+        .unwrap()
+        .advance("\x1b]2;OSC title\x07".as_bytes());
+    assert_eq!(title_projections(&mut app, pane).1, "OSC title", "OSC wins");
+    engine.lock().unwrap().advance(b"\x1b]2;\x07");
+    assert_eq!(
+        title_projections(&mut app, pane).1,
+        "Module title",
+        "clearing the OSC title reveals the module title"
+    );
+
+    let long = "界".repeat(170);
+    engine
+        .lock()
+        .unwrap()
+        .advance(format!("\x1b]2;{long}\x07").as_bytes());
+    let (listed, got, snapshot) = title_projections(&mut app, pane);
+    assert_eq!(got.as_str().unwrap().chars().count(), 160);
+    assert_eq!(listed, Some(got.clone()));
+    assert_eq!(snapshot, got);
+}
+
+/// Reading titles through `agent.list` / `agent.get` must not consume a
+/// pending OSC title change: subscribers still get `agent.title_changed` once,
+/// and further reads of an unchanged title publish nothing.
+#[test]
+fn reading_agent_titles_does_not_consume_or_publish_title_events() {
+    let _env = crate::persist::test_env("agent-session-title-events");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    let pane = app.layout().focus;
+    app.status.get_mut(&pane).unwrap().agent = "claude".into();
+    let engine = title_engine(&mut app, pane);
+    let events_after = |app: &App, floor: u64| {
+        crate::ipc::api::replayed_events_after(&app.events, floor)
+            .into_iter()
+            .filter(|event| event["event"] == "agent.title_changed")
+            .collect::<Vec<_>>()
+    };
+
+    let floor = crate::ipc::api::current_sequence(&app.events);
+    engine
+        .lock()
+        .unwrap()
+        .advance("\x1b]2;⠂ Pending title\x07".as_bytes());
+    assert_eq!(title_projections(&mut app, pane).1, "Pending title");
+    assert!(
+        events_after(&app, floor).is_empty(),
+        "reads publish nothing"
+    );
+
+    assert!(
+        app.agent_session_title_changed(pane),
+        "the change is still pending"
+    );
+    let events = events_after(&app, floor);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["data"]["title"], "Pending title");
+
+    for _ in 0..3 {
+        title_projections(&mut app, pane);
+    }
+    assert!(!app.agent_session_title_changed(pane));
+    assert_eq!(events_after(&app, floor).len(), 1, "no duplicate events");
+}
+
+/// A session report that names its reporting process binds only when that
+/// process runs in the claimed pane. A shared agent server keeps the
+/// environment of whichever pane started it, so its reports would otherwise
+/// bind sessions to an unrelated pane.
+#[test]
+fn a_session_report_from_outside_the_pane_is_refused() {
+    let _env = crate::persist::test_env("report-session-reporter");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    let pane = app.layout().focus;
+    let root = app.panes[&pane]
+        .child_pid
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_ne!(root, 0, "the pane runs a real shell");
+
+    let outside = app
+        .dispatch(
+            "pane.report_session",
+            &json!({"pane": pane.0.to_string(), "agent": "codex",
+                    "session_id": "019a-outside", "reporter_pid": std::process::id()}),
+        )
+        .unwrap_err();
+    assert_eq!(outside.0, "reporter_outside_pane");
+    assert!(app.status[&pane].agent_session.is_none());
+
+    let inside = app
+        .dispatch(
+            "pane.report_session",
+            &json!({"pane": pane.0.to_string(), "agent": "codex",
+                    "session_id": "019a-inside", "reporter_pid": root}),
+        )
+        .expect("the pane's own process may report");
+    assert_eq!(inside["verified"], true);
+    assert_eq!(
+        app.status[&pane]
+            .agent_session
+            .as_ref()
+            .map(|s| s.session_id.as_str()),
+        Some("019a-inside")
+    );
+
+    // A reporter that cannot be checked, here because the pane has no process
+    // yet, is refused instead of binding unproven.
+    let root_handle = app.panes[&pane].child_pid.clone();
+    root_handle.store(0, std::sync::atomic::Ordering::Relaxed);
+    let unchecked = app
+        .dispatch(
+            "pane.report_session",
+            &json!({"pane": pane.0.to_string(), "agent": "codex",
+                    "session_id": "019a-unchecked", "reporter_pid": std::process::id()}),
+        )
+        .unwrap_err();
+    assert_eq!(unchecked.0, "reporter_unverified");
+    assert_eq!(
+        app.status[&pane]
+            .agent_session
+            .as_ref()
+            .map(|s| s.session_id.as_str()),
+        Some("019a-inside"),
+        "the earlier proven binding is untouched"
+    );
+    root_handle.store(root, std::sync::atomic::Ordering::Relaxed);
+
+    // A claim without a reporter still binds, as before, but unproven.
+    let plain = app
+        .dispatch(
+            "pane.report_session",
+            &json!({"pane": pane.0.to_string(), "agent": "codex", "session_id": "019a-plain"}),
+        )
+        .unwrap();
+    assert_eq!(plain["verified"], false);
+}
+
+/// Without a trustworthy pane, a report may describe the session instead: the
+/// one pane running the agent in that directory and showing the submitted
+/// prompt claims it. No match, or more than one, binds nothing.
+#[test]
+fn session_evidence_binds_only_one_matching_pane() {
+    let _env = crate::persist::test_env("report-session-evidence");
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(120, 40, tx).unwrap();
+    let dir = std::env::temp_dir().join(format!("luvus-evidence-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cwd = dir.to_string_lossy().to_string();
+
+    let first = app.layout().focus;
+    app.dispatch("tab.new", &json!({})).unwrap();
+    let second = app.layout().focus;
+    for (pane, screen) in [
+        (
+            first,
+            "› Fix the login redirect after sign-in\n\n• Working (3s)",
+        ),
+        (second, "› Write release notes for 0.15\n"),
+    ] {
+        app.status.get_mut(&pane).unwrap().agent = "codex".into();
+        app.panes.get_mut(&pane).unwrap().cwd = dir.clone();
+        title_engine(&mut app, pane)
+            .lock()
+            .unwrap()
+            .advance(screen.replace('\n', "\r\n").as_bytes());
+    }
+    let evidence = |prompt: &str, dry_run: bool| {
+        json!({"agent": "codex", "session_id": "019a-evidence",
+               "evidence": {"cwd": cwd, "prompt": prompt}, "dry_run": dry_run})
+    };
+
+    let probe = app
+        .dispatch(
+            "pane.report_session",
+            &evidence("Fix the  login redirect\nafter sign-in", true),
+        )
+        .unwrap();
+    assert_eq!(probe["type"], "session_match");
+    assert_eq!(probe["pane"], first.0.to_string());
+    assert_eq!(probe["matches"], 1);
+    assert!(probe["server_generation"].is_string());
+    assert!(
+        app.status[&first].agent_session.is_none(),
+        "a dry run binds nothing"
+    );
+
+    app.dispatch(
+        "pane.report_session",
+        &evidence("Fix the login redirect after sign-in", false),
+    )
+    .unwrap();
+    assert_eq!(
+        app.status[&first]
+            .agent_session
+            .as_ref()
+            .map(|s| s.session_id.as_str()),
+        Some("019a-evidence")
+    );
+    assert!(app.status[&second].agent_session.is_none());
+
+    // A prompt both panes show is ambiguous; one neither shows matches nothing.
+    title_engine(&mut app, second)
+        .lock()
+        .unwrap()
+        .advance("› Fix the login redirect after sign-in\r\n".as_bytes());
+    let both = json!({"agent": "codex", "session_id": "019a-other",
+                      "evidence": {"cwd": cwd, "prompt": "Fix the login redirect after sign-in"}});
+    assert_eq!(
+        app.dispatch("pane.report_session", &both).unwrap_err().0,
+        "conflict"
+    );
+    let none = app
+        .dispatch(
+            "pane.report_session",
+            &evidence("Something nobody typed", true),
+        )
+        .unwrap();
+    assert_eq!(
+        (none["pane"].clone(), none["matches"].clone()),
+        (Value::Null, json!(0))
+    );
+    // Too short to tell panes apart.
+    assert_eq!(
+        app.dispatch("pane.report_session", &evidence("ok", true))
+            .unwrap()["matches"],
+        0
+    );
+
+    // Evidence replaces a pane claim, and a dry run needs evidence.
+    for invalid in [
+        json!({"pane": first.0.to_string(), "agent": "codex", "session_id": "x",
+               "evidence": {"cwd": cwd, "prompt": "Fix the login"}}),
+        json!({"pane": first.0.to_string(), "agent": "codex", "session_id": "x", "dry_run": true}),
+        json!({"agent": "codex", "session_id": "x", "evidence": {"cwd": "relative", "prompt": "Fix it now"}}),
+    ] {
+        assert_eq!(
+            app.dispatch("pane.report_session", &invalid).unwrap_err().0,
+            "invalid_request"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

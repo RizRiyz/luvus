@@ -17,8 +17,8 @@ use anyhow::{anyhow, Result};
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton,
-    MouseEventKind,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
@@ -64,6 +64,12 @@ enum Endpoint {
 
 fn allow_host_file_links(endpoint: &Endpoint, host_terminal_shares_local_filesystem: bool) -> bool {
     host_terminal_shares_local_filesystem && matches!(endpoint, Endpoint::Local)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum KeyOwner {
+    Client,
+    Server(Endpoint),
 }
 
 enum MachineState {
@@ -298,6 +304,9 @@ struct DockState {
     machine_form_hits: Vec<(MachineFormHit, Rect)>,
     machine_form_backdrop_pending: bool,
     machine_popup: Option<MachinePopup>,
+    /// Physical keys stay with the side that consumed their Press even when a
+    /// selector opens or closes before the matching Repeat/Release arrives.
+    key_owners: HashMap<(KeyCode, bool), KeyOwner>,
     dirty: bool,
 }
 
@@ -375,6 +384,7 @@ impl Default for DockState {
             machine_form_hits: Vec::new(),
             machine_form_backdrop_pending: false,
             machine_popup: None,
+            key_owners: HashMap::new(),
             dirty: true,
         }
     }
@@ -754,17 +764,51 @@ fn run_inner(
                 dock.dirty = true;
             }
             ShellEvent::Input(message) => {
-                if handle_dock_input(
-                    &message,
-                    &mut dock,
-                    &active,
-                    &mut candidate,
-                    &mut pending_endpoint,
-                    &mut machines,
-                    &writer,
-                    terminal,
-                    &events_tx,
-                )? {
+                let phase_route = owned_key_phase(&message, &mut dock, &active);
+                let phase_endpoint = match phase_route {
+                    OwnedKeyPhase::Consume => continue,
+                    OwnedKeyPhase::ClientRepeat => {
+                        handle_dock_input(
+                            &message,
+                            &mut dock,
+                            &active,
+                            &mut candidate,
+                            &mut pending_endpoint,
+                            &mut machines,
+                            &writer,
+                            terminal,
+                            &events_tx,
+                        )?;
+                        continue;
+                    }
+                    OwnedKeyPhase::EvaluatePress => None,
+                    OwnedKeyPhase::Server(endpoint) => Some(endpoint),
+                };
+                let consumed = phase_endpoint.is_none()
+                    && handle_dock_input(
+                        &message,
+                        &mut dock,
+                        &active,
+                        &mut candidate,
+                        &mut pending_endpoint,
+                        &mut machines,
+                        &writer,
+                        terminal,
+                        &events_tx,
+                    )?;
+                if let ClientMessage::Key(key) = &message {
+                    if key.kind == KeyEventKind::Press {
+                        dock.key_owners.insert(
+                            federated_key_identity(*key),
+                            if consumed {
+                                KeyOwner::Client
+                            } else {
+                                KeyOwner::Server(active.clone())
+                            },
+                        );
+                    }
+                }
+                if consumed {
                     continue;
                 }
                 if matches!(message, ClientMessage::Detach) {
@@ -772,7 +816,11 @@ fn run_inner(
                     running = false;
                     continue;
                 }
-                if let Err(error) = send_surface(&active, &message, &machines, &writer) {
+                let destination = phase_endpoint.as_ref().unwrap_or(&active);
+                if let Err(error) = send_surface(destination, &message, &machines, &writer) {
+                    if destination != &active {
+                        continue;
+                    }
                     if matches!(active, Endpoint::Local) {
                         return Err(error);
                     }
@@ -2804,7 +2852,7 @@ fn handle_dock_input(
     } else if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
         // Only the disclosure gutter folds a group. Its label retains the
         // existing endpoint-switch action.
-        if mouse.column < rect.x.saturating_add(4) {
+        if in_heading_gutter(rect.x, mouse.column) {
             match hit.as_ref().map(|(hit, _)| hit) {
                 Some(DockHit::Endpoint(Endpoint::Local)) => {
                     dock.local_collapsed = !dock.local_collapsed;
@@ -4094,6 +4142,10 @@ fn paint_dock(
     paint_owner_session_button(terminal, dock, active, cursor, cursor_visible)
 }
 
+/// Paints the machine-aware Workspaces dock: the heading row, one row per
+/// endpoint heading or workspace, the scrollbar, and any open machine form.
+/// Workspace rows reuse the server's native row renderer; endpoint headings
+/// are painted here and recorded in `dock.hits` for mouse handling.
 fn paint_dock_content(
     terminal: &mut DefaultTerminal,
     dock: &mut DockState,
@@ -4169,13 +4221,13 @@ fn paint_dock_content(
         );
         dock.hits.push((DockHit::AddWorkspace, add));
     }
-    let list_height = rect.height.saturating_sub(1);
+    let list_height = rect.height.saturating_sub(crate::ui::DOCK_HEADER_ROWS);
     let rows = visible_dock_rows(machines, active, dock);
     reveal_workspace(&rows, active, dock, list_height, rect.show_paths);
     dock.scroll = dock
         .scroll
         .min(dock_max_scroll(&rows, list_height, rect.show_paths));
-    let mut next_row = 1;
+    let mut next_row = crate::ui::DOCK_HEADER_ROWS;
     let total_rows = rows.len();
     let mut visible_rows = 0;
     for (row_index, projected) in rows.into_iter().enumerate().skip(dock.scroll) {
@@ -4317,11 +4369,14 @@ fn paint_dock_content(
                 cell.set_bg(bg);
             }
         }
+        // Endpoint headings sit one column left of the workspace rows beneath
+        // them, so a machine reads as the parent of its list rather than as
+        // another entry in it.
         write_endpoint_text(
             &mut cells,
             geometry,
             row,
-            2,
+            ENDPOINT_HEADING_INDENT,
             symbol,
             StyleSpec {
                 fg: tone,
@@ -4338,7 +4393,14 @@ fn paint_dock_content(
             bg: selected.then(|| protocol::unpack(style.active_bg)),
             bold,
         };
-        write_endpoint_text(&mut cells, geometry, row, 4, &label, primary);
+        write_endpoint_text(
+            &mut cells,
+            geometry,
+            row,
+            ENDPOINT_HEADING_INDENT + 2,
+            &label,
+            primary,
+        );
         if rect.show_paths {
             let secondary_style = StyleSpec {
                 fg: protocol::unpack(if selected {
@@ -4350,7 +4412,14 @@ fn paint_dock_content(
                 bold: false,
             };
             if let Some(value) = secondary_text.as_deref() {
-                write_endpoint_text(&mut cells, geometry, row + 1, 4, value, secondary_style);
+                write_endpoint_text(
+                    &mut cells,
+                    geometry,
+                    row + 1,
+                    ENDPOINT_HEADING_INDENT + 2,
+                    value,
+                    secondary_style,
+                );
             }
         }
         dock.hits
@@ -4496,6 +4565,14 @@ fn owner_session_projection(dock: &DockState) -> Option<(Rect, Rect, String)> {
 
 fn machine_header_active(endpoint_active: bool, collapsed: bool) -> bool {
     endpoint_active && collapsed
+}
+
+/// Whether a click at `column` lands in a heading row's disclosure gutter: the
+/// cells up to the chevron and the space after it, left of the label text. The
+/// boundary follows `ENDPOINT_HEADING_INDENT` so the whole label keeps its
+/// endpoint-switch action wherever the heading is painted.
+fn in_heading_gutter(rect_x: u16, column: u16) -> bool {
+    column < rect_x.saturating_add(ENDPOINT_HEADING_INDENT + 2)
 }
 
 fn broadcast_workspace_width(
@@ -5369,6 +5446,15 @@ struct StyleSpec {
     bold: bool,
 }
 
+/// Column of a machine or Local heading's chevron inside the Workspaces dock.
+/// Workspace rows start their state dot at column 2, so headings outdent by
+/// one cell to separate machines from the workspaces listed under them.
+const ENDPOINT_HEADING_INDENT: u16 = 1;
+
+/// Writes `text` into `cells` on `row` starting at `indent`, clipping at the
+/// dock's right edge and skipping zero-width characters. Wide characters take
+/// two cells; their continuation cell is blanked so the terminal does not
+/// repaint a stale glyph beside them.
 fn write_endpoint_text(
     cells: &mut [(u16, u16, Cell)],
     rect: Rect,
@@ -5616,8 +5702,81 @@ fn write_row(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OwnedKeyPhase {
+    EvaluatePress,
+    ClientRepeat,
+    Consume,
+    Server(Endpoint),
+}
+
+fn federated_key_identity(key: KeyEvent) -> (KeyCode, bool) {
+    (key.code, key.state.contains(KeyEventState::KEYPAD))
+}
+
+fn owned_key_phase(
+    message: &ClientMessage,
+    dock: &mut DockState,
+    active: &Endpoint,
+) -> OwnedKeyPhase {
+    let ClientMessage::Key(key) = message else {
+        return OwnedKeyPhase::EvaluatePress;
+    };
+    let identity = federated_key_identity(*key);
+    match key.kind {
+        KeyEventKind::Press => OwnedKeyPhase::EvaluatePress,
+        KeyEventKind::Repeat => match dock.key_owners.get(&identity) {
+            Some(KeyOwner::Client) if client_repeat_allowed(*key, dock) => {
+                OwnedKeyPhase::ClientRepeat
+            }
+            Some(KeyOwner::Client) => OwnedKeyPhase::Consume,
+            Some(KeyOwner::Server(endpoint)) => OwnedKeyPhase::Server(endpoint.clone()),
+            None => OwnedKeyPhase::Server(active.clone()),
+        },
+        KeyEventKind::Release => match dock.key_owners.remove(&identity) {
+            Some(KeyOwner::Client) => OwnedKeyPhase::Consume,
+            Some(KeyOwner::Server(endpoint)) => OwnedKeyPhase::Server(endpoint),
+            None => OwnedKeyPhase::Server(active.clone()),
+        },
+    }
+}
+
+fn client_repeat_allowed(key: KeyEvent, dock: &DockState) -> bool {
+    let navigation_open = dock.selector_open
+        || dock.navigation.is_some()
+        || matches!(dock.machine_popup, Some(MachinePopup::Menu { .. }));
+    navigation_open
+        && matches!(
+            key.code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Char('j' | 'k' | 'g' | 'G')
+        )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn heading_gutter_ends_where_the_label_begins() {
+        use super::{in_heading_gutter, ENDPOINT_HEADING_INDENT};
+        let label_column = ENDPOINT_HEADING_INDENT + 2;
+        for rect_x in [0u16, 1, 7] {
+            // The chevron and the space after it fold the group.
+            assert!(in_heading_gutter(rect_x, rect_x + ENDPOINT_HEADING_INDENT));
+            assert!(in_heading_gutter(
+                rect_x,
+                rect_x + ENDPOINT_HEADING_INDENT + 1
+            ));
+            // The first label character switches endpoints instead.
+            assert!(!in_heading_gutter(rect_x, rect_x + label_column));
+            assert!(!in_heading_gutter(rect_x, rect_x + label_column + 5));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -5772,6 +5931,88 @@ mod tests {
         assert!(machine_can_disconnect(&MachineState::Reconnecting {
             at: Instant::now()
         }));
+    }
+
+    #[test]
+    fn federated_docks_keep_repeat_and_release_with_the_press_owner() {
+        let mut dock = DockState::default();
+        let key = |code, kind| {
+            ClientMessage::Key(KeyEvent::new_with_kind(code, KeyModifiers::NONE, kind))
+        };
+        let down = federated_key_identity(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let pressed_endpoint = Endpoint::Local;
+        let active = Endpoint::Remote {
+            machine_id: "other".into(),
+            session: "default".into(),
+        };
+
+        // A server-owned Press stays with its exact endpoint if an overlay
+        // opens or another surface becomes active before its trailing phases.
+        dock.key_owners
+            .insert(down, KeyOwner::Server(pressed_endpoint.clone()));
+        dock.selector_open = true;
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Repeat),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Server(pressed_endpoint.clone())
+        );
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Release),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Server(pressed_endpoint)
+        );
+        assert!(!dock.key_owners.contains_key(&down));
+
+        // A client-owned navigation Press may repeat while its selector is
+        // open, and its Release never leaks to the selected server even if the
+        // selector closes first.
+        dock.key_owners.insert(down, KeyOwner::Client);
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Repeat),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::ClientRepeat
+        );
+        dock.selector_open = false;
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Repeat),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Consume
+        );
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Down, KeyEventKind::Release),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Consume
+        );
+        assert!(!dock.key_owners.contains_key(&down));
+
+        // Action repeats remain suppressed even while their client-owned Press
+        // is held.
+        let enter = federated_key_identity(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        dock.selector_open = true;
+        dock.key_owners.insert(enter, KeyOwner::Client);
+        assert_eq!(
+            owned_key_phase(
+                &key(KeyCode::Enter, KeyEventKind::Repeat),
+                &mut dock,
+                &active,
+            ),
+            OwnedKeyPhase::Consume
+        );
     }
 
     #[test]

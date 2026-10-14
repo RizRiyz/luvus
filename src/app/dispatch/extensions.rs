@@ -637,11 +637,18 @@ impl App {
                 "enabled": m.enabled,
                 "runnable": m.is_runnable(),
                 "source": m.source,
+                "git_ref": m.git_ref,
                 "root": m.root.display().to_string(),
                 "warning": m.warning,
                 "platforms": m.manifest.platforms,
                 "actions": m.manifest.actions.iter()
-                    .map(|a| json!({"id": a.id, "title": a.title, "contexts": a.contexts})).collect::<Vec<_>>(),
+                    .map(|a| {
+                        let mut item = json!({"id": a.id, "title": a.title, "contexts": a.contexts});
+                        if let Some(commander) = &a.commander {
+                            item["commander"] = json!(commander);
+                        }
+                        item
+                    }).collect::<Vec<_>>(),
                 "panes": m.manifest.panes.iter()
                     .map(|pe| json!({"id": pe.id, "title": pe.title, "placement": pe.placement})).collect::<Vec<_>>(),
                 "bars": m.manifest.bars.iter()
@@ -661,11 +668,59 @@ impl App {
             let path = req_str(p, "path")?;
             let enabled = !p.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
             let source = p.get("source").and_then(|v| v.as_str()).map(String::from);
+            let git_ref = match p.get("git_ref") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+                _ => return Err(module_err("git_ref must be a nonempty string".into())),
+            };
             let id = self
                 .module_link_with(std::path::Path::new(path), enabled, source)
                 .map_err(module_err)?;
+            self.modules.find_mut(&id).unwrap().git_ref = git_ref;
+            crate::module::registry::save(&self.modules);
             Ok(json!({"type":"module","id": id}))
         }
+    }
+
+    pub(super) fn api_module_update(&mut self, _method: &str, p: &Value) -> DispatchResult {
+        for key in p.as_object().into_iter().flat_map(|p| p.keys()) {
+            if !matches!(
+                key.as_str(),
+                "id" | "path"
+                    | "source"
+                    | "expected_source"
+                    | "expected_root"
+                    | "expected_ref"
+                    | "git_ref"
+            ) {
+                return Err(module_err(format!("unknown module.update parameter {key}")));
+            }
+        }
+        let optional_ref = |key| -> Result<Option<String>, (String, String)> {
+            match p.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(v)) if !v.is_empty() => Ok(Some(v.clone())),
+                _ => Err(module_err(format!(
+                    "{key} must be a nonempty string or null"
+                ))),
+            }
+        };
+        let id = self.module_id_for(req_str(p, "id")?).map_err(module_err)?;
+        let target = crate::module::install::UpdateTarget {
+            id: id.clone(),
+            root: req_str(p, "expected_root")?.into(),
+            source: req_str(p, "expected_source")?.into(),
+            git_ref: optional_ref("expected_ref")?,
+        };
+        let installed = crate::module::install::Installed {
+            id: id.clone(),
+            root: req_str(p, "path")?.into(),
+            source: req_str(p, "source")?.into(),
+            git_ref: optional_ref("git_ref")?,
+        };
+        self.module_update(&target, &installed)
+            .map_err(module_err)?;
+        Ok(json!({"type":"module", "id":id}))
     }
 
     pub(super) fn api_module_unlink(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -709,12 +764,16 @@ impl App {
             let mut arr = Vec::new();
             for m in &self.modules.modules {
                 for a in &m.manifest.actions {
-                    arr.push(json!({
+                    let mut item = json!({
                         "module": m.id, "action": a.id,
                         "qualified": format!("{}.{}", m.id, a.id),
                         "title": a.title, "contexts": a.contexts,
                         "runnable": m.is_runnable(),
-                    }));
+                    });
+                    if let Some(commander) = &a.commander {
+                        item["commander"] = json!(commander);
+                    }
+                    arr.push(item);
                 }
             }
             Ok(json!({"type":"module_action_list","actions":arr}))
@@ -908,12 +967,21 @@ impl App {
                 ));
             }
             if method == "mission.refresh" {
-                self.request_mission_usage_refresh_for(scope, workspace);
+                let refresh_id = self
+                    .request_mission_usage_refresh_for(scope, workspace)
+                    .ok_or_else(|| {
+                        (
+                            "resource_exhausted".to_string(),
+                            "too many pending Mission Control refreshes".to_string(),
+                        )
+                    })?;
                 Ok(json!({
                     "type":"mission_refresh",
                     "scope":match scope { crate::mission::MissionScope::Workspace => "workspace", crate::mission::MissionScope::All => "all" },
                     "workspace":workspace.to_string(),
                     "refreshing":true,
+                    "refresh_id":refresh_id.to_string(),
+                    "server_generation":self.backend_server_generation,
                 }))
             } else {
                 Ok(self.mission_snapshot_value(scope, workspace))

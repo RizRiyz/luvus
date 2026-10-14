@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::manifest::ModuleManifest;
 use super::paths;
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ModuleRegistry {
     #[serde(default)]
     pub modules: Vec<InstalledModule>,
@@ -26,6 +26,9 @@ pub struct InstalledModule {
     /// `owner/repo@<sha>` for git installs; `None` for a local `link`.
     #[serde(default)]
     pub source: Option<String>,
+    /// Explicit branch/tag/commit selected at install or update time.
+    #[serde(default)]
+    pub git_ref: Option<String>,
     /// Cached manifest, refreshed from disk on startup.
     pub manifest: ModuleManifest,
     /// Set when the on-disk manifest is missing/broken — entry stays visible
@@ -83,6 +86,46 @@ impl ModuleRegistry {
         })
     }
 
+    /// Validate the identity fence and replacement before changing any state.
+    pub fn replace(
+        &mut self,
+        target: &super::install::UpdateTarget,
+        installed: &super::install::Installed,
+    ) -> Result<(), String> {
+        let old = self
+            .find_mut(&target.id)
+            .ok_or_else(|| format!("no module {}", target.id))?;
+        if old.root != target.root
+            || old.source.as_deref() != Some(&target.source)
+            || old.git_ref != target.git_ref
+        {
+            return Err("module changed while update was being prepared — retry".into());
+        }
+        let current = super::install::UpdateTarget::from_module(old).map_err(|e| e.to_string())?;
+        let spec = current.spec().map_err(|e| e.to_string())?;
+        if installed.id != old.id
+            || installed.source.rsplit_once('@').map(|(s, _)| s) != Some(spec)
+            || !super::install::is_removable(&installed.root)
+            || installed.root == old.root
+        {
+            return Err("invalid module replacement".into());
+        }
+        let root = installed.root.canonicalize().map_err(|e| e.to_string())?;
+        if root == old.root {
+            return Err("replacement must use a separate checkout".into());
+        }
+        let manifest = ModuleManifest::load(&root)?;
+        if manifest.id != old.id {
+            return Err("updated manifest changed module id".into());
+        }
+        old.root = root;
+        old.source = Some(installed.source.clone());
+        old.git_ref = installed.git_ref.clone();
+        old.manifest = manifest;
+        old.warning = None;
+        Ok(())
+    }
+
     /// Re-read each manifest from disk: valid → refresh cached fields (keeping
     /// the stored `enabled`/`source`); missing/broken → keep the entry with a
     /// warning so it shows in `list` but won't run.
@@ -125,4 +168,18 @@ pub fn save(reg: &ModuleRegistry) {
             let _ = fs::rename(&tmp, &path);
         }
     }
+}
+
+/// Updates must not report success or swap runtime state if persistence fails.
+pub fn save_checked(reg: &ModuleRegistry) -> anyhow::Result<()> {
+    fs::create_dir_all(crate::persist::config_dir())?;
+    let json = serde_json::to_string_pretty(reg)?;
+    let path = paths::registry_path();
+    let tmp = path.with_extension("json.tmp");
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(json.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&tmp, &path)?;
+    Ok(())
 }

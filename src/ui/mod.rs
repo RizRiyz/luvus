@@ -85,7 +85,7 @@ mod session_menu;
 mod settings;
 pub(crate) mod sidebar;
 pub(crate) mod workspace_row;
-pub(crate) use sidebar::SIDEBAR_CHROME_ROWS;
+pub(crate) use sidebar::{DOCK_HEADER_ROWS, SIDEBAR_CHROME_ROWS};
 mod status;
 pub(crate) mod switcher;
 mod tabbar;
@@ -563,6 +563,7 @@ pub(crate) fn retained_pty_eligible(app: &App) -> bool {
         && app.copy_mode.is_none()
         && app.hover_link.is_none()
         && app.search_flash.is_none()
+        && app.pane_search.is_none()
         && app.settings.is_none()
         && app.commander.is_none()
         && app.picker.is_none()
@@ -779,9 +780,13 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     };
     // Only frame panes when the tab is split; a lone pane needs no border.
     let bordered = rects.len() > 1;
+    // Title visibility is shared by lone and split panes. A zoomed split keeps
+    // its one-row header even when titles are hidden so the mouse/touch restore
+    // control remains available.
+    let lone_header = !bordered && !app.compact && (app.config.layout.show_titles || app.zoomed);
     if resize_panes {
         for (id, rect) in &rects {
-            let Some(content) = pane_content(*rect, bordered, app.compact) else {
+            let Some(content) = pane_content(*rect, bordered, app.compact, lone_header) else {
                 continue;
             };
             let resized = app
@@ -793,6 +798,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
             // geometry) repaints the agent; note it so detection freezes briefly
             // and a reflowed spinner can't flip the pane to "working" (docs/07).
             if resized {
+                if let Some(search) = app.pane_search.as_mut().filter(|search| search.pane == *id) {
+                    search.invalidate_matches();
+                }
                 if let Some(s) = app.status.get_mut(id) {
                     s.last_resize = Some(std::time::Instant::now());
                     s.force_detect = true;
@@ -934,13 +942,14 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         let preview_rects: Vec<(PaneId, Rect)> = rects
             .iter()
             .filter_map(|(id, rect)| {
-                pane_content(*rect, bordered, app.compact).map(|content| (*id, content))
+                pane_content(*rect, bordered, app.compact, lone_header)
+                    .map(|content| (*id, content))
             })
             .collect();
         if resize_panes {
             app.ensure_preview_layouts(&preview_rects);
         }
-        let cursor = panes::draw_panes(f, &rects, bordered, app, &t);
+        let cursor = panes::draw_panes(f, &rects, bordered, lone_header, app, &t);
         // Draw all pane borders in one overlay pass (manual cell-by-cell), then
         // the dot+path+close titles ON each top border row.
         if bordered {
@@ -980,7 +989,9 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
         } else {
             rects
                 .iter()
-                .filter_map(|(id, r)| pane_content(*r, bordered, app.compact).map(|c| (*id, c)))
+                .filter_map(|(id, r)| {
+                    pane_content(*r, bordered, app.compact, lone_header).map(|c| (*id, c))
+                })
                 .collect()
         };
     status::draw_status(f, status, app, &t);
@@ -1426,8 +1437,18 @@ fn draw_commander(
             );
         }
     }
+    // An armed confirmation prompt (kept in `receipt`) always owns this line.
+    // Otherwise results that finished while a prompt was showing come first,
+    // so they are seen even when an older message is still in `receipt`.
+    let held = if commander.confirming() {
+        None
+    } else {
+        commander.held_summary()
+    };
     let footer = if let Some(result) = commander.delivery_results.get(commander.delivery_index) {
         result
+    } else if let Some(held) = held.as_deref() {
+        held
     } else if let Some(receipt) = commander.receipt.as_deref() {
         receipt
     } else if commander.guided_orch.is_some() {
@@ -1456,6 +1477,7 @@ fn draw_commander(
     }
     if commander.focused && app.commander_accepts_input() {
         draw_commander_slash_preview(f, rect, app.last_pane_area.y, commander, cat, t);
+        draw_commander_module_preview(f, rect, app.last_pane_area.y, commander, cat, t);
     }
     Some((
         inner.x + (2 + cursor_column).min(inner.width.saturating_sub(1) as usize) as u16,
@@ -1537,6 +1559,104 @@ fn draw_commander_slash_preview(
         } else {
             format!("{} {}", spec.name, spec.usage)
         };
+        let position = format!("{}/{}", selected + 1, matches.len());
+        let position_width = position.len() as u16;
+        let usage_width = popup.width.saturating_sub(position_width + 4);
+        f.render_widget(
+            Paragraph::new(truncate(&usage, usage_width as usize))
+                .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(popup.x + 1, popup.bottom() - 2, usage_width, 1),
+        );
+        f.render_widget(
+            Paragraph::new(position).style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(
+                popup.right() - position_width - 1,
+                popup.bottom() - 2,
+                position_width,
+                1,
+            ),
+        );
+    }
+}
+
+fn draw_commander_module_preview(
+    f: &mut RenderTarget,
+    strip: Rect,
+    pane_top: u16,
+    commander: &crate::commander::Commander,
+    cat: &crate::i18n::Catalog,
+    t: &Theme,
+) {
+    let Some((matches, selected)) = commander.module_menu() else {
+        return;
+    };
+    let Some((popup, visible)) =
+        crate::commander::slash_popup_layout(strip, pane_top, matches.len())
+    else {
+        return;
+    };
+    f.render_widget(
+        Block::bordered()
+            .border_type(BorderType::Plain)
+            .title(Span::styled(
+                format!(" {} ", cat.commander_slash_title),
+                Style::new().fg(t.accent).bold(),
+            ))
+            .border_style(Style::new().fg(t.border_focus))
+            .style(Style::new().bg(t.mantle).fg(t.text)),
+        popup,
+    );
+    let first = crate::commander::slash_window_start(selected, matches.len(), visible);
+    for (row, entry) in matches.iter().skip(first).take(visible).enumerate() {
+        let active = first + row == selected;
+        let line = format!(
+            "{} {} · {} · {}",
+            if active { "›" } else { " " },
+            entry.command,
+            entry.spec.title,
+            entry.spec.module_name
+        );
+        f.render_widget(
+            Paragraph::new(truncate(&line, popup.width.saturating_sub(4) as usize)).style(
+                Style::new()
+                    .bg(if active { t.surface0 } else { t.mantle })
+                    .fg(if active { t.accent } else { t.text }),
+            ),
+            Rect::new(popup.x + 1, popup.y + 1 + row as u16, popup.width - 2, 1),
+        );
+    }
+    if first > 0 {
+        f.render_widget(
+            Paragraph::new("↑").style(Style::new().bg(t.mantle).fg(t.accent)),
+            Rect::new(popup.right() - 2, popup.y + 1, 1, 1),
+        );
+    }
+    if first + visible < matches.len() {
+        f.render_widget(
+            Paragraph::new("↓").style(Style::new().bg(t.mantle).fg(t.accent)),
+            Rect::new(popup.right() - 2, popup.y + visible as u16, 1, 1),
+        );
+    }
+    if matches.is_empty() {
+        f.render_widget(
+            Paragraph::new(cat.commander_slash_no_match)
+                .style(Style::new().bg(t.mantle).fg(t.overlay1)),
+            Rect::new(popup.x + 1, popup.y + 1, popup.width - 2, 1),
+        );
+    }
+    if let Some(entry) = matches.get(selected) {
+        let target = match entry.spec.target {
+            crate::module::manifest::CommanderTarget::None => "",
+            crate::module::manifest::CommanderTarget::Pane => " @pane",
+            crate::module::manifest::CommanderTarget::Agent => " @agent-pane",
+            crate::module::manifest::CommanderTarget::Tab => " @tab:name",
+            crate::module::manifest::CommanderTarget::Workspace => " @workspace:name",
+        };
+        let input = match entry.spec.input {
+            crate::module::manifest::CommanderInput::None => "",
+            crate::module::manifest::CommanderInput::Text => " [text]",
+        };
+        let usage = format!("{}{}{}", entry.command, target, input);
         let position = format!("{}/{}", selected + 1, matches.len());
         let position_width = position.len() as u16;
         let usage_width = popup.width.saturating_sub(position_width + 4);
@@ -1824,6 +1944,31 @@ pub(crate) fn format_utc(seconds: u64) -> String {
         .unwrap_or_else(|| seconds.to_string())
 }
 
+pub(crate) fn local_search_footer<M>(search: &crate::search::local::LocalSearch<M>) -> String {
+    let case = if search.case_sensitive { " · Aa" } else { "" };
+    let position = if search.editing {
+        String::new()
+    } else if search.matches.is_empty() {
+        " · 0/0".to_string()
+    } else {
+        format!(
+            " · {}/{}{}",
+            search.current + 1,
+            search.matches.len(),
+            if search.truncated { "+" } else { "" }
+        )
+    };
+    let navigation = if !search.editing && !search.matches.is_empty() {
+        " · n/N match"
+    } else {
+        ""
+    };
+    format!(
+        " SEARCH  /{}{}{}{} · Ctrl-U clear · Ctrl-I case · Esc cancel",
+        search.query, position, case, navigation
+    )
+}
+
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -1892,10 +2037,10 @@ pub(super) fn lone_pad(width: u16) -> u16 {
     }
 }
 
-/// The terminal content area: inside the box when bordered (the dot+path+close
-/// live on the top border row as a title), else just below the header row with a
-/// small horizontal pad so it aligns with the tab bar.
-fn pane_content(rect: Rect, bordered: bool, mobile: bool) -> Option<Rect> {
+/// The terminal content area: inside the box when bordered (the title lives on
+/// the top border row), otherwise optionally below the lone-pane header. The
+/// horizontal pad keeps desktop content aligned with the tab bar.
+fn pane_content(rect: Rect, bordered: bool, mobile: bool, lone_header: bool) -> Option<Rect> {
     if bordered {
         return pane_inner(rect, true);
     }
@@ -1903,11 +2048,12 @@ fn pane_content(rect: Rect, bordered: bool, mobile: bool) -> Option<Rect> {
         return (rect.width > 0 && rect.height > 0).then_some(rect);
     }
     let pad = lone_pad(rect.width);
+    let header_height = u16::from(lone_header);
     let c = Rect::new(
         rect.x + pad,
-        rect.y + 1,
+        rect.y + header_height,
         rect.width.saturating_sub(2 * pad),
-        rect.height.saturating_sub(1),
+        rect.height.saturating_sub(header_height),
     );
     if c.width < 1 || c.height < 1 {
         return None;
@@ -1957,18 +2103,65 @@ pub(crate) fn short_path(p: &Path, max: u16) -> String {
         }
     }
     let max = max as usize;
-    if s.chars().count() > max && max > 1 {
-        let tail: String = s
-            .chars()
-            .rev()
-            .take(max - 1)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        format!("…{tail}")
-    } else {
-        s
+    if display_width(&s) <= max {
+        return s;
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_string();
+    }
+
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut used = 0;
+    let mut tail_start = s.len();
+    for grapheme in s.graphemes(true).rev() {
+        let width = display_width(grapheme);
+        if used + width > max - 1 {
+            break;
+        }
+        used += width;
+        tail_start -= grapheme.len();
+    }
+
+    while tail_start < s.len() {
+        let grapheme = s[tail_start..]
+            .graphemes(true)
+            .next()
+            .expect("tail starts at a grapheme boundary");
+        if display_width(grapheme) > 0 {
+            break;
+        }
+        tail_start += grapheme.len();
+    }
+    format!("…{}", &s[tail_start..])
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn short_path_keeps_a_wide_paths_tail_within_its_column_budget() {
+        let shortened = short_path(Path::new("界界/important-project"), 20);
+        assert!(display_width(&shortened) <= 20);
+        assert!(shortened.ends_with("important-project"));
+    }
+
+    #[test]
+    fn short_path_keeps_joined_emoji_intact() {
+        let family = "👨‍👩‍👧";
+        let shortened = short_path(Path::new(&format!("/tmp/very-long-workspace/{family}")), 6);
+        assert!(display_width(&shortened) <= 6);
+        assert!(shortened.ends_with(family));
+    }
+
+    #[test]
+    fn short_path_honors_zero_and_one_column_budgets() {
+        let path = Path::new("long/path");
+        assert_eq!(short_path(path, 0), "");
+        assert_eq!(short_path(path, 1), "…");
     }
 }
 
@@ -1980,6 +2173,41 @@ mod retained_render_tests {
 
     use crate::terminal::appearance::PaneAppearance;
     use crate::terminal::vt::{create_engine, VtEngineKind};
+
+    #[test]
+    fn successful_terminal_resize_invalidates_committed_search_coordinates() {
+        let _env = crate::persist::test_env("pane-search-resize-invalidation");
+        let (app_tx, _app_rx) = mpsc::channel();
+        let mut app = App::new(100, 30, app_tx).expect("app starts");
+        let focus = app.layout().focus;
+        app.pane_search = Some(crate::app::PaneSearch {
+            pane: focus,
+            owner: crate::app::PaneSearchOwner::Scroll,
+            local: crate::search::local::LocalSearch {
+                query: "needle".into(),
+                editing: false,
+                case_sensitive: false,
+                matches: vec![crate::app::PaneSearchMatch {
+                    row: 0,
+                    col: 12,
+                    width: 6,
+                }],
+                current: 0,
+                truncated: false,
+            },
+            saved_scroll: 0,
+        });
+        let area = Rect::new(0, 0, 54, 16);
+        let mut buffer = Buffer::empty(area);
+        let mut target = RenderTarget::new(&mut buffer, area);
+
+        render_into(&mut target, &mut app);
+
+        let search = &app.pane_search.as_ref().expect("search retained").local;
+        assert!(search.editing, "resize makes old row coordinates unsafe");
+        assert_eq!(search.query, "needle");
+        assert!(search.matches.is_empty());
+    }
 
     #[test]
     fn damaged_rows_match_a_forced_full_projection() {
@@ -2423,7 +2651,9 @@ mod dock_projection_tests {
         let slot = projection
             .shell_dock
             .expect("machine-aware client owns the right Workspaces dock");
-        assert_eq!(slot.height, 37);
+        let expected_height = area.height - 1 - SIDEBAR_CHROME_ROWS;
+        assert_eq!(slot.y, area.y + SIDEBAR_CHROME_ROWS);
+        assert_eq!(slot.height, expected_height);
         assert!(slot.x > area.width / 2);
         assert_eq!(app.panes[&pane].size(), pty_size);
         assert!(app.client_shell_dock_rect.is_none());
@@ -2437,7 +2667,7 @@ mod dock_projection_tests {
                 .shell_dock
                 .expect("hidden paths retain the client-owned Workspaces dock")
                 .height,
-            37
+            expected_height
         );
 
         let mut remote = Buffer::empty(area);
@@ -2446,7 +2676,7 @@ mod dock_projection_tests {
         let dock = projection
             .shell_dock
             .expect("projection keeps the complete client-owned dock");
-        assert_eq!(dock.height, 37);
+        assert_eq!(dock.height, expected_height);
         assert_eq!(remote[(dock.x + 2, dock.y)].symbol(), " ");
         assert_eq!(app.panes[&pane].size(), pty_size);
     }

@@ -39,8 +39,11 @@ Protocol v1 capabilities are:
 - `inventory`, `validate`, `capture`, `observe`, and `control_stream`
 - `type_literal`, `paste_text`, `paste_image`, `submit_text`, `send_key`, and
   bounded `upload_*` control-stream actions
+- `set_viewport`, a control-stream action that sizes a terminal while no native
+  client is rendering
 - `set_title` and `notify_terminal`
-- `create_workspace`, `create_sibling`, and `close`
+- `create_workspace`, `create_sibling`, and `close`, with an optional
+  per-terminal restart policy advertised by `create_restore_policy`
 - `snapshot`, `events`, `wait_change`, and `wait_output`
 - privacy-preserving cached `process_inspection`, returning executable names
   rather than full argument vectors that may contain secrets
@@ -50,11 +53,24 @@ Every control-stream action is advertised by its exact action name in
 must not infer image or file-upload support from `control_stream`, the protocol
 version, or the Luvus release version. In particular, an older server without
 `paste_image`, `upload_start`, `upload_chunk`, `upload_finish`, or
-`upload_cancel` does not support that action.
+`upload_cancel` does not support that action. The same rule applies to
+`set_viewport`.
+
+When `terminal.features` includes `create_restore_policy`,
+`terminal.backend.create` accepts optional `restore:false`. The terminal stays
+fully live until it exits, is closed, or the server stops, but Luvus omits it
+from the next restored layout. This lets an external manager remain the sole
+owner of restarting that process. Omitted `restore` defaults to `true`. When a
+create request includes `restore`, its response echoes the effective policy.
+Inventory entries always report it for reconciliation. Requests that omit the
+field retain the original strict create-response shape.
 
 The bounded `send_key` vocabulary includes `ctrl-w` and `alt-d` for backward
 and forward word deletion plus `ctrl-u` and `ctrl-k` for deletion toward the
-start and end of the current line.
+start and end of the current line. It also carries the common shell and agent
+controls `ctrl-a`, `ctrl-b`, `ctrl-e`, `ctrl-f`, `ctrl-g`, `ctrl-l`, `ctrl-n`,
+`ctrl-o`, `ctrl-p`, `ctrl-r`, `ctrl-t`, and `ctrl-y`. Job-control and
+flow-control keys such as `ctrl-z`, `ctrl-s`, and `ctrl-q` remain excluded.
 
 Protocol 1.0 capture includes a monotonic `content_revision` and provides a
 sequence-fenced snapshot, bounded terminal-only event streams, and event-driven
@@ -84,7 +100,13 @@ up to 160 KiB. General files use `upload_start`, ordered `upload_chunk` frames,
 and `upload_finish` or `upload_cancel`; one control stream owns at most one
 incomplete upload, each chunk is at most 160 KiB, and a file is at most 32 MiB.
 Luvus stages bytes in private selected-session storage and pastes only the
-completed server-owned path. Only one API control stream may lease a terminal
+completed server-owned path. `set_viewport` takes `{cols, rows}` within the
+advertised `viewport_cols` and `viewport_rows` limits and resizes the terminal
+only while no native client is rendering; otherwise it is rejected with
+`unavailable` and nothing changes. A native client that attaches later lays the
+pane out again, so native geometry authority is unchanged. A successful resize
+publishes a new content revision, so the stream sends a frame at the new size
+even when the child stays quiet. Only one API control stream may lease a terminal
 at a time. There are at most eight combined observe/control streams per server.
 Overflow requires a fresh capture and reconnect.
 

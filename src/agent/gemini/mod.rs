@@ -34,6 +34,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
             recent: sessions::recent,
             latest: sessions::latest,
             list: Some(sessions::list),
+            titled: None,
         }),
         resume: |session| format!("gemini --resume {session}\r"),
         fork: None,

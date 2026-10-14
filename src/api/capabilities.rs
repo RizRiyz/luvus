@@ -150,6 +150,7 @@ pub const METHODS: &[&str] = &[
     "module.list",
     "module.info",
     "module.link",
+    "module.update",
     "module.unlink",
     "module.uninstall",
     "module.enable",
@@ -429,7 +430,7 @@ pub fn capabilities(event_sequence: u64) -> Value {
         },
         "authorization":{"default":"local_owner","delegation":"scoped_ephemeral_token",
             "scopes":["read","workspace","agent","terminal","orchestration","extensions","admin","all"]},
-        "concurrency":{"mutation_guard":"if_revision"},
+        "concurrency":{"mutation_guard":"if_revision","agent_prompt_terminal_id":true},
         "atomic_methods":["agent.start","agent.prompt","automation.create","automation.rebind","automation.run","task.retry","workspace.move_block","layout.apply","diff.note.apply"],
         "idempotency_keys":{"methods":["automation.create","automation.run"],"max_bytes":128},
         "graphics":false,
@@ -471,6 +472,10 @@ mod tests {
                 && contract["idempotent"].is_boolean()
         }));
         let capabilities = capabilities(0);
+        assert_eq!(
+            capabilities["concurrency"]["agent_prompt_terminal_id"],
+            true
+        );
         assert_eq!(capabilities["limits"]["terminal_stream_capacity"], 8);
         assert_eq!(capabilities["limits"]["terminal_stream_queue"], 2);
         assert_eq!(
@@ -486,7 +491,7 @@ mod tests {
         assert_eq!(capabilities["limits"]["agent_row_title_agent_bytes"], 64);
         assert_eq!(
             capabilities["terminal"]["features"],
-            json!(["stream_cursor"])
+            json!(["stream_cursor", "create_restore_policy"])
         );
         let terminal_capabilities = capabilities["terminal"]["capabilities"]
             .as_array()
@@ -497,6 +502,7 @@ mod tests {
             "upload_chunk",
             "upload_finish",
             "upload_cancel",
+            "set_viewport",
         ] {
             assert!(
                 terminal_capabilities.iter().any(|value| value == action),

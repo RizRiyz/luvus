@@ -37,6 +37,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
             recent: sessions::recent,
             latest: sessions::latest,
             list: None,
+            titled: None,
         }),
         resume: |session| format!("grok --resume {session}\r"),
         fork: Some(|session| format!("grok --resume {session} --fork-session\r")),

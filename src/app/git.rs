@@ -291,6 +291,10 @@ impl App {
 
     /// Key handling while the PR detail panel is open.
     fn handle_pr_detail_key(&mut self, key: KeyEvent) {
+        // Refresh, browser opens, checkout, and approve are one-shot actions.
+        if super::is_key_repeat(&key) && matches!(key.code, KeyCode::Char('r' | 'o' | 'c' | 'a')) {
+            return;
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_pr_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
@@ -360,6 +364,9 @@ impl App {
     /// Keys while the commit detail is open: `esc`/`q` back, `j`/`k` scroll,
     /// `o` open the commit on GitHub.
     fn handle_commit_detail_key(&mut self, key: KeyEvent) {
+        if super::is_key_repeat(&key) && key.code == KeyCode::Char('o') {
+            return; // one browser tab per press
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_commit_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
@@ -599,6 +606,9 @@ impl App {
 
     /// Keys while the issue detail is open: `esc`/`q` back, `j`/`k` scroll, `o` web.
     fn handle_issue_detail_key(&mut self, key: KeyEvent) {
+        if super::is_key_repeat(&key) && key.code == KeyCode::Char('o') {
+            return; // one browser tab per press
+        }
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.git_close_issue_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.git_scroll(1),
@@ -778,6 +788,18 @@ impl App {
         // The issue detail view captures keys while open (docs/17).
         if self.active_git().is_some_and(|g| g.open_issue.is_some()) {
             self.handle_issue_detail_key(key);
+            return;
+        }
+        // Section switches refetch, and the rest toggle state, open a browser,
+        // or run a command without leaving this tab.
+        if super::is_key_repeat(&key)
+            && matches!(
+                key.code,
+                KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Char('1'..='6' | 'r' | 'o' | 'd' | 'm' | 'x' | 'E' | 's' | 'c')
+            )
+        {
             return;
         }
         match key.code {
@@ -1742,6 +1764,70 @@ mod tests {
             !s.contains("email"),
             "the footer must not mention the email toggle:\n{s}"
         );
+    }
+
+    /// A held key belongs to the dashboard tab that received its Press. An API
+    /// or another client can switch to a different workspace's Git tab without
+    /// any key transition; the held key must not scroll that other tab.
+    #[test]
+    fn a_held_key_stays_with_its_git_tab_across_workspace_switches() {
+        use crate::event::AppEvent;
+        use crate::git::model::{FileChange, RepoStatus};
+        use ratatui::crossterm::event::KeyEventKind;
+
+        let _env = crate::persist::test_env("git-repeat-tab-instance");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(40, 12, tx).unwrap();
+        app.create_workspace_at(std::env::temp_dir().join("luvus-git-repeat-other"));
+        for workspace in 0..2 {
+            let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
+            view.status = Load::Loaded(RepoStatus {
+                unstaged: (0..20)
+                    .map(|i| FileChange {
+                        code: 'M',
+                        path: format!("f{i}.rs"),
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+            view.section = Section::Status;
+            app.workspaces[workspace].tabs.push(Tab {
+                id: crate::ids::public_id("tab"),
+                layout: TileLayout::new(PaneId::alloc()),
+                git: Some(Box::new(view)),
+                orch: false,
+                mission: false,
+                name: None,
+            });
+            app.workspaces[workspace].active_tab = app.workspaces[workspace].tabs.len() - 1;
+        }
+        let scroll = |app: &App, workspace: usize| {
+            let tab = app.workspaces[workspace].active_tab;
+            app.workspaces[workspace].tabs[tab]
+                .git
+                .as_ref()
+                .unwrap()
+                .scroll
+        };
+        let j = |kind| {
+            AppEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                kind,
+            ))
+        };
+
+        app.active_ws = 0;
+        app.handle_event(j(KeyEventKind::Press));
+        app.handle_event(j(KeyEventKind::Repeat));
+        assert_eq!(scroll(&app, 0), 2, "the held key repeats in its own tab");
+
+        // Focus moves without any key transition, as an API call or another
+        // client would move it.
+        app.active_ws = 1;
+        app.handle_event(j(KeyEventKind::Repeat));
+        assert_eq!(scroll(&app, 1), 0, "it never scrolls the other Git tab");
+        assert_eq!(scroll(&app, 0), 2);
     }
 
     #[test]

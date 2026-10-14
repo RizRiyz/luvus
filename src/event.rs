@@ -39,8 +39,12 @@ pub enum AppEvent {
     Resize,
     /// The given pane produced output; the screen changed.
     PtyData(PaneId),
-    /// The given pane's child process exited.
+    /// Deferred PTY spawn failed before a child result was available.
     PtyExit(PaneId),
+    /// The PTY reader finished draining output (which can precede reaping).
+    PtyIoClosed(PaneId),
+    /// The child was reaped; its process status is independent of PTY EOF.
+    PtyReaped(PaneId, PtyExitStatus),
     /// Coalesced overload notification for all input sources, including replies.
     PtyInputRejected(PaneId),
     /// A deferred pane finished opening its PTY and now owns a root process and
@@ -62,6 +66,13 @@ pub enum AppEvent {
         commit: crate::terminal::backend::CreateCommit,
         result: Result<crate::terminal::pty::Pane, String>,
     },
+    /// Just before the background worker spawns a PTY, ask the app owner to
+    /// check the current deletion set and sibling destination.
+    BackendCreatePreflight {
+        cwd: std::path::PathBuf,
+        placement: crate::terminal::backend::CreatePlacement,
+        reply: Sender<Result<(), crate::terminal::backend::BackendError>>,
+    },
     /// Resolve and validate an opt-in ANSI stream target on the single-writer
     /// app loop. Only cloneable read handles leave the loop; capture and socket
     /// writes happen on the requesting API worker.
@@ -70,6 +81,13 @@ pub enum AppEvent {
         reply: Sender<
             Result<crate::terminal::backend::ObserveTarget, crate::terminal::backend::BackendError>,
         >,
+    },
+    /// Size one terminal for an API control stream. The server loop answers it
+    /// with its client set in hand, so native render clients keep geometry
+    /// authority; a local single-process UI always refuses.
+    BackendViewport {
+        params: serde_json::Value,
+        reply: Sender<Result<serde_json::Value, crate::terminal::backend::BackendError>>,
     },
     /// A binary client attached (server mode); `messages` feeds its socket writer.
     ClientConnected {
@@ -313,7 +331,7 @@ pub enum AppEvent {
     /// tokens/context/cost keyed by agent + session id, read off-loop from native
     /// agent stores, plus each ledger's mtime so unchanged sessions stay cached.
     UsageScanned {
-        scope: crate::mission::MissionScope,
+        request: crate::mission::MissionUsageRequest,
         scanned: Vec<crate::mission::UsageKey>,
         usage: std::collections::HashMap<crate::mission::UsageKey, crate::mission::AgentUsage>,
         mtimes: std::collections::HashMap<crate::mission::UsageKey, std::time::SystemTime>,
@@ -331,6 +349,8 @@ pub enum AppEvent {
     /// at Review with the captured output.
     TaskGateFinished {
         task: String,
+        generation: u64,
+        attempt: u32,
         code: Option<i32>,
         out: String,
     },
@@ -429,4 +449,83 @@ pub enum AppEvent {
     /// Windows has no POSIX signals; the detached server stops via `server stop`.
     #[cfg_attr(not(unix), allow(dead_code))]
     Shutdown,
+}
+
+/// Portable process result retained across the PTY reader/reaper race.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PtyExitStatus {
+    pub exit_code: Option<u32>,
+    pub signal: Option<String>,
+}
+
+impl From<portable_pty::ExitStatus> for PtyExitStatus {
+    fn from(status: portable_pty::ExitStatus) -> Self {
+        let signal = status.signal().map(canonical_signal);
+        Self {
+            exit_code: signal.is_none().then(|| status.exit_code()),
+            signal,
+        }
+    }
+}
+
+fn canonical_signal(signal: &str) -> String {
+    // portable-pty exposes strsignal text rather than the signal number. Match
+    // that same platform text to stable names without guessing from an English
+    // phrase (which may be localized or differ by Unix flavor).
+    #[cfg(unix)]
+    for (name, number) in [
+        ("SIGHUP", libc::SIGHUP),
+        ("SIGINT", libc::SIGINT),
+        ("SIGQUIT", libc::SIGQUIT),
+        ("SIGILL", libc::SIGILL),
+        ("SIGTRAP", libc::SIGTRAP),
+        ("SIGABRT", libc::SIGABRT),
+        ("SIGBUS", libc::SIGBUS),
+        ("SIGFPE", libc::SIGFPE),
+        ("SIGKILL", libc::SIGKILL),
+        ("SIGUSR1", libc::SIGUSR1),
+        ("SIGSEGV", libc::SIGSEGV),
+        ("SIGUSR2", libc::SIGUSR2),
+        ("SIGPIPE", libc::SIGPIPE),
+        ("SIGALRM", libc::SIGALRM),
+        ("SIGTERM", libc::SIGTERM),
+        ("SIGCHLD", libc::SIGCHLD),
+        ("SIGCONT", libc::SIGCONT),
+        ("SIGSTOP", libc::SIGSTOP),
+        ("SIGTSTP", libc::SIGTSTP),
+        ("SIGTTIN", libc::SIGTTIN),
+        ("SIGTTOU", libc::SIGTTOU),
+        ("SIGXCPU", libc::SIGXCPU),
+        ("SIGXFSZ", libc::SIGXFSZ),
+    ] {
+        // SAFETY: strsignal returns either a null pointer or a NUL-terminated
+        // string for a valid platform signal constant. Read it immediately.
+        let description = unsafe { libc::strsignal(number) };
+        if !description.is_null()
+            && unsafe { std::ffi::CStr::from_ptr(description) }.to_bytes() == signal.as_bytes()
+        {
+            return name.to_owned();
+        }
+    }
+    signal.to_owned()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::PtyExitStatus;
+
+    #[test]
+    fn resource_limit_signals_use_stable_names() {
+        for (number, name) in [(libc::SIGXCPU, "SIGXCPU"), (libc::SIGXFSZ, "SIGXFSZ")] {
+            // SAFETY: these are valid signal constants and strsignal returns
+            // a NUL-terminated description, copied by with_signal below.
+            let description = unsafe { libc::strsignal(number) };
+            assert!(!description.is_null());
+            let raw = unsafe { std::ffi::CStr::from_ptr(description) }
+                .to_str()
+                .unwrap();
+            let status = portable_pty::ExitStatus::with_signal(raw);
+            assert_eq!(PtyExitStatus::from(status).signal.as_deref(), Some(name));
+        }
+    }
 }

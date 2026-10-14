@@ -259,6 +259,32 @@ and FreeBSD display clients need `wl-paste` or `xclip`; the remote host does not
 The global finder searches the selected remote Luvus home. It does not mix
 local workspaces or sessions into remote results.
 
+### Terminal colors over SSH
+
+Luvus preserves RGB colors on modern color-terminal connections, including
+`TERM=xterm-256color` when SSH does not forward `COLORTERM`. Color depth belongs
+to each display client, not the shared server or a command inside a pane.
+This is a compatibility policy, not an active terminal capability query.
+
+Known limited terminals and native Apple Terminal retain the conservative
+fallback unless explicitly opted into RGB. For other genuinely 256-color
+terminals, force that fallback on the **client attachment**:
+
+```sh
+COLORTERM=256color luvus --remote devbox
+```
+
+To explicitly request RGB on a compatible terminal:
+
+```sh
+COLORTERM=truecolor luvus --remote devbox
+
+# If you already opened an SSH shell, set it where the client runs:
+COLORTERM=truecolor luvus
+```
+
+Detach and reattach to change this choice; no server restart is needed.
+
 ## Connect from a phone or tablet
 
 A phone does not need a native Luvus installation when it already has an SSH

@@ -65,32 +65,55 @@ impl App {
     }
 
     pub(super) fn api_pane_list(&mut self, method: &str, p: &Value) -> DispatchResult {
-        let _ = (method, p);
+        let _ = method;
         {
-            let focus = self.layout().focus;
-            let panes: Vec<Value> = self
-                .layout()
-                .leaves()
-                .iter()
-                .map(|id| {
-                    let (agent, status) = self
-                        .status
-                        .get(id)
-                        .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
-                        .unwrap_or_else(|| (String::new(), "unknown".to_string()));
-                    let cwd = self
-                        .panes
-                        .get(id)
-                        .map(|p| p.cwd.display().to_string())
-                        .unwrap_or_default();
-                    let history = self.panes.get(id).map(|p| p.history_metrics());
-                    let module = self
-                        .module_panes
-                        .get(id)
-                        .map(|r| json!({"id": r.module_id, "entrypoint": r.entrypoint}));
-                    json!({
+            reject_api_fields(p, &["all_tabs"])?;
+            let all_tabs = match p.get("all_tabs") {
+                None => true,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "all_tabs must be a boolean".to_string(),
+                    ))
+                }
+            };
+            let mut panes = Vec::new();
+            for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
+                if !all_tabs && workspace_index != self.active_ws {
+                    continue;
+                }
+                for (tab_index, tab) in workspace.tabs.iter().enumerate() {
+                    if !all_tabs && tab_index != workspace.active_tab {
+                        continue;
+                    }
+                    // Dashboard layouts contain placeholder IDs, not live panes.
+                    if tab.is_git() || tab.is_orch() || tab.is_mission() {
+                        continue;
+                    }
+                    for id in tab.layout.leaves() {
+                        let (agent, status) = self
+                            .status
+                            .get(&id)
+                            .map(|s| (s.agent.clone(), state_str(s.state).to_string()))
+                            .unwrap_or_else(|| (String::new(), "unknown".to_string()));
+                        let cwd = self
+                            .panes
+                            .get(&id)
+                            .map(|p| p.cwd.display().to_string())
+                            .unwrap_or_default();
+                        let history = self.panes.get(&id).map(|p| p.history_metrics());
+                        let module = self
+                            .module_panes
+                            .get(&id)
+                            .map(|r| json!({"id": r.module_id, "entrypoint": r.entrypoint}));
+                        panes.push(json!({
                         "pane": id.0.to_string(), "agent": agent, "status": status,
-                        "focused": *id == focus, "cwd": cwd, "module": module,
+                        "workspace": workspace_index.to_string(), "workspace_id": workspace.id,
+                        "tab": (tab_index + 1).to_string(), "tab_id": tab.id,
+                        "focused": workspace_index == self.active_ws
+                            && tab_index == workspace.active_tab && id == tab.layout.focus,
+                        "cwd": cwd, "module": module,
                         "scroll_offset": history.map(|m| m.offset).unwrap_or(0),
                         "history_rows": history.map(|m| m.retained_rows).unwrap_or(0),
                         "history_budget_bytes": history.map(|m| m.budget_bytes).unwrap_or(0),
@@ -107,9 +130,10 @@ impl App {
                         "history_allocation_count": history.and_then(|m| m.allocation_count),
                         "history_exact": history.map(|m| m.exact_bytes).unwrap_or(false),
                         "history_bytes_kind": if history.is_some_and(|m| m.exact_bytes) { "exact" } else { "estimated" },
-                    })
-                })
-                .collect();
+                    }));
+                    }
+                }
+            }
             Ok(json!({
                 "type":"pane_list",
                 "panes":panes,
@@ -130,6 +154,27 @@ impl App {
     pub(super) fn api_pane_split(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
+            let cwd = match p.get("cwd") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    let invalid =
+                        |message: &str| ("invalid_request".to_string(), message.to_string());
+                    let cwd = value
+                        .as_str()
+                        .filter(|cwd| !cwd.is_empty() && cwd.len() <= 4096)
+                        .ok_or_else(|| {
+                            invalid("cwd must be a non-empty path of at most 4096 bytes")
+                        })?;
+                    let path = Path::new(cwd);
+                    if !path.is_absolute() {
+                        return Err(invalid("cwd must be absolute"));
+                    }
+                    if !path.is_dir() {
+                        return Err(invalid("cwd must be an existing directory"));
+                    }
+                    Some(path.to_path_buf())
+                }
+            };
             if self.workspaces.is_empty() && !self.ensure_workspace_for_terminal() {
                 return Err((
                     "spawn_failed".to_string(),
@@ -161,7 +206,9 @@ impl App {
                 }
             };
             let focus = p.get("focus").and_then(|v| v.as_bool()) != Some(false);
-            let new = self.split_pane(base, axis, focus).ok_or_else(not_found)?;
+            let new = self
+                .split_pane_in(base, axis, focus, cwd)
+                .ok_or_else(not_found)?;
             let (workspace, tab) = self.pane_location(new).ok_or_else(not_found)?;
             Ok(json!({
                 "type":"pane",
@@ -272,8 +319,8 @@ impl App {
         }
     }
 
-    // A **global** single-pane status lookup (any workspace) — `pane.list` is
-    // scoped to the active workspace, so `luvus wait agent-status` polls this.
+    // A **global** single-pane status lookup (any workspace). `luvus wait
+    // agent-status` polls this instead of fetching every pane with `pane.list`.
     pub(super) fn api_pane_status(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
@@ -327,8 +374,18 @@ impl App {
     pub(super) fn api_pane_report_session(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
         {
-            reject_api_fields(p, &["pane", "agent", "session_id", "usage"])?;
-            let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
+            reject_api_fields(
+                p,
+                &[
+                    "pane",
+                    "agent",
+                    "session_id",
+                    "usage",
+                    "reporter_pid",
+                    "evidence",
+                    "dry_run",
+                ],
+            )?;
             let raw_agent = required_bounded_string(p, "agent", 64)?;
             let agent = crate::agent::canonical_builtin(&raw_agent).ok_or_else(|| {
                 (
@@ -343,6 +400,101 @@ impl App {
                     "session_id must contain only safe identifier characters".to_string(),
                 ));
             }
+            let dry_run = match p.get("dry_run") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err((
+                        "invalid_request".to_string(),
+                        "dry_run must be a boolean".to_string(),
+                    ))
+                }
+            };
+            // Whether this binding was proven: by the reporter's own process,
+            // or by one exact evidence match.
+            let mut reporter_verified = true;
+            let id = match p.get("evidence") {
+                // A hook that cannot name its pane (for example one run by an
+                // agent's shared background server) describes the session
+                // instead. Only one exact match may claim it.
+                Some(evidence) => {
+                    if p.get("pane").is_some() || p.get("reporter_pid").is_some() {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "evidence replaces pane and reporter_pid".to_string(),
+                        ));
+                    }
+                    let (cwd, prompt) = parse_session_evidence(evidence)?;
+                    let matches = self.panes_showing_agent_prompt(agent, &cwd, &prompt);
+                    if dry_run {
+                        return Ok(json!({
+                            "type": "session_match",
+                            "pane": (matches.len() == 1).then(|| matches[0].0.to_string()),
+                            "matches": matches.len(),
+                            // Lets a caller that probes several sockets tell one
+                            // server reached twice from two servers.
+                            "server_generation": self.backend_server_generation,
+                        }));
+                    }
+                    match matches.as_slice() {
+                        [only] => *only,
+                        [] => return Err(not_found()),
+                        _ => {
+                            return Err((
+                                "conflict".to_string(),
+                                "more than one pane matches the session evidence".to_string(),
+                            ))
+                        }
+                    }
+                }
+                None => {
+                    if dry_run {
+                        return Err((
+                            "invalid_request".to_string(),
+                            "dry_run requires evidence".to_string(),
+                        ));
+                    }
+                    let id = self.resolve_pane(p)?.ok_or_else(not_found)?;
+                    reporter_verified = false;
+                    // A reporter that names its own process must run inside the
+                    // pane it claims. A shared agent server keeps the
+                    // environment of whichever pane started it, so its reports
+                    // would otherwise bind sessions to that unrelated pane.
+                    if let Some(reporter) = p.get("reporter_pid") {
+                        let reporter = parse_u32_value(reporter, "reporter_pid")?;
+                        let root = self
+                            .panes
+                            .get(&id)
+                            .map(|pane| pane.child_pid.load(std::sync::atomic::Ordering::Relaxed))
+                            .unwrap_or(0);
+                        let within = (root != 0)
+                            .then(|| crate::platform::process_is_within(root, reporter))
+                            .flatten();
+                        // Only a proven reporter binds. When the pane has no
+                        // process yet, or this platform cannot read process
+                        // trees, the claim is refused rather than bound unproven:
+                        // a reporter that names itself expects that check, and a
+                        // wrong binding would block the correct pane later.
+                        match within {
+                            Some(true) => reporter_verified = true,
+                            Some(false) => {
+                                return Err((
+                                    "reporter_outside_pane".to_string(),
+                                    "the reporting process does not run in that pane".to_string(),
+                                ))
+                            }
+                            None => {
+                                return Err((
+                                    "reporter_unverified".to_string(),
+                                    "the reporting process could not be checked against that pane"
+                                        .to_string(),
+                                ))
+                            }
+                        }
+                    }
+                    id
+                }
+            };
 
             let key = crate::mission::UsageKey::new(agent, &session_id);
             let usage = p.get("usage").map(parse_reported_usage).transpose()?;
@@ -431,8 +583,46 @@ impl App {
             }
             self.session_dirty = true;
             self.confirm_durable_active_target(id);
-            Ok(json!({"type":"ok"}))
+            // `verified` is false only for a pane claim without a provable
+            // `reporter_pid`, so a careful reporter can tell a proven binding
+            // from one an older server would also have accepted.
+            let verified = reporter_verified
+                && (p.get("evidence").is_some() || p.get("reporter_pid").is_some());
+            Ok(json!({"type":"ok", "verified": verified}))
         }
+    }
+
+    /// Panes running `agent` in `cwd` whose visible screen shows `prompt`: the
+    /// evidence a hook without a trustworthy pane uses to find its session.
+    fn panes_showing_agent_prompt(&self, agent: &str, cwd: &Path, prompt: &str) -> Vec<PaneId> {
+        let Some(needle) = prompt_evidence_needle(prompt) else {
+            return Vec::new();
+        };
+        let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let mut ids: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(id, pane)| {
+                let runs_agent =
+                    self.status
+                        .get(id)
+                        .is_some_and(|status| status.agent.eq_ignore_ascii_case(agent))
+                        || self.proc_commands.get(id).is_some_and(|commands| {
+                            self.manifests.process_has_agent(commands, agent)
+                        });
+                runs_agent
+                    && std::fs::canonicalize(&pane.cwd).unwrap_or_else(|_| pane.cwd.clone()) == cwd
+            })
+            .filter(|(_, pane)| {
+                let Ok(engine) = pane.engine.lock() else {
+                    return false;
+                };
+                collapse_whitespace(&engine.detection_text(u16::MAX)).contains(&needle)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
     }
 
     /// Release only the exact native session identity previously reported by
@@ -504,9 +694,40 @@ impl App {
             let kind = p.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             let message = p.get("message").and_then(|v| v.as_str()).unwrap_or("");
             let tool = p.get("tool").and_then(|v| v.as_str()).unwrap_or("");
+            let notification_type = p
+                .get("notification_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let claude_semantic_ready = if agent.eq_ignore_ascii_case("claude") {
+                match kind {
+                    "Stop" => Some(true),
+                    "UserPromptSubmit" => Some(false),
+                    "Notification"
+                        if matches!(
+                            notification_type,
+                            "permission_prompt" | "elicitation_dialog" | "elicitation_url_dialog"
+                        ) =>
+                    {
+                        Some(false)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(ready) = claude_semantic_ready {
+                if let Some(status) = self.status.get_mut(&id) {
+                    status.claude_prompt_semantic_ready = ready;
+                    status.force_detect = true;
+                    if !ready {
+                        status.prompt_evidence = detect::PromptEvidence::Unknown;
+                        status.last_detect_generation = None;
+                    }
+                }
+            }
             self.emit_event(
                 "agent.hook",
-                json!({ "pane": id.0.to_string(), "agent": agent, "kind": kind, "message": message, "tool": tool }),
+                json!({ "pane": id.0.to_string(), "agent": agent, "kind": kind, "message": message, "tool": tool, "notification_type": notification_type }),
             );
             Ok(json!({"type":"ok"}))
         }
@@ -1595,6 +1816,44 @@ impl App {
             })
             .collect())
     }
+}
+
+/// `{cwd, prompt}` from a session report that cannot name its pane.
+fn parse_session_evidence(value: &Value) -> Result<(std::path::PathBuf, String), (String, String)> {
+    let invalid = |message: &str| ("invalid_request".to_string(), message.to_string());
+    let Some(object) = value.as_object() else {
+        return Err(invalid("evidence must be an object"));
+    };
+    if object.keys().any(|key| key != "cwd" && key != "prompt") {
+        return Err(invalid("evidence accepts only cwd and prompt"));
+    }
+    let cwd = object
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty() && cwd.len() <= 4096)
+        .ok_or_else(|| invalid("evidence.cwd must be a non-empty path of at most 4096 bytes"))?;
+    if !Path::new(cwd).is_absolute() {
+        return Err(invalid("evidence.cwd must be absolute"));
+    }
+    let prompt = object
+        .get("prompt")
+        .and_then(Value::as_str)
+        .filter(|prompt| prompt.len() <= 16 * 1024)
+        .ok_or_else(|| invalid("evidence.prompt must be a string of at most 16 KiB"))?;
+    Ok((std::path::PathBuf::from(cwd), prompt.to_string()))
+}
+
+/// The part of a submitted prompt that must appear on screen: its first 80
+/// characters with whitespace collapsed, since the terminal wraps and indents
+/// long prompts. `None` when too short to tell panes apart.
+fn prompt_evidence_needle(prompt: &str) -> Option<String> {
+    let collapsed = collapse_whitespace(prompt);
+    let needle: String = collapsed.chars().take(80).collect();
+    (needle.chars().count() >= 4).then_some(needle)
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

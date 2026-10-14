@@ -23,7 +23,7 @@
 
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "luvus";
-  version = "0.14.2";
+  version = "0.14.3";
 
   # Required for new by-name packages (nixpkgs-vet NPV-166).
   __structuredAttrs = true;

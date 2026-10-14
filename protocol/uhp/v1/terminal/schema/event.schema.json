@@ -50,7 +50,11 @@
           "required":["server_generation","terminal_id","pane_id","content_revision","workspace","tab","detail"],
           "additionalProperties":false
         }
-      }
+      },
+      "allOf":[
+        {"if":{"properties":{"event":{"const":"terminal.exited"}}},"then":{"properties":{"data":{"$ref":"#/$defs/exited_data"}}}},
+        {"if":{"properties":{"event":{"const":"terminal.closed"}}},"then":{"properties":{"data":{"$ref":"#/$defs/closed_data"}}}}
+      ]
     },
     {
       "properties":{
@@ -63,5 +67,34 @@
         }
       }
     }
-  ]
+  ],
+  "$defs":{
+    "exited_data":{
+      "allOf":[
+        {"$ref":"#/oneOf/1/properties/data"},
+        {"properties":{"detail":{
+          "type":"object",
+          "properties":{"exit_code":{"type":["integer","null"],"minimum":0},"signal":{"type":["string","null"]}},
+          "required":["exit_code","signal"]
+        }}}
+      ]
+    },
+    "closed_data":{
+      "allOf":[
+        {"$ref":"#/oneOf/1/properties/data"},
+        {"properties":{"detail":{
+          "type":"object",
+          "properties":{
+            "reason":{"enum":["exited","closed"]},
+            "exit_code":{"type":["integer","null"],"minimum":0},
+            "signal":{"type":["string","null"]}
+          },
+          "required":["reason"],
+          "dependentRequired":{"exit_code":["signal"],"signal":["exit_code"]},
+          "if":{"properties":{"reason":{"const":"exited"}}},
+          "then":{"required":["exit_code","signal"]}
+        }}}
+      ]
+    }
+  }
 }

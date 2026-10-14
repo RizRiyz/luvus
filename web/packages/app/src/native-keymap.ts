@@ -6,6 +6,8 @@ export interface BrowserKey {
   shiftKey: boolean;
 }
 
+const CONTROL_LETTERS = new Set(["a", "b", "c", "d", "e", "f", "g", "k", "l", "n", "o", "p", "r", "t", "u", "w", "y"]);
+
 /** Translate browser keys into the bounded terminal-control vocabulary. */
 export function logicalKey(event: BrowserKey): string | undefined {
   if (event.key === "Backspace") {
@@ -19,7 +21,8 @@ export function logicalKey(event: BrowserKey): string | undefined {
   if (event.metaKey || event.altKey) return undefined;
   if (event.ctrlKey && !event.shiftKey) {
     const control = event.key.toLowerCase();
-    if (["c", "d", "k", "u", "w"].includes(control)) return `ctrl-${control}`;
+    // Ctrl+V stays the browser paste shortcut.
+    if (CONTROL_LETTERS.has(control)) return `ctrl-${control}`;
     return undefined;
   }
   if (event.ctrlKey) return undefined;

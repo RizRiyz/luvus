@@ -105,6 +105,11 @@ impl App {
         scope: MissionScope,
         workspace_index: usize,
     ) -> serde_json::Value {
+        let mut counted = std::collections::HashSet::new();
+        let mut total_cost = 0.0_f64;
+        let mut total_tokens = 0_u64;
+        let mut available = 0_usize;
+        let mut priced = 0_usize;
         let rows = self
             .build_mission_rows_for(scope, workspace_index)
             .into_iter()
@@ -122,6 +127,33 @@ impl App {
                         ("resumable", None, workspace, None)
                     }
                 };
+                let key = self.mission_row_usage_key(&row);
+                let usage_status = if row.usage.is_some() {
+                    available += 1;
+                    "available"
+                } else if key.is_none() {
+                    "unbound"
+                } else if !crate::agent::supports_session_usage(&row.agent) {
+                    "unsupported"
+                } else if self.mission_usage_refreshing_for(workspace) {
+                    "refreshing"
+                } else if key
+                    .as_ref()
+                    .is_some_and(|key| self.mission_usage_attempted.contains(key))
+                {
+                    "unavailable"
+                } else {
+                    "not_refreshed"
+                };
+                if let (Some(key), Some(usage)) = (&key, row.usage.as_ref()) {
+                    if usage.cost.is_some() {
+                        priced += 1;
+                    }
+                    if counted.insert(key.clone()) {
+                        total_tokens = total_tokens.saturating_add(usage.total_tokens());
+                        total_cost += usage.cost.unwrap_or(0.0);
+                    }
+                }
                 let usage = row.usage.map(|usage| {
                     serde_json::json!({
                         "model": usage.model,
@@ -144,17 +176,21 @@ impl App {
                     "tab": tab.map(|tab| tab.to_string()),
                     "location": row.location,
                     "usage": usage,
+                    "usage_status": usage_status,
                 }))
             })
             .collect::<Vec<_>>();
-        let total_cost = rows
-            .iter()
-            .filter_map(|row| row["usage"]["cost_usd"].as_f64())
-            .sum::<f64>();
-        let total_tokens = rows
-            .iter()
-            .filter_map(|row| row["usage"]["total_tokens"].as_u64())
-            .sum::<u64>();
+        let total_cost = if total_cost == 0.0 { 0.0 } else { total_cost };
+        let workspace_id = self
+            .workspaces
+            .get(workspace_index)
+            .map(|ws| ws.id.as_str());
+        let burn = self.mission_last_cost.as_ref().and_then(|sample| {
+            (sample.scope == scope
+                && (scope == MissionScope::All || sample.workspace_id.as_deref() == workspace_id))
+                .then_some(self.mission_burn)
+                .flatten()
+        });
         let automation = self.automation.health();
         let automation_rows = self.automation_views();
         serde_json::json!({
@@ -163,11 +199,23 @@ impl App {
             "workspace": workspace_index.to_string(),
             "workspace_id": self.workspaces.get(workspace_index).map(|workspace| workspace.id.as_str()),
             "refreshing": self.mission_usage_refreshing(),
+            "refresh": {
+                "server_generation": self.backend_server_generation,
+                "completed_id": self.mission_usage_completed_id.to_string(),
+                "completed_at": self.mission_usage_completed_at,
+            },
             "summary": {
                 "agents": rows.len(),
                 "tokens": total_tokens,
                 "cost_usd": total_cost,
-                "burn_usd_per_hour": self.mission_burn,
+                "burn_usd_per_hour": burn,
+                "usage_coverage": {
+                    "available": available,
+                    "priced": priced,
+                    "total": rows.len(),
+                    "tokens_complete": available == rows.len(),
+                    "cost_complete": priced == rows.len(),
+                },
             },
             "automation": {"summary": automation, "rows": automation_rows},
             "rows": rows,
@@ -246,19 +294,96 @@ impl App {
     /// scan is running; after it lands, Mission Control stays idle until another
     /// explicit request or a later transition into the dashboard.
     pub fn request_mission_usage_refresh(&mut self) {
-        self.request_mission_usage_refresh_for(self.mission_scope, self.active_ws);
+        let _ = self.request_mission_usage_refresh_for(self.mission_scope, self.active_ws);
     }
 
     /// Queue a usage refresh without changing Mission Control's visible scope.
     /// UHP uses this path so a read-only fleet query never steals UI focus.
-    pub fn request_mission_usage_refresh_for(&mut self, scope: MissionScope, workspace: usize) {
-        if scope == MissionScope::All || workspace < self.workspaces.len() {
-            self.mission_usage_requested = Some(MissionUsageRequest { scope, workspace });
+    pub fn request_mission_usage_refresh_for(
+        &mut self,
+        scope: MissionScope,
+        workspace: usize,
+    ) -> Option<u64> {
+        if scope != MissionScope::All && workspace >= self.workspaces.len() {
+            return None;
         }
+        let workspace_id =
+            (scope == MissionScope::Workspace).then(|| self.workspaces[workspace].id.clone());
+        let same_target = |request: &MissionUsageRequest| {
+            request.scope == scope
+                && (scope == MissionScope::All || request.workspace_id == workspace_id)
+        };
+        if let Some(request) = self
+            .mission_usage_requested
+            .as_ref()
+            .filter(|r| same_target(r))
+        {
+            return Some(request.id);
+        }
+        if let Some(request) = self.mission_usage_queued.iter().find(|r| same_target(r)) {
+            return Some(request.id);
+        }
+        if self.mission_usage_queued.len() >= crate::mission::MAX_PENDING_USAGE_REFRESHES {
+            return None;
+        }
+        let id = self.mission_usage_next_id;
+        self.mission_usage_next_id = id.checked_add(1)?;
+        let request = MissionUsageRequest {
+            id,
+            scope,
+            workspace,
+            workspace_id,
+        };
+        if self.mission_usage_requested.is_none() {
+            self.mission_usage_requested = Some(request);
+        } else {
+            self.mission_usage_queued.push_back(request);
+        }
+        Some(id)
     }
 
     pub fn mission_usage_refreshing(&self) -> bool {
-        self.mission_usage_requested.is_some() || self.usage_scan_inflight
+        self.mission_usage_requested.is_some() || self.mission_usage_inflight.is_some()
+    }
+
+    /// Resolve queued workspace requests at scan/apply time. An index reused
+    /// after workspace removal must never select a different workspace.
+    pub(crate) fn mission_usage_workspace(&self, request: &MissionUsageRequest) -> usize {
+        request
+            .workspace_id
+            .as_ref()
+            .map_or(request.workspace, |id| {
+                self.workspaces
+                    .iter()
+                    .position(|workspace| &workspace.id == id)
+                    .unwrap_or(usize::MAX)
+            })
+    }
+
+    fn mission_usage_refreshing_for(&self, workspace: usize) -> bool {
+        let workspace_id = self.workspaces.get(workspace).map(|ws| ws.id.as_str());
+        self.mission_usage_requested
+            .iter()
+            .chain(self.mission_usage_queued.iter())
+            .chain(self.mission_usage_inflight.iter())
+            .any(|request| {
+                request.scope == MissionScope::All
+                    || request.workspace_id.as_deref() == workspace_id
+            })
+    }
+
+    fn mission_row_usage_key(&self, row: &MissionRowView) -> Option<crate::mission::UsageKey> {
+        let (agent, session_id) = match row.row {
+            MissionRow::Live(pane) => {
+                let session = self.status.get(&pane)?.agent_session.as_ref()?;
+                (&session.agent, &session.session_id)
+            }
+            MissionRow::Session(index) => {
+                let session = self.resumable.get(index)?;
+                (&session.agent, &session.session_id)
+            }
+        };
+        Some(crate::mission::UsageKey::new(agent, session_id))
     }
 
     /// Detect focus transitions in one central place so mouse, keyboard, API,
@@ -514,6 +639,17 @@ impl App {
             ) {
                 self.mission_detail = None;
             }
+            return;
+        }
+        // Scope toggles, closing, forking, agent input, and usage
+        // refresh act on agents while this dashboard stays open. Only list
+        // movement repeats.
+        if super::is_key_repeat(&key)
+            && matches!(
+                key.code,
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('x' | 'f' | 'i' | 'y' | 'r')
+            )
+        {
             return;
         }
         let n = self.mission_rows.len();

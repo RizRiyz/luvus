@@ -68,8 +68,7 @@ pub(super) fn draw_diff_view(
         return;
     }
     let header = Rect::new(area.x, area.y, area.width, 1);
-    let show_footer =
-        !mobile || view.note_draft.is_some() || view.note_selecting || view.search_editing;
+    let show_footer = diff_footer_visible(mobile, view);
     let footer = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     let body = Rect::new(
         area.x,
@@ -164,8 +163,8 @@ pub(super) fn draw_diff_view(
     } else if view.note_selecting {
         " NOTE  select source · click a row or move with j/k · Enter writes · Esc cancels"
             .to_string()
-    } else if view.search_editing {
-        format!(" SEARCH> {}", view.search.as_deref().unwrap_or_default())
+    } else if let Some(search) = view.search.as_ref() {
+        super::local_search_footer(search)
     } else {
         format!(
             " [j/k] move  [q] close  [s] layout  [m] viewed  [/] search  [n] note  [a] send  ·  {viewed}/{total} viewed · {note_count} notes"
@@ -218,6 +217,10 @@ fn draw_diff_header(f: &mut RenderTarget, area: Rect, path: &str, metadata: Line
     }
 }
 
+fn diff_footer_visible(mobile: bool, view: &DiffView) -> bool {
+    !mobile || view.note_draft.is_some() || view.note_selecting || view.search.is_some()
+}
+
 fn effective_layout(preference: DiffLayoutPreference, width: u16) -> DiffLayoutPreference {
     match preference {
         DiffLayoutPreference::Stack => DiffLayoutPreference::Stack,
@@ -257,10 +260,12 @@ fn draw_stack(
         let gutter_width = bar.chars().count() + numbers.chars().count() + symbol.chars().count();
         let text_w = area.width.saturating_sub(gutter_width as u16);
         if view.effective_wrap(area.width) {
+            let mut fragment_byte_start = 0;
             for (fragment_index, text) in wrapped_text(&line.text, text_w.max(1)).enumerate() {
                 if y >= area.bottom() {
                     break;
                 }
+                let fragment_byte_end = fragment_byte_start + text.len();
                 let (visible_bar, visible_numbers, visible_symbol) = if fragment_index == 0 {
                     (bar.clone(), numbers.clone(), symbol.clone())
                 } else {
@@ -270,24 +275,28 @@ fn draw_stack(
                         " ".repeat(symbol.chars().count()),
                     )
                 };
+                let mut spans = vec![
+                    Span::styled(
+                        visible_bar,
+                        Style::new().fg(style.marker).bg(style.bg).bold(),
+                    ),
+                    Span::styled(visible_numbers, Style::new().fg(t.overlay1).bg(style.bg)),
+                    Span::styled(
+                        visible_symbol,
+                        Style::new().fg(style.marker).bg(style.bg).bold(),
+                    ),
+                ];
+                spans.extend(search_fragment_spans(
+                    view,
+                    index,
+                    &line.text,
+                    fragment_byte_start..fragment_byte_end,
+                    Style::new().fg(style.text).bg(style.bg),
+                    t,
+                ));
                 fill_bg(f, Rect::new(area.x, y, area.width, 1), style.bg);
-                f.buffer_mut().set_line(
-                    area.x,
-                    y,
-                    &Line::from(vec![
-                        Span::styled(
-                            visible_bar,
-                            Style::new().fg(style.marker).bg(style.bg).bold(),
-                        ),
-                        Span::styled(visible_numbers, Style::new().fg(t.overlay1).bg(style.bg)),
-                        Span::styled(
-                            visible_symbol,
-                            Style::new().fg(style.marker).bg(style.bg).bold(),
-                        ),
-                        Span::styled(text, Style::new().fg(style.text).bg(style.bg)),
-                    ]),
-                    area.width,
-                );
+                f.buffer_mut()
+                    .set_line(area.x, y, &Line::from(spans), area.width);
                 if hits.interactive {
                     if let Some((side, _)) = line_anchor(line) {
                         hits.source.push((
@@ -299,21 +308,26 @@ fn draw_stack(
                     }
                 }
                 y = y.saturating_add(1);
+                fragment_byte_start = fragment_byte_end;
             }
         } else {
-            let text = horizontal_text(&line.text, view.horizontal, text_w);
+            let (text_start, text_end) = horizontal_text_range(&line.text, view.horizontal, text_w);
+            let mut spans = vec![
+                Span::styled(bar, Style::new().fg(style.marker).bg(style.bg).bold()),
+                Span::styled(numbers, Style::new().fg(t.overlay1).bg(style.bg)),
+                Span::styled(symbol, Style::new().fg(style.marker).bg(style.bg).bold()),
+            ];
+            spans.extend(search_fragment_spans(
+                view,
+                index,
+                &line.text,
+                text_start..text_end,
+                Style::new().fg(style.text).bg(style.bg),
+                t,
+            ));
             fill_bg(f, Rect::new(area.x, y, area.width, 1), style.bg);
-            f.buffer_mut().set_line(
-                area.x,
-                y,
-                &Line::from(vec![
-                    Span::styled(bar, Style::new().fg(style.marker).bg(style.bg).bold()),
-                    Span::styled(numbers, Style::new().fg(t.overlay1).bg(style.bg)),
-                    Span::styled(symbol, Style::new().fg(style.marker).bg(style.bg).bold()),
-                    Span::styled(text, Style::new().fg(style.text).bg(style.bg)),
-                ]),
-                area.width,
-            );
+            f.buffer_mut()
+                .set_line(area.x, y, &Line::from(spans), area.width);
             if hits.interactive {
                 if let Some((side, _)) = line_anchor(line) {
                     hits.source
@@ -351,7 +365,7 @@ fn draw_split(
         .unwrap_or(0);
     let half = area.width.saturating_sub(1) / 2;
     let mut y = area.y;
-    for row in view.split_rows.iter().skip(start) {
+    for (split_index, row) in view.split_rows.iter().enumerate().skip(start) {
         if y >= area.bottom() {
             break;
         }
@@ -379,6 +393,13 @@ fn draw_split(
         let new_width = area.width.saturating_sub(half + 1);
         let mut old_fragments = split_side_fragments(row.old.as_ref(), view, options, old_width);
         let mut new_fragments = split_side_fragments(row.new.as_ref(), view, options, new_width);
+        let (old_stack_index, new_stack_index) = view
+            .split_indices
+            .get(split_index)
+            .copied()
+            .unwrap_or((None, None));
+        let mut old_fragment_start = 0;
+        let mut new_fragment_start = 0;
         let mut fragment_index = 0;
         loop {
             if y >= area.bottom() {
@@ -386,6 +407,18 @@ fn draw_split(
             }
             let old_fragment = old_fragments.as_mut().and_then(Iterator::next);
             let new_fragment = new_fragments.as_mut().and_then(Iterator::next);
+            let old_range = old_fragment.map(|fragment| {
+                let end = old_fragment_start + fragment.len();
+                let range = old_fragment_start..end;
+                old_fragment_start = end;
+                range
+            });
+            let new_range = new_fragment.map(|fragment| {
+                let end = new_fragment_start + fragment.len();
+                let range = new_fragment_start..end;
+                new_fragment_start = end;
+                range
+            });
             if fragment_index > 0 && old_fragment.is_none() && new_fragment.is_none() {
                 break;
             }
@@ -399,6 +432,8 @@ fn draw_split(
                 true,
                 fragment_index == 0,
                 old_selected,
+                old_stack_index,
+                old_range,
                 view,
                 options,
                 t,
@@ -414,6 +449,8 @@ fn draw_split(
                 false,
                 fragment_index == 0,
                 new_selected,
+                new_stack_index,
+                new_range,
                 view,
                 options,
                 t,
@@ -796,6 +833,8 @@ fn draw_split_side(
     old_side: bool,
     first_fragment: bool,
     selected: bool,
+    stack_index: Option<usize>,
+    fragment_range: Option<std::ops::Range<usize>>,
     view: &DiffView,
     options: DiffRenderOptions,
     t: &Theme,
@@ -826,21 +865,27 @@ fn draw_split_side(
         )
     };
     let style = line_style(line.kind, selected, options.color_mode, t);
+    let text_style = Style::new().fg(style.text).bg(style.bg);
+    let mut spans = vec![
+        Span::styled(bar, Style::new().fg(style.marker).bg(style.bg).bold()),
+        Span::styled(number, Style::new().fg(t.overlay1).bg(style.bg)),
+        Span::styled(symbol, Style::new().fg(style.marker).bg(style.bg).bold()),
+    ];
+    if let (Some(stack_index), Some(fragment_range)) = (stack_index, fragment_range) {
+        spans.extend(search_fragment_spans(
+            view,
+            stack_index,
+            &line.text,
+            fragment_range,
+            text_style,
+            t,
+        ));
+    } else {
+        spans.push(Span::styled(fragment.unwrap_or_default(), text_style));
+    }
     fill_bg(f, area, style.bg);
-    f.buffer_mut().set_line(
-        area.x,
-        area.y,
-        &Line::from(vec![
-            Span::styled(bar, Style::new().fg(style.marker).bg(style.bg).bold()),
-            Span::styled(number, Style::new().fg(t.overlay1).bg(style.bg)),
-            Span::styled(symbol, Style::new().fg(style.marker).bg(style.bg).bold()),
-            Span::styled(
-                fragment.unwrap_or_default(),
-                Style::new().fg(style.text).bg(style.bg),
-            ),
-        ]),
-        area.width,
-    );
+    f.buffer_mut()
+        .set_line(area.x, area.y, &Line::from(spans), area.width);
 }
 
 fn split_side_fragments<'a>(
@@ -959,8 +1004,65 @@ fn fill_bg(f: &mut RenderTarget, rect: Rect, color: Color) {
     }
 }
 
-fn horizontal_text(text: &str, offset: usize, width: u16) -> String {
-    text.chars().skip(offset).take(width as usize).collect()
+fn horizontal_text_range(text: &str, offset: usize, width: u16) -> (usize, usize) {
+    let byte_at = |character: usize| {
+        text.char_indices()
+            .nth(character)
+            .map_or(text.len(), |(byte, _)| byte)
+    };
+    (
+        byte_at(offset),
+        byte_at(offset.saturating_add(width as usize)),
+    )
+}
+
+fn search_fragment_spans<'a>(
+    view: &DiffView,
+    row: usize,
+    text: &'a str,
+    range: std::ops::Range<usize>,
+    base_style: Style,
+    t: &Theme,
+) -> Vec<Span<'a>> {
+    let Some(search) = view
+        .search
+        .as_ref()
+        .filter(|search| !search.query.is_empty())
+    else {
+        return vec![Span::styled(&text[range], base_style)];
+    };
+    let hits = search
+        .matches
+        .iter()
+        .enumerate()
+        .filter(|(_, search_match)| {
+            search_match.row == row
+                && search_match.byte_start < range.end
+                && search_match.byte_end > range.start
+        });
+    let mut spans = Vec::new();
+    let mut cursor = range.start;
+    for (match_index, search_match) in hits {
+        let start = search_match.byte_start.max(range.start);
+        let end = search_match.byte_end.min(range.end);
+        if cursor < start {
+            spans.push(Span::styled(&text[cursor..start], base_style));
+        }
+        let highlight = if match_index == search.current {
+            Style::new().fg(t.base).bg(t.accent).bold()
+        } else {
+            Style::new().fg(t.base).bg(t.amber)
+        };
+        spans.push(Span::styled(&text[start..end], highlight));
+        cursor = end;
+    }
+    if cursor < range.end {
+        spans.push(Span::styled(&text[cursor..range.end], base_style));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(&text[range], base_style));
+    }
+    spans
 }
 
 struct WrappedText<'a> {
@@ -1086,6 +1188,68 @@ mod tests {
             marker_style,
             color_mode: DiffColorMode::Theme,
         }
+    }
+
+    #[test]
+    fn search_uses_the_diff_footer_including_on_mobile() {
+        let mut view = test_view(vec![changed_line(DiffLineKind::Addition, "Needle")]);
+        view.search = Some(crate::search::local::LocalSearch {
+            query: "Needle".into(),
+            editing: false,
+            case_sensitive: true,
+            matches: vec![crate::search::local::RowMatch {
+                row: 0,
+                byte_start: 0,
+                byte_end: 6,
+                column: 0,
+                width: 6,
+            }],
+            current: 0,
+            truncated: true,
+        });
+
+        assert!(diff_footer_visible(true, &view));
+        assert_eq!(
+            crate::ui::local_search_footer(view.search.as_ref().expect("search")),
+            " SEARCH  /Needle · 1/1+ · Aa · n/N match · Ctrl-U clear · Ctrl-I case · Esc cancel"
+        );
+    }
+
+    #[test]
+    fn search_highlight_projects_unicode_matches_into_visible_fragments() {
+        let theme = Theme::quattro_rally();
+        let line = "a界Needle x needle";
+        let mut view = test_view(vec![changed_line(DiffLineKind::Addition, line)]);
+        view.search_begin();
+        for ch in "needle".chars() {
+            view.search_push(ch);
+        }
+        view.search_commit();
+
+        let base = Style::new().fg(theme.text).bg(theme.mantle);
+        let full = search_fragment_spans(&view, 0, line, 0..line.len(), base, &theme);
+        assert_eq!(
+            full.iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            line
+        );
+        assert!(full
+            .iter()
+            .any(|span| span.content == "Needle" && span.style.bg == Some(theme.accent)));
+        assert!(full
+            .iter()
+            .any(|span| span.content == "needle" && span.style.bg == Some(theme.amber)));
+
+        let first_end = "a界Nee".len();
+        let first = search_fragment_spans(&view, 0, line, 0..first_end, base, &theme);
+        let second = search_fragment_spans(&view, 0, line, first_end..line.len(), base, &theme);
+        assert!(first
+            .iter()
+            .any(|span| span.content == "Nee" && span.style.bg == Some(theme.accent)));
+        assert!(second
+            .iter()
+            .any(|span| span.content == "dle" && span.style.bg == Some(theme.accent)));
     }
 
     #[test]
@@ -1419,6 +1583,8 @@ mod tests {
                 true,
                 true,
                 false,
+                None,
+                None,
                 &view,
                 options(DiffMarkerStyle::Symbols),
                 &theme,
@@ -1431,6 +1597,8 @@ mod tests {
                 false,
                 true,
                 false,
+                None,
+                None,
                 &view,
                 options(DiffMarkerStyle::Symbols),
                 &theme,
@@ -1470,6 +1638,12 @@ mod tests {
             old: Some(old),
             new: Some(new),
         });
+        view.rebuild_row_indices();
+        view.search_begin();
+        for ch in "ijkl".chars() {
+            view.search_push(ch);
+        }
+        view.search_commit();
         let area = Rect::new(0, 0, 21, 3);
         let pane = crate::ids::PaneId(12);
         let mut buffer = Buffer::empty(area);
@@ -1497,6 +1671,8 @@ mod tests {
 
         assert_eq!(row_text(0), "- abcdefgh│+ new     ");
         assert_eq!(row_text(1), "  ijklmnop│          ");
+        assert_eq!(buffer[(2, 1)].bg, theme.accent);
+        assert_eq!(buffer[(5, 1)].bg, theme.accent);
         assert_eq!(row_text(2), "  qrst    │          ");
         assert_eq!(rects.len(), 6, "both sides own every aligned visual row");
         assert!(rects.iter().all(|(_, _, _, rect)| rect.width == 10));

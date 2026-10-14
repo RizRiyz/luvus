@@ -1,27 +1,43 @@
-//! Process-wide PTY child waiter.
+//! Process-wide child waiter for PTYs and fire-and-forget helpers.
 //!
-//! One `luvus-pty-reaper` thread owns every pane child. An empty list blocks on
+//! One `luvus-pty-reaper` thread owns every child. An empty list blocks on
 //! the registration channel. A live child blocks on SIGCHLD (Unix) or process
 //! handles (Windows), then `try_wait`s. There is no idle timer.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
 
 use crate::event::AppEvent;
 use crate::ids::PaneId;
 
 struct ReaperEntry {
-    id: PaneId,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    completion: Option<PaneCompletion>,
+}
+
+struct PaneCompletion {
+    id: PaneId,
     child_exited: Arc<AtomicBool>,
     app_tx: Sender<AppEvent>,
 }
 
+enum HelperStartup {
+    Starting,
+    Finished(Option<std::process::Child>),
+}
+
+type PendingHelper = Arc<Mutex<HelperStartup>>;
+
+enum Registration {
+    Pane(ReaperEntry),
+    Helper(PendingHelper),
+}
+
 struct Reaper {
-    tx: Sender<ReaperEntry>,
+    tx: Sender<Registration>,
     wake: Arc<ReaperWake>,
 }
 
@@ -39,81 +55,146 @@ pub(super) fn register_child_reaper(
     child_exited: Arc<AtomicBool>,
     app_tx: Sender<AppEvent>,
 ) {
-    let reaper = CHILD_REAPER.get_or_init(start_reaper);
+    let reaper = get_reaper().expect("failed to prepare the child reaper");
     let entry = ReaperEntry {
-        id,
         child,
-        child_exited,
-        app_tx,
+        completion: Some(PaneCompletion {
+            id,
+            child_exited,
+            app_tx,
+        }),
     };
-    if let Err(error) = reaper.tx.send(entry) {
+    if let Err(error) = reaper.tx.send(Registration::Pane(entry)) {
         // A panic in the shared reaper must not leave an unreaped child. This
         // fallback is deliberately exceptional; the normal path stays at one
         // waiter thread for the whole server.
-        let mut entry = error.0;
+        let Registration::Pane(mut entry) = error.0 else {
+            unreachable!("pane registration owns a child");
+        };
         let _ = thread::Builder::new()
             .name("luvus-pty-reaper-fallback".to_string())
             .spawn(move || {
-                let _ = entry.child.wait();
-                finish_child(entry);
+                let status = entry.child.wait().ok();
+                finish_child(entry, status);
             });
         return;
     }
     reaper.wake.signal();
 }
 
-fn start_reaper() -> Reaper {
+/// Register ownership before spawning, so neither setup nor channel failure
+/// can lose an already-started helper. Command startup still runs on the caller
+/// as with `Command::spawn`; all exit waiting happens on the shared reaper.
+pub(crate) fn spawn_helper_reaped(command: &mut std::process::Command) -> Option<u32> {
+    let reaper = get_reaper().ok()?;
+    spawn_helper_reaped_with(command, &reaper.wake, |pending| {
+        reaper
+            .tx
+            .send(Registration::Helper(pending))
+            .map_err(|_| io::Error::other("child reaper disconnected"))?;
+        reaper.wake.signal();
+        Ok(())
+    })
+}
+
+fn spawn_helper_reaped_with(
+    command: &mut std::process::Command,
+    wake: &ReaperWake,
+    register: impl FnOnce(PendingHelper) -> io::Result<()>,
+) -> Option<u32> {
+    let pending = Arc::new(Mutex::new(HelperStartup::Starting));
+    register(Arc::clone(&pending)).ok()?;
+    // Slow startup must not hold a lock needed by the shared reaper. Publish
+    // success or failure afterward, with no fallible ownership handoff.
+    let child = command.spawn().ok();
+    let pid = child.as_ref().map(std::process::Child::id);
+    {
+        let mut startup = pending.lock().unwrap_or_else(|error| error.into_inner());
+        *startup = HelperStartup::Finished(child);
+    }
+    // Signal after unlocking, including failed startup. A pending helper keeps
+    // the loop on its wake primitive rather than waiting for another registration.
+    wake.signal();
+    pid
+}
+
+fn get_reaper() -> io::Result<&'static Reaper> {
+    static START_LOCK: Mutex<()> = Mutex::new(());
+    if let Some(reaper) = CHILD_REAPER.get() {
+        return Ok(reaper);
+    }
+    let _initializing = START_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    if CHILD_REAPER.get().is_none() {
+        let _ = CHILD_REAPER.set(start_reaper()?);
+    }
+    Ok(CHILD_REAPER
+        .get()
+        .expect("initialized while holding START_LOCK"))
+}
+
+fn start_reaper() -> io::Result<Reaper> {
+    start_reaper_with(|waiter| {
+        thread::Builder::new()
+            .name("luvus-pty-reaper".to_string())
+            .spawn(waiter)
+            .map(|_| ())
+    })
+}
+
+fn start_reaper_with(
+    start_waiter: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
+) -> io::Result<Reaper> {
     let (tx, rx) = mpsc::channel();
-    let wake = Arc::new(ReaperWake::new().expect("failed to create the PTY child reaper wake"));
-    #[cfg(unix)]
-    wake.install_sigchld();
+    let wake = Arc::new(ReaperWake::new()?);
     let thread_wake = Arc::clone(&wake);
     #[cfg(unix)]
     let (ready_tx, ready_rx) = mpsc::sync_channel(0);
-    thread::Builder::new()
-        .name("luvus-pty-reaper".to_string())
-        .spawn(move || {
-            #[cfg(unix)]
-            {
-                // Signal masks survive exec and are inherited by new threads.
-                // Unblock SIGCHLD only in the process-lifetime reaper before it
-                // relies on the handler's self-pipe.
-                let _sigchld_unblocked = match SigchldUnblockGuard::new() {
-                    Ok(guard) => {
-                        if ready_tx.send(Ok(())).is_err() {
-                            return;
-                        }
-                        guard
-                    }
-                    Err(error) => {
-                        let _ = ready_tx.send(Err(error));
+    start_waiter(Box::new(move || {
+        #[cfg(unix)]
+        {
+            // Signal masks survive exec and are inherited by new threads.
+            // Unblock SIGCHLD only in the process-lifetime reaper before it
+            // relies on the handler's self-pipe.
+            let _sigchld_unblocked = match SigchldUnblockGuard::new() {
+                Ok(guard) => {
+                    if ready_tx.send(Ok(())).is_err() {
                         return;
                     }
-                };
-                child_reaper_loop(rx, thread_wake);
-            }
-            #[cfg(windows)]
+                    guard
+                }
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
             child_reaper_loop(rx, thread_wake);
-        })
-        .expect("failed to start the PTY child reaper");
+        }
+        #[cfg(windows)]
+        child_reaper_loop(rx, thread_wake);
+    }))?;
     #[cfg(unix)]
-    ready_rx
-        .recv()
-        .expect("PTY child reaper exited during signal-mask setup")
-        .unwrap_or_else(|error| {
-            panic!("failed to unblock SIGCHLD in the PTY child reaper: {error}")
-        });
+    {
+        ready_rx
+            .recv()
+            .map_err(|_| io::Error::other("child reaper exited during signal-mask setup"))??;
+        // Install only after thread startup succeeds: failure must not leave a
+        // signal handler pointing at the closed wake pipe.
+        wake.install_sigchld()?;
+    }
     #[cfg(test)]
     CHILD_REAPER_STARTS.fetch_add(1, Ordering::SeqCst);
-    Reaper { tx, wake }
+    Ok(Reaper { tx, wake })
 }
 
-fn child_reaper_loop(rx: Receiver<ReaperEntry>, wake: Arc<ReaperWake>) {
+fn child_reaper_loop(rx: Receiver<Registration>, wake: Arc<ReaperWake>) {
     let mut children = Vec::<ReaperEntry>::new();
+    let mut pending_helpers = Vec::<PendingHelper>::new();
     loop {
-        if children.is_empty() {
+        if children.is_empty() && pending_helpers.is_empty() {
             match rx.recv() {
-                Ok(entry) => children.push(entry),
+                Ok(registration) => {
+                    accept_registration(registration, &mut children, &mut pending_helpers)
+                }
                 Err(_) => break,
             }
         } else {
@@ -123,23 +204,69 @@ fn child_reaper_loop(rx: Receiver<ReaperEntry>, wake: Arc<ReaperWake>) {
                     // The wake primitive failed. Block on the next registration
                     // so this thread cannot spin, then try_wait listed children.
                     match rx.recv() {
-                        Ok(entry) => children.push(entry),
+                        Ok(registration) => {
+                            accept_registration(registration, &mut children, &mut pending_helpers)
+                        }
                         Err(_) => break,
                     }
                 }
             }
         }
-        children.extend(rx.try_iter());
+        for registration in rx.try_iter() {
+            accept_registration(registration, &mut children, &mut pending_helpers);
+        }
+        promote_started_helpers(&mut pending_helpers, &mut children);
         reap_finished(&mut children);
+    }
+}
+
+fn accept_registration(
+    registration: Registration,
+    children: &mut Vec<ReaperEntry>,
+    pending_helpers: &mut Vec<PendingHelper>,
+) {
+    match registration {
+        Registration::Pane(entry) => children.push(entry),
+        Registration::Helper(pending) => pending_helpers.push(pending),
+    }
+}
+
+fn promote_started_helpers(
+    pending_helpers: &mut Vec<PendingHelper>,
+    children: &mut Vec<ReaperEntry>,
+) {
+    let mut index = 0;
+    while index < pending_helpers.len() {
+        let startup = match pending_helpers[index].try_lock() {
+            Ok(startup) => Some(startup),
+            Err(TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        let finished = startup.and_then(|mut startup| match &mut *startup {
+            HelperStartup::Starting => None,
+            HelperStartup::Finished(child) => Some(child.take()),
+        });
+        match finished {
+            Some(child) => {
+                pending_helpers.swap_remove(index);
+                if let Some(child) = child {
+                    children.push(ReaperEntry {
+                        child: Box::new(child),
+                        completion: None,
+                    });
+                }
+            }
+            None => index += 1,
+        }
     }
 }
 
 fn reap_finished(children: &mut Vec<ReaperEntry>) {
     let mut index = 0;
     while index < children.len() {
-        if child_poll_finished(children[index].child.try_wait()) {
+        if let Some(status) = child_poll_status(children[index].child.try_wait()) {
             let entry = children.swap_remove(index);
-            finish_child(entry);
+            finish_child(entry, Some(status));
         } else {
             index += 1;
         }
@@ -147,17 +274,22 @@ fn reap_finished(children: &mut Vec<ReaperEntry>) {
 }
 
 #[inline]
-pub(super) fn child_poll_finished(
+pub(super) fn child_poll_status(
     result: std::io::Result<Option<portable_pty::ExitStatus>>,
-) -> bool {
-    matches!(result, Ok(Some(_)))
+) -> Option<portable_pty::ExitStatus> {
+    result.ok().flatten()
 }
 
-fn finish_child(entry: ReaperEntry) {
+fn finish_child(entry: ReaperEntry, status: Option<portable_pty::ExitStatus>) {
     // Publish exit before notifying the app. If the app immediately drops the
     // pane, `Drop` must not signal a PID that the operating system may reuse.
-    entry.child_exited.store(true, Ordering::SeqCst);
-    let _ = entry.app_tx.send(AppEvent::PtyExit(entry.id));
+    if let Some(completion) = entry.completion {
+        completion.child_exited.store(true, Ordering::SeqCst);
+        let _ = completion.app_tx.send(AppEvent::PtyReaped(
+            completion.id,
+            status.map(Into::into).unwrap_or_default(),
+        ));
+    }
 }
 
 struct ReaperWake {
@@ -182,8 +314,8 @@ impl ReaperWake {
     }
 
     #[cfg(unix)]
-    fn install_sigchld(&self) {
-        self.inner.install_sigchld();
+    fn install_sigchld(&self) -> io::Result<()> {
+        self.inner.install_sigchld()
     }
 
     fn wait_for_exit_or_registration(&self, children: &[ReaperEntry]) -> io::Result<()> {
@@ -255,10 +387,10 @@ impl UnixWake {
         write_wake(self.write.as_raw_fd());
     }
 
-    fn install_sigchld(&self) {
+    fn install_sigchld(&self) -> io::Result<()> {
         use std::os::fd::AsRawFd;
 
-        SIGCHLD_WRITE.store(self.write.as_raw_fd(), Ordering::Release);
+        let previous = SIGCHLD_WRITE.swap(self.write.as_raw_fd(), Ordering::AcqRel);
         extern "C" fn on_sigchld(_sig: libc::c_int) {
             write_wake(SIGCHLD_WRITE.load(Ordering::Relaxed));
         }
@@ -270,12 +402,12 @@ impl UnixWake {
             action.sa_flags = libc::SA_NOCLDSTOP | libc::SA_RESTART;
             libc::sigemptyset(&mut action.sa_mask);
             if libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) != 0 {
-                panic!(
-                    "failed to install SIGCHLD handler for the PTY reaper: {}",
-                    io::Error::last_os_error()
-                );
+                let error = io::Error::last_os_error();
+                SIGCHLD_WRITE.store(previous, Ordering::Release);
+                return Err(error);
             }
         }
+        Ok(())
     }
 
     fn wait_for_exit_or_registration(&self, _children: &[ReaperEntry]) -> io::Result<()> {
@@ -499,6 +631,213 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn reaper_thread_startup_failure_is_reported() {
+        let result = super::start_reaper_with(|_| {
+            Err(std::io::Error::other("injected reaper startup failure"))
+        });
+        assert!(
+            matches!(result, Err(error) if error.to_string() == "injected reaper startup failure")
+        );
+    }
+
+    #[test]
+    fn helper_registration_and_spawn_failures_leave_no_child() {
+        let wake = ReaperWake::new().unwrap();
+        let mut command = std::process::Command::new("luvus-nonexistent-helper-test");
+        let mut registration_called = false;
+        assert!(super::spawn_helper_reaped_with(&mut command, &wake, |_| {
+            registration_called = true;
+            Err(std::io::Error::other("injected disconnected reaper"))
+        })
+        .is_none());
+        assert!(
+            registration_called,
+            "registration must precede command startup"
+        );
+
+        let mut pending = None;
+        assert!(
+            super::spawn_helper_reaped_with(&mut command, &wake, |child| {
+                pending = Some(child);
+                Ok(())
+            })
+            .is_none()
+        );
+        let mut pending_helpers = vec![pending.unwrap()];
+        let mut children = Vec::new();
+        super::promote_started_helpers(&mut pending_helpers, &mut children);
+        assert!(children.is_empty());
+        assert!(
+            pending_helpers.is_empty(),
+            "failed startup must not remain pending"
+        );
+    }
+
+    #[test]
+    fn pending_helper_lock_never_blocks_the_reaper() {
+        let pending = Arc::new(std::sync::Mutex::new(super::HelperStartup::Starting));
+        let mut pending_helpers = vec![Arc::clone(&pending)];
+        let mut children = Vec::new();
+        let startup = pending.lock().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            super::promote_started_helpers(&mut pending_helpers, &mut children);
+            let _ = done_tx.send((pending_helpers.len(), children.len()));
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        // Unlock before joining/asserting: a regression should fail, not hang CI.
+        drop(startup);
+        worker.join().unwrap();
+        assert_eq!(result.expect("helper lock blocked reaping"), (1, 0));
+        let mut pending_helpers = vec![Arc::clone(&pending)];
+        let mut children = Vec::new();
+        *pending.lock().unwrap() = super::HelperStartup::Finished(None);
+        super::promote_started_helpers(&mut pending_helpers, &mut children);
+        assert!(pending_helpers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_helper_startup_does_not_delay_pane_exit() {
+        use crate::event::AppEvent;
+        use crate::ids::PaneId;
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::pty::Pane;
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::CommandExt;
+        use std::sync::atomic::Ordering;
+        use std::time::Instant;
+
+        let _env = crate::persist::test_env("reaper-slow-helper");
+        let (app_tx, app_rx) = mpsc::channel();
+        let id = PaneId::alloc();
+        let pane = Pane::spawn(
+            id,
+            80,
+            24,
+            std::env::current_dir().unwrap(),
+            app_tx,
+            None,
+            "/bin/sh",
+            500,
+            PaneAppearance::default(),
+        )
+        .unwrap();
+        let (child_gate, mut release) = UnixStream::pair().unwrap();
+        child_gate
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        release
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut command = std::process::Command::new("true");
+        // SAFETY: the post-fork closure uses only async-signal-safe read/write.
+        // It reports that spawn is in progress, then blocks until the parent
+        // writes a release byte. No allocation or Rust synchronization occurs here.
+        unsafe {
+            command.pre_exec(move || {
+                let fd = child_gate.as_raw_fd();
+                let mut byte = [1u8];
+                if libc::write(fd, byte.as_ptr().cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                loop {
+                    if libc::read(fd, byte.as_mut_ptr().cast(), 1) >= 0 {
+                        return Ok(());
+                    }
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+            });
+        }
+        let helper = thread::spawn(move || super::spawn_helper_reaped(&mut command));
+        let mut ready = [0u8];
+        let startup_reached = release.read_exact(&mut ready).is_ok();
+        pane.send(b"exit\r");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut reaped_while_starting = false;
+        while startup_reached && Instant::now() < deadline {
+            match app_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(AppEvent::PtyReaped(exited, _)) if exited == id => {
+                    reaped_while_starting = pane.child_exited.load(Ordering::SeqCst);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        // Release startup before asserting so failure cannot strand the helper.
+        let _ = release.write_all(&[0]);
+        drop(release);
+        let helper_pid = helper.join().unwrap().expect("helper starts after release");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe { libc::kill(helper_pid as libc::pid_t, 0) } == 0 {
+            assert!(Instant::now() < deadline, "released helper was not reaped");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(startup_reached, "helper never entered delayed startup");
+        assert!(
+            reaped_while_starting,
+            "slow helper startup blocked pane exit notification"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn long_running_helpers_do_not_limit_links_or_delay_other_exits() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+        use std::process::{Command, Stdio};
+        use std::sync::atomic::Ordering;
+        use std::time::Instant;
+
+        fn wait_gone(pid: u32) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+                assert!(Instant::now() < deadline, "helper {pid} was not reaped");
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+
+        let mut writers = Vec::new();
+        let mut waiting_pids = Vec::new();
+        // More than the old 16-waiter cap, without timing-dependent sleeps in
+        // the children. Dropping writers releases them even if an assertion fails.
+        for _ in 0..24 {
+            let (read, write) = UnixStream::pair().unwrap();
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "read ignored"])
+                .stdin(Stdio::from(OwnedFd::from(read)))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            waiting_pids.push(super::spawn_helper_reaped(&mut command).expect("no helper cap"));
+            writers.push(write);
+        }
+        assert_eq!(super::CHILD_REAPER_STARTS.load(Ordering::SeqCst), 1);
+        for _ in 0..8 {
+            let pid = super::spawn_helper_reaped(&mut Command::new("true")).unwrap();
+            wait_gone(pid);
+        }
+        assert!(waiting_pids
+            .iter()
+            .all(|pid| unsafe { libc::kill(*pid as libc::pid_t, 0) } == 0));
+        drop(writers);
+        for pid in waiting_pids {
+            wait_gone(pid);
+        }
+        assert_eq!(super::CHILD_REAPER_STARTS.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn reaper_wake_blocks_until_signaled() {
