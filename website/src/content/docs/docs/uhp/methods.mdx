@@ -87,7 +87,7 @@ Luvus release number.
 | workspaces | `workspace.list` · `workspace.get` · `workspace.open` · `workspace.focus` · `workspace.rename` · `workspace.pin` · `workspace.move` · `workspace.move_block` · `workspace.report_metadata` · `workspace.close` |
 | tabs | `tab.list` · `tab.get` · `tab.new` · `tab.focus` · `tab.move` · `tab.swap` · `tab.rename` · `tab.close` |
 | runtime and agents | `session.snapshot` · `agent.start` · `agent.prompt` · `agent.wait` · `events.subscribe` |
-| panes | `pane.list` · `pane.get` · `pane.current` · `pane.layout` · `pane.neighbor` · `pane.edges` · `pane.split` · `pane.move` · `pane.swap` · `pane.focus` · `pane.focus_direction` · `pane.resize` · `pane.zoom` · `pane.rename` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
+| panes | `pane.list` · `pane.get` · `pane.current` · `pane.layout` · `pane.neighbor` · `pane.edges` · `pane.split` · `pane.move` · `pane.swap` · `pane.transpose` · `pane.focus` · `pane.focus_direction` · `pane.resize` · `pane.zoom` · `pane.rename` · `pane.run` · `pane.send_input` · `pane.read` · `pane.status` · `pane.processes` · `pane.close` · `attach.pane` |
 | layouts | `layout.export` · `layout.apply` · `layout.set_split_ratio` |
 | agents | `agent.list` · `agent.get` · `agent.explain` · `agent.report` · `agent.release` · `agent.start` · `agent.prompt` · `agent.wait` · `agent.name` · `agent.fork` · `agent.send` · `agent.keys` · `agent.read` · `agent.sessions` · `agent.resume` · `pane.report_session` · `pane.release_session` · `pane.report_event` |
 | search | `search` · `search.capabilities` · `search.query` · `search.activate` |
@@ -447,6 +447,15 @@ steps and a ratio from 0 to 1. The live layout clamps the result to preserve the
 minimum pane size. `pane.resize` takes `direction` and `cells`; `pane.swap`
 requires both panes to be in the same tab. `pane.focus_direction` changes focus,
 while `pane.neighbor` only inspects it.
+
+`pane.transpose` accepts `{pane?}` (or `{pane?, if_revision?}` at the wire
+boundary) and returns `{type:"pane_transpose", pane, changed}`. It toggles only
+the split immediately containing that pane, preserving ratios, leaf order,
+focus, zoom, and live terminals. An omitted/null pane selects the focused pane;
+an explicit ID resolves across workspaces and tabs. A single-pane tab returns
+`changed:false`. Dashboard or missing targets return `not_found`. A successful
+change emits `pane.transposed` with `{pane}`. This toggle is not idempotent:
+after a lost response, inspect `pane.layout` instead of retrying blindly.
 
 `workspace.move_block` takes a unique, bounded `workspaces` array and a final
 zero-based `to` position. All indices are validated before anything changes,

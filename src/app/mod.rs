@@ -1027,6 +1027,8 @@ pub struct PaneMenu {
     /// Whether this pane runs a fork-capable agent, snapshotted at open. Gates
     /// whether the "Fork to new pane" row is shown (docs/23).
     pub can_fork: bool,
+    /// Whether the pane has a sibling split that can be transposed.
+    pub can_transpose: bool,
     /// Exact tracked file + derived-preview kind snapshotted at menu open.
     /// Already-rendered previews and untracked shell/editor panes leave this empty.
     pub document_preview: Option<(PathBuf, crate::files::preview::PreviewKind)>,
@@ -1114,6 +1116,7 @@ pub struct AgentForkResult {
 pub enum PaneMenuItem {
     SplitVertical,
     SplitHorizontal,
+    Transpose,
     /// "Open Link" — open the URL that was under the right-click (docs/58). Only
     /// offered when there actually was one, so the row is never a dead end.
     OpenLink,
@@ -1144,6 +1147,7 @@ impl PaneMenuItem {
     pub const ALL: &'static [PaneMenuItem] = &[
         PaneMenuItem::SplitVertical,
         PaneMenuItem::SplitHorizontal,
+        PaneMenuItem::Transpose,
         PaneMenuItem::ForkPane,
         PaneMenuItem::OpenLink,
         PaneMenuItem::OpenFile,
@@ -5670,6 +5674,25 @@ impl App {
         })
     }
 
+    /// Transpose only the target pane's parent split without changing focus,
+    /// zoom, terminal lifetime, or any other tab.
+    pub(crate) fn transpose_pane(&mut self, pane: PaneId) -> Option<bool> {
+        let (workspace, tab) = self.pane_location(pane)?;
+        let target = &mut self.workspaces[workspace].tabs[tab];
+        if !target.is_renameable() {
+            return None;
+        }
+        let changed = target.layout.transpose_pane(pane);
+        if changed {
+            self.session_dirty = true;
+            self.emit_event(
+                "pane.transposed",
+                serde_json::json!({"pane":pane.0.to_string()}),
+            );
+        }
+        Some(changed)
+    }
+
     /// Fork `pane`'s agent session into a new sibling on its right, preserving
     /// the parent conversation. The source is resolved globally so Mission
     /// Control and socket callers can fork an inactive pane safely. With
@@ -6828,6 +6851,7 @@ impl App {
             .as_ref()
             .is_some_and(|m| !m.move_targets.is_empty());
         let can_fork = self.pane_menu.as_ref().is_some_and(|m| m.can_fork);
+        let can_transpose = self.pane_menu.as_ref().is_some_and(|m| m.can_transpose);
         let document_preview = self
             .pane_menu
             .as_ref()
@@ -6842,6 +6866,7 @@ impl App {
             .copied()
             .filter(|it| has_move || *it != PaneMenuItem::MoveToTab)
             .filter(|it| can_fork || *it != PaneMenuItem::ForkPane)
+            .filter(|it| can_transpose || *it != PaneMenuItem::Transpose)
             .filter(|it| has_url || *it != PaneMenuItem::OpenLink)
             .filter(|it| has_file || *it != PaneMenuItem::OpenFile)
             .filter(|it| {
@@ -7589,6 +7614,10 @@ impl App {
         }
         let move_targets = self.pane_move_targets();
         let can_fork = self.can_fork_pane(pane);
+        let can_transpose = self
+            .pane_location(pane)
+            .and_then(|(workspace, tab)| self.workspaces.get(workspace)?.tabs.get(tab))
+            .is_some_and(|tab| tab.layout.len() > 1);
         let link = self.link_at_screen(col, row).map(|h| h.target);
         let document_preview = match self.views.get(&pane) {
             Some(ViewKind::File(view)) => crate::files::preview::PreviewKind::for_path(&view.path)
@@ -7608,6 +7637,7 @@ impl App {
             move_open: false,
             tab_rects: Vec::new(),
             can_fork,
+            can_transpose,
             link,
             document_preview,
         });
@@ -7955,6 +7985,12 @@ impl App {
             return;
         };
         self.pane_menu = None;
+        // Transpose resolves the stable menu target globally and preserves focus,
+        // including after a background request has moved or closed that pane.
+        if item == PaneMenuItem::Transpose {
+            self.transpose_pane(pane);
+            return;
+        }
         // Act on the right-clicked pane, not whatever was focused before.
         self.layout_mut().focus = pane;
         match item {
@@ -7968,6 +8004,7 @@ impl App {
             }
             PaneMenuItem::SplitVertical => self.split(Axis::Col), // side by side
             PaneMenuItem::SplitHorizontal => self.split(Axis::Row), // stacked
+            PaneMenuItem::Transpose => {} // handled above without changing focus
             PaneMenuItem::ForkPane => {
                 self.fork_pane(pane);
             }
@@ -16711,6 +16748,43 @@ fi
             app.module_dock_rects.is_empty(),
             "user module dock rects cleared — a stale module dock can't fire"
         );
+    }
+
+    #[test]
+    fn transpose_menu_preserves_focus_and_ignores_closed_target() {
+        let _env = crate::persist::test_env("transpose-menu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        app.open_pane_menu(pane, 1, 1);
+        assert!(!app.pane_menu_items().contains(&PaneMenuItem::Transpose));
+        app.split(Axis::Col);
+        let focus = app.layout().focus;
+        app.open_pane_menu(pane, 1, 1);
+        assert!(app.pane_menu_items().contains(&PaneMenuItem::Transpose));
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let rect = app
+            .pane_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(item, _)| *item == PaneMenuItem::Transpose)
+            .unwrap()
+            .1;
+        app.pane_menu_click(rect.x, rect.y);
+        assert!(app.pane_menu.is_none());
+        assert_eq!(app.layout().focus, focus);
+        let crate::layout::LayoutTree::Split { axis, .. } = app.layout().to_tree() else {
+            panic!("split");
+        };
+        assert_eq!(axis, 1);
+        app.open_pane_menu(pane, 1, 1);
+        app.close_pane(pane);
+        app.pane_menu_action(PaneMenuItem::Transpose);
+        assert_eq!(app.layout().focus, focus);
     }
 
     #[test]

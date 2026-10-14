@@ -674,6 +674,7 @@ fn pane_label(it: PaneMenuItem, cat: &Catalog, extras: &[ModuleMenuAction]) -> S
     match it {
         PaneMenuItem::SplitVertical => cat.menu_split_vertical.to_string(),
         PaneMenuItem::SplitHorizontal => cat.menu_split_horizontal.to_string(),
+        PaneMenuItem::Transpose => cat.menu_transpose.to_string(),
         PaneMenuItem::ForkPane => cat.menu_fork_pane.to_string(),
         PaneMenuItem::OpenLink => cat.menu_open_link.to_string(),
         PaneMenuItem::OpenFile => cat.menu_open_file.to_string(),

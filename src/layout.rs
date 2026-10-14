@@ -210,6 +210,30 @@ impl TileLayout {
         true
     }
 
+    /// Transpose the split immediately containing `pane`.
+    ///
+    /// This changes only that split's orientation, preserving its ratio and
+    /// both pane identities. Descendant splits and their ratios are untouched,
+    /// so transposing a pane is a local layout operation rather than a global
+    /// rearrangement.
+    pub fn transpose_pane(&mut self, pane: PaneId) -> bool {
+        let mut path = Vec::new();
+        if !path_to_leaf(&self.root, pane, &mut path) || path.is_empty() {
+            return false;
+        }
+        // The final turn selects the leaf; its prefix identifies the split
+        // directly containing it.
+        path.pop();
+        let Some(Node::Split { axis, .. }) = self.node_at_mut(&path) else {
+            return false;
+        };
+        *axis = match *axis {
+            Axis::Col => Axis::Row,
+            Axis::Row => Axis::Col,
+        };
+        true
+    }
+
     /// Replace the tree only when it contains every current pane exactly once.
     /// This makes `layout.apply` atomic and preserves all pane-owned state.
     pub fn apply_tree(&mut self, tree: &LayoutTree, focus: PaneId) -> Result<(), &'static str> {
@@ -439,6 +463,17 @@ impl TileLayout {
 
     fn node_at(&self, path: &[bool]) -> Option<&Node> {
         let mut node = &self.root;
+        for &side in path {
+            match node {
+                Node::Split { a, b, .. } => node = if side { b } else { a },
+                Node::Leaf(_) => return None,
+            }
+        }
+        Some(node)
+    }
+
+    fn node_at_mut(&mut self, path: &[bool]) -> Option<&mut Node> {
+        let mut node = &mut self.root;
         for &side in path {
             match node {
                 Node::Split { a, b, .. } => node = if side { b } else { a },
@@ -763,6 +798,40 @@ fn equalize_node(node: &mut Node) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transpose_preserves_ratio_focus_and_nested_splits() {
+        let a = PaneId::alloc();
+        let b = PaneId::alloc();
+        let c = PaneId::alloc();
+        let mut layout = TileLayout::new(a);
+        assert!(!layout.transpose_pane(a));
+        assert!(!layout.transpose_pane(b));
+        layout.split_focused(Axis::Col, b);
+        layout.split_focused(Axis::Row, c);
+        layout.set_ratio(Rect::new(0, 0, 120, 60), &[], 0.6);
+        layout.set_ratio(Rect::new(0, 0, 120, 60), &[true], 0.3);
+        let before = serde_json::to_value(layout.to_tree()).unwrap();
+        let focus = layout.focus;
+        assert!(layout.transpose_pane(b));
+        let mut expected = before.clone();
+        expected["Split"]["b"]["Split"]["axis"] = serde_json::json!(0);
+        assert_eq!(serde_json::to_value(layout.to_tree()).unwrap(), expected);
+        assert_eq!(layout.focus, focus);
+        assert_eq!(layout.leaves(), vec![a, b, c]);
+        assert!(layout.transpose_pane(b));
+        assert_eq!(serde_json::to_value(layout.to_tree()).unwrap(), before);
+        assert!(layout.transpose_pane(a));
+        let mut expected = before;
+        expected["Split"]["axis"] = serde_json::json!(1);
+        assert_eq!(serde_json::to_value(layout.to_tree()).unwrap(), expected);
+        let remap = [(a.0, a), (b.0, b), (c.0, c)].into_iter().collect();
+        let restored = TileLayout::from_tree(&layout.to_tree(), &remap, focus.0).unwrap();
+        assert_eq!(serde_json::to_value(restored.to_tree()).unwrap(), expected);
+        for area in [Rect::new(0, 0, 120, 60), Rect::new(0, 0, 1, 1)] {
+            assert_eq!(restored.panes(area).len(), 3);
+        }
+    }
 
     #[test]
     fn split_and_navigate() {

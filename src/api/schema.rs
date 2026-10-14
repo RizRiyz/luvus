@@ -65,6 +65,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transpose_contract_is_mutating_and_revision_fenced() {
+        let bundle = schema_bundle();
+        let params = &bundle["request"]["$defs"]["paneTransposeParams"];
+        assert_eq!(params["additionalProperties"], false);
+        assert_eq!(params["properties"]["if_revision"]["type"], "integer");
+        assert_eq!(
+            crate::api::capabilities::required_scope("pane.transpose"),
+            "workspace"
+        );
+        assert!(!crate::api::capabilities::is_read_only("pane.transpose"));
+    }
+
+    #[test]
     fn schema_method_enum_tracks_registry() {
         let bundle = schema_bundle();
         let methods = bundle["request"]["properties"]["method"]["enum"]
@@ -287,6 +300,7 @@ mod tests {
             "pane.renamed",
             "pane.resized",
             "pane.swapped",
+            "pane.transposed",
             "pane.zoomed",
             "server.agent_manifests_reloaded",
             "tab.closed",

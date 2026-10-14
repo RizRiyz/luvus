@@ -18,6 +18,7 @@ like, and luvus tiles them automatically.
 | Split side by side | right-click a pane → **Split** | `Ctrl+Space v` |
 | Split top / bottom | right-click a pane → **Split down** | `Ctrl+Space s` |
 | Focus a pane | click it | `Ctrl+Space` then an arrow to preview; more arrows move, `Enter` focuses, `Esc` cancels; `hjkl` focuses immediately |
+| Transpose a split | right-click → **Transpose Split** | `Ctrl+Space T` |
 | Move a pane to another tab | right-click → **Move to Tab** | n/a |
 | Zoom (fullscreen) a pane | n/a | `Ctrl+Space z` |
 | Close a pane | the `×` on its title, or right-click → **Close** | `Ctrl+Space x` |
@@ -34,6 +35,21 @@ active pane or sending it input. When Commander is open, `Down` from the bottom
 pane can highlight its input; `Up` returns to that pane. `Enter` commits the
 highlighted focus; `Esc` keeps the original focus. Compact and zoomed layouts
 retain one-step pane focus.
+
+### Transposing a split
+
+**Transpose Split** toggles the split directly containing the target pane
+from side-by-side to top/bottom or back. Other split directions and all ratios
+stay unchanged. It preserves pane order, focus, zoom, terminal history, and
+running processes. Apply it twice to restore the original layout. A single-pane
+tab has no split to transpose, so the menu hides this action.
+
+Use `Ctrl+Space T` for the focused pane, or `luvus pane transpose 7` for an
+explicit pane in any workspace/tab without switching views. Omit the ID to use
+the caller pane inside Luvus, or the focused pane from an external terminal.
+The command returns `changed:false` for a single-pane tab. The shortcut can be
+rebound in **Settings → Keys** (`transpose_pane`), including an opt-in direct
+shortcut.
 
 ### Resizing
 

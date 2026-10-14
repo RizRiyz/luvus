@@ -658,6 +658,17 @@ def valid_global_request(value, methods):
     if value["method"] == "events.subscribe":
         after = value["params"].get("after_sequence", 0)
         return integer(after) and after >= 0
+    if value["method"] == "pane.transpose":
+        params = value["params"]
+        target = params.get("pane")
+        revision = params.get("if_revision", 0)
+        valid_target = target is None or (
+            type(target) is int and 0 <= target <= 4294967295
+        ) or (
+            isinstance(target, str) and target.isascii() and target.isdigit()
+            and int(target) <= 4294967295
+        )
+        return set(params) <= {"pane", "if_revision"} and valid_target and integer(revision) and revision >= 0
     if value["method"] == "pane.list":
         params = value["params"]
         return set(params) <= {"all_tabs"} and (

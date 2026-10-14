@@ -54,6 +54,7 @@ pub const METHODS: &[&str] = &[
     "pane.split",
     "pane.move",
     "pane.swap",
+    "pane.transpose",
     "pane.focus",
     "pane.focus_direction",
     "pane.resize",

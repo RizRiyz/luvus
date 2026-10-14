@@ -99,6 +99,7 @@ pub enum Cmd {
     SplitRight,
     SplitDown,
     SplitAuto,
+    TransposePane,
     ForkSession,
     ClosePane,
     ZoomPane,
@@ -151,6 +152,7 @@ impl Cmd {
         Cmd::SplitRight,
         Cmd::SplitDown,
         Cmd::SplitAuto,
+        Cmd::TransposePane,
         Cmd::ForkSession,
         Cmd::ClosePane,
         Cmd::ZoomPane,
@@ -207,6 +209,7 @@ impl Cmd {
             Cmd::SplitRight => "split_right",
             Cmd::SplitDown => "split_down",
             Cmd::SplitAuto => "split_auto",
+            Cmd::TransposePane => "transpose_pane",
             Cmd::ForkSession => "fork_session",
             Cmd::ClosePane => "close_pane",
             Cmd::ZoomPane => "zoom_pane",
@@ -268,6 +271,7 @@ impl Cmd {
             Cmd::SplitRight => cat.cmd_split_right,
             Cmd::SplitDown => cat.cmd_split_down,
             Cmd::SplitAuto => cat.cmd_split_auto,
+            Cmd::TransposePane => cat.menu_transpose,
             Cmd::ForkSession => cat.cmd_fork_session,
             Cmd::ClosePane => cat.cmd_close_pane,
             Cmd::ZoomPane => cat.cmd_zoom_pane,
@@ -318,6 +322,7 @@ impl Cmd {
             | Cmd::SplitRight
             | Cmd::SplitDown
             | Cmd::SplitAuto
+            | Cmd::TransposePane
             | Cmd::ForkSession
             | Cmd::ClosePane
             | Cmd::ZoomPane
@@ -364,6 +369,7 @@ impl Cmd {
             Cmd::SplitRight => "v",
             Cmd::SplitDown => "s",
             Cmd::SplitAuto => "+",
+            Cmd::TransposePane => "T",
             Cmd::ForkSession => "f",
             Cmd::ClosePane => "x",
             Cmd::ZoomPane => "z",
@@ -969,6 +975,16 @@ impl App {
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
             Cmd::SplitAuto => self.split_auto(),
+            Cmd::TransposePane => {
+                if let Some(pane) = self
+                    .workspaces
+                    .get(self.active_ws)
+                    .and_then(|ws| ws.tabs.get(ws.active_tab))
+                    .map(|tab| tab.layout.focus)
+                {
+                    self.transpose_pane(pane);
+                }
+            }
             // Fork the focused agent pane's session into a new pane (no-op if it
             // isn't a fork-capable agent).
             Cmd::ForkSession => {
@@ -1119,6 +1135,7 @@ mod tests {
         assert_eq!(m.get("a"), Some(&Cmd::ToggleAgents));
         assert_eq!(m.get("A"), Some(&Cmd::ToggleAgentScope));
         assert_eq!(m.get("+"), Some(&Cmd::SplitAuto));
+        assert_eq!(m.get("T"), Some(&Cmd::TransposePane));
         // Every command is reachable by at least one default binding.
         for &c in Cmd::ALL {
             assert!(m.values().any(|v| *v == c), "{c:?} default binding");
