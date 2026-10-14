@@ -137,7 +137,14 @@ impl App {
                         );
                     }
                 }
-                json!({ "id": req.id, "result": result }).to_string()
+                let response = json!({ "id": req.id, "result": result }).to_string();
+                if req.method == "agent.transcript" {
+                    // Private worker plan, never a wire response. A raw NUL cannot
+                    // begin serde_json output, even with client-controlled strings.
+                    format!("{}{response}", crate::ipc::api::TRANSCRIPT_REPLY_PREFIX)
+                } else {
+                    response
+                }
             }
             Err((code, message)) => {
                 json!({ "id": req.id, "error": { "code": code, "message": message } }).to_string()
@@ -146,6 +153,8 @@ impl App {
     }
 
     /// Validate and execute one bounded local API method against server-owned state.
+    /// `agent.transcript` returns a private read plan completed only by `ipc::api`;
+    /// in-process callers must not use this method or `handle_api` for transcript data.
     ///
     /// Keep this inventory explicit so CLI, API, and UHP parity stays auditable.
     /// Handler bodies belong in the domain modules, not in this router.
@@ -250,6 +259,7 @@ impl App {
             "agent.keys" => self.api_agent_keys(method, p),
             // Read a target agent's output, addressed by name or pane id.
             "agent.read" => self.api_agent_read(method, p),
+            "agent.transcript" => self.api_agent_transcript(p),
             // One agent's live info, resolved by name / pane id / kind — what to
             // check before deciding how to answer a blocked agent.
             "agent.get" => self.api_agent_get(method, p),

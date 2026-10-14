@@ -55,3 +55,6 @@
 {"id":"pane-list-all-tabs","method":"pane.list","params":{"all_tabs":true}}
 {"id":"pane-list-current-tab","method":"pane.list","params":{"all_tabs":false}}
 {"id":"pane-list-default","method":"pane.list","params":{}}
+{"id":"transcript-default","method":"agent.transcript","params":{"target":"reviewer"}}
+{"id":"transcript-page","method":"agent.transcript","params":{"target":"7","limit":1,"cursor":"0"}}
+{"id":"transcript-max","method":"agent.transcript","params":{"target":"7","limit":50,"cursor":"0000000000"}}
