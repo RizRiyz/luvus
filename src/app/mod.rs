@@ -2588,6 +2588,9 @@ pub struct App {
     /// UHP-created terminals whose lifecycle belongs to an external manager.
     /// They remain ordinary live panes, but are omitted from restart snapshots.
     pub(crate) backend_non_restorable: HashSet<PaneId>,
+    /// Panes started as scheduled automation workers. They restore as plain
+    /// shells: the headless run's native session is never saved for resume.
+    pub(crate) automation_worker_panes: HashSet<PaneId>,
     /// Last terminal content revision announced to backend observers. PTY
     /// readers coalesce wakeups, so the re-arm boundary may need to publish a
     /// newer trailing revision without duplicating the first wake's event.
@@ -3454,6 +3457,7 @@ impl App {
             backend_terminal_index,
             backend_labels: HashMap::new(),
             backend_non_restorable: HashSet::new(),
+            automation_worker_panes: HashSet::new(),
             backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
             last_backend_wait_scan: Instant::now(),
@@ -3848,6 +3852,7 @@ impl App {
         let mut views: HashMap<PaneId, ViewKind> = HashMap::new();
         let mut restored_names: Vec<(String, PaneId)> = Vec::new();
         let mut restored_backend_labels: Vec<(PaneId, String)> = Vec::new();
+        let mut automation_worker_panes = HashSet::new();
         let mut workspaces = Vec::new();
         for ws in snap.workspaces {
             let mut tabs = Vec::new();
@@ -4009,7 +4014,10 @@ impl App {
                     // it through the PTY after interactive profile setup.
                     // Re-apply the launch flags captured at save time (docs/62),
                     // unless Settings → General turns that off.
-                    let resume = ps.agent_session.as_ref().and_then(|(agent, sid)| {
+                    // A scheduled worker never resumes, even from a snapshot
+                    // that still names a session for it.
+                    let agent_session = ps.agent_session.as_ref().filter(|_| !ps.automation_worker);
+                    let resume = agent_session.and_then(|(agent, sid)| {
                         crate::agent::resume_for(
                             agent,
                             sid,
@@ -4091,7 +4099,7 @@ impl App {
                     }
                     let cmd = pane.command.clone();
                     let mut st = PaneStatus::new(cmd);
-                    if let Some((agent, sid)) = &ps.agent_session {
+                    if let Some((agent, sid)) = agent_session {
                         st.agent = agent.clone();
                         st.agent_session = Some(AgentSession {
                             agent: agent.clone(),
@@ -4105,6 +4113,9 @@ impl App {
                     }
                     panes.insert(id, pane);
                     status.insert(id, st);
+                    if ps.automation_worker {
+                        automation_worker_panes.insert(id);
+                    }
                     if let Some(label) = &ps.backend_label {
                         if !label.is_empty()
                             && label.len() <= crate::terminal::backend::MAX_TITLE_BYTES
@@ -4192,6 +4203,7 @@ impl App {
             backend_terminal_index,
             backend_labels,
             backend_non_restorable: HashSet::new(),
+            automation_worker_panes,
             backend_published_revisions: HashMap::new(),
             backend_revision_waits: HashMap::new(),
             last_backend_wait_scan: Instant::now(),
@@ -9516,6 +9528,7 @@ impl App {
         self.backend_terminal_index.retain(|_, pane| *pane != id);
         self.backend_labels.remove(&id);
         self.backend_non_restorable.remove(&id);
+        self.automation_worker_panes.remove(&id);
         self.backend_published_revisions.remove(&id);
         self.agent_title_panes.remove(&id);
         self.cancel_backend_revision_waits(id);

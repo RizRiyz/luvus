@@ -168,6 +168,10 @@ pane, while Luvus leaves the shared service and its live SQLite database alone.
 Exact-ID resume uses `opencode --session <id>`, and scheduled work is offered
 only for explicit **Full access** through `opencode run --auto`.
 
+Scheduled automation workers are the exception. Their panes restore as plain
+shells, and a headless run is never reopened as an interactive conversation.
+See [Automation](/docs/guides/automation/).
+
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
 (toggle *All*): click one to reopen it into a new pane, even sessions from
 before you installed luvus. The ✕ hides an entry from the list. It never

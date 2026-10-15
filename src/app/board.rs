@@ -583,6 +583,11 @@ impl App {
                 },
             ),
         }
+        // A scheduled run is headless. Its native session must not come back
+        // as an interactive conversation when the server restarts.
+        if matches!(launch, Some(TaskAgentLaunch::Automation(_))) {
+            self.automation_worker_panes.insert(pane);
+        }
         self.orch.save();
         self.emit_event(
             "task.started",
@@ -6144,5 +6149,485 @@ mod tests {
             app.orch.task("t1").unwrap().status,
             crate::orch::TaskStatus::Done
         );
+    }
+
+    /// A temporary Codex store holding one rollout per session in `cwd`.
+    /// Callers hold `persist::test_env`, which serializes environment edits.
+    struct FakeCodexHome {
+        dir: std::path::PathBuf,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl FakeCodexHome {
+        fn new(tag: &str, cwd: &std::path::Path, sessions: &[&str]) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("luvus-worker-codex-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let day = dir.join("sessions/2026/10/08");
+            std::fs::create_dir_all(&day).unwrap();
+            for id in sessions {
+                let meta = serde_json::json!({
+                    "type": "session_meta",
+                    "payload": {"id": id, "cwd": cwd, "source": "exec"},
+                });
+                std::fs::write(
+                    day.join(format!("rollout-2026-10-08T10-00-00-{id}.jsonl")),
+                    format!("{meta}\n"),
+                )
+                .unwrap();
+            }
+            let previous = std::env::var_os("CODEX_HOME");
+            std::env::set_var("CODEX_HOME", &dir);
+            Self { dir, previous }
+        }
+    }
+
+    impl Drop for FakeCodexHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Start a scheduled worker through the production task-start path, with
+    /// the PTY submit stubbed out so no agent process is launched.
+    fn start_scheduled_worker(app: &mut App, run_id: &str) -> TaskStartResult {
+        let workspace_id = app.ws().id.clone();
+        let task = app
+            .orch
+            .add_task("scheduled".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch
+            .attach_automation(
+                &task.id,
+                "summarize the readme".into(),
+                crate::orch::AutomationProvenance {
+                    automation_id: "a1".into(),
+                    run_id: run_id.into(),
+                    scheduled_at: 10,
+                },
+            )
+            .unwrap();
+        app.task_start_impl_with_submit(
+            &task.id,
+            None,
+            Some("codex".into()),
+            TaskWorkerMode::Workspace,
+            Some(workspace_id),
+            Some(crate::automation::AutomationAccess::ReadOnly),
+            |_pane, _line| Ok(()),
+        )
+        .unwrap()
+    }
+
+    fn report_session(app: &mut App, pane: PaneId, agent: &str, session_id: &str) {
+        let (reply, _r) = std::sync::mpsc::channel();
+        app.handle_api(&crate::ipc::api::ApiRequest {
+            id: "1".into(),
+            method: "pane.report_session".into(),
+            params: serde_json::json!({
+                "pane": pane.0.to_string(),
+                "agent": agent,
+                "session_id": session_id,
+            }),
+            reply,
+        });
+        assert!(
+            app.status[&pane].agent_session.is_some(),
+            "the live report is accepted"
+        );
+    }
+
+    /// The session a snapshot will resume in `pane`. A pane left out of the
+    /// snapshot resumes nothing either.
+    fn saved_session(
+        snap: &crate::persist::SessionSnapshot,
+        pane: PaneId,
+    ) -> Option<(String, String)> {
+        snap.workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .flat_map(|tab| &tab.panes)
+            .find(|(raw, _)| *raw == pane.0)
+            .and_then(|(_, saved)| saved.agent_session.clone())
+    }
+
+    #[test]
+    fn a_scheduled_worker_does_not_save_its_reported_session_for_resume() {
+        let _env = crate::persist::test_env("worker-reported-session");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let worker = start_scheduled_worker(&mut app, "r1").pane;
+
+        report_session(&mut app, worker, "codex", "worker-session");
+
+        let snap = crate::persist::snapshot(&app);
+        assert_eq!(
+            saved_session(&snap, worker),
+            None,
+            "a restart must not reopen the headless run as an interactive session"
+        );
+    }
+
+    #[test]
+    fn a_scheduled_worker_is_not_bound_to_its_discovered_session() {
+        let _env = crate::persist::test_env("worker-discovered-session");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let worker = start_scheduled_worker(&mut app, "r1").pane;
+        let cwd = app.panes[&worker].cwd.clone();
+        let _codex = FakeCodexHome::new("discovered", &cwd, &["worker-exec"]);
+        // Detection identified the finished worker from its screen text.
+        app.status.get_mut(&worker).unwrap().agent = "codex".into();
+
+        let snap = crate::persist::snapshot(&app);
+        assert_eq!(
+            saved_session(&snap, worker),
+            None,
+            "the only session in the worker's directory is still its own run"
+        );
+    }
+
+    #[test]
+    fn an_interactive_pane_does_not_inherit_a_workers_session() {
+        let _env = crate::persist::test_env("worker-session-not-inherited");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let interactive = app.layout().focus;
+        let worker = start_scheduled_worker(&mut app, "r1").pane;
+        let cwd = app.panes[&worker].cwd.clone();
+        assert_eq!(
+            app.panes[&interactive].cwd, cwd,
+            "workspace mode shares the directory"
+        );
+        let _codex = FakeCodexHome::new("not-inherited", &cwd, &["worker-exec"]);
+        app.status.get_mut(&interactive).unwrap().agent = "codex".into();
+
+        // Discovery: the worker's exec rollout is the directory's only session.
+        app.status.get_mut(&worker).unwrap().agent = "codex".into();
+        let snap = crate::persist::snapshot(&app);
+        assert_eq!(saved_session(&snap, interactive), None);
+        assert_eq!(saved_session(&snap, worker), None);
+
+        // Report: the worker's own session stays out of discovery as well.
+        report_session(&mut app, worker, "codex", "worker-exec");
+        let snap = crate::persist::snapshot(&app);
+        assert_eq!(saved_session(&snap, interactive), None);
+        assert_eq!(saved_session(&snap, worker), None);
+    }
+
+    #[test]
+    fn a_restored_scheduled_worker_stays_unbound_when_identified_again() {
+        let _env = crate::persist::test_env("worker-restored-identity");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let started = start_scheduled_worker(&mut app, "r1");
+        let cwd = app.panes[&started.pane].cwd.clone();
+        let _codex = FakeCodexHome::new("restored", &cwd, &["worker-exec"]);
+
+        let snap = crate::persist::snapshot(&app);
+        assert_eq!(saved_session(&snap, started.pane), None);
+        let (tx2, _rx2) = std::sync::mpsc::channel();
+        let mut restored = App::from_snapshot(snap, tx2).expect("restore");
+
+        // Pane ids are reallocated on restore; the worker keeps its tab id.
+        let Some(worker) = restored
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .find(|tab| tab.id == started.tab_id)
+            .map(|tab| tab.layout.focus)
+        else {
+            // Leaving the finished worker out of restore also never resumes it.
+            return;
+        };
+        // The restored screen still shows the run, so detection can name the
+        // agent again in the next server lifetime.
+        restored.status.get_mut(&worker).unwrap().agent = "codex".into();
+
+        let snap = crate::persist::snapshot(&restored);
+        assert_eq!(
+            saved_session(&snap, worker),
+            None,
+            "the second restart must not resume the worker either"
+        );
+    }
+
+    #[test]
+    fn closing_a_scheduled_worker_forgets_it() {
+        let _env = crate::persist::test_env("worker-mark-closed");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let worker = start_scheduled_worker(&mut app, "r1").pane;
+        assert!(app.automation_worker_panes.contains(&worker));
+
+        app.close_pane(worker);
+
+        assert!(!app.automation_worker_panes.contains(&worker));
+    }
+
+    #[test]
+    fn a_manual_task_worker_still_saves_its_reported_session() {
+        let _env = crate::persist::test_env("manual-worker-session");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspace_id = app.ws().id.clone();
+        app.orch
+            .add_task("manual".into(), vec![], vec![], None)
+            .unwrap();
+        let worker = app
+            .task_start_impl_with_submit(
+                "t1",
+                None,
+                Some("codex".into()),
+                TaskWorkerMode::Workspace,
+                Some(workspace_id),
+                None,
+                |_pane, _line| Ok(()),
+            )
+            .unwrap()
+            .pane;
+
+        report_session(&mut app, worker, "codex", "manual-session");
+
+        let snap = crate::persist::snapshot(&app);
+        assert_eq!(
+            saved_session(&snap, worker),
+            Some(("codex".into(), "manual-session".into())),
+            "interactive ORCH workers keep resuming as before"
+        );
+        crate::orch::worker::discard(worker);
+    }
+
+    #[test]
+    fn a_worktree_scheduled_worker_is_marked_and_not_resumed() {
+        let _env = crate::persist::test_env("worker-worktree-mode");
+        let base = crate::persist::config_dir().join("worker-worktree-repo");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&base)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {:?} failed", args);
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(base.clone()));
+        let workspace_id = app.ws().id.clone();
+        let project = app.task_project_at(app.active_ws).unwrap();
+        let task = app
+            .orch
+            .add_task_with_prompt_in_project(
+                "scheduled".into(),
+                None,
+                vec![],
+                vec![],
+                None,
+                Some(project),
+            )
+            .unwrap();
+        app.orch
+            .attach_automation(
+                &task.id,
+                "summarize the readme".into(),
+                crate::orch::AutomationProvenance {
+                    automation_id: "a1".into(),
+                    run_id: "r1".into(),
+                    scheduled_at: 10,
+                },
+            )
+            .unwrap();
+        let started = app
+            .task_start_impl_with_submit(
+                &task.id,
+                None,
+                Some("codex".into()),
+                TaskWorkerMode::Worktree,
+                Some(workspace_id),
+                Some(crate::automation::AutomationAccess::ReadOnly),
+                |_pane, _line| Ok(()),
+            )
+            .unwrap();
+        assert!(app.automation_worker_panes.contains(&started.pane));
+
+        report_session(&mut app, started.pane, "codex", "worktree-run");
+        let snap = crate::persist::snapshot(&app);
+        assert_eq!(saved_session(&snap, started.pane), None);
+
+        app.close_pane(started.pane);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_scheduled_start_leaves_no_worker_mark() {
+        let _env = crate::persist::test_env("worker-failed-start");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let workspace_id = app.ws().id.clone();
+        let task = app
+            .orch
+            .add_task("scheduled".into(), vec![], vec![], None)
+            .unwrap();
+        app.orch
+            .attach_automation(
+                &task.id,
+                "summarize the readme".into(),
+                crate::orch::AutomationProvenance {
+                    automation_id: "a1".into(),
+                    run_id: "r1".into(),
+                    scheduled_at: 10,
+                },
+            )
+            .unwrap();
+
+        let error = app
+            .task_start_impl_with_submit(
+                &task.id,
+                None,
+                Some("codex".into()),
+                TaskWorkerMode::Workspace,
+                Some(workspace_id),
+                Some(crate::automation::AutomationAccess::ReadOnly),
+                |_pane, _line| Err("injected submit failure".into()),
+            )
+            .unwrap_err();
+
+        assert_eq!(error.0, "send_failed");
+        assert!(app.automation_worker_panes.is_empty());
+    }
+
+    #[test]
+    fn the_worker_mark_is_saved_only_for_workers() {
+        let _env = crate::persist::test_env("worker-mark-serialized");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let interactive = app.layout().focus;
+        let worker = start_scheduled_worker(&mut app, "r1").pane;
+
+        let snap = crate::persist::snapshot(&app);
+        let saved = |pane: PaneId| {
+            snap.workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .flat_map(|tab| &tab.panes)
+                .find(|(raw, _)| *raw == pane.0)
+                .map(|(_, saved)| serde_json::to_value(saved).unwrap())
+                .unwrap()
+        };
+        assert_eq!(saved(worker)["automation_worker"], serde_json::json!(true));
+        assert!(
+            saved(interactive).get("automation_worker").is_none(),
+            "ordinary panes keep the existing session.json shape"
+        );
+
+        // A snapshot written before the field existed still loads.
+        let mut legacy = saved(worker);
+        legacy.as_object_mut().unwrap().remove("automation_worker");
+        let legacy: crate::persist::PaneSnap = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.automation_worker);
+    }
+
+    #[test]
+    fn a_restored_worker_keeps_its_mark_across_restarts() {
+        let _env = crate::persist::test_env("worker-mark-restored");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let started = start_scheduled_worker(&mut app, "r1");
+
+        let mut current = app;
+        for restart in 1..=2 {
+            let snap = crate::persist::snapshot(&current);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            current = App::from_snapshot(snap, tx).expect("restore");
+            let worker = current
+                .workspaces
+                .iter()
+                .flat_map(|workspace| &workspace.tabs)
+                .find(|tab| tab.id == started.tab_id)
+                .map(|tab| tab.layout.focus)
+                .expect("the worker tab is restored");
+            assert!(
+                current.automation_worker_panes.contains(&worker),
+                "restart {restart} keeps the worker mark"
+            );
+            assert_eq!(current.automation_worker_panes.len(), 1);
+            assert!(current.status[&worker].agent_session.is_none());
+        }
+    }
+
+    #[test]
+    fn a_worker_snapshot_that_names_a_session_does_not_resume_it() {
+        let _env = crate::persist::test_env("worker-mixed-snapshot");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let started = start_scheduled_worker(&mut app, "r1");
+
+        // A hand-edited or mixed-version snapshot carries both.
+        let mut snap = crate::persist::snapshot(&app);
+        for (raw, saved) in snap
+            .workspaces
+            .iter_mut()
+            .flat_map(|workspace| &mut workspace.tabs)
+            .flat_map(|tab| &mut tab.panes)
+        {
+            if *raw == started.pane.0 {
+                assert!(saved.automation_worker);
+                saved.agent_session = Some(("codex".into(), "stale-run".into()));
+            }
+        }
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let restored = App::from_snapshot(snap, tx).expect("restore");
+
+        let worker = restored
+            .workspaces
+            .iter()
+            .flat_map(|workspace| &workspace.tabs)
+            .find(|tab| tab.id == started.tab_id)
+            .map(|tab| tab.layout.focus)
+            .expect("the worker tab is restored");
+        assert!(restored.automation_worker_panes.contains(&worker));
+        assert!(restored.status[&worker].agent_session.is_none());
+        assert_ne!(restored.status[&worker].agent, "codex");
+    }
+
+    #[test]
+    fn an_interactive_pane_keeps_its_own_session_beside_a_reported_worker() {
+        let _env = crate::persist::test_env("worker-reported-beside-owner");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let interactive = app.layout().focus;
+        let worker = start_scheduled_worker(&mut app, "r1").pane;
+        let cwd = app.panes[&worker].cwd.clone();
+        assert_eq!(app.panes[&interactive].cwd, cwd);
+        let _codex = FakeCodexHome::new("beside-owner", &cwd, &["worker-run", "interactive-run"]);
+        app.status.get_mut(&interactive).unwrap().agent = "codex".into();
+        report_session(&mut app, worker, "codex", "worker-run");
+
+        // Before the worker mark existed, the reported run bound the worker and
+        // left the directory's other session to this pane. That must not change.
+        let snap = crate::persist::snapshot(&app);
+        assert_eq!(
+            saved_session(&snap, interactive),
+            Some(("codex".into(), "interactive-run".into()))
+        );
+        assert_eq!(saved_session(&snap, worker), None);
     }
 }
