@@ -98,9 +98,9 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal",
 # Jiff is local-only: it reads the OS timezone database (with a Windows bundle)
 # and performs no runtime network access.
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
-# `libc` (setsid + macOS proc_pidinfo) is only needed on Unix.
+# Unix APIs; 0.2.187 adds musl renameat2 for exclusive worktree restoration.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.187"
 
 # Native Windows terminal-backend safety: owner verification for named-pipe
 # peers, PID-reuse-safe process creation timestamps, and one bounded ToolHelp
