@@ -53,6 +53,11 @@ impl ProgramState {
         matches!(self, Self::Done | Self::Error)
     }
 
+    /// A live producer claim. Results outlive the process that reported them.
+    fn is_live(self) -> bool {
+        matches!(self, Self::Idle | Self::Working | Self::Blocked)
+    }
+
     pub(crate) fn projected(self) -> State {
         match self {
             Self::Idle => State::Idle,
@@ -113,11 +118,9 @@ impl ProgramStatusStore {
         self.records.is_empty()
     }
 
-    /// Working/blocked records claim a live producer; results do not.
+    /// Idle/working/blocked records claim a live producer; results do not.
     pub(crate) fn has_transient(&self) -> bool {
-        self.records
-            .values()
-            .any(|r| matches!(r.state, ProgramState::Working | ProgramState::Blocked))
+        self.records.values().any(|r| r.state.is_live())
     }
 
     /// Preserve read confirmation for the same result, not merely the same ID.
@@ -159,10 +162,8 @@ impl ProgramStatusStore {
     /// process observation. Later reports can belong to its replacement.
     pub(crate) fn clear_transient_through(&mut self, boundary: u64) {
         self.mark_left_behind_through(boundary);
-        self.records.retain(|_, r| {
-            r.update_sequence > boundary
-                || !matches!(r.state, ProgramState::Working | ProgramState::Blocked)
-        });
+        self.records
+            .retain(|_, r| r.update_sequence > boundary || !r.state.is_live());
         self.refresh_summary();
     }
 
@@ -756,6 +757,20 @@ mod tests {
             store.effective_projection().unwrap().0,
             crate::ui::theme::State::Blocked
         );
+    }
+
+    #[test]
+    fn producer_exit_drops_idle_from_the_old_producer_only() {
+        let mut store = ProgramStatusStore::default();
+        store.apply(parse_report(b"state=idle:id=prompt").unwrap());
+        store.apply(parse_report(b"state=done:id=build").unwrap());
+        assert!(store.has_transient());
+        let boundary = store.revision();
+        store.apply(parse_report(b"state=idle:id=next").unwrap());
+        store.clear_transient_through(boundary);
+        let mut ids: Vec<_> = store.records().map(|record| record.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["build", "next"]);
     }
 
     #[test]

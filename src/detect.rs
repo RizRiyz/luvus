@@ -311,6 +311,23 @@ impl Manifests {
         self.agents.iter().any(|a| a.name == low)
     }
 
+    /// True when `name` is any string Luvus uses to recognise an agent: the
+    /// canonical id, a distinct executable, or an ambiguous alias. A program
+    /// report can claim these without a process to back them up.
+    pub(crate) fn identifies_agent(&self, name: &str) -> bool {
+        self.agents.iter().any(|agent| {
+            agent.name.eq_ignore_ascii_case(name)
+                || agent
+                    .distinct
+                    .iter()
+                    .any(|pattern| pattern.eq_ignore_ascii_case(name))
+                || agent
+                    .ambiguous
+                    .iter()
+                    .any(|pattern| pattern.eq_ignore_ascii_case(name))
+        })
+    }
+
     fn best_agent(&self, matches: impl Fn(&AgentIdent) -> bool) -> Option<&AgentIdent> {
         self.agents
             .iter()
@@ -1848,6 +1865,26 @@ mod tests {
     use super::*;
     use crate::terminal::vt::alacritty::AlacrittyEngine;
     use crate::terminal::vt::VtEngine;
+
+    #[test]
+    fn agent_identity_strings_include_aliases_beyond_the_canonical_id() {
+        let manifests = Manifests::builtin();
+        for name in [
+            "claude",
+            "cursor-agent",
+            "kilocode",
+            "pi-coding-agent",
+            "opencode2",
+            "agy",
+            "letta-code",
+            "hermes-cli",
+        ] {
+            assert!(manifests.identifies_agent(name), "{name}");
+        }
+        for name in ["terraform", "zsh", "program", "cursoragent"] {
+            assert!(!manifests.identifies_agent(name), "{name}");
+        }
+    }
 
     #[test]
     fn shell_commands_are_recognized_across_platform_forms() {

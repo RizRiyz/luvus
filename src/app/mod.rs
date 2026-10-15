@@ -8830,7 +8830,7 @@ impl App {
                 .or(st.program_status_agent.as_deref());
             let Some(bound_agent) = bound_agent else {
                 st.agent_absent_scans = 0;
-                // Any program can report working/blocked from a plain shell,
+                // Any program can report idle/working/blocked from a plain shell,
                 // and a Ctrl+C or crash never sends the clear. Once two scans
                 // see only the shell root, reports made before the first one
                 // have lost their producer; later reports remain live.
@@ -11640,7 +11640,7 @@ mod tests {
         engine
             .lock()
             .unwrap()
-            .advance(b"\x1b]7501;state=done:id=build\x07\x1b]7501;state=blocked:app=terraform\x07");
+            .advance(b"\x1b]7501;state=done:id=build\x07\x1b]7501;state=blocked:app=terraform\x07\x1b]7501;state=idle:id=quiet\x07");
         app.handle_event(AppEvent::PtyData(pane));
         let ids = |app: &App| {
             let mut ids = app.status[&pane]
@@ -11659,10 +11659,10 @@ mod tests {
         )])));
         app.apply_proc_scan(Some(HashMap::from([(root, vec!["terraform".to_string()])])));
         app.apply_proc_scan(Some(HashMap::from([(root, vec!["terraform".to_string()])])));
-        assert_eq!(ids(&app), ["", "build"]);
+        assert_eq!(ids(&app), ["", "build", "quiet"]);
         // The first shell-only scan is an observation, not proof.
         app.apply_proc_scan(shell_only());
-        assert_eq!(ids(&app), ["", "build"]);
+        assert_eq!(ids(&app), ["", "build", "quiet"]);
         assert!(app.proc_scan_requested);
         // A report made after that observation belongs to whatever runs next.
         engine

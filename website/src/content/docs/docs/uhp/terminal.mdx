@@ -116,8 +116,9 @@ bounded records through `agent.explain`, with `state_source: "program_status"`.
 Identity continues to come from process, launch, title, and session evidence.
 The self-reported `app` value is grouping metadata only; it cannot grant native
 agent capabilities or impersonate a built-in agent identity. An `app` that names
-a built-in or manifest agent is displayed as `program` unless process or session
-evidence proves that agent is running in the pane. An active leased
+a built-in or manifest agent — its id, a distinct executable, or an ambiguous
+alias — is displayed as `program` unless process or session evidence proves
+that agent is running in the pane. An active leased
 integration report takes precedence over OSC 7501 state.
 
 While valid OSC 7501 records provide state, Luvus skips legacy screen-state
@@ -143,16 +144,17 @@ Updates are reduced in PTY wire order into a bounded metadata snapshot, not a
 lossy report queue. A query `OSC 7501 ; ? ST` receives the fixed `?` reply.
 
 OSC 133 `A` prompt starts remove unfinished records (`idle`, `working`, and
-`blocked`); confirmed process exits remove `working` and `blocked`. Both retain
-`done` and `error` results. OSC 133 `C` command starts remove only results left
-behind before that prompt, not freshly reported records. RIS clears every record;
+`blocked`). Confirmed producer exit removes `idle`, `working`, and `blocked`
+records from that producer. Both retain `done` and `error` results. OSC 133 `C`
+command starts remove only results left behind before that prompt, not freshly
+reported records. RIS clears every record;
 alternate-screen switches do not. Pane closure removes the pane and its
 metadata.
 
 A program that is interrupted or crashes never sends its clear. Without OSC 133
 markers, Luvus uses its existing process scan instead: when two consecutive
-scans find only the pane's shell (no foreground job), `working` and `blocked`
-records reported before the first of those scans are removed. Reports made
+scans find only the pane's shell (no foreground job), `idle`, `working`, and
+`blocked` records reported before the first of those scans are removed. Reports made
 after it are kept, and results are retained. Status emitted by the shell itself
 with no child process is treated the same way. This needs a working process
 scan, so a pane whose root is not a shell (an SSH session, or a program launched
