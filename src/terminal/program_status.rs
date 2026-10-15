@@ -4,7 +4,7 @@
 //! malformed reports are ignored without changing the existing record set.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::sync::Arc;
 
 use crate::ui::theme::State;
 
@@ -36,7 +36,6 @@ impl ProgramState {
             "blocked" => Self::Blocked,
             "done" => Self::Done,
             "error" => Self::Error,
-            "clear" => return None,
             _ => return None,
         })
     }
@@ -74,9 +73,10 @@ pub struct ProgramStatusRecord {
     pub kind: Option<String>,
     pub progress: Option<u8>,
     pub app: Option<String>,
-    pub title: Option<String>,
-    pub message: Option<String>,
-    updated_at: Instant,
+    // Shared so the per-change snapshot handed to the app thread does not
+    // copy up to 2 KiB of message text for every retained record.
+    pub title: Option<Arc<str>>,
+    pub message: Option<Arc<str>>,
     // Sequence identifies a result independently of LRU recency.
     result_sequence: u64,
     update_sequence: u64,
@@ -96,7 +96,7 @@ pub struct ProgramStatusStore {
 struct ProgramStatusSummary {
     state: State,
     app: Option<String>,
-    message: Option<String>,
+    message: Option<Arc<str>>,
     progress: Option<u8>,
     unread_result: bool,
 }
@@ -111,6 +111,13 @@ impl ProgramStatusStore {
     }
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// Working/blocked records claim a live producer; results do not.
+    pub(crate) fn has_transient(&self) -> bool {
+        self.records
+            .values()
+            .any(|r| matches!(r.state, ProgramState::Working | ProgramState::Blocked))
     }
 
     /// Preserve read confirmation for the same result, not merely the same ID.
@@ -233,7 +240,7 @@ impl ProgramStatusStore {
             if let Some(oldest) = self
                 .records
                 .values()
-                .min_by_key(|r| (r.updated_at, r.id.as_str()))
+                .min_by_key(|r| r.update_sequence)
                 .map(|r| r.id.clone())
             {
                 self.records.remove(&oldest);
@@ -252,10 +259,7 @@ impl ProgramStatusStore {
                     && old.message == report.message
             })
             .map(|old| (old.result_sequence, old.done_read));
-        self.last_sequence = self
-            .last_sequence
-            .checked_add(1)
-            .expect("report sequence exhausted");
+        self.last_sequence = self.last_sequence.saturating_add(1);
         let (result_sequence, done_read) = repeated.unwrap_or((self.last_sequence, false));
         self.records.insert(
             report.id.clone(),
@@ -267,7 +271,6 @@ impl ProgramStatusStore {
                 app: report.app,
                 title: report.title,
                 message: report.message,
-                updated_at: Instant::now(),
                 result_sequence,
                 update_sequence: self.last_sequence,
                 done_read,
@@ -282,7 +285,7 @@ impl ProgramStatusStore {
     pub fn effective(&self) -> Option<&ProgramStatusRecord> {
         self.records
             .values()
-            .max_by_key(|r| (r.state.priority(), r.updated_at, r.id.as_str()))
+            .max_by_key(|r| (r.state.priority(), r.update_sequence))
     }
 
     pub(crate) fn inherited_app<'a>(&'a self, record: &'a ProgramStatusRecord) -> Option<&'a str> {
@@ -309,7 +312,7 @@ impl ProgramStatusStore {
                 } else {
                     record.state.priority()
                 };
-                (priority, record.updated_at, record.id.as_str())
+                (priority, record.update_sequence)
             })
             .map(|record| ProgramStatusSummary {
                 state: if record.state.is_result() && record.done_read {
@@ -348,8 +351,8 @@ pub struct ProgramStatusReport {
     kind: Option<String>,
     progress: Option<u8>,
     app: Option<String>,
-    title: Option<String>,
-    message: Option<String>,
+    title: Option<Arc<str>>,
+    message: Option<Arc<str>>,
 }
 
 /// Parse one OSC 7501 body. The body excludes `OSC 7501;` and its terminator.
@@ -499,7 +502,7 @@ fn decode_text(
     value: Option<&str>,
     max_encoded: usize,
     max_decoded: usize,
-) -> Option<Option<String>> {
+) -> Option<Option<Arc<str>>> {
     let Some(value) = value else {
         return Some(None);
     };
@@ -514,7 +517,7 @@ fn decode_text(
     if text.chars().any(char::is_control) {
         return None;
     }
-    Some(Some(text))
+    Some(Some(text.into()))
 }
 
 /// Plain display text for status shown outside the terminal grid. Raw records
@@ -824,7 +827,7 @@ mod tests {
         assert_eq!(super::display_message(text), "ABC text");
         assert_eq!(
             super::decode_text(Some("4oCuQUJD"), 2732, 2048).unwrap(),
-            Some("\u{202e}ABC".to_string())
+            Some("\u{202e}ABC".into())
         );
     }
 

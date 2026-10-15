@@ -1334,6 +1334,7 @@ impl VtEngine for AlacrittyEngine {
         if let Ok(mut pending) = self.program_status.lock() {
             pending.records.clear_transient_through(boundary);
             pending.changed = true;
+            self.response_tx.mark_program_status_pending();
         }
     }
 
@@ -1341,7 +1342,13 @@ impl VtEngine for AlacrittyEngine {
         if let Ok(mut pending) = self.program_status.lock() {
             pending.records.clear_transient();
             pending.changed = true;
+            self.response_tx.mark_program_status_pending();
         }
+    }
+
+    #[cfg(test)]
+    fn response_sender_for_test(&self) -> Option<InputSender> {
+        Some(self.response_tx.clone())
     }
 
     fn set_history_budget(&mut self, bytes: usize) {

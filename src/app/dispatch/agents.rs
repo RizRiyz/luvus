@@ -797,10 +797,15 @@ impl App {
         if self.is_agent_pane(pane) {
             return Some(&s.agent);
         }
+        // Any output can claim `app=claude`. Only process or session evidence
+        // may put a known agent's name on a row that offers inline answers.
         s.program_status
             .as_ref()?
             .effective_projection()
-            .map(|(_, app, _)| app.unwrap_or("program"))
+            .map(|(_, app, _)| {
+                app.filter(|app| !self.manifests.is_agent(app))
+                    .unwrap_or("program")
+            })
     }
 
     /// Resolve an `agent.*` `target` param (a live alias or a numeric pane id) to a

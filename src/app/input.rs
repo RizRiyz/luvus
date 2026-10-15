@@ -553,12 +553,13 @@ impl App {
         &mut self,
         id: PaneId,
         store: crate::terminal::program_status::ProgramStatusStore,
-    ) {
+    ) -> bool {
         let Some(status) = self.status.get_mut(&id) else {
-            return;
+            return false;
         };
-        status.sync_program_status(store, &self.manifests);
+        let presentation_changed = status.sync_program_status(store, &self.manifests);
         self.detection_dirty.insert(id);
+        presentation_changed
     }
 
     /// Apply an event; returns whether it changed the rendered UI (→ the loop

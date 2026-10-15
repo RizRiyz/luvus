@@ -1974,20 +1974,22 @@ pub struct PaneStatus {
 }
 
 impl PaneStatus {
+    /// Returns whether the summarized presentation changed.
     fn sync_program_status(
         &mut self,
         mut store: crate::terminal::program_status::ProgramStatusStore,
         manifests: &crate::detect::Manifests,
-    ) {
+    ) -> bool {
         if let Some(previous) = self.program_status.as_ref() {
             store.preserve_done_reads(previous);
         }
-        self.program_status_presentation_changed |= self
+        let presentation_changed = self
             .program_status
             .as_ref()
             .map_or(!store.is_empty(), |previous| {
                 !store.same_presentation(previous)
             });
+        self.program_status_presentation_changed |= presentation_changed;
         self.program_status = (!store.is_empty()).then_some(store);
         if self.program_status.is_none() {
             self.program_status_agent = None;
@@ -2000,6 +2002,7 @@ impl PaneStatus {
         }
         // Detection owns published identity/state and transition side effects.
         self.force_detect = true;
+        presentation_changed
     }
 
     fn new(agent: String) -> Self {
@@ -5269,10 +5272,9 @@ impl App {
             }
         }
         for (id, store) in status_events {
-            // Metadata has consumers outside the terminal grid, including
-            // hidden-pane sidebar rows and API explanations.
-            title_changed = true;
-            self.sync_program_status(id, store);
+            // Hidden-pane sidebar rows only need a repaint when the summary
+            // they draw changed; a repeated progress report does not.
+            title_changed |= self.sync_program_status(id, store);
         }
         // A reader can append more bytes while its wake flag is already set.
         // Publish at the re-arm boundary so backend observers receive that
@@ -8828,6 +8830,34 @@ impl App {
                 .or(st.program_status_agent.as_deref());
             let Some(bound_agent) = bound_agent else {
                 st.agent_absent_scans = 0;
+                // Any program can report working/blocked from a plain shell,
+                // and a Ctrl+C or crash never sends the clear. Once two scans
+                // see only the shell root, reports made before the first one
+                // have lost their producer; later reports remain live.
+                let returned_to_shell = cmds.len() == 1
+                    && detect::is_shell_command(&cmds[0])
+                    && st
+                        .program_status
+                        .as_ref()
+                        .is_some_and(|store| store.has_transient());
+                if !returned_to_shell {
+                    st.program_status_exit_boundary = None;
+                    continue;
+                }
+                let Some(pane) = self.panes.get(id) else {
+                    continue;
+                };
+                let Some(boundary) = st.program_status_exit_boundary.take() else {
+                    st.program_status_exit_boundary = Some(pane.program_status_revision());
+                    self.proc_scan_requested = true;
+                    self.proc_scan_failure_retries = dispatch::PROC_SCAN_FAILURE_RETRIES;
+                    continue;
+                };
+                pane.program_status_process_exited_through(boundary);
+                if let Some(store) = pane.take_pending_program_status() {
+                    st.sync_program_status(store, &self.manifests);
+                }
+                self.detection_dirty.insert(*id);
                 continue;
             };
             if self.manifests.process_has_agent(cmds, bound_agent) {
@@ -11400,7 +11430,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         engine
             .lock()
             .unwrap()
@@ -11441,7 +11474,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         app.proc_commands.insert(pane, vec!["claude".into()]);
         engine
             .lock()
@@ -11508,7 +11544,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         engine
             .lock()
             .unwrap()
@@ -11575,6 +11614,67 @@ mod tests {
     }
 
     #[test]
+    fn osc7501_plain_shell_return_clears_reports_left_by_an_exited_program() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-shell-return");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let root = app.panes[&pane]
+            .child_pid
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            4 * 1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=done:id=build\x07\x1b]7501;state=blocked:app=terraform\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let ids = |app: &App| {
+            let mut ids = app.status[&pane]
+                .program_status
+                .as_ref()
+                .map(|store| store.records().map(|r| r.id.clone()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            ids.sort();
+            ids
+        };
+        let shell_only = || Some(HashMap::from([(root, vec!["-zsh".to_string()])]));
+        // A running foreground job, or a non-shell pane root, is a live producer.
+        app.apply_proc_scan(Some(HashMap::from([(
+            root,
+            vec!["-zsh".to_string(), "terraform apply".to_string()],
+        )])));
+        app.apply_proc_scan(Some(HashMap::from([(root, vec!["terraform".to_string()])])));
+        app.apply_proc_scan(Some(HashMap::from([(root, vec!["terraform".to_string()])])));
+        assert_eq!(ids(&app), ["", "build"]);
+        // The first shell-only scan is an observation, not proof.
+        app.apply_proc_scan(shell_only());
+        assert_eq!(ids(&app), ["", "build"]);
+        assert!(app.proc_scan_requested);
+        // A report made after that observation belongs to whatever runs next.
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=working:id=next\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.apply_proc_scan(shell_only());
+        assert_eq!(ids(&app), ["build", "next"]);
+    }
+
+    #[test]
     fn osc7501_integration_authority_wins_until_released() {
         use crate::terminal::appearance::PaneAppearance;
         use crate::terminal::vt::{create_engine, VtEngineKind};
@@ -11591,7 +11691,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         app.dispatch("agent.report", &json!({"pane":pane.0.to_string(),"source":"test/hook","agent":"pi","status":"blocked","message":"Hook message"})).unwrap();
         engine
             .lock()
@@ -11638,7 +11741,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         engine
             .lock()
             .unwrap()
@@ -11727,7 +11833,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         let start = Instant::now();
         engine
             .lock()
@@ -11783,7 +11892,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         app.proc_commands.insert(pane, vec!["pi".into()]);
         engine
             .lock()
@@ -11862,7 +11974,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         engine
             .lock()
             .unwrap()
@@ -11910,7 +12025,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         engine
             .lock()
             .unwrap()
@@ -11920,7 +12038,12 @@ mod tests {
         app.detect_tick(Instant::now());
         assert!(!app.is_agent_pane(pane));
         assert!(app.is_status_reporter_pane(pane));
-        assert_eq!(app.status_reporter_label(pane), Some("claude"));
+        // A report cannot borrow a built-in agent's name without process proof.
+        assert_eq!(app.status_reporter_label(pane), Some("program"));
+        assert_eq!(
+            app.agent_explanation(pane)["program_status"][0]["app"],
+            "claude"
+        );
         assert_eq!(
             app.agent_explanation(pane)["program_status"][0]["state"],
             "done"
@@ -11960,7 +12083,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         app.proc_commands.insert(pane, vec!["claude".into()]);
         engine
             .lock()
@@ -12002,7 +12128,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         engine
             .lock()
             .unwrap()
@@ -12041,7 +12170,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         app.config.notifications.sound_on_done = true;
         let now = Instant::now();
         engine
@@ -12098,7 +12230,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         app.proc_commands.insert(pane, vec!["claude".into()]);
         engine
             .lock()
@@ -12143,7 +12278,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         app.config.notifications.sound_on_done = true;
         let mut now = Instant::now();
         for result in ["done", "error"] {
@@ -12186,7 +12324,10 @@ mod tests {
             4 * 1024 * 1024,
             PaneAppearance::default(),
         );
-        app.panes.get_mut(&pane).unwrap().engine = engine.clone();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
         app.dispatch("agent.report", &json!({"pane":pane.0.to_string(),"source":"test/hook","agent":"pi","status":"working"})).unwrap();
         engine.lock().unwrap().advance(b"\x1b]7501;state=error\x07");
         app.handle_event(AppEvent::PtyData(pane));

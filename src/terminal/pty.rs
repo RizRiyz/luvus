@@ -799,6 +799,11 @@ impl Pane {
     pub(crate) fn take_pending_program_status(
         &self,
     ) -> Option<crate::terminal::program_status::ProgramStatusStore> {
+        // Called on every output wake; skip the engine lock unless a report,
+        // reset, or prompt marker actually changed the records.
+        if !self.input_tx.program_status_pending() {
+            return None;
+        }
         self.engine.lock().ok()?.take_pending_program_status()
     }
 
@@ -819,6 +824,18 @@ impl Pane {
         if let Ok(mut engine) = self.engine.lock() {
             engine.program_status_process_exited();
         }
+    }
+
+    /// Swap in a test engine together with the sender it reports through.
+    #[cfg(test)]
+    pub(crate) fn replace_engine_for_test(
+        &mut self,
+        engine: Arc<Mutex<dyn crate::terminal::vt::VtEngine>>,
+    ) {
+        if let Some(sender) = engine.lock().unwrap().response_sender_for_test() {
+            self.input_tx = sender;
+        }
+        self.engine = engine;
     }
 
     #[cfg(test)]

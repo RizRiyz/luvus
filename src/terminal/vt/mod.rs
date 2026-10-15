@@ -498,6 +498,13 @@ pub trait VtEngine: Send {
     /// Clear transient terminal metadata after an attached process exit.
     fn program_status_process_exited(&mut self) {}
 
+    /// The sender this engine answers through, so a test that swaps a pane's
+    /// engine can keep the pane's lock-free status gate wired to it.
+    #[cfg(test)]
+    fn response_sender_for_test(&self) -> Option<InputSender> {
+        None
+    }
+
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
     /// retained history. No-op while on the alternate screen.

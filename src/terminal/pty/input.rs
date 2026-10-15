@@ -82,18 +82,34 @@ impl InputSender {
     /// Metadata has its own coalesced wake, independent of PTY repaint/input
     /// rearming. A final report never relies on another byte arriving.
     pub(crate) fn notify_program_status(&self) {
+        if self
+            .budget
+            .program_status_pending
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
         if let Some((id, tx)) = self.budget.notice.get() {
-            if !self
-                .budget
-                .program_status_pending
-                .swap(true, Ordering::AcqRel)
-                && tx.send(AppEvent::ProgramStatusChanged(*id)).is_err()
-            {
+            if tx.send(AppEvent::ProgramStatusChanged(*id)).is_err() {
                 self.budget
                     .program_status_pending
                     .store(false, Ordering::Release);
             }
         }
+    }
+
+    /// Mark an app-side status change for the next take without a wake; the
+    /// caller drains it immediately.
+    pub(crate) fn mark_program_status_pending(&self) {
+        self.budget
+            .program_status_pending
+            .store(true, Ordering::Release);
+    }
+
+    /// Lock-free gate for the per-output-event drain: false means no status
+    /// change has been recorded since the last take.
+    pub(crate) fn program_status_pending(&self) -> bool {
+        self.budget.program_status_pending.load(Ordering::Acquire)
     }
 
     pub(crate) fn rearm_program_status(&self) {

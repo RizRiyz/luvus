@@ -1516,9 +1516,6 @@ mod tests {
         );
     }
 
-    // The focused agent's "project · =pane" line sits on the selection
-    // background, so it must use the same readable colour the workspaces dock
-    // gives its path row. Pinned to `overlay0` it was almost invisible on green.
     #[test]
     fn osc7501_program_reporter_has_display_row_without_agent_capabilities() {
         let _env = crate::persist::test_env("osc7501-sidebar-program");
@@ -1541,6 +1538,9 @@ mod tests {
         assert!(app.agent_rects.iter().any(|(id, _)| *id == pane));
     }
 
+    // The focused agent's "project · =pane" line sits on the selection
+    // background, so it must use the same readable colour the workspaces dock
+    // gives its path row. Pinned to `overlay0` it was almost invisible on green.
     #[test]
     fn focused_agent_meta_line_is_readable() {
         let _env = crate::persist::test_env("agent-meta-colour");

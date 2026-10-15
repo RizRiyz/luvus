@@ -1317,6 +1317,20 @@ pub(crate) fn classify_with_composer(
         screen: bottom.to_lowercase(),
         title: title.map(|t| t.to_lowercase()).unwrap_or_default(),
     };
+    // Identity has two regimes, and which one applies is decided by whether we
+    // could see the pane's processes at all.
+    //
+    // `running` non-empty means the scan worked, so it is the *whole* answer: an
+    // agent is a program, and a pane that is not running one is a plain shell no
+    // matter what it prints. Letting text vote here is what put "amp" and "kiro"
+    // in the sidebar for panes running neither.
+    //
+    // `running` empty means we could not tell (Windows, a remote pane, `ps`
+    // failed, or the pane has no child yet). Only then do the text heuristics
+    // run — including `known_agent` stickiness, which covers the frames where an
+    // agent's UI does not print its own name (Claude Code's bottom rows are a
+    // prompt box and a model label, so a repaint would otherwise resolve to the
+    // bare shell and read its own redraw as work).
     let (agent, identity_source) = if running.is_empty() {
         text_identity(title, &regions.screen, base_command, known_agent, manifests)
     } else {
@@ -1711,6 +1725,31 @@ fn strip_script_extension(token: &str) -> &str {
         .unwrap_or(token)
 }
 
+/// Whether a process command line is an interactive shell. A pane whose scan
+/// finds only its shell root has no foreground job left.
+pub(crate) fn is_shell_command(command: &str) -> bool {
+    let Some(first) = Manifests::command_tokens(command).into_iter().next() else {
+        return false;
+    };
+    matches!(
+        binary_name(&first.to_lowercase()),
+        "sh" | "bash"
+            | "zsh"
+            | "dash"
+            | "ksh"
+            | "mksh"
+            | "fish"
+            | "tcsh"
+            | "csh"
+            | "nu"
+            | "elvish"
+            | "xonsh"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+    )
+}
+
 /// Runtimes that execute an agent as a script, so the name to look for is the
 /// argument rather than argv[0].
 pub(crate) fn is_interpreter(base: &str) -> bool {
@@ -1809,6 +1848,27 @@ mod tests {
     use super::*;
     use crate::terminal::vt::alacritty::AlacrittyEngine;
     use crate::terminal::vt::VtEngine;
+
+    #[test]
+    fn shell_commands_are_recognized_across_platform_forms() {
+        for command in [
+            "-zsh",
+            "/bin/bash --login",
+            "fish",
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#,
+            r"C:\Windows\System32\cmd.exe",
+        ] {
+            assert!(is_shell_command(command), "{command}");
+        }
+        for command in [
+            "",
+            "terraform apply",
+            "node /usr/lib/claude/cli.js",
+            "zshrc",
+        ] {
+            assert!(!is_shell_command(command), "{command}");
+        }
+    }
 
     #[test]
     fn identity_resolution_never_evaluates_state_rules() {

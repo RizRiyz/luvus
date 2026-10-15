@@ -815,6 +815,7 @@ impl App {
                     known,
                     running,
                     &self.manifests,
+                    // Only Claude's own probe can vouch for Claude's screen.
                     composer_agent
                         .filter(|agent| agent.eq_ignore_ascii_case("claude"))
                         .and(detected_composer_ready),
