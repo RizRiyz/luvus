@@ -445,12 +445,26 @@ impl App {
             };
             command.push_str(&word);
         }
+        let program_status_boundary = target.program_status_revision();
         if let Err(message) = target.try_submit_text(&command) {
             if created {
                 self.close_pane(pane);
             }
             fail("send_failed", message);
             return;
+        }
+        // A successful launch explicitly replaces the old producer, even in
+        // shells without OSC 133. Fence cleanup before submit so fresh output
+        // from the new agent cannot be removed with the old reports.
+        if self
+            .status
+            .get(&pane)
+            .is_some_and(|status| status.program_status.is_some())
+        {
+            target.program_status_process_exited_through(program_status_boundary);
+            if let Some(store) = target.take_pending_program_status() {
+                self.sync_program_status(pane, store);
+            }
         }
         if let Some(status) = self.status.get_mut(&pane) {
             status.prompt_evidence = detect::PromptEvidence::Unknown;

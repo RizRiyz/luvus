@@ -18,6 +18,22 @@ impl App {
         }
     }
 
+    /// Retained results still label an idle shell, but cannot override a
+    /// replacement agent that has no fresh reports of its own.
+    fn program_status_has_authority(&self, id: PaneId) -> bool {
+        self.status.get(&id).is_some_and(|status| {
+            status.program_status.as_ref().is_some_and(|store| {
+                store.has_current_reports()
+                    || (!self.manifests.is_agent(&status.agent)
+                        && status.agent_session.is_none()
+                        && self
+                            .manifests
+                            .agent_in_processes(self.running_for_detection(id))
+                            .is_none())
+            })
+        })
+    }
+
     /// Recover a stale persisted selection before any periodic work indexes it.
     ///
     /// Workspace and tab mutations normally keep these indices valid. A restored
@@ -66,7 +82,7 @@ impl App {
     /// integration leases, and parked API waits.
     #[cfg(test)]
     pub(crate) fn needs_fast_runtime_tick(&self, now: Instant) -> bool {
-        self.detection_work_pending(now)
+        self.detection_work_pending(now, self.runtime_clients_attached)
             || !self.output_waits.is_empty()
             || !self.agent_waits.is_empty()
             || !self.agent_starts.is_empty()
@@ -76,15 +92,17 @@ impl App {
             || self.search_flash.is_some()
     }
 
-    fn detection_work_pending(&self, now: Instant) -> bool {
+    fn detection_work_pending(&self, now: Instant, clients_attached: bool) -> bool {
         !self.detection_dirty.is_empty()
-            || self
-                .workspaces
-                .get(self.active_ws)
-                .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
-                .and_then(|tab| self.status.get(&tab.layout.focus))
-                .and_then(|status| status.program_status.as_ref())
-                .is_some_and(|store| store.has_unread_done())
+            || (clients_attached
+                && self
+                    .workspaces
+                    .get(self.active_ws)
+                    .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+                    .filter(|tab| self.program_status_has_authority(tab.layout.focus))
+                    .and_then(|tab| self.status.get(&tab.layout.focus))
+                    .and_then(|status| status.program_status.as_ref())
+                    .is_some_and(|store| store.has_unread_done()))
             || self.status.values().any(|status| {
                 status.force_detect
                     || status.candidate != status.state
@@ -161,7 +179,7 @@ impl App {
             consider(exp, true);
         }
 
-        if self.detection_work_pending(now) {
+        if self.detection_work_pending(now, clients_attached) {
             consider(self.last_detect_at + DETECTION_INTERVAL, true);
         }
         if self.detection_audit_needed() {
@@ -542,7 +560,9 @@ impl App {
                     || self.status.get(id).is_some_and(|status| {
                         status.force_detect
                             || status.candidate != status.state
-                            || (*id == focus
+                            || (clients_attached
+                                && *id == focus
+                                && self.program_status_has_authority(*id)
                                 && status
                                     .program_status
                                     .as_ref()
@@ -607,7 +627,8 @@ impl App {
                 .status
                 .get(&id)
                 .and_then(|status| status.agent_report.clone());
-            if id == focus && report.is_none() {
+            let program_status_authority = self.program_status_has_authority(id);
+            if clients_attached && id == focus && report.is_none() && program_status_authority {
                 if let Some(store) = self
                     .status
                     .get_mut(&id)
@@ -620,6 +641,7 @@ impl App {
                 .status
                 .get(&id)
                 .and_then(|status| status.program_status.as_ref())
+                .filter(|_| program_status_authority)
                 .and_then(|store| store.effective_projection())
                 .map(|(state, app, message)| {
                     (state, app.map(str::to_string), message.map(str::to_string))

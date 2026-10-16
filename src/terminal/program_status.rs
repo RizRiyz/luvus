@@ -120,9 +120,10 @@ impl ProgramStatusStore {
         self.records.is_empty()
     }
 
-    /// Idle/working/blocked records claim a live producer; results do not.
-    pub(crate) fn has_transient(&self) -> bool {
-        self.records.values().any(|r| r.state.is_live())
+    /// Left-behind results remain inspectable, but cannot own a later agent's
+    /// state. Fresh reports restore authority without deleting retained results.
+    pub(crate) fn has_current_reports(&self) -> bool {
+        self.records.values().any(|record| !record.left_behind)
     }
 
     /// Preserve read confirmation for the same result, not merely the same ID.
@@ -800,7 +801,7 @@ mod tests {
         let mut store = ProgramStatusStore::default();
         store.apply(parse_report(b"state=idle:id=prompt").unwrap());
         store.apply(parse_report(b"state=done:id=build").unwrap());
-        assert!(store.has_transient());
+        assert!(store.has_current_reports());
         let boundary = store.revision();
         store.apply(parse_report(b"state=idle:id=next").unwrap());
         store.clear_transient_through(boundary);

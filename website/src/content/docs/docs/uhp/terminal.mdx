@@ -155,7 +155,10 @@ A program that is interrupted or crashes never sends its clear. Without OSC 133
 markers, Luvus uses its existing process scan instead: when two consecutive
 scans find only the pane's shell (no foreground job), `idle`, `working`, and
 `blocked` records reported before the first of those scans are removed. Reports made
-after it are kept, and results are retained. Status emitted by the shell itself
+after it are kept, and results are retained. Retained results left behind by a
+prompt or confirmed producer exit remain queryable, but do not override a new
+agent's screen-derived state unless fresh OSC 7501 reports arrive.
+Status emitted by the shell itself
 with no child process is treated the same way. This needs a working process
 scan, so a pane whose root is not a shell (an SSH session, or a program launched
 directly) still relies on explicit clears, prompt markers, or exit. No heartbeat
@@ -175,7 +178,9 @@ until they become the pane's representative result.
 A result in an unfocused pane shows `done` after the dwell. Focusing the pane
 acknowledges a visible result at the next detection, then `done` remains visible
 until the `idle` candidate has held for 2500 ms. Results in an already focused
-pane are acknowledged when visible but still use the same quiet-state debounce.
+pane are acknowledged when visible to an active client but still use the same
+quiet-state debounce. Detached servers retain unread results until a client views
+the pane.
 Acknowledgement does not alter raw protocol state in `agent.explain.program_status`.
 Repeated identical reports from the same run do not re-arm unread results;
 a state change or a new report after a prompt does. `blocked` cannot be dismissed

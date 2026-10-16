@@ -8830,16 +8830,17 @@ impl App {
                 .or(st.program_status_agent.as_deref());
             let Some(bound_agent) = bound_agent else {
                 st.agent_absent_scans = 0;
-                // Any program can report idle/working/blocked from a plain shell,
-                // and a Ctrl+C or crash never sends the clear. Once two scans
-                // see only the shell root, reports made before the first one
-                // have lost their producer; later reports remain live.
+                // Any program can report from a plain shell, and a Ctrl+C or
+                // crash never sends the clear. Once two scans see only the
+                // shell root, reports before the first one lost their producer.
+                // Also mark result-only producers as left behind, so their
+                // retained results cannot own a replacement agent's state.
                 let returned_to_shell = cmds.len() == 1
                     && detect::is_shell_command(&cmds[0])
                     && st
                         .program_status
                         .as_ref()
-                        .is_some_and(|store| store.has_transient());
+                        .is_some_and(|store| store.has_current_reports());
                 if !returned_to_shell {
                     st.program_status_exit_boundary = None;
                     continue;
@@ -12032,7 +12033,7 @@ mod tests {
         engine
             .lock()
             .unwrap()
-            .advance(b"\x1b]7501;state=done:app=claude\x07\x1b]133;A\x07");
+            .advance(b"\x1b]7501;state=done:app=claude\x07");
         app.handle_event(AppEvent::PtyData(pane));
         app.proc_commands.insert(pane, vec!["zsh".into()]);
         app.detect_tick(Instant::now());
@@ -12052,6 +12053,11 @@ mod tests {
             .resolve_agent_target(&json!({"target":"claude"}))
             .is_err());
         // A result has no authority to reject launch or acquire native capabilities.
+        assert!(app.status[&pane]
+            .program_status
+            .as_ref()
+            .unwrap()
+            .has_current_reports());
         let (reply, received) = std::sync::mpsc::channel();
         app.start_agent_launch(
             "test".into(),
@@ -12061,6 +12067,9 @@ mod tests {
         );
         assert!(app.agent_starts.contains_key(&pane));
         assert!(received.try_recv().is_err());
+        let store = app.status[&pane].program_status.as_ref().unwrap();
+        assert!(!store.has_current_reports());
+        assert_eq!(store.records().count(), 1, "launch preserves old results");
     }
 
     #[test]
@@ -12384,6 +12393,132 @@ mod tests {
             assert!(app.pending_sound.take().is_some());
             app.detect_tick(now + Duration::from_secs(8));
             assert!(app.pending_sound.is_none());
+        }
+    }
+
+    #[test]
+    fn osc7501_detached_results_remain_unread_until_viewed() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-detached-result");
+        for result in ["done", "error"] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            let pane = app.layout().focus;
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let engine = create_engine(
+                VtEngineKind::Alacritty,
+                80,
+                24,
+                tx,
+                1024 * 1024,
+                PaneAppearance::default(),
+            );
+            app.panes
+                .get_mut(&pane)
+                .unwrap()
+                .replace_engine_for_test(engine.clone());
+            engine
+                .lock()
+                .unwrap()
+                .advance(format!("\x1b]7501;state={result}\x07").as_bytes());
+            app.handle_event(AppEvent::PtyData(pane));
+            let now = Instant::now();
+            app.detect_tick_with(now, false);
+            app.detect_tick_with(now + QUIET_DWELL + Duration::from_millis(200), false);
+            assert!(app.status[&pane]
+                .program_status
+                .as_ref()
+                .unwrap()
+                .has_unread_done());
+            assert_eq!(app.status[&pane].state, State::Done);
+            assert!(!app.needs_fast_runtime_tick(now + Duration::from_secs(3)));
+            app.detect_tick_with(now + Duration::from_secs(4), true);
+            assert!(!app.status[&pane]
+                .program_status
+                .as_ref()
+                .unwrap()
+                .has_unread_done());
+            app.detect_tick_with(
+                now + Duration::from_secs(4) + QUIET_DWELL + Duration::from_millis(200),
+                true,
+            );
+            assert_eq!(app.status[&pane].state, State::Idle);
+        }
+    }
+
+    #[test]
+    fn osc7501_exited_results_do_not_override_replacement_agent() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-replacement-state");
+        for producer in [None, Some("claude")] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            let pane = app.layout().focus;
+            let root = app.panes[&pane]
+                .child_pid
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let engine = create_engine(
+                VtEngineKind::Alacritty,
+                80,
+                24,
+                tx,
+                1024 * 1024,
+                PaneAppearance::default(),
+            );
+            app.panes
+                .get_mut(&pane)
+                .unwrap()
+                .replace_engine_for_test(engine.clone());
+            if let Some(producer) = producer {
+                app.proc_commands.insert(pane, vec![producer.into()]);
+            }
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b]7501;state=done:id=old\x07");
+            app.handle_event(AppEvent::PtyData(pane));
+            let now = Instant::now();
+            app.detect_tick_with(now, false);
+            let shell = app.panes[&pane].command.clone();
+            app.apply_proc_scan(Some(HashMap::from([(root, vec![shell.clone()])])));
+            app.apply_proc_scan(Some(HashMap::from([(root, vec![shell])])));
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b[2J\x1b[HWorking (esc to interrupt)");
+            app.handle_event(AppEvent::PtyData(pane));
+            app.apply_proc_scan(Some(HashMap::from([(root, vec!["codex".into()])])));
+            app.detect_tick(now + Duration::from_millis(200));
+            assert_eq!(app.status[&pane].agent, "codex");
+            assert_eq!(app.status[&pane].state, State::Working);
+            assert_ne!(app.status[&pane].state_source, "program_status");
+            assert!(app.status[&pane]
+                .program_status
+                .as_ref()
+                .unwrap()
+                .has_unread_done());
+            assert_eq!(
+                app.agent_explanation(pane)["program_status"][0]["state"],
+                "done"
+            );
+            engine.lock().unwrap().advance(
+                b"\x1b[2J\x1b[HTrust this folder?\r\nTrust and continue\r\nenter continue",
+            );
+            app.handle_event(AppEvent::PtyData(pane));
+            app.detect_tick(now + Duration::from_millis(400));
+            assert_eq!(app.status[&pane].state, State::Blocked);
+            // New protocol reports must restore authority, not remain suppressed.
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b]7501;state=working:id=new\x07");
+            app.handle_event(AppEvent::PtyData(pane));
+            app.detect_tick(now + Duration::from_millis(600));
+            assert_eq!(app.status[&pane].state_source, "program_status");
+            assert_eq!(app.status[&pane].state, State::Working);
         }
     }
 
