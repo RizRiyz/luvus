@@ -93,10 +93,12 @@ fn windows_agent_command(
     let program = if local.is_file() && has_extension(&local, &[".exe", ".com"]) {
         local
     } else {
-        resolve_program(&interpreter.fallback, &dirs, &extensions, &|path| {
-            path.is_file()
-        })
-        .filter(|path| !is_batch(path))
+        resolve_program(
+            &interpreter.fallback,
+            &dirs,
+            &native_extensions(&extensions),
+            &|path| path.is_file(),
+        )
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -130,12 +132,12 @@ fn read_bounded(path: &Path) -> std::io::Result<String> {
     Ok(text)
 }
 
-/// The executable extensions Luvus may start, in `PATHEXT` order.
-///
-/// Only native executables and batch files are considered; script hosts such
-/// as `.js` or `.vbs` in `PATHEXT` are never selected for an agent.
+/// Extensions Luvus may start: native executables and batch files. Script
+/// hosts such as `.js` or `.vbs` in `PATHEXT` are never selected for an agent.
+const LAUNCHABLE: &[&str] = &[".com", ".exe", ".bat", ".cmd"];
+
+/// The launchable extensions appended to a bare name, in `PATHEXT` order.
 fn launch_extensions(pathext: Option<&str>) -> Vec<String> {
-    const LAUNCHABLE: &[&str] = &[".com", ".exe", ".bat", ".cmd"];
     let mut extensions: Vec<String> = pathext
         .unwrap_or(".COM;.EXE;.BAT;.CMD")
         .split(';')
@@ -149,9 +151,24 @@ fn launch_extensions(pathext: Option<&str>) -> Vec<String> {
     extensions
 }
 
-/// Resolve `program` like `cmd.exe` would for an explicit or `PATH` lookup,
-/// restricted to `extensions`. The current directory is never searched
-/// implicitly.
+/// The native executable extensions among `extensions`, in the same order.
+fn native_extensions(extensions: &[String]) -> Vec<String> {
+    let native: Vec<String> = extensions
+        .iter()
+        .filter(|extension| matches!(extension.as_str(), ".com" | ".exe"))
+        .cloned()
+        .collect();
+    if native.is_empty() {
+        vec![".com".to_string(), ".exe".to_string()]
+    } else {
+        native
+    }
+}
+
+/// Resolve `program` like `cmd.exe` would for an explicit or `PATH` lookup.
+/// `extensions` are appended to a name without a launchable extension; a name
+/// that already ends in one is used as written, whatever `PATHEXT` says. The
+/// current directory is never searched implicitly.
 fn resolve_program(
     program: &str,
     dirs: &[PathBuf],
@@ -162,7 +179,7 @@ fn resolve_program(
         return None;
     }
     let candidates = |base: &Path| -> Vec<PathBuf> {
-        if has_extension(base, extensions) {
+        if has_extension(base, LAUNCHABLE) {
             vec![base.to_path_buf()]
         } else {
             extensions
@@ -243,6 +260,14 @@ fn parse_npm_shim(text: &str) -> Option<NpmShim> {
         .map(|line| line.trim().trim_start_matches('@').trim())
         .filter(|line| !line.is_empty())
         .collect();
+    // Any line outside the generated templates (for example an extra
+    // `SET NODE_OPTIONS=...`) is setup Luvus would silently skip, so refuse.
+    if !lines
+        .iter()
+        .all(|line| line.ends_with("%*") || is_template_line(line))
+    {
+        return None;
+    }
     let launches: Vec<(ShimLauncher, String)> = lines
         .iter()
         .filter(|line| line.ends_with("%*"))
@@ -291,6 +316,42 @@ fn parse_npm_shim(text: &str) -> Option<NpmShim> {
         }),
         _ => None,
     }
+}
+
+/// Whether `line` is one of the non-launch lines `cmd-shim` generates.
+fn is_template_line(line: &str) -> bool {
+    const FIXED: &[&str] = &[
+        "echo off",
+        "goto start",
+        ":find_dp0",
+        "set dp0=%dp0%",
+        "exit /b",
+        "exit /b %errorlevel%",
+        ":start",
+        "setlocal",
+        "endlocal",
+        "call :find_dp0",
+        ") else (",
+        ")",
+        "set pathext=%pathext:;.js;=;%",
+    ];
+    let lower = line.to_ascii_lowercase();
+    if FIXED.contains(&lower.as_str()) {
+        return true;
+    }
+    if let Some(value) = lower
+        .strip_prefix("set \"_prog=")
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return match value.strip_prefix("%dp0%\\") {
+            Some(relative) => shim_relative(relative).is_some(),
+            None => plain_program_name(value).is_some(),
+        };
+    }
+    lower
+        .strip_prefix("if exist \"%dp0%\\")
+        .and_then(|rest| rest.strip_suffix("\" ("))
+        .is_some_and(|relative| shim_relative(relative).is_some())
 }
 
 /// Parse one `... "%dp0%\target" %*` line into its launcher and target.
@@ -444,6 +505,58 @@ mod tests {
     }
 
     #[test]
+    fn explicit_launchable_suffixes_do_not_depend_on_pathext() {
+        let only_cmd = launch_extensions(Some(".CMD"));
+        assert_eq!(only_cmd, [".cmd"]);
+        let tools = PathBuf::from(r"C:\tools");
+        let existing = [tools.join("agent.exe")];
+        let is_file = |path: &Path| existing.iter().any(|candidate| candidate == path);
+        assert_eq!(
+            resolve_program(r"C:\tools\agent.exe", &[], &only_cmd, &is_file),
+            Some(existing[0].clone())
+        );
+        assert_eq!(
+            resolve_program(
+                "agent.exe",
+                std::slice::from_ref(&tools),
+                &only_cmd,
+                &is_file
+            ),
+            Some(existing[0].clone())
+        );
+        // PATHEXT still decides what is appended to a bare name.
+        assert_eq!(
+            resolve_program("agent", std::slice::from_ref(&tools), &only_cmd, &is_file),
+            None
+        );
+    }
+
+    #[test]
+    fn interpreter_fallback_searches_native_executables_in_pathext_order() {
+        assert_eq!(native_extensions(&extensions()), [".com", ".exe"]);
+        let ordered = launch_extensions(Some(".CMD;.EXE;.BAT;.COM"));
+        assert_eq!(native_extensions(&ordered), [".exe", ".com"]);
+        assert_eq!(
+            native_extensions(&launch_extensions(Some(".CMD"))),
+            [".com", ".exe"]
+        );
+        // A version-manager node.cmd earlier on PATH does not hide node.exe.
+        let shims = PathBuf::from(r"C:\Users\Ada\shims");
+        let nodejs = PathBuf::from(r"C:\Program Files\nodejs");
+        let existing = [shims.join("node.cmd"), nodejs.join("node.exe")];
+        let is_file = |path: &Path| existing.iter().any(|candidate| candidate == path);
+        assert_eq!(
+            resolve_program(
+                "node",
+                &[shims, nodejs.clone()],
+                &native_extensions(&extensions()),
+                &is_file
+            ),
+            Some(nodejs.join("node.exe"))
+        );
+    }
+
+    #[test]
     fn missing_or_empty_programs_do_not_resolve() {
         let dirs = [PathBuf::from(r"C:\bin"), PathBuf::new()];
         let never = |_: &Path| false;
@@ -505,9 +618,35 @@ mod tests {
             &MODERN_SHIM.replace("& \"%_prog%\"", "& calc & \"%_prog%\""),
             &LEGACY_SHIM.replacen("dist\\index.js", "dist\\other.js", 1),
             &format!("{MODERN_SHIM}\"%dp0%\\second.exe\" %*\r\n"),
+            // Extra setup beside an otherwise valid launch line would be
+            // skipped when Luvus starts the interpreter directly.
+            &MODERN_SHIM.replace(
+                "CALL :find_dp0\r\n",
+                "CALL :find_dp0\r\nSET NODE_OPTIONS=--require=hook.js\r\n",
+            ),
+            &LEGACY_SHIM.replace(
+                "@SETLOCAL\r\n",
+                "@SETLOCAL\r\n@SET \"NODE_PATH=C:\\pnpm\\node_modules\"\r\n",
+            ),
+            &DIRECT_SHIM.replace("SETLOCAL\r\n", "SETLOCAL\r\ncd /d %dp0%\r\n"),
         ] {
             assert_eq!(parse_npm_shim(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn parses_the_cmd_shim_4_layout_with_its_own_launch_line() {
+        let shim = "@ECHO off\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\n\"%_prog%\"  \"%dp0%\\node_modules\\tool\\cli.js\" %*\r\nENDLOCAL\r\nEXIT /b %errorlevel%\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n";
+        assert_eq!(
+            parse_npm_shim(shim),
+            Some(NpmShim {
+                interpreter: Some(ShimInterpreter {
+                    local: "node.exe".into(),
+                    fallback: "node".into(),
+                }),
+                target: r"node_modules\tool\cli.js".into(),
+            })
+        );
     }
 
     #[cfg(not(windows))]
