@@ -279,7 +279,10 @@ luvus integration install claude    # or: copilot · codex · antigravity · let
 or toggle it in **Settings → Integrations**. What it does per agent:
 
 - **claude / copilot / codex**: registers a small session-start hook script in
-  the agent's own settings file.
+  the agent's own settings file. On Windows, Claude Code and Codex run a
+  PowerShell script through an encoded command, so a home path with spaces
+  works under Git Bash and `cmd.exe` and no `python3` is needed. Re-enable an
+  integration installed by an earlier release to replace its old hook entries.
 - **antigravity**: adds one Luvus-owned `PreInvocation` entry to
   `~/.gemini/config/hooks.json`. It reports only the exact conversation id for
   `agy --conversation <id>` restore; screen detection continues to own agent
