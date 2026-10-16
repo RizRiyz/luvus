@@ -48,6 +48,9 @@ pub fn atomic_replace_file(source: &Path, destination: &Path) -> std::io::Result
     }
 }
 
+mod agent_command;
+pub use agent_command::agent_command;
+
 #[cfg(windows)]
 mod windows;
 

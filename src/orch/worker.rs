@@ -9,7 +9,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -117,8 +117,28 @@ pub(crate) fn run(args: &[String]) -> Result<i32> {
             "task briefing must not contain terminal control characters"
         ));
     }
-    let status = launch(&spec.agent, &spec.briefing, &spec.task_id)?;
+    let status = match launch(&spec.agent, &spec.briefing, &spec.task_id) {
+        Ok(status) => status,
+        Err(error) => {
+            fail_unstarted(&spec.task_id, &error.to_string());
+            return Err(error);
+        }
+    };
     Ok(status.code().unwrap_or(1))
+}
+
+/// A task whose agent never started has no process left to settle it, so the
+/// runner records the failure instead of leaving the task `running`.
+fn fail_unstarted(task_id: &str, detail: &str) {
+    let response = crate::cli::send_request(
+        "task.update",
+        json!({"id":task_id, "status":"failed", "output":detail}),
+    );
+    match response {
+        Ok(response) if response.get("error").is_none() => {}
+        Ok(response) => eprintln!("could not mark task {task_id} failed: {response}"),
+        Err(error) => eprintln!("could not mark task {task_id} failed: {error}"),
+    }
 }
 
 fn take(pane: crate::ids::PaneId) -> Result<ManualLaunchSpec> {
@@ -191,13 +211,16 @@ fn owner_ready(task_id: &str, pane: u32) -> Result<bool> {
 }
 
 fn launch(agent: &str, briefing: &str, task_id: &str) -> Result<ExitStatus> {
+    let start_error =
+        |error: std::io::Error| anyhow!("could not start manual agent {agent}: {error}");
     let mut command = if let Some(descriptor) = crate::agent::registry::find(agent) {
         if !crate::agent::registry::supports_local_task(descriptor) {
             return Err(anyhow!(
                 "{agent} cannot work in a local ORCH task workspace"
             ));
         }
-        let mut command = Command::new(descriptor.launch_command);
+        let mut command =
+            crate::platform::agent_command(descriptor.launch_command).map_err(start_error)?;
         command.args(descriptor.task_prompt_args);
         command
     } else {
@@ -205,7 +228,7 @@ fn launch(agent: &str, briefing: &str, task_id: &str) -> Result<ExitStatus> {
         let (executable, arguments) = argv
             .split_first()
             .ok_or_else(|| anyhow!("manual agent command cannot be empty"))?;
-        let mut command = Command::new(executable);
+        let mut command = crate::platform::agent_command(executable).map_err(start_error)?;
         command.args(arguments);
         command
     };
@@ -213,7 +236,7 @@ fn launch(agent: &str, briefing: &str, task_id: &str) -> Result<ExitStatus> {
         .arg(briefing)
         .env("LUVUS_TASK_ID", task_id)
         .status()
-        .map_err(|error| anyhow!("could not start manual agent {agent}: {error}"))
+        .map_err(start_error)
 }
 
 fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
