@@ -134,56 +134,59 @@ try {
 }
 
 async function checkDeviceFooter(page, pairingOpen) {
-  for (const [width, height, mobile] of [[1440, 900, false], [390, 844, true], [320, 568, true]]) {
-    await cdp.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile }, page.sessionId);
-    await until(() => evaluate(page.sessionId, `innerWidth === ${width} && innerHeight === ${height}`));
-    await evaluate(page.sessionId, "document.querySelector('.device-browser-access').scrollIntoView({block: 'nearest'})");
-    await evaluate(page.sessionId, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
-    if (pairingOpen && mobile) {
-      // Saving the unchanged limit causes a real live redraw without changing
-      // authority. A scrolled QR panel must retain access to its footer.
-      const before = await evaluate(page.sessionId, `(() => {
-        const panel = document.querySelector('.device-panel');
-        panel.setAttribute('data-qa-before-refresh', '');
-        const scroll = panel.scrollTop;
-        document.querySelector('.device-limit').dispatchEvent(new Event('change', {bubbles: true}));
-        return scroll;
+  try {
+    for (const [width, height, mobile] of [[1440, 900, false], [390, 844, true], [320, 568, true]]) {
+      await cdp.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile }, page.sessionId);
+      await until(() => evaluate(page.sessionId, `innerWidth === ${width} && innerHeight === ${height}`));
+      await evaluate(page.sessionId, "document.querySelector('.device-browser-access').scrollIntoView({block: 'nearest'})");
+      await evaluate(page.sessionId, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+      if (pairingOpen && mobile) {
+        // Saving the unchanged limit causes a real live redraw without changing
+        // authority. A scrolled QR panel must retain access to its footer.
+        const before = await evaluate(page.sessionId, `(() => {
+          const panel = document.querySelector('.device-panel');
+          panel.setAttribute('data-qa-before-refresh', '');
+          const scroll = panel.scrollTop;
+          document.querySelector('.device-limit').dispatchEvent(new Event('change', {bubbles: true}));
+          return scroll;
+        })()`);
+        assert.ok(before > 0, "short mobile QR panel needs scrolling");
+        await until(() => evaluate(page.sessionId, "!!document.querySelector('.device-disconnect:not(:disabled)') && !document.querySelector('.device-panel')?.hasAttribute('data-qa-before-refresh')"));
+        assert.equal(await evaluate(page.sessionId, "document.querySelector('.device-panel').scrollTop"), before, "live redraw preserves the device panel scroll position");
+      }
+      const geometry = await evaluate(page.sessionId, `(() => {
+        const panel = document.querySelector('.device-panel').getBoundingClientRect();
+        const footer = document.querySelector('.device-browser-access').getBoundingClientRect();
+        const info = document.querySelector('.device-browser-info').getBoundingClientRect();
+        const button = document.querySelector('.device-disconnect');
+        const control = button.getBoundingClientRect();
+        const previous = document.querySelector('${pairingOpen ? ".pairing-card" : ".device-pair"}').getBoundingClientRect();
+        return {
+          panelFits: panel.top >= 0 && panel.bottom <= innerHeight + 1,
+          footerFits: footer.left >= panel.left && footer.right <= panel.right && footer.bottom <= panel.bottom,
+          separated: footer.top - previous.bottom,
+          buttonHeight: control.height,
+          infoGap: control.left - info.right,
+          clickable: button.contains(document.elementFromPoint(control.left + control.width / 2, control.top + control.height / 2)),
+          panel: {top: panel.top, bottom: panel.bottom, left: panel.left, right: panel.right},
+          clip: {x: footer.left, y: footer.top, width: footer.width, height: footer.height, scale: 1},
+        };
       })()`);
-      assert.ok(before > 0, "short mobile QR panel needs scrolling");
-      await until(() => evaluate(page.sessionId, "!!document.querySelector('.device-disconnect:not(:disabled)') && !document.querySelector('.device-panel')?.hasAttribute('data-qa-before-refresh')"));
-      assert.equal(await evaluate(page.sessionId, "document.querySelector('.device-panel').scrollTop"), before, "live redraw preserves the device panel scroll position");
+      assert.equal(geometry.panelFits, true, `device panel fits ${width}×${height}`);
+      assert.equal(geometry.footerFits, true, `browser access stays inside the device panel at ${width}×${height}: ${JSON.stringify({ panel: geometry.panel, footer: geometry.clip })}`);
+      assert.ok(geometry.separated >= 16, "disconnect footer is separated from pairing actions");
+      assert.ok(geometry.buttonHeight >= 44, "disconnect retains a touch-sized target");
+      assert.ok(geometry.infoGap >= 12, "browser label and disconnect button do not overlap");
+      assert.equal(geometry.clickable, true, "disconnect remains reachable on short mobile screens");
+      if (screenshots) {
+        // Capture only the footer, never an unspent pairing URL or QR code.
+        const result = await cdp.call("Page.captureScreenshot", { format: "png", clip: geometry.clip, captureBeyondViewport: false }, page.sessionId);
+        await writeFile(path.join(screenshots, `device-footer-${pairingOpen ? "pairing" : "idle"}-${width}.png`), Buffer.from(result.data, "base64"));
+      }
     }
-    const geometry = await evaluate(page.sessionId, `(() => {
-      const panel = document.querySelector('.device-panel').getBoundingClientRect();
-      const footer = document.querySelector('.device-browser-access').getBoundingClientRect();
-      const info = document.querySelector('.device-browser-info').getBoundingClientRect();
-      const button = document.querySelector('.device-disconnect');
-      const control = button.getBoundingClientRect();
-      const previous = document.querySelector('${pairingOpen ? ".pairing-card" : ".device-pair"}').getBoundingClientRect();
-      return {
-        panelFits: panel.top >= 0 && panel.bottom <= innerHeight + 1,
-        footerFits: footer.left >= panel.left && footer.right <= panel.right && footer.bottom <= panel.bottom,
-        separated: footer.top - previous.bottom,
-        buttonHeight: control.height,
-        infoGap: control.left - info.right,
-        clickable: button.contains(document.elementFromPoint(control.left + control.width / 2, control.top + control.height / 2)),
-        panel: {top: panel.top, bottom: panel.bottom, left: panel.left, right: panel.right},
-        clip: {x: footer.left, y: footer.top, width: footer.width, height: footer.height, scale: 1},
-      };
-    })()`);
-    assert.equal(geometry.panelFits, true, `device panel fits ${width}×${height}`);
-    assert.equal(geometry.footerFits, true, `browser access stays inside the device panel at ${width}×${height}: ${JSON.stringify({ panel: geometry.panel, footer: geometry.clip })}`);
-    assert.ok(geometry.separated >= 16, "disconnect footer is separated from pairing actions");
-    assert.ok(geometry.buttonHeight >= 44, "disconnect retains a touch-sized target");
-    assert.ok(geometry.infoGap >= 12, "browser label and disconnect button do not overlap");
-    assert.equal(geometry.clickable, true, "disconnect remains reachable on short mobile screens");
-    if (screenshots) {
-      // Capture only the footer, never an unspent pairing URL or QR code.
-      const result = await cdp.call("Page.captureScreenshot", { format: "png", clip: geometry.clip, captureBeyondViewport: false }, page.sessionId);
-      await writeFile(path.join(screenshots, `device-footer-${pairingOpen ? "pairing" : "idle"}-${width}.png`), Buffer.from(result.data, "base64"));
-    }
+  } finally {
+    await cdp.call("Emulation.clearDeviceMetricsOverride", {}, page.sessionId);
   }
-  await cdp.call("Emulation.clearDeviceMetricsOverride", {}, page.sessionId);
 }
 
 async function launchBrowser() {

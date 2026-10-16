@@ -2501,6 +2501,7 @@ mod tests {
             assert_eq!(legacy(&key, false).unwrap(), [letter - b'a' + 1]);
         }
         assert_eq!(legacy("ctrl-space", false).unwrap(), b"\x00");
+        assert_eq!(legacy("ctrl-shift-space", false).unwrap(), b"\x00");
         assert_eq!(legacy("ctrl-left", true).unwrap(), b"\x1b[1;5D");
         assert_eq!(legacy("ctrl-shift-right", false).unwrap(), b"\x1b[1;6C");
         assert_eq!(legacy("shift-enter", false).unwrap(), b"\n");
@@ -2511,12 +2512,21 @@ mod tests {
         };
         for (key, bytes) in [
             ("ctrl-a", &b"\x1b[97;5u"[..]),
+            ("ctrl-space", &b"\x1b[32;5u"[..]),
+            ("ctrl-shift-space", &b"\x1b[32;6u"[..]),
             ("shift-enter", &b"\x1b[13;2u"[..]),
             ("ctrl-enter", &b"\x1b[13;5u"[..]),
             ("ctrl-shift-enter", &b"\x1b[13;6u"[..]),
         ] {
             assert_eq!(backend_key_bytes(key, false, kitty, b"\n").unwrap(), bytes);
         }
+        let report_all = KeyboardProtocol::Kitty {
+            flags: KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+        };
+        assert_eq!(
+            backend_key_bytes("ctrl-shift-space", false, report_all, b"\n").unwrap(),
+            b"\x1b[32;6u"
+        );
         let events = KeyboardProtocol::Kitty {
             flags: KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KittyKeyboardFlags::REPORT_EVENT_TYPES,
@@ -2528,6 +2538,10 @@ mod tests {
         assert_eq!(
             backend_key_bytes("ctrl-shift-a", false, events, b"\n").unwrap(),
             b"\x1b[97;6u\x1b[97;6:3u"
+        );
+        assert_eq!(
+            backend_key_bytes("ctrl-shift-space", false, events, b"\n").unwrap(),
+            b"\x1b[32;6u\x1b[32;6:3u"
         );
         assert_eq!(
             backend_key_bytes("ctrl-left", false, events, b"\n").unwrap(),
