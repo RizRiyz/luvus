@@ -1059,16 +1059,6 @@ impl Pane {
         self.engine.lock().map(|e| e.alt_screen()).unwrap_or(false)
     }
 
-    /// Whether the child enabled application cursor mode (DECCKM). When it has,
-    /// the key encoder sends SS3 (`ESC O` + letter) cursor-key codes so apps
-    /// like `less` that are strict about the mode recognize the keys.
-    pub fn application_cursor(&self) -> bool {
-        self.engine
-            .lock()
-            .map(|e| e.application_cursor())
-            .unwrap_or(false)
-    }
-
     /// Input modes read together under one engine lock.
     pub fn key_encoding_modes(&self) -> KeyEncodingModes {
         self.engine

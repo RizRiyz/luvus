@@ -844,54 +844,7 @@ fn valid_terminal_control_frame(frame: &str) -> bool {
                     && params
                         .get("key")
                         .and_then(Value::as_str)
-                        .is_some_and(|key| {
-                            matches!(
-                                key,
-                                "enter"
-                                    | "escape"
-                                    | "tab"
-                                    | "backtab"
-                                    | "up"
-                                    | "down"
-                                    | "left"
-                                    | "right"
-                                    | "home"
-                                    | "end"
-                                    | "backspace"
-                                    | "delete"
-                                    | "pageup"
-                                    | "pagedown"
-                                    | "ctrl-a"
-                                    | "ctrl-b"
-                                    | "ctrl-c"
-                                    | "ctrl-d"
-                                    | "ctrl-e"
-                                    | "ctrl-f"
-                                    | "ctrl-g"
-                                    | "ctrl-k"
-                                    | "ctrl-l"
-                                    | "ctrl-n"
-                                    | "ctrl-o"
-                                    | "ctrl-p"
-                                    | "ctrl-r"
-                                    | "ctrl-t"
-                                    | "ctrl-u"
-                                    | "ctrl-w"
-                                    | "ctrl-y"
-                                    | "alt-d"
-                                    | "space"
-                                    | "digit-0"
-                                    | "digit-1"
-                                    | "digit-2"
-                                    | "digit-3"
-                                    | "digit-4"
-                                    | "digit-5"
-                                    | "digit-6"
-                                    | "digit-7"
-                                    | "digit-8"
-                                    | "digit-9"
-                            )
-                        })
+                        .is_some_and(|key| crate::terminal::backend::control_key(key).is_some())
             }
             _ => false,
         }
@@ -1268,6 +1221,18 @@ mod tests {
         assert!(valid_terminal_control_frame(
             r#"{"id":"key-3","action":"send_key","params":{"key":"alt-d"}}"#
         ));
+        for key in [
+            "ctrl-a",
+            "ctrl-z",
+            "shift-enter",
+            "ctrl-shift-left",
+            "ctrl-space",
+        ] {
+            assert!(valid_terminal_control_frame(
+                &serde_json::json!({"id":"key","action":"send_key","params":{"key":key}})
+                    .to_string()
+            ));
+        }
         assert!(valid_terminal_control_frame(
             r#"{"id":"key-4","action":"send_key","params":{"key":"ctrl-r"}}"#
         ));
@@ -1287,7 +1252,7 @@ mod tests {
             r#"{"id":"run-1","action":"pane.run","params":{"text":"id"}}"#
         ));
         assert!(!valid_terminal_control_frame(
-            r#"{"id":"key-1","action":"send_key","params":{"key":"ctrl-z"}}"#
+            r#"{"id":"key-1","action":"send_key","params":{"key":"raw-bytes"}}"#
         ));
         assert!(!valid_terminal_control_frame(
             r#"{"id":"input-1","action":"submit_text","params":{"text":"ok","extra":true}}"#

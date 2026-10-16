@@ -187,8 +187,19 @@ backward and forward word deletion, and `ctrl-u` and `ctrl-k` for deletion
 toward the start and end of the current line.
 It also includes `ctrl-a`, `ctrl-b`, `ctrl-e`, `ctrl-f`, `ctrl-g`, `ctrl-l`,
 `ctrl-n`, `ctrl-o`, `ctrl-p`, `ctrl-r`, `ctrl-t`, and `ctrl-y` for line
-movement, history search, screen clearing, and agent shortcuts. Job-control and
-flow-control keys such as `ctrl-z`, `ctrl-s`, and `ctrl-q` are not accepted.
+movement, history search, screen clearing, and agent shortcuts. On servers
+without `modified_keys`, job-control and flow-control keys such as `ctrl-z`,
+`ctrl-s`, and `ctrl-q` are not accepted.
+
+Servers advertising the `modified_keys` terminal feature also accept `ctrl-a`
+through `ctrl-z`, `ctrl-shift-a` through `ctrl-shift-z`, `ctrl-space` and
+`ctrl-shift-space`. Prefix Enter, Tab, arrows, Home, End, PageUp or PageDown
+with `ctrl-`, `shift-` or `ctrl-shift-` (for example, `shift-enter` or
+`ctrl-left`). The server uses the pane's negotiated keyboard mode; legacy
+Shift+Enter uses Luvus's configured newline sequence. Raw escape sequences
+remain unsupported.
+Each action is a complete key tap, including the release when the child
+requests Kitty key-event reporting.
 
 `paste_image` takes `{png_base64}` for one validated PNG up to 160 KiB. Luvus
 stages the image beneath private selected-session storage and delivers its

@@ -18,6 +18,9 @@ OPAQUE = re.compile(r"^[0-9a-f]{32}$")
 REQUEST_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 KEYS = {"enter", "escape", "tab", "backtab", "up", "down", "left", "right", "home", "end", "backspace", "delete", "pageup", "pagedown", "ctrl-a", "ctrl-b", "ctrl-c", "ctrl-d", "ctrl-e", "ctrl-f", "ctrl-g", "ctrl-k", "ctrl-l", "ctrl-n", "ctrl-o", "ctrl-p", "ctrl-r", "ctrl-t", "ctrl-u", "ctrl-w", "ctrl-y", "alt-d", "space", *(f"digit-{n}" for n in range(10))}
+KEYS.update(f"{prefix}{letter}" for prefix in ("ctrl-", "ctrl-shift-") for letter in "abcdefghijklmnopqrstuvwxyz")
+KEYS.update(f"{prefix}{key}" for prefix in ("ctrl-", "shift-", "ctrl-shift-") for key in ("enter", "tab", "up", "down", "left", "right", "home", "end", "pageup", "pagedown"))
+KEYS.update(("ctrl-space", "ctrl-shift-space"))
 METHOD_FIELDS = {
     "uhp.capabilities": set(),
     "terminal.backend.inventory": set(),

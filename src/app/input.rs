@@ -5640,7 +5640,7 @@ fn encode_key(
     encode_key_with_modes(key, newline, app_cursor, protocol)
 }
 
-fn encode_key_with_modes(
+pub(super) fn encode_key_with_modes(
     key: &KeyEvent,
     newline: &[u8],
     app_cursor: bool,
@@ -5868,12 +5868,16 @@ fn encode_key_with_modes(
 /// Shift modifier, not the unshifted key identity Kitty requires. Keep those
 /// combinations on the pre-existing legacy path until the Windows input layer
 /// can preserve the virtual-key or scan-code identity alongside the event.
+/// Space keeps its canonical identity even with Shift held.
 fn modified_char_has_canonical_identity(
     character: char,
     modifiers: KeyModifiers,
     windows: bool,
 ) -> bool {
-    !windows || !modifiers.contains(KeyModifiers::SHIFT) || character.is_alphabetic()
+    !windows
+        || !modifiers.contains(KeyModifiers::SHIFT)
+        || character.is_alphabetic()
+        || character == ' '
 }
 
 /// Lowercase a key identity only when Unicode maps it to exactly one scalar.
@@ -8555,6 +8559,24 @@ mod tests {
         assert!(!modified_char_has_canonical_identity('€', alt_shift, true));
         assert!(modified_char_has_canonical_identity('A', alt_shift, true));
         assert!(modified_char_has_canonical_identity('?', alt_shift, false));
+    }
+
+    #[test]
+    fn windows_modified_space_preserves_canonical_identity() {
+        let modifiers = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert!(modified_char_has_canonical_identity(' ', modifiers, true));
+        let key = KeyEvent::new(KeyCode::Char(' '), modifiers);
+        for (disambiguate, report_all) in [(true, false), (false, true)] {
+            assert!(kitty_key_supports_event_types(
+                &key,
+                disambiguate,
+                report_all,
+                true,
+                false,
+                false,
+                true,
+            ));
+        }
     }
 
     #[test]
