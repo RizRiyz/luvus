@@ -290,7 +290,12 @@ pub(crate) fn install_powershell_hook(
         register_hook(&mut cfg, event, None, &command, *timeout_seconds);
     }
     fs::create_dir_all(&spec.dir)?;
-    fs::write(spec.dir.join(POWERSHELL_HOOK_SCRIPT), script)?;
+    // Windows PowerShell 5.1 reads a script without a BOM in the ANSI code
+    // page, which would garble a non-ASCII path the script embeds.
+    fs::write(
+        spec.dir.join(POWERSHELL_HOOK_SCRIPT),
+        format!("\u{feff}{script}"),
+    )?;
     fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
     let _ = fs::remove_file(spec.dir.join("luvus-agent-hook.sh"));
     let _ = fs::remove_file(spec.dir.join("bohay-agent-hook.sh"));
@@ -1646,8 +1651,9 @@ console.log(JSON.stringify(calls));
             "the script no shell could run is gone"
         );
         assert_eq!(
-            fs::read_to_string(tmp.join(POWERSHELL_HOOK_SCRIPT)).unwrap(),
-            "managed script"
+            fs::read(tmp.join(POWERSHELL_HOOK_SCRIPT)).unwrap(),
+            b"\xef\xbb\xbfmanaged script",
+            "the script starts with a UTF-8 BOM for Windows PowerShell 5.1"
         );
         let value: Value =
             serde_json::from_str(&fs::read_to_string(tmp.join("settings.json")).unwrap()).unwrap();
@@ -1777,6 +1783,43 @@ console.log(JSON.stringify(calls));
                 shell.display()
             );
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The Codex script embeds the installing binary's path. Windows
+    /// PowerShell 5.1 reads a script without a BOM in the ANSI code page, so
+    /// a path such as `C:\Users\José\…` must survive the installed script.
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_script_keeps_a_non_ascii_path_literal() {
+        use std::process::Command;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/integration")
+            .join(format!("windows-non-ascii-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("José Ñandú").join(".codex");
+        fs::create_dir_all(&dir).unwrap();
+        let received = dir.join("received.txt");
+        let spec = HookSpec {
+            dir: dir.clone(),
+            file: "hooks.json",
+            event: "SessionStart",
+            matcher: None,
+        };
+        let script = format!(
+            "[IO.File]::WriteAllText('{}', 'ok')\nexit 0\n",
+            received.display().to_string().replace('\'', "''")
+        );
+        install_powershell_hook(&spec, &script, &[]).unwrap();
+        let command = powershell_hook_command(dir.join(POWERSHELL_HOOK_SCRIPT).to_str().unwrap());
+
+        let status = Command::new("cmd.exe")
+            .args(["/C", &command])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(fs::read_to_string(&received).unwrap(), "ok");
         let _ = fs::remove_dir_all(root);
     }
 }
