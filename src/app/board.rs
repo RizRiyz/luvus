@@ -49,7 +49,7 @@ struct TaskStartSelection {
 
 enum TaskAgentLaunch {
     Manual { agent: String, briefing: String },
-    Automation(String),
+    Automation(AutomationWorkerLaunch),
 }
 
 pub enum TaskRetryResult {
@@ -517,9 +517,11 @@ impl App {
                             Err(error) => Some(("send_failed".to_string(), error.to_string())),
                         }
                     }
-                    TaskAgentLaunch::Automation(line) => submit(worker, line)
-                        .err()
-                        .map(|message| ("send_failed".to_string(), message)),
+                    TaskAgentLaunch::Automation(launch) => {
+                        submit(worker, &launch.line(&worker.command))
+                            .err()
+                            .map(|message| ("send_failed".to_string(), message))
+                    }
                 },
                 None => Some((
                     "spawn_failed".to_string(),
@@ -3007,27 +3009,127 @@ fn manual_agent_launch(
     })
 }
 
+/// The shell family that reads a worker launch line in a new task pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerShell {
+    Posix,
+    PowerShell,
+    Cmd,
+}
+
+impl WorkerShell {
+    /// Unix panes always use POSIX syntax. Windows panes follow the configured
+    /// shell; anything unrecognised keeps the POSIX form.
+    fn of(shell: &str) -> Self {
+        if cfg!(windows) {
+            Self::classify(shell)
+        } else {
+            Self::Posix
+        }
+    }
+
+    /// Platform-neutral: split on both separators so a Windows shell path is
+    /// recognised wherever this runs, including Unix CI.
+    fn classify(shell: &str) -> Self {
+        let base = shell
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(shell)
+            .to_ascii_lowercase();
+        match base.trim_end_matches(".exe") {
+            "pwsh" | "powershell" => Self::PowerShell,
+            "cmd" => Self::Cmd,
+            _ => Self::Posix,
+        }
+    }
+
+    /// Quote `s` as one literal argument for this shell.
+    fn quote(self, s: &str) -> String {
+        match self {
+            Self::Posix => format!("'{}'", s.replace('\'', "'\\''")),
+            // PowerShell single-quoted strings expand nothing; every quote
+            // character it recognises (including typographic ones) is
+            // escaped by doubling it.
+            Self::PowerShell => {
+                let mut quoted = String::with_capacity(s.len() + 2);
+                quoted.push('\'');
+                for c in s.chars() {
+                    if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+                        quoted.push(c);
+                    }
+                    quoted.push(c);
+                }
+                quoted.push('\'');
+                quoted
+            }
+            // cmd has no escape for `"` inside quotes; Windows paths cannot
+            // contain one, so soften any stray quote rather than break out.
+            Self::Cmd => format!("\"{}\"", s.replace('"', "'")),
+        }
+    }
+
+    /// Leave plain identifier tokens bare and quote anything else.
+    fn arg(self, s: &str) -> String {
+        let plain = !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if plain {
+            s.to_string()
+        } else {
+            self.quote(s)
+        }
+    }
+
+    /// Invoke a quoted program. PowerShell parses a leading quoted string as
+    /// an expression, so it needs the call operator.
+    fn invoke(self, program: &str) -> String {
+        match self {
+            Self::PowerShell => format!("& {program}"),
+            Self::Posix | Self::Cmd => program.to_string(),
+        }
+    }
+}
+
 /// The shell receives only a bounded private-runner command. The runner reloads
 /// the claimed task and passes its full briefing directly to the agent process.
 fn manual_agent_runner_line(shell: &str) -> String {
-    #[cfg(not(windows))]
-    let _ = shell;
-    #[cfg(not(windows))]
-    {
-        "\"$LUVUS_BIN_PATH\" __task-worker".to_string()
+    let shell = WorkerShell::of(shell);
+    let program = match shell {
+        WorkerShell::PowerShell => "\"$env:LUVUS_BIN_PATH\"",
+        WorkerShell::Cmd => "\"%LUVUS_BIN_PATH%\"",
+        WorkerShell::Posix => "\"$LUVUS_BIN_PATH\"",
+    };
+    format!("{} __task-worker", shell.invoke(program))
+}
+
+/// Validated data for a scheduled worker. The launch line is rendered only
+/// once the worker pane exists, because its syntax depends on that pane's
+/// shell.
+#[derive(Debug)]
+struct AutomationWorkerLaunch {
+    executable: String,
+    task_id: String,
+    automation_id: String,
+    run_id: String,
+}
+
+impl AutomationWorkerLaunch {
+    fn line(&self, shell: &str) -> String {
+        self.line_for(WorkerShell::of(shell), !cfg!(windows))
     }
-    #[cfg(windows)]
-    {
-        let base = std::path::Path::new(shell)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(shell)
-            .trim_end_matches(".exe")
-            .to_ascii_lowercase();
-        match base.as_str() {
-            "pwsh" | "powershell" => "& \"$env:LUVUS_BIN_PATH\" __task-worker".to_string(),
-            "cmd" => "\"%LUVUS_BIN_PATH%\" __task-worker".to_string(),
-            _ => "\"$LUVUS_BIN_PATH\" __task-worker".to_string(),
+
+    fn line_for(&self, shell: WorkerShell, task_id_prefix: bool) -> String {
+        let command = format!(
+            "{} __automation-worker {} {} {}",
+            shell.invoke(&shell.quote(&self.executable)),
+            shell.arg(&self.task_id),
+            shell.arg(&self.automation_id),
+            shell.arg(&self.run_id),
+        );
+        if task_id_prefix && shell == WorkerShell::Posix {
+            format!("LUVUS_TASK_ID={} {command}", shell.arg(&self.task_id))
+        } else {
+            command
         }
     }
 }
@@ -3036,7 +3138,7 @@ fn automation_agent_launch_line(
     agent: &str,
     task: &crate::orch::Task,
     access: crate::automation::AutomationAccess,
-) -> Result<String, String> {
+) -> Result<AutomationWorkerLaunch, String> {
     let descriptor =
         crate::agent::registry::find(agent).ok_or_else(|| format!("unsupported agent: {agent}"))?;
     // Validate the adapter/access pair before anything is created. The private
@@ -3052,16 +3154,12 @@ fn automation_agent_launch_line(
     // sessions cannot accidentally route through a different Luvus install.
     let executable = std::env::current_exe()
         .map_err(|error| format!("could not resolve the Luvus automation runner: {error}"))?;
-    let executable = shell_quote(&executable.to_string_lossy());
-    let command = format!(
-        "{executable} __automation-worker {} {} {}",
-        task.id, provenance.automation_id, provenance.run_id
-    );
-    if cfg!(windows) {
-        Ok(command)
-    } else {
-        Ok(format!("LUVUS_TASK_ID={} {command}", task.id))
-    }
+    Ok(AutomationWorkerLaunch {
+        executable: executable.to_string_lossy().into_owned(),
+        task_id: task.id.clone(),
+        automation_id: provenance.automation_id.clone(),
+        run_id: provenance.run_id.clone(),
+    })
 }
 
 fn agent_automation_command(
@@ -3084,17 +3182,6 @@ fn agent_automation_command(
         .chain(launch.args.iter().copied())
         .collect::<Vec<_>>()
         .join(" "))
-}
-
-/// Quote `s` as one shell argument: POSIX single-quoting on Unix; on Windows
-/// (cmd/PowerShell have no safe common quoting) double quotes with inner
-/// double quotes softened to single quotes.
-fn shell_quote(s: &str) -> String {
-    if cfg!(windows) {
-        format!("\"{}\"", s.replace('"', "'"))
-    } else {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    }
 }
 
 struct TaskMergeJob {
@@ -4708,13 +4795,130 @@ mod tests {
             )
             .unwrap();
         let task = state.task(&task.id).unwrap();
-        let line =
+        let launch =
             automation_agent_launch_line("codex", task, AutomationAccess::Workspace).unwrap();
+        let line = launch.line("pwsh");
         assert!(line.contains("__automation-worker t1 automation_1 run_1"));
         assert!(!line.contains("LUVUS_BIN_PATH"));
         assert!(!line.contains("review safely"));
         assert!(!line.contains("luvus task done"));
         assert!(!line.contains("codex exec"));
+    }
+
+    fn worker_launch(executable: &str) -> AutomationWorkerLaunch {
+        AutomationWorkerLaunch {
+            executable: executable.into(),
+            task_id: "t1".into(),
+            automation_id: "automation_1".into(),
+            run_id: "run_1".into(),
+        }
+    }
+
+    #[test]
+    fn worker_shell_classifies_configured_windows_shells() {
+        for shell in [
+            "pwsh",
+            "pwsh.exe",
+            "PWSH.EXE",
+            "powershell",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+        ] {
+            assert_eq!(
+                WorkerShell::classify(shell),
+                WorkerShell::PowerShell,
+                "{shell}"
+            );
+        }
+        for shell in ["cmd", "cmd.exe", r"C:\Windows\System32\cmd.exe"] {
+            assert_eq!(WorkerShell::classify(shell), WorkerShell::Cmd, "{shell}");
+        }
+        for shell in ["bash", "/bin/zsh", "fish", "nu", ""] {
+            assert_eq!(WorkerShell::classify(shell), WorkerShell::Posix, "{shell}");
+        }
+        if !cfg!(windows) {
+            assert_eq!(WorkerShell::of("pwsh"), WorkerShell::Posix);
+        }
+    }
+
+    #[test]
+    fn automation_worker_line_uses_the_powershell_call_operator() {
+        let launch = worker_launch(r"C:\Program Files\Luvus\luvus.exe");
+        assert_eq!(
+            launch.line_for(WorkerShell::PowerShell, false),
+            r"& 'C:\Program Files\Luvus\luvus.exe' __automation-worker t1 automation_1 run_1"
+        );
+        // A single-quoted PowerShell string expands nothing, and doubling is
+        // its only escape, so `$`, backticks, and quotes stay literal.
+        let launch = worker_launch(r"C:\Users\O'Neil $x `y\luvus.exe");
+        assert_eq!(
+            launch.line_for(WorkerShell::PowerShell, false),
+            r"& 'C:\Users\O''Neil $x `y\luvus.exe' __automation-worker t1 automation_1 run_1"
+        );
+        let mut odd = worker_launch(r"C:\luvus.exe");
+        odd.run_id = "run 1;rm".into();
+        odd.automation_id = "it\u{2019}s".into();
+        assert_eq!(
+            odd.line_for(WorkerShell::PowerShell, false),
+            "& 'C:\\luvus.exe' __automation-worker t1 'it\u{2019}\u{2019}s' 'run 1;rm'"
+        );
+    }
+
+    #[test]
+    fn automation_worker_line_for_cmd_quotes_without_call_operator() {
+        let launch = worker_launch(r"C:\Program Files\Luvus\luvus.exe");
+        assert_eq!(
+            launch.line_for(WorkerShell::Cmd, false),
+            r#""C:\Program Files\Luvus\luvus.exe" __automation-worker t1 automation_1 run_1"#
+        );
+        let mut odd = worker_launch(r"C:\luvus.exe");
+        odd.run_id = "run 1&x".into();
+        assert_eq!(
+            odd.line_for(WorkerShell::Cmd, false),
+            r#""C:\luvus.exe" __automation-worker t1 automation_1 "run 1&x""#
+        );
+    }
+
+    #[test]
+    fn automation_worker_line_for_posix_shells_single_quotes() {
+        let launch = worker_launch("/opt/my luvus/it's/luvus");
+        assert_eq!(
+            launch.line_for(WorkerShell::Posix, true),
+            r"LUVUS_TASK_ID=t1 '/opt/my luvus/it'\''s/luvus' __automation-worker t1 automation_1 run_1"
+        );
+        // Git Bash on Windows keeps the prefix-free form used before.
+        assert_eq!(
+            worker_launch(r"C:\Program Files\Luvus\luvus.exe").line_for(WorkerShell::Posix, false),
+            r"'C:\Program Files\Luvus\luvus.exe' __automation-worker t1 automation_1 run_1"
+        );
+        let mut odd = worker_launch("/bin/luvus");
+        odd.task_id = "t 1".into();
+        assert_eq!(
+            odd.line_for(WorkerShell::Posix, true),
+            "LUVUS_TASK_ID='t 1' '/bin/luvus' __automation-worker 't 1' automation_1 run_1"
+        );
+    }
+
+    #[test]
+    fn manual_runner_line_matches_the_shell_family() {
+        if cfg!(windows) {
+            assert_eq!(
+                manual_agent_runner_line("pwsh"),
+                "& \"$env:LUVUS_BIN_PATH\" __task-worker"
+            );
+            assert_eq!(
+                manual_agent_runner_line("powershell.exe"),
+                "& \"$env:LUVUS_BIN_PATH\" __task-worker"
+            );
+            assert_eq!(
+                manual_agent_runner_line("cmd.exe"),
+                "\"%LUVUS_BIN_PATH%\" __task-worker"
+            );
+        }
+        assert_eq!(
+            manual_agent_runner_line("bash"),
+            "\"$LUVUS_BIN_PATH\" __task-worker"
+        );
     }
 
     #[test]
@@ -4754,7 +4958,8 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
     #[test]
     fn gate_command_runner_terminates_a_detached_session() {
-        let executable = shell_quote(&std::env::current_exe().unwrap().to_string_lossy());
+        let executable =
+            WorkerShell::Posix.quote(&std::env::current_exe().unwrap().to_string_lossy());
         let command = format!(
             "LUVUS_GATE_DETACH_HELPER=1 {executable} --exact app::board::tests::gate_detached_child_helper & sleep 0.05; exit 0"
         );
