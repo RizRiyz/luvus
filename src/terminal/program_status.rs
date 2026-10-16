@@ -94,6 +94,8 @@ pub struct ProgramStatusRecord {
 pub struct ProgramStatusStore {
     records: HashMap<String, ProgramStatusRecord>,
     last_sequence: u64,
+    // Results from before the current working/blocked stretch cannot complete it.
+    completion_started_after: u64,
     summary: Option<ProgramStatusSummary>,
 }
 
@@ -179,7 +181,7 @@ impl ProgramStatusStore {
         }
         self.records
             .values()
-            .filter(|r| r.state.is_result())
+            .filter(|r| r.state.is_result() && r.result_sequence > self.completion_started_after)
             .map(|r| r.result_sequence)
             .max()
     }
@@ -236,6 +238,18 @@ impl ProgramStatusStore {
             }
             self.refresh_summary();
             return;
+        }
+        // Capture this in wire order, not at detection time: an old result and
+        // a replacement's working report may arrive in one coalesced snapshot.
+        if matches!(
+            report.state,
+            Some(ProgramState::Working | ProgramState::Blocked)
+        ) && self
+            .summary
+            .as_ref()
+            .is_none_or(|summary| !matches!(summary.state, State::Working | State::Blocked))
+        {
+            self.completion_started_after = self.last_sequence;
         }
         if self.records.len() >= MAX_RECORDS && !self.records.contains_key(&report.id) {
             if let Some(oldest) = self
@@ -757,6 +771,28 @@ mod tests {
             store.effective_projection().unwrap().0,
             crate::ui::theme::State::Blocked
         );
+    }
+
+    #[test]
+    fn completion_evidence_excludes_results_before_a_new_active_stretch() {
+        let mut store = ProgramStatusStore::default();
+        store.apply(parse_report(b"state=done:id=old").unwrap());
+        let old = store.visible_result_sequence().unwrap();
+        for state in ["working", "blocked"] {
+            store.apply(parse_report(format!("state={state}:id=job").as_bytes()).unwrap());
+            store.apply(parse_report(b"state=idle:id=job").unwrap());
+            assert_eq!(store.visible_result_sequence(), None);
+            assert!(store.records().any(|record| record.id == "old"));
+        }
+        store.apply(parse_report(b"state=working:id=job").unwrap());
+        store.apply(parse_report(b"state=done:id=child").unwrap());
+        assert_eq!(store.visible_result_sequence(), None);
+        store.apply(parse_report(b"state=blocked:id=job").unwrap());
+        store.apply(parse_report(b"state=idle:id=job").unwrap());
+        let result = store.visible_result_sequence().unwrap();
+        assert!(result > old);
+        assert!(store.acknowledge_done());
+        assert_eq!(store.visible_result_sequence(), Some(result));
     }
 
     #[test]

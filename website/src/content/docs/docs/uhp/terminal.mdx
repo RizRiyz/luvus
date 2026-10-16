@@ -180,7 +180,8 @@ Acknowledgement does not alter raw protocol state in `agent.explain.program_stat
 Repeated identical reports from the same run do not re-arm unread results;
 a state change or a new report after a prompt does. `blocked` cannot be dismissed
 by focus. Protocol working-to-idle without an explicit result is not a completion
-notification.
+notification. Retained results from before a new working/blocked stretch do not
+trigger that stretch's completion sound.
 
 The existing four-state Luvus presentation maps protocol `error` to `done`;
 `agent.explain.program_status` preserves the original `error` state. Consumers

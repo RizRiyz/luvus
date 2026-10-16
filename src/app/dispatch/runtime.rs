@@ -954,7 +954,9 @@ impl App {
                 } else {
                     commit_dwell(desired)
                 };
-                if s.state != desired && now.duration_since(s.candidate_since) >= dwell {
+                let state_committed =
+                    s.state != desired && now.duration_since(s.candidate_since) >= dwell;
+                if state_committed {
                     let was_working = s.state == State::Working;
                     let previous = s.state;
                     s.state = desired;
@@ -973,19 +975,31 @@ impl App {
                         blocking_hint(&bottom)
                     };
                     changes.push((id, s.state, s.agent.clone()));
-                    if program_authority && matches!(desired, State::Idle | State::Done) {
-                        if let Some(sequence) = s
-                            .program_status
-                            .as_ref()
-                            .and_then(|store| store.visible_result_sequence())
-                        {
-                            if sequence > s.program_status_completed_through {
-                                s.program_status_completed_through = sequence;
+                    if !program_authority
+                        && was_working
+                        && matches!(desired, State::Idle | State::Done)
+                    {
+                        finished.push(id);
+                    }
+                }
+                // Consume visible results even when focus acknowledgment leaves
+                // the published state unchanged. Only a committed transition
+                // earns a completion cue; old results must not chime later.
+                if program_authority
+                    && s.state == desired
+                    && matches!(desired, State::Idle | State::Done)
+                {
+                    if let Some(sequence) = s
+                        .program_status
+                        .as_ref()
+                        .and_then(|store| store.visible_result_sequence())
+                    {
+                        if sequence > s.program_status_completed_through {
+                            s.program_status_completed_through = sequence;
+                            if state_committed {
                                 finished.push(id);
                             }
                         }
-                    } else if was_working && matches!(desired, State::Idle | State::Done) {
-                        finished.push(id);
                     }
                 }
             }

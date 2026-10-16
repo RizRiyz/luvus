@@ -12308,6 +12308,86 @@ mod tests {
     }
 
     #[test]
+    fn osc7501_old_result_does_not_chime_for_a_later_idle_job() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-old-result-sound");
+        for (detect_old_result, detect_working) in [(true, true), (false, true), (false, false)] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            let pane = app.layout().focus;
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let engine = create_engine(
+                VtEngineKind::Alacritty,
+                80,
+                24,
+                tx,
+                4 * 1024 * 1024,
+                PaneAppearance::default(),
+            );
+            app.panes
+                .get_mut(&pane)
+                .unwrap()
+                .replace_engine_for_test(engine.clone());
+            app.config.notifications.sound_on_done = true;
+            let now = Instant::now();
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b]7501;state=done:id=old\x07");
+            app.handle_event(AppEvent::PtyData(pane));
+            if detect_old_result {
+                app.detect_tick(now);
+                assert_eq!(app.status[&pane].state, State::Idle);
+                assert!(app.pending_sound.is_none());
+                assert!(app.status[&pane].program_status_completed_through > 0);
+            }
+            // Also cover coalescing: a new stretch can start before detection
+            // has ever seen the previous result. No OSC 133 clears it for us.
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b]7501;state=working:id=job\x07");
+            app.handle_event(AppEvent::PtyData(pane));
+            if detect_working {
+                app.detect_tick(now + Duration::from_millis(200));
+                assert_eq!(app.status[&pane].state, State::Working);
+            }
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b]7501;state=idle:id=job\x07");
+            app.handle_event(AppEvent::PtyData(pane));
+            app.detect_tick(now + Duration::from_millis(400));
+            app.detect_tick(now + QUIET_DWELL + Duration::from_millis(500));
+            assert_eq!(app.status[&pane].state, State::Idle);
+            assert!(
+                app.pending_sound.is_none(),
+                "old result must not complete a later idle job (detected={detect_old_result}/{detect_working})"
+            );
+            // A real result in the next stretch still chimes exactly once.
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b]7501;state=working:id=job\x07");
+            app.handle_event(AppEvent::PtyData(pane));
+            app.detect_tick(now + Duration::from_secs(4));
+            engine
+                .lock()
+                .unwrap()
+                .advance(b"\x1b]7501;state=done:id=job\x07");
+            app.handle_event(AppEvent::PtyData(pane));
+            app.detect_tick(now + Duration::from_millis(4200));
+            app.detect_tick(
+                now + Duration::from_secs(4) + QUIET_DWELL + Duration::from_millis(300),
+            );
+            assert!(app.pending_sound.take().is_some());
+            app.detect_tick(now + Duration::from_secs(8));
+            assert!(app.pending_sound.is_none());
+        }
+    }
+
+    #[test]
     fn osc7501_integration_hidden_results_are_not_acknowledged() {
         use crate::terminal::appearance::PaneAppearance;
         use crate::terminal::vt::{create_engine, VtEngineKind};
