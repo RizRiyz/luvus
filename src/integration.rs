@@ -881,6 +881,57 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    /// The raw `.sh` path an earlier release registered is the working install
+    /// on Unix, but it never ran on Windows. There it must show as not
+    /// installed, so re-enabling replaces it, and a missing script must not
+    /// count as installed either.
+    #[test]
+    fn codex_status_reports_a_raw_path_install_only_where_it_runs() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("luvus-codex-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("CODEX_HOME", &tmp);
+        let raw = tmp.join("luvus-agent-hook.sh");
+        fs::write(&raw, "old managed script").unwrap();
+        let group = |matcher: Option<&str>| {
+            let mut group =
+                json!({"hooks": [{"type": "command", "command": raw.to_string_lossy()}]});
+            if let Some(matcher) = matcher {
+                group["matcher"] = json!(matcher);
+            }
+            group
+        };
+        fs::write(
+            tmp.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({"hooks": {
+                "SessionStart": [group(Some("startup|resume"))],
+                "UserPromptSubmit": [group(None)],
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(is_installed("codex"), !cfg!(windows));
+
+        install("codex").unwrap();
+        assert!(is_installed("codex"));
+        let script = tmp.join(CLAUDE_SCRIPT);
+        if cfg!(windows) {
+            assert!(!raw.exists(), "the raw-path script is replaced");
+        }
+        fs::remove_file(&script).unwrap();
+        assert_eq!(
+            is_installed("codex"),
+            !cfg!(windows),
+            "on Windows the PowerShell script must exist"
+        );
+
+        std::env::remove_var("CODEX_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn codex_hook_installs_start_and_prompt_session_reporting() {
         let _env = crate::persist::TEST_ENV_LOCK

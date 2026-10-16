@@ -108,8 +108,14 @@ fn uninstall() -> Result<()> {
     integration::uninstall_shell_hook(spec(), &["UserPromptSubmit"])
 }
 
+#[cfg(not(windows))]
 fn is_installed() -> bool {
     integration::shell_hook_installed(spec(), &["UserPromptSubmit"])
+}
+
+#[cfg(windows)]
+fn is_installed() -> bool {
+    integration::powershell_hook_installed(&spec(), &["UserPromptSubmit"])
 }
 
 /// What one Codex hook payload says about its session.
