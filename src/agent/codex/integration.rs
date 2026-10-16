@@ -1,3 +1,4 @@
+#[cfg(not(windows))]
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,10 @@ pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     hook: Some(run_hook),
 };
 
+#[cfg(any(not(windows), test))]
 const SCRIPT: &str = include_str!("hook.sh");
+#[cfg(any(windows, test))]
+const POWERSHELL_SCRIPT: &str = include_str!("hook.ps1");
 /// A submitted prompt rides in the UserPromptSubmit payload, so this bound is
 /// wider than for session-only hooks. A larger payload is ignored.
 const MAX_HOOK_PAYLOAD: u64 = 256 * 1024;
@@ -24,6 +28,8 @@ const MAX_HOOK_PAYLOAD: u64 = 256 * 1024;
 /// when the hook runs. The total stays well inside the hook timeout.
 const EVIDENCE_ATTEMPTS: usize = 4;
 const EVIDENCE_RETRY: Duration = Duration::from_millis(400);
+/// The UserPromptSubmit hook timeout, which covers every evidence attempt.
+const PROMPT_HOOK_TIMEOUT_SECS: u64 = 5;
 
 fn config_dir() -> PathBuf {
     std::env::var_os("CODEX_HOME")
@@ -41,8 +47,10 @@ fn spec() -> ShellHookSpec {
 }
 
 /// The installed script, with the Luvus binary that installed it. Codex keeps
-/// hook trust per `hooks.json` entry, so the entries and the script path stay
-/// the same as earlier releases and only the script's content changes.
+/// hook trust per `hooks.json` entry, so on Unix the entries and the script
+/// path stay the same as earlier releases and only the script's content
+/// changes.
+#[cfg(any(not(windows), test))]
 fn script_for(binary: &Path) -> Result<String> {
     let binary = binary
         .to_str()
@@ -51,6 +59,17 @@ fn script_for(binary: &Path) -> Result<String> {
     Ok(SCRIPT.replace("__LUVUS_BIN__", &quoted))
 }
 
+/// The Windows script, with the installing binary as a PowerShell literal.
+#[cfg(any(windows, test))]
+fn powershell_script_for(binary: &Path) -> Result<String> {
+    let binary = binary
+        .to_str()
+        .ok_or_else(|| anyhow!("Luvus binary path is not valid Unicode"))?;
+    let quoted = format!("'{}'", binary.replace('\'', "''"));
+    Ok(POWERSHELL_SCRIPT.replace("__LUVUS_BIN__", &quoted))
+}
+
+#[cfg(not(windows))]
 fn install() -> Result<()> {
     let dir = integration::install_shell_hook_with_spec("codex", spec())?;
     let config = dir.join("hooks.json");
@@ -64,7 +83,7 @@ fn install() -> Result<()> {
         "UserPromptSubmit",
         None,
         &script.to_string_lossy(),
-        Some(5),
+        Some(PROMPT_HOOK_TIMEOUT_SECS),
     );
     fs::write(config, serde_json::to_string_pretty(&value)?)?;
     fs::write(&script, script_for(&std::env::current_exe()?)?)?;
@@ -72,12 +91,31 @@ fn install() -> Result<()> {
     Ok(())
 }
 
+/// Codex runs Windows hook commands as `%COMSPEC% /C "<command>"`, and
+/// cmd.exe can neither keep a raw path with spaces together nor run a `.sh`
+/// file, so Windows registers an encoded PowerShell command. The old raw-path
+/// entries never ran, so Codex asks to trust the new ones once.
+#[cfg(windows)]
+fn install() -> Result<()> {
+    integration::install_powershell_hook(
+        &spec(),
+        &powershell_script_for(&std::env::current_exe()?)?,
+        &[("UserPromptSubmit", Some(PROMPT_HOOK_TIMEOUT_SECS))],
+    )
+}
+
 fn uninstall() -> Result<()> {
     integration::uninstall_shell_hook(spec(), &["UserPromptSubmit"])
 }
 
+#[cfg(not(windows))]
 fn is_installed() -> bool {
     integration::shell_hook_installed(spec(), &["UserPromptSubmit"])
+}
+
+#[cfg(windows)]
+fn is_installed() -> bool {
+    integration::powershell_hook_installed(&spec(), &["UserPromptSubmit"])
 }
 
 /// What one Codex hook payload says about its session.
@@ -482,6 +520,20 @@ mod tests {
         assert!(!script.contains("__LUVUS_BIN__"));
         assert!(
             !script.contains("LUVUS_BIN_PATH:-"),
+            "never trusts the inherited path"
+        );
+    }
+
+    #[test]
+    fn windows_script_calls_the_installing_binary_as_a_literal() {
+        let script =
+            powershell_script_for(Path::new(r"C:\Users\a $HOME b `x c'd %PATH%\luvus.exe"))
+                .unwrap();
+        assert!(script.contains(r"$luvus = 'C:\Users\a $HOME b `x c''d %PATH%\luvus.exe'"));
+        assert!(script.contains("integration hook codex"));
+        assert!(!script.contains("__LUVUS_BIN__"));
+        assert!(
+            !script.contains("$env:LUVUS_BIN_PATH"),
             "never trusts the inherited path"
         );
     }
