@@ -9,7 +9,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus};
+use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -107,7 +107,7 @@ pub(crate) fn run(args: &[String]) -> Result<i32> {
     // Shell input and app mutations run independently. Keep the one-use record
     // intact until the server has committed the task/pane ownership that
     // authorizes this process to consume it.
-    wait_for_owner(&staged.task_id, pane.0)?;
+    let attempt = wait_for_owner(&staged.task_id, pane.0)?;
     let spec = take(pane)?;
     if spec != staged {
         return Err(anyhow!("manual task launch changed before it was consumed"));
@@ -117,8 +117,41 @@ pub(crate) fn run(args: &[String]) -> Result<i32> {
             "task briefing must not contain terminal control characters"
         ));
     }
-    let status = launch(&spec.agent, &spec.briefing, &spec.task_id)?;
+    let status = match launch(&spec.agent, &spec.briefing, &spec.task_id) {
+        Ok(status) => status,
+        Err(error) => {
+            fail_unstarted(&spec.task_id, pane.0, attempt, &error.to_string());
+            return Err(error);
+        }
+    };
     Ok(status.code().unwrap_or(1))
+}
+
+/// A task whose agent never started has no process left to settle it, so the
+/// runner records the failure instead of leaving the task `running`. The task
+/// may have changed while the agent was starting (completed, blocked, retried
+/// or reassigned); only the attempt this pane still owns is marked failed.
+fn fail_unstarted(task_id: &str, pane: u32, attempt: u64, detail: &str) {
+    match fetch_task(task_id) {
+        Ok(task) if owns_running_attempt(&task, pane, attempt) => {}
+        Ok(_) => {
+            eprintln!("task {task_id} changed while its agent was starting; leaving it as is");
+            return;
+        }
+        Err(error) => {
+            eprintln!("could not mark task {task_id} failed: {error}");
+            return;
+        }
+    }
+    let response = crate::cli::send_request(
+        "task.update",
+        json!({"id":task_id, "status":"failed", "output":detail}),
+    );
+    match response {
+        Ok(response) if response.get("error").is_none() => {}
+        Ok(response) => eprintln!("could not mark task {task_id} failed: {response}"),
+        Err(error) => eprintln!("could not mark task {task_id} failed: {error}"),
+    }
 }
 
 fn take(pane: crate::ids::PaneId) -> Result<ManualLaunchSpec> {
@@ -150,9 +183,20 @@ fn launch_path(pane: crate::ids::PaneId) -> PathBuf {
     crate::persist::session_dir().join(format!("task-launch-{}.json", pane.0))
 }
 
-fn wait_for_owner(task_id: &str, pane: u32) -> Result<()> {
-    wait_for_owner_with(OWNERSHIP_WAIT, || owner_ready(task_id, pane))
-        .map_err(|error| anyhow!("manual task ownership was not committed: {error}"))
+/// Wait until the server binds the task to this pane, and return the attempt
+/// number this runner owns.
+fn wait_for_owner(task_id: &str, pane: u32) -> Result<u64> {
+    let mut attempt = None;
+    wait_for_owner_with(OWNERSHIP_WAIT, || {
+        let task = fetch_task(task_id)?;
+        let ready = owner_ready(&task, task_id, pane)?;
+        if ready {
+            attempt = task.get("attempt").and_then(|value| value.as_u64());
+        }
+        Ok(ready)
+    })
+    .map_err(|error| anyhow!("manual task ownership was not committed: {error}"))?;
+    attempt.ok_or_else(|| anyhow!("manual task snapshot has no attempt number: {task_id}"))
 }
 
 fn wait_for_owner_with(timeout: Duration, mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
@@ -168,15 +212,25 @@ fn wait_for_owner_with(timeout: Duration, mut ready: impl FnMut() -> Result<bool
     }
 }
 
-fn owner_ready(task_id: &str, pane: u32) -> Result<bool> {
+fn fetch_task(task_id: &str) -> Result<serde_json::Value> {
     let response = crate::cli::send_request("task.get", json!({"id":task_id}))?;
     if let Some(error) = response.get("error") {
         return Err(anyhow!("could not load manual task: {error}"));
     }
-    let task = response
+    response
         .get("result")
         .and_then(|result| result.get("task"))
-        .ok_or_else(|| anyhow!("manual task snapshot is unavailable: {task_id}"))?;
+        .cloned()
+        .ok_or_else(|| anyhow!("manual task snapshot is unavailable: {task_id}"))
+}
+
+fn owns_running_attempt(task: &serde_json::Value, pane: u32, attempt: u64) -> bool {
+    task.get("status").and_then(|value| value.as_str()) == Some("running")
+        && task.get("assignee").and_then(|value| value.as_u64()) == Some(u64::from(pane))
+        && task.get("attempt").and_then(|value| value.as_u64()) == Some(attempt)
+}
+
+fn owner_ready(task: &serde_json::Value, task_id: &str, pane: u32) -> Result<bool> {
     let status = task.get("status").and_then(|value| value.as_str());
     let assignee = task.get("assignee").and_then(|value| value.as_u64());
     if status == Some("running") && assignee == Some(u64::from(pane)) {
@@ -191,13 +245,16 @@ fn owner_ready(task_id: &str, pane: u32) -> Result<bool> {
 }
 
 fn launch(agent: &str, briefing: &str, task_id: &str) -> Result<ExitStatus> {
+    let start_error =
+        |error: std::io::Error| anyhow!("could not start manual agent {agent}: {error}");
     let mut command = if let Some(descriptor) = crate::agent::registry::find(agent) {
         if !crate::agent::registry::supports_local_task(descriptor) {
             return Err(anyhow!(
                 "{agent} cannot work in a local ORCH task workspace"
             ));
         }
-        let mut command = Command::new(descriptor.launch_command);
+        let mut command =
+            crate::platform::agent_command(descriptor.launch_command).map_err(start_error)?;
         command.args(descriptor.task_prompt_args);
         command
     } else {
@@ -205,7 +262,7 @@ fn launch(agent: &str, briefing: &str, task_id: &str) -> Result<ExitStatus> {
         let (executable, arguments) = argv
             .split_first()
             .ok_or_else(|| anyhow!("manual agent command cannot be empty"))?;
-        let mut command = Command::new(executable);
+        let mut command = crate::platform::agent_command(executable).map_err(start_error)?;
         command.args(arguments);
         command
     };
@@ -213,7 +270,7 @@ fn launch(agent: &str, briefing: &str, task_id: &str) -> Result<ExitStatus> {
         .arg(briefing)
         .env("LUVUS_TASK_ID", task_id)
         .status()
-        .map_err(|error| anyhow!("could not start manual agent {agent}: {error}"))
+        .map_err(start_error)
 }
 
 fn custom_agent_argv(agent: &str) -> Result<Vec<String>, String> {
@@ -337,6 +394,23 @@ mod tests {
 
         let error = wait_for_owner_with(Duration::ZERO, || Ok(false)).unwrap_err();
         assert!(error.to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn a_start_failure_only_fails_the_attempt_this_pane_still_owns() {
+        let task = |status: &str, assignee: Option<u32>, attempt: u64| json!({"id":"t1", "status":status, "assignee":assignee, "attempt":attempt});
+        assert!(owns_running_attempt(&task("running", Some(7), 2), 7, 2));
+        for status in ["done", "blocked", "review", "failed", "queued", "claimed"] {
+            assert!(
+                !owns_running_attempt(&task(status, Some(7), 2), 7, 2),
+                "{status}"
+            );
+        }
+        // Reassigned to another pane, or retried as a new attempt.
+        assert!(!owns_running_attempt(&task("running", Some(8), 2), 7, 2));
+        assert!(!owns_running_attempt(&task("running", None, 2), 7, 2));
+        assert!(!owns_running_attempt(&task("running", Some(7), 3), 7, 2));
+        assert!(!owns_running_attempt(&json!({"status":"running"}), 7, 2));
     }
 
     #[test]
