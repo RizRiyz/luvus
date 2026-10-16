@@ -99,6 +99,9 @@ fn windows_agent_command(
             &native_extensions(&extensions),
             &|path| path.is_file(),
         )
+        // A fallback written with an explicit `.cmd`/`.bat` suffix must still
+        // never run the briefing through cmd.exe.
+        .filter(|path| !is_batch(path))
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -508,12 +511,15 @@ mod tests {
     fn explicit_launchable_suffixes_do_not_depend_on_pathext() {
         let only_cmd = launch_extensions(Some(".CMD"));
         assert_eq!(only_cmd, [".cmd"]);
+        // Build both spellings so the test also runs where `\` is not a path
+        // separator; on Windows they are the same path.
+        let explicit = PathBuf::from(r"C:\tools\agent.exe");
         let tools = PathBuf::from(r"C:\tools");
-        let existing = [tools.join("agent.exe")];
+        let existing = [explicit.clone(), tools.join("agent.exe")];
         let is_file = |path: &Path| existing.iter().any(|candidate| candidate == path);
         assert_eq!(
             resolve_program(r"C:\tools\agent.exe", &[], &only_cmd, &is_file),
-            Some(existing[0].clone())
+            Some(explicit)
         );
         assert_eq!(
             resolve_program(
@@ -522,7 +528,7 @@ mod tests {
                 &only_cmd,
                 &is_file
             ),
-            Some(existing[0].clone())
+            Some(existing[1].clone())
         );
         // PATHEXT still decides what is appended to a bare name.
         assert_eq!(
@@ -749,6 +755,21 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
             assert!(
                 error.to_string().contains("program not found: node"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn a_batch_interpreter_fallback_is_never_started() {
+            let dir = TempDir::new("batch fallback");
+            install_modern_shim(&dir.0, "codex");
+            let shim = MODERN_SHIM.replace("SET \"_prog=node\"", "SET \"_prog=node.cmd\"");
+            std::fs::write(dir.0.join("codex.cmd"), shim).unwrap();
+            std::fs::write(dir.0.join("node.cmd"), "@echo off\r\n").unwrap();
+            let error = build("codex", &[&dir.0]).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                error.to_string().contains("program not found: node.cmd"),
                 "{error}"
             );
         }
