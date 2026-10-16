@@ -3028,10 +3028,12 @@ impl WorkerShell {
         }
     }
 
+    /// Platform-neutral: split on both separators so a Windows shell path is
+    /// recognised wherever this runs, including Unix CI.
     fn classify(shell: &str) -> Self {
-        let base = std::path::Path::new(shell)
-            .file_name()
-            .and_then(|name| name.to_str())
+        let base = shell
+            .rsplit(['/', '\\'])
+            .next()
             .unwrap_or(shell)
             .to_ascii_lowercase();
         match base.trim_end_matches(".exe") {
