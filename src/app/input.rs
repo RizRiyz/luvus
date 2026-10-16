@@ -549,6 +549,19 @@ impl App {
         }
     }
 
+    pub(crate) fn sync_program_status(
+        &mut self,
+        id: PaneId,
+        store: crate::terminal::program_status::ProgramStatusStore,
+    ) -> bool {
+        let Some(status) = self.status.get_mut(&id) else {
+            return false;
+        };
+        let presentation_changed = status.sync_program_status(store, &self.manifests);
+        self.detection_dirty.insert(id);
+        presentation_changed
+    }
+
     /// Apply an event; returns whether it changed the rendered UI (→ the loop
     /// should redraw). Input forwarded to a pane returns `false` — the screen only
     /// changes when the pane echoes (a separate `PtyData` event), so we don't waste
@@ -561,6 +574,16 @@ impl App {
             AppEvent::LocalClipboardSucceeded => {
                 self.show_toast(self.catalog.copied);
                 return true;
+            }
+            AppEvent::ProgramStatusChanged(id) => {
+                if let Some(store) = self
+                    .panes
+                    .get(&id)
+                    .and_then(|pane| pane.take_pending_program_status())
+                {
+                    self.sync_program_status(id, store);
+                }
+                return false; // detection decides which rendered consumers changed
             }
             AppEvent::IoCompleted(completion) => {
                 return completion.apply(self);
@@ -960,6 +983,9 @@ impl App {
                 if let Some(pane) = self.panes.get(&id) {
                     if let Some(text) = pane.take_pending_clipboard() {
                         self.pending_clipboard = Some(text);
+                    }
+                    if let Some(store) = pane.take_pending_program_status() {
+                        self.sync_program_status(id, store);
                     }
                 }
                 // The PTY grid has already advanced by the time this event is
@@ -1422,6 +1448,7 @@ impl App {
             | AppEvent::Shutdown => false,
             // Consumed by the pre-dispatch worker-result branch above.
             AppEvent::IoCompleted(_)
+            | AppEvent::ProgramStatusChanged(_)
             | AppEvent::ThemeUninstalled { .. }
             | AppEvent::ConfigReloaded { .. }
             | AppEvent::ManifestsReloaded { .. }
