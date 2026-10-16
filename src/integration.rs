@@ -524,10 +524,7 @@ mod tests {
         table
             .get("command")
             .and_then(|value| value.as_str())
-            .map(|command| {
-                command.contains("luvus-agent-hook") || command.contains("bohay-agent-hook")
-            })
-            .unwrap_or(false)
+            .is_some_and(command_mentions_luvus)
     }
 
     fn omp_extension() -> &'static str {
@@ -1030,7 +1027,18 @@ mod tests {
         install("kimi").unwrap();
         install("kimi").unwrap(); // idempotent
         assert!(is_installed("kimi"));
-        assert!(tmp.join("luvus-agent-hook.sh").exists());
+        // Kimi Code runs hooks through cmd.exe on Windows and sh elsewhere.
+        let script = tmp.join(if cfg!(windows) {
+            POWERSHELL_HOOK_SCRIPT
+        } else {
+            "luvus-agent-hook.sh"
+        });
+        assert!(script.exists());
+        let expected = if cfg!(windows) {
+            powershell_hook_command(script.to_str().unwrap())
+        } else {
+            script.to_string_lossy().into_owned()
+        };
 
         let after = fs::read_to_string(tmp.join("config.toml")).unwrap();
         // The secret, comment, and user's own hook all survive the edit.
@@ -1042,6 +1050,15 @@ mod tests {
         let hooks = doc["hooks"].as_array_of_tables().unwrap();
         let luvus = hooks.iter().filter(|t| kimi_entry_is_luvus(t)).count();
         assert_eq!(luvus, 3, "SessionStart + Notification + Stop, no dupes");
+        for event in ["SessionStart", "Notification", "Stop"] {
+            assert!(
+                hooks.iter().any(|t| {
+                    t.get("event").and_then(|v| v.as_str()) == Some(event)
+                        && t.get("command").and_then(|v| v.as_str()) == Some(expected.as_str())
+                }),
+                "{event} runs {expected}"
+            );
+        }
         let sess = hooks
             .iter()
             .find(|t| t.get("event").and_then(|v| v.as_str()) == Some("SessionStart"))
@@ -1051,13 +1068,14 @@ mod tests {
         uninstall("kimi").unwrap();
         assert!(!is_installed("kimi"), "luvus hooks removed");
         assert!(!tmp.join("luvus-agent-hook.sh").exists());
+        assert!(!tmp.join(POWERSHELL_HOOK_SCRIPT).exists());
         let cleaned = fs::read_to_string(tmp.join("config.toml")).unwrap();
         assert!(cleaned.contains("sk-secret-123"), "secret still intact");
         assert!(cleaned.contains("echo mine"), "user's hook still intact");
-        assert!(
-            !cleaned.contains("luvus-agent-hook"),
-            "no luvus hooks remain"
-        );
+        let doc: toml_edit::DocumentMut = cleaned.parse().unwrap();
+        let hooks = doc["hooks"].as_array_of_tables().unwrap();
+        assert_eq!(hooks.len(), 1, "only the user's hook remains");
+        assert!(!hooks.iter().any(kimi_entry_is_luvus));
         uninstall("kimi").unwrap(); // idempotent
 
         std::env::remove_var("KIMI_CODE_HOME");

@@ -298,7 +298,11 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   to the inherited owner-local Luvus endpoint. No `luvus` process is spawned per
   update and no agent database is opened.
 - **kimi**: adds a `[[hooks]]` entry to `~/.kimi-code/config.toml`, edited in
-  place so your API keys, comments, and own hooks are left untouched.
+  place so your API keys, comments, and own hooks are left untouched. On
+  Windows, Kimi Code runs hooks through `cmd.exe`, so the entry runs a
+  PowerShell script through an encoded command and needs no `python3`.
+  Re-enable an integration installed by an earlier release to replace its old
+  hook entries.
 - **grok**: installs its own hook file without editing Grok's authentication
   configuration.
 - **hermes**: installs an opt-in plugin under the active `HERMES_HOME`. It
