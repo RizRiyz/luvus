@@ -49,6 +49,10 @@ The **All / Active** toggle in the header switches between the full resumable
 history and live agents only. A new configuration starts with **All**, then
 luvus remembers whichever view you select across restarts.
 
+A live agent row's first line shows the name you gave its pane (the row's
+**Rename** action, `luvus agent name`, or `luvus pane name`). An unnamed pane
+shows the detected agent kind, such as `claude`.
+
 When **Show agent session title** is on, the second line of each agent row
 prefers the live OSC title, then a title a module published with
 `ui.agent_title.push`. If neither is set, live rows keep `workspace · =pane`
