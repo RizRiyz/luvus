@@ -6788,11 +6788,11 @@ impl App {
             // Keep this helper useful to callers that inspect rows before
             // opening a menu. The renderer always takes the cached branch.
             .unwrap_or_else(|| ws.is_some_and(|w| crate::git::local::is_repo(&w.cwd)));
-        // A linked worktree (a `git worktree add` checkout) can be deleted; a main
-        // checkout or plain workspace cannot — only closed.
-        let is_worktree = ws
+        // Only offer deletion when the confirmed checkout can be identified.
+        // Missing identity fails closed; opening the menu must not recapture it.
+        let can_delete_worktree = ws
             .and_then(|w| w.worktree.as_ref())
-            .is_some_and(|m| m.linked);
+            .is_some_and(|m| m.linked && m.directory_identity.is_some());
         let pin = if ws.is_some_and(|w| w.pinned) {
             WsMenuItem::Unpin
         } else {
@@ -6805,7 +6805,7 @@ impl App {
             WsMenuItem::TogglePath,
             WsMenuItem::QuickActions,
         ];
-        if is_worktree {
+        if can_delete_worktree {
             items.push(WsMenuItem::DeleteWorktree);
         }
         if is_repo {
@@ -7290,12 +7290,7 @@ impl App {
                         .and_then(|_| linked_worktree_branch(&repo, &path))
                         .and_then(|_| ensure_worktree_identity(&path, identity))
                         .and_then(|_| {
-                            crate::git::local::worktree_remove_force(&repo, &path)?;
-                            if path.exists() {
-                                ensure_worktree_identity(&path, identity)?;
-                                std::fs::remove_dir_all(&path)
-                                    .map_err(|error| error.to_string())?;
-                            }
+                            crate::git::removal::remove_confirmed(&repo, &path, identity)?;
                             cleanup_empty_worktree_parent(&path);
                             Ok(())
                         });
@@ -10316,6 +10311,29 @@ mod tests {
             "a non-worktree node has no Delete worktree action"
         );
         assert!(items.contains(&WsMenuItem::Close), "but it can be closed");
+    }
+
+    #[test]
+    fn delete_worktree_menu_requires_captured_directory_identity() {
+        let _env = crate::persist::test_env("wt-del-menu-identity");
+        let (base, _repo, wt) = repo_with_sibling_worktree("wt-del-menu-identity");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(app.create_workspace_at(wt));
+        let index = app.active_ws;
+        assert!(app
+            .ws_menu_items(index)
+            .contains(&WsMenuItem::DeleteWorktree));
+        app.workspaces[index]
+            .worktree
+            .as_mut()
+            .unwrap()
+            .directory_identity = None;
+        let items = app.ws_menu_items(index);
+        assert!(!items.contains(&WsMenuItem::DeleteWorktree));
+        assert!(items.contains(&WsMenuItem::Close));
+        app.drain_io_jobs();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The worktree-delete confirm cancels on any non-confirm key, and confirming
