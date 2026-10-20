@@ -2389,6 +2389,14 @@ Would you like to proceed?
             "opening the install script must not name the pane"
         );
         assert_eq!(
+            m.agent_in_processes(&[
+                "agent --use-system-ca /home/cursor-agent/.local/share/cursor-agent/versions/2026.10.19/index.js"
+                    .into()
+            ]),
+            Some("cursor".into()),
+            "an earlier cursor-agent directory must not hide the install"
+        );
+        assert_eq!(
             m.agent_in_processes(&["node /work/cursor-agent/index.js".into()]),
             None
         );

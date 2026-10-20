@@ -91,27 +91,22 @@ fn positional(args: &[String]) -> Option<usize> {
 }
 
 /// Cursor's installer runs `…/cursor-agent/versions/<version>/index.js`.
-/// Require that directory sequence so a project named `cursor-agent`, or any
-/// other program invoked as `agent`, is not claimed.
+/// The sequence has to be the end of the path, so an earlier directory named
+/// `cursor-agent` does not hide the install, and a project of that name is
+/// not claimed.
 fn is_install_script(token: &str) -> bool {
-    let mut parts = token.split(['/', '\\']).filter(|part| !part.is_empty());
-    while let Some(part) = parts.next() {
-        if part != "cursor-agent" {
-            continue;
-        }
-        let Some(versions) = parts.next() else {
-            return false;
-        };
-        let Some(version) = parts.next() else {
-            return false;
-        };
-        let Some(script) = parts.next() else {
-            return false;
-        };
-        return versions == "versions"
-            && !version.starts_with('.')
-            && matches!(script, "index.js" | "index.mjs" | "index.cjs")
-            && parts.next().is_none();
+    let mut tail = [""; 4];
+    let mut count = 0usize;
+    for part in token.split(['/', '\\']).filter(|part| !part.is_empty()) {
+        tail[0] = tail[1];
+        tail[1] = tail[2];
+        tail[2] = tail[3];
+        tail[3] = part;
+        count += 1;
     }
-    false
+    count >= 4
+        && tail[0] == "cursor-agent"
+        && tail[1] == "versions"
+        && !tail[2].starts_with('.')
+        && matches!(tail[3], "index.js" | "index.mjs" | "index.cjs")
 }
