@@ -368,6 +368,10 @@ distinct = ["cursor-agent"]   # the CLI binary: unmistakable
 ambiguous = ["cursor"]        # also a normal English word
 ```
 
+Cursor's short command is `agent`. Luvus recognizes that process from the
+install path `cursor-agent/versions/<version>/index.js`. The word `agent` alone
+is not an identity, so do not add it to either list.
+
 Naming an agent luvus does not ship teaches it a new one, no rebuild and no
 waiting for a release:
 
