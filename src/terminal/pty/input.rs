@@ -1,4 +1,5 @@
 //! Nonblocking admission shared by every producer and every writer stage.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use crate::{event::AppEvent, ids::PaneId};
@@ -19,6 +20,7 @@ struct Usage {
 struct Budget {
     usage: Mutex<Usage>,
     notice: OnceLock<(PaneId, mpsc::Sender<AppEvent>)>,
+    program_status_pending: AtomicBool,
 }
 
 /// Travels with the action until its final byte is written or cancelled.
@@ -73,8 +75,47 @@ impl InputSender {
         self.wake.clone()
     }
 
-    pub(super) fn set_notice(&self, id: PaneId, tx: mpsc::Sender<AppEvent>) {
+    pub(crate) fn set_notice(&self, id: PaneId, tx: mpsc::Sender<AppEvent>) {
         let _ = self.budget.notice.set((id, tx));
+    }
+
+    /// Metadata has its own coalesced wake, independent of PTY repaint/input
+    /// rearming. A final report never relies on another byte arriving.
+    pub(crate) fn notify_program_status(&self) {
+        if self
+            .budget
+            .program_status_pending
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        if let Some((id, tx)) = self.budget.notice.get() {
+            if tx.send(AppEvent::ProgramStatusChanged(*id)).is_err() {
+                self.budget
+                    .program_status_pending
+                    .store(false, Ordering::Release);
+            }
+        }
+    }
+
+    /// Mark an app-side status change for the next take without a wake; the
+    /// caller drains it immediately.
+    pub(crate) fn mark_program_status_pending(&self) {
+        self.budget
+            .program_status_pending
+            .store(true, Ordering::Release);
+    }
+
+    /// Lock-free gate for the per-output-event drain: false means no status
+    /// change has been recorded since the last take.
+    pub(crate) fn program_status_pending(&self) -> bool {
+        self.budget.program_status_pending.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn rearm_program_status(&self) {
+        self.budget
+            .program_status_pending
+            .store(false, Ordering::Release);
     }
 
     pub(super) fn acknowledge_rejection(&self) {

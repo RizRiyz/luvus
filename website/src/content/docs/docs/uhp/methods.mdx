@@ -590,6 +590,19 @@ owner renews with another report or calls `agent.release`. This lets unfamiliar
 agents integrate immediately without weakening process-based fallback detection
 or leaving stale state after an adapter crashes.
 
+A program can also report its own state from inside the pane with OSC 7501
+(see [Program status](/docs/uhp/terminal/#program-status)). Those panes report
+`state_source: "program_status"` with `state_confidence: "authoritative"`, and
+`agent.explain` adds a `program_status` array of the raw records (`id`, `state`
+including `error`, `kind`, `progress`, `app`, `effective_app`, `title`,
+`message`), or `null` when the pane has none. An active `agent.report` lease
+still wins over OSC 7501. `agent.list` also lists such panes, so each row
+carries `is_agent` (whether the pane is a native or manifest agent) and
+`display_agent` (the label Luvus draws; an `app` that matches an agent id or
+identity string is shown as `program`). `agent` remains the trusted
+process-derived identity; target agent methods by that, never by
+`display_agent`. Older servers omit both fields.
+
 The normative schemas and fixtures live under `protocol/uhp/v1` and are
 embedded in packaged binaries. Print that exact contract with `luvus uhp schema`.
 
