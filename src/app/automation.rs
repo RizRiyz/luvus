@@ -2178,6 +2178,10 @@ mod tests {
         assert!(run.task_id.is_none());
         assert!(run.error.is_none());
         assert!(app.orch.tasks.is_empty());
+        assert!(
+            app.automation_worker_panes.is_empty(),
+            "an active-agent target is the user's pane, not a scheduled worker"
+        );
     }
 
     #[test]

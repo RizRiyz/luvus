@@ -371,7 +371,14 @@ impl App {
         let pane_id = self.resolve_backend_runtime(params, true)?;
         let key = required_bounded_string(params, "key", 32, true)?;
         let pane = &self.panes[&pane_id];
-        let bytes = backend_key_bytes(key, pane.application_cursor()).ok_or_else(|| {
+        let modes = pane.key_encoding_modes();
+        let bytes = backend_key_bytes(
+            key,
+            modes.application_cursor,
+            modes.protocol,
+            self.config.shift_enter_bytes(),
+        )
+        .ok_or_else(|| {
             BackendError::mutation(
                 "invalid_params",
                 "unsupported logical key",
@@ -1704,60 +1711,26 @@ pub(super) fn bounded_text(text: &str, max_bytes: usize) -> String {
         .collect()
 }
 
-fn backend_key_bytes(key: &str, application_cursor: bool) -> Option<Vec<u8>> {
-    let sequence: &[u8] = match key {
-        "enter" => b"\r",
-        "escape" => b"\x1b",
-        "tab" => b"\t",
-        "backtab" => b"\x1b[Z",
-        "up" if application_cursor => b"\x1bOA",
-        "up" => b"\x1b[A",
-        "down" if application_cursor => b"\x1bOB",
-        "down" => b"\x1b[B",
-        "right" if application_cursor => b"\x1bOC",
-        "right" => b"\x1b[C",
-        "left" if application_cursor => b"\x1bOD",
-        "left" => b"\x1b[D",
-        "home" if application_cursor => b"\x1bOH",
-        "home" => b"\x1b[H",
-        "end" if application_cursor => b"\x1bOF",
-        "end" => b"\x1b[F",
-        "backspace" => b"\x7f",
-        "delete" => b"\x1b[3~",
-        "pageup" => b"\x1b[5~",
-        "pagedown" => b"\x1b[6~",
-        "ctrl-a" => b"\x01",
-        "ctrl-b" => b"\x02",
-        "ctrl-c" => b"\x03",
-        "ctrl-d" => b"\x04",
-        "ctrl-e" => b"\x05",
-        "ctrl-f" => b"\x06",
-        "ctrl-g" => b"\x07",
-        "ctrl-k" => b"\x0b",
-        "ctrl-l" => b"\x0c",
-        "ctrl-n" => b"\x0e",
-        "ctrl-o" => b"\x0f",
-        "ctrl-p" => b"\x10",
-        "ctrl-r" => b"\x12",
-        "ctrl-t" => b"\x14",
-        "ctrl-u" => b"\x15",
-        "ctrl-w" => b"\x17",
-        "ctrl-y" => b"\x19",
-        "alt-d" => b"\x1bd",
-        "space" => b" ",
-        "digit-0" => b"0",
-        "digit-1" => b"1",
-        "digit-2" => b"2",
-        "digit-3" => b"3",
-        "digit-4" => b"4",
-        "digit-5" => b"5",
-        "digit-6" => b"6",
-        "digit-7" => b"7",
-        "digit-8" => b"8",
-        "digit-9" => b"9",
-        _ => return None,
-    };
-    Some(sequence.to_vec())
+fn backend_key_bytes(
+    key: &str,
+    application_cursor: bool,
+    protocol: crate::terminal::keyboard::KeyboardProtocol,
+    newline: &[u8],
+) -> Option<Vec<u8>> {
+    let event = backend::control_key(key)?;
+    let mut bytes =
+        super::input::encode_key_with_modes(&event, newline, application_cursor, protocol)?;
+    // A logical stream key is a complete tap, not a held physical key. Apps
+    // requesting Kitty event types must not be left with a pressed key forever.
+    if protocol.reports_event_types() {
+        let release = KeyEvent::new_with_kind(event.code, event.modifiers, KeyEventKind::Release);
+        if let Some(released) =
+            super::input::encode_key_with_modes(&release, newline, application_cursor, protocol)
+        {
+            bytes.extend(released);
+        }
+    }
+    Some(bytes)
 }
 
 #[cfg(test)]
@@ -2514,15 +2487,70 @@ mod tests {
 
     #[test]
     fn logical_keys_are_strict_and_mode_aware() {
-        assert_eq!(backend_key_bytes("left", false).unwrap(), b"\x1b[D");
-        assert_eq!(backend_key_bytes("left", true).unwrap(), b"\x1bOD");
-        assert_eq!(backend_key_bytes("ctrl-k", false).unwrap(), b"\x0b");
-        assert_eq!(backend_key_bytes("alt-d", false).unwrap(), b"\x1bd");
-        assert_eq!(backend_key_bytes("ctrl-a", false).unwrap(), b"\x01");
-        assert_eq!(backend_key_bytes("ctrl-r", false).unwrap(), b"\x12");
-        assert_eq!(backend_key_bytes("ctrl-y", false).unwrap(), b"\x19");
-        assert!(backend_key_bytes("ctrl-z", false).is_none());
-        assert!(backend_key_bytes("raw-escape", false).is_none());
+        use crate::terminal::keyboard::{KeyboardProtocol, KittyKeyboardFlags};
+        let legacy = |key: &str, app_cursor: bool| {
+            backend_key_bytes(key, app_cursor, KeyboardProtocol::Legacy, b"\n")
+        };
+        assert_eq!(legacy("left", false).unwrap(), b"\x1b[D");
+        assert_eq!(legacy("left", true).unwrap(), b"\x1bOD");
+        assert_eq!(legacy("ctrl-k", false).unwrap(), b"\x0b");
+        assert_eq!(legacy("alt-d", false).unwrap(), b"\x1bd");
+        assert_eq!(legacy("ctrl-a", false).unwrap(), b"\x01");
+        for letter in b'a'..=b'z' {
+            let key = format!("ctrl-{}", char::from(letter));
+            assert_eq!(legacy(&key, false).unwrap(), [letter - b'a' + 1]);
+        }
+        assert_eq!(legacy("ctrl-space", false).unwrap(), b"\x00");
+        assert_eq!(legacy("ctrl-shift-space", false).unwrap(), b"\x00");
+        assert_eq!(legacy("ctrl-left", true).unwrap(), b"\x1b[1;5D");
+        assert_eq!(legacy("ctrl-shift-right", false).unwrap(), b"\x1b[1;6C");
+        assert_eq!(legacy("shift-enter", false).unwrap(), b"\n");
+        assert_eq!(legacy("shift-tab", false).unwrap(), b"\x1b[Z");
+        assert!(legacy("raw-escape", false).is_none());
+        let kitty = KeyboardProtocol::Kitty {
+            flags: KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES,
+        };
+        for (key, bytes) in [
+            ("ctrl-a", &b"\x1b[97;5u"[..]),
+            ("ctrl-space", &b"\x1b[32;5u"[..]),
+            ("ctrl-shift-space", &b"\x1b[32;6u"[..]),
+            ("shift-enter", &b"\x1b[13;2u"[..]),
+            ("ctrl-enter", &b"\x1b[13;5u"[..]),
+            ("ctrl-shift-enter", &b"\x1b[13;6u"[..]),
+        ] {
+            assert_eq!(backend_key_bytes(key, false, kitty, b"\n").unwrap(), bytes);
+        }
+        let report_all = KeyboardProtocol::Kitty {
+            flags: KittyKeyboardFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+        };
+        assert_eq!(
+            backend_key_bytes("ctrl-shift-space", false, report_all, b"\n").unwrap(),
+            b"\x1b[32;6u"
+        );
+        let events = KeyboardProtocol::Kitty {
+            flags: KittyKeyboardFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KittyKeyboardFlags::REPORT_EVENT_TYPES,
+        };
+        assert_eq!(
+            backend_key_bytes("ctrl-enter", false, events, b"\n").unwrap(),
+            b"\x1b[13;5u\x1b[13;5:3u"
+        );
+        assert_eq!(
+            backend_key_bytes("ctrl-shift-a", false, events, b"\n").unwrap(),
+            b"\x1b[97;6u\x1b[97;6:3u"
+        );
+        assert_eq!(
+            backend_key_bytes("ctrl-shift-space", false, events, b"\n").unwrap(),
+            b"\x1b[32;6u\x1b[32;6:3u"
+        );
+        assert_eq!(
+            backend_key_bytes("ctrl-left", false, events, b"\n").unwrap(),
+            b"\x1b[1;5D\x1b[1;5:3D"
+        );
+        assert_eq!(
+            backend_key_bytes("backspace", false, events, b"\n").unwrap(),
+            b"\x7f"
+        );
     }
 
     #[test]

@@ -124,6 +124,10 @@ pub struct PaneSnap {
     /// An explicit derived document preview. Source is always re-read.
     #[serde(default)]
     pub preview: Option<PreviewSnap>,
+    /// A scheduled automation worker. It restores as a plain shell and never
+    /// takes a native session for resume, in this or any later server lifetime.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automation_worker: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -613,6 +617,9 @@ struct SessionEvidence {
     /// The live terminal title of each unbound agent pane. An agent that
     /// names its conversation there can be resolved per pane.
     titles: HashMap<PaneId, String>,
+    /// Scheduled automation workers. They still count in their discovery
+    /// group, so a pane beside them stays ambiguous, but never take a session.
+    workers: HashSet<PaneId>,
 }
 
 fn capture_session_evidence(app: &App) -> SessionEvidence {
@@ -624,8 +631,11 @@ fn capture_session_evidence(app: &App) -> SessionEvidence {
     // Externally managed panes are omitted from the snapshot, but their precise
     // session IDs must remain claimed while resolving the panes that do restore.
     // Otherwise discovery could hand the external conversation to another pane.
+    // A scheduled worker's reported run is claimed the same way: its headless
+    // conversation must not move to another pane. Pass 1 then finds it already
+    // claimed and leaves the worker unbound, as it does a duplicate report.
     for id in &ids {
-        if !app.backend_non_restorable.contains(id) {
+        if !app.backend_non_restorable.contains(id) && !app.automation_worker_panes.contains(id) {
             continue;
         }
         if let Some(a) = app.status.get(id).and_then(|s| s.agent_session.as_ref()) {
@@ -693,6 +703,7 @@ fn capture_session_evidence(app: &App) -> SessionEvidence {
         claimed,
         unbound,
         titles,
+        workers: app.automation_worker_panes.clone(),
     }
 }
 
@@ -702,6 +713,7 @@ fn resolve_pane_sessions(evidence: SessionEvidence) -> HashMap<PaneId, Option<(S
         mut claimed,
         unbound,
         titles,
+        workers,
     } = evidence;
     // A pane whose title names its conversation resolves on its own, even
     // beside other panes of the same agent in the same directory. A session
@@ -724,6 +736,11 @@ fn resolve_pane_sessions(evidence: SessionEvidence) -> HashMap<PaneId, Option<(S
         let [id] = pane_ids[..] else {
             continue;
         };
+        // A worker's title still makes a shared name ambiguous above, but it
+        // never resumes the worker's own run.
+        if workers.contains(&id) {
+            continue;
+        }
         claimed.insert(key.clone());
         out.insert(id, Some(key));
     }
@@ -741,7 +758,7 @@ fn resolve_pane_sessions(evidence: SessionEvidence) -> HashMap<PaneId, Option<(S
             .into_iter()
             .filter(|sid| !claimed.contains(&(agent.clone(), sid.clone())))
             .collect();
-        if pane_ids.len() == 1 && sessions.len() == 1 {
+        if pane_ids.len() == 1 && sessions.len() == 1 && !workers.contains(&pane_ids[0]) {
             let id = pane_ids[0];
             let sid = sessions.into_iter().next().expect("length checked");
             claimed.insert((agent.clone(), sid.clone()));
@@ -965,6 +982,7 @@ fn snapshot_layout(
                                 file,
                                 diff,
                                 preview,
+                                automation_worker: false,
                             },
                         ));
                     }
@@ -1025,6 +1043,7 @@ fn snapshot_layout(
                                 file: None,
                                 diff: None,
                                 preview: None,
+                                automation_worker: app.automation_worker_panes.contains(&id),
                             },
                         )
                     })
@@ -1449,6 +1468,7 @@ mod title_resolution_tests {
                     .iter()
                     .map(|(id, title)| (PaneId(*id), title.to_string()))
                     .collect(),
+                workers: HashSet::new(),
             })
         };
         let named = Some(("codex".to_string(), "01a0-named".to_string()));
@@ -1473,6 +1493,76 @@ mod title_resolution_tests {
             out[&PaneId(1)],
             None,
             "a hook already bound it to another pane"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&codex);
+    }
+
+    #[test]
+    fn a_scheduled_worker_title_never_resolves_its_own_run() {
+        let _env = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let codex =
+            std::env::temp_dir().join(format!("luvus-titled-worker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&codex);
+        let work = codex.join("work");
+        let sessions = codex.join("sessions/2026/10/14");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for id in ["01a0-named", "01a0-other"] {
+            let meta =
+                serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": work}});
+            std::fs::write(
+                sessions.join(format!("rollout-2026-10-14T10-00-00-{id}.jsonl")),
+                format!("{meta}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            codex.join("session_index.jsonl"),
+            r#"{"id":"01a0-named","thread_name":"nightly-review"}"#,
+        )
+        .unwrap();
+        let previous = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", &codex);
+
+        // Pane 1 is the scheduled worker in every case.
+        let resolve = |panes: &[u32], titles: &[(u32, &str)]| {
+            resolve_pane_sessions(SessionEvidence {
+                out: HashMap::new(),
+                claimed: HashSet::new(),
+                unbound: HashMap::from([(
+                    ("codex".to_string(), work.clone()),
+                    panes.iter().map(|id| PaneId(*id)).collect(),
+                )]),
+                titles: titles
+                    .iter()
+                    .map(|(id, title)| (PaneId(*id), title.to_string()))
+                    .collect(),
+                workers: HashSet::from([PaneId(1)]),
+            })
+        };
+
+        let out = resolve(&[1], &[(1, "nightly-review | work")]);
+        assert_eq!(out[&PaneId(1)], None, "its title names its own run");
+
+        let out = resolve(
+            &[1, 2],
+            &[(1, "nightly-review | work"), (2, "nightly-review | work")],
+        );
+        assert_eq!(
+            (&out[&PaneId(1)], &out[&PaneId(2)]),
+            (&None, &None),
+            "a name the worker shares stays ambiguous"
+        );
+
+        let out = resolve(&[1, 2], &[(1, "nightly-review | work"), (2, "work")]);
+        assert_eq!(
+            (&out[&PaneId(1)], &out[&PaneId(2)]),
+            (&None, &None),
+            "the pane beside it does not inherit a remaining session"
         );
 
         match previous {

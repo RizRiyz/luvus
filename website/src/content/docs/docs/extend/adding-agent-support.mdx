@@ -115,6 +115,11 @@ Identity must be conservative because process evidence outranks text:
 - `overlap_priority`: an explicit tie-breaker for a reviewed collision, not a
   general ranking system.
 
+Cursor's short command is `agent`. That ordinary word is not an identity
+string. The Cursor adapter recognizes the wrapper from its full argv, and a
+user manifest with `replace = true` drops that predicate with the rest of
+Cursor's built-in identity.
+
 Package scope is part of identity. For example,
 `@oh-my-pi/pi-coding-agent` is OMP while
 `@earendil-works/pi-coding-agent` is Pi. Matching only the shared basename

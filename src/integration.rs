@@ -208,6 +208,139 @@ pub(crate) fn install_shell_hook_with_spec(agent: &str, spec: ShellHookSpec) -> 
     Ok(spec.dir)
 }
 
+/// The script a Windows PowerShell hook runs, next to the agent's config.
+pub(crate) const POWERSHELL_HOOK_SCRIPT: &str = "luvus-agent-hook.ps1";
+
+/// Agents run hook commands through a shell (Git Bash, cmd, or PowerShell),
+/// and each one rewrites a raw or quoted Windows path that contains spaces,
+/// backslashes, `$`, backticks, `%`, or apostrophes. The script path therefore
+/// travels as a single-quoted PowerShell literal inside `-EncodedCommand`,
+/// whose base64 text no shell can alter.
+#[cfg(any(windows, test))]
+pub(crate) fn powershell_hook_command(path: &str) -> String {
+    let literal = format!("& '{}'", path.replace('\'', "''"));
+    let utf16: Vec<u8> = literal.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    format!(
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}",
+        crate::base64_encode(&utf16)
+    )
+}
+
+/// Decodes one standard base64 token, or returns `None` when it is not one.
+pub(crate) fn decode_base64(token: &str) -> Option<Vec<u8>> {
+    if token.is_empty() || !token.len().is_multiple_of(4) {
+        return None;
+    }
+    let (mut bits, mut count) = (0u32, 0u32);
+    let mut output = Vec::with_capacity(token.len() / 4 * 3);
+    for byte in token.trim_end_matches('=').bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            output.push((bits >> count) as u8);
+            bits &= (1 << count) - 1;
+        }
+    }
+    Some(output)
+}
+
+/// The UTF-16LE text of each base64 token in a command, such as the script a
+/// PowerShell `-EncodedCommand` runs.
+pub(crate) fn encoded_command_texts(command: &str) -> impl Iterator<Item = String> + '_ {
+    command.split_whitespace().filter_map(|token| {
+        let bytes = decode_base64(token)?;
+        let (pairs, remainder) = bytes.as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        remainder
+            .is_empty()
+            .then(|| String::from_utf16(&units).ok())
+            .flatten()
+    })
+}
+
+/// Windows install for an agent whose hook command runs through a shell:
+/// writes `script` as [`POWERSHELL_HOOK_SCRIPT`] and registers the encoded
+/// PowerShell command under `spec.event` and each `(event, timeout)` in
+/// `extra_events`. Earlier Luvus entries, including the raw `.sh` path that
+/// no Windows shell could run, are replaced, and the old script is removed.
+#[cfg(any(windows, test))]
+pub(crate) fn install_powershell_hook(
+    spec: &ShellHookSpec,
+    script: &str,
+    extra_events: &[(&str, Option<u64>)],
+) -> Result<()> {
+    let cfg_path = spec.dir.join(spec.file);
+    let mut cfg: Value = match fs::read_to_string(&cfg_path) {
+        Ok(contents) => serde_json::from_str(&contents)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error.into()),
+    };
+    let command = powershell_hook_command_in(&spec.dir)?;
+    register_hook(&mut cfg, spec.event, spec.matcher, &command, None);
+    for (event, timeout_seconds) in extra_events {
+        register_hook(&mut cfg, event, None, &command, *timeout_seconds);
+    }
+    fs::create_dir_all(&spec.dir)?;
+    // Windows PowerShell 5.1 reads a script without a BOM in the ANSI code
+    // page, which would garble a non-ASCII path the script embeds.
+    fs::write(
+        spec.dir.join(POWERSHELL_HOOK_SCRIPT),
+        format!("\u{feff}{script}"),
+    )?;
+    fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
+    let _ = fs::remove_file(spec.dir.join("luvus-agent-hook.sh"));
+    let _ = fs::remove_file(spec.dir.join("bohay-agent-hook.sh"));
+    Ok(())
+}
+
+/// Whether the PowerShell hook is installed: the script exists and every
+/// event runs exactly the command this install writes. An older raw-path
+/// entry does not count, so re-enabling the integration replaces it.
+#[cfg(any(windows, test))]
+pub(crate) fn powershell_hook_installed(spec: &ShellHookSpec, extra_events: &[&str]) -> bool {
+    let Ok(command) = powershell_hook_command_in(&spec.dir) else {
+        return false;
+    };
+    if !spec.dir.join(POWERSHELL_HOOK_SCRIPT).is_file() {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(spec.dir.join(spec.file)) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&contents) else {
+        return false;
+    };
+    std::iter::once(spec.event)
+        .chain(extra_events.iter().copied())
+        .all(|event| {
+            value["hooks"][event]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|group| group["hooks"].as_array())
+                .flatten()
+                .any(|hook| hook["command"].as_str() == Some(command.as_str()))
+        })
+}
+
+#[cfg(any(windows, test))]
+fn powershell_hook_command_in(dir: &Path) -> Result<String> {
+    let script = dir.join(POWERSHELL_HOOK_SCRIPT);
+    let path = script
+        .to_str()
+        .ok_or_else(|| anyhow!("integration path is not valid Unicode"))?;
+    Ok(powershell_hook_command(path))
+}
+
 pub fn agent_ids() -> impl ExactSizeIterator<Item = &'static str> + DoubleEndedIterator + Clone {
     crate::agent::registry::integrations()
         .iter()
@@ -257,6 +390,7 @@ pub fn is_installed(agent: &str) -> bool {
 pub(crate) fn uninstall_shell_hook(spec: ShellHookSpec, extra_events: &[&str]) -> Result<()> {
     let _ = fs::remove_file(spec.dir.join("luvus-agent-hook.sh"));
     let _ = fs::remove_file(spec.dir.join("bohay-agent-hook.sh"));
+    let _ = fs::remove_file(spec.dir.join(POWERSHELL_HOOK_SCRIPT));
     let cfg_path = spec.dir.join(spec.file);
     if let Ok(contents) = fs::read_to_string(&cfg_path) {
         if let Ok(mut value) = serde_json::from_str::<Value>(&contents) {
@@ -346,11 +480,19 @@ pub(crate) fn group_mentions_luvus(group: &Value) -> bool {
             hs.iter().any(|h| {
                 h.get("command")
                     .and_then(|c| c.as_str())
-                    .map(|c| c.contains("luvus-agent-hook") || c.contains("bohay-agent-hook"))
+                    .map(command_mentions_luvus)
                     .unwrap_or(false)
             })
         })
         .unwrap_or(false)
+}
+
+/// Whether a hook command runs a Luvus script, directly or, on Windows,
+/// through the script path inside a PowerShell `-EncodedCommand`.
+fn command_mentions_luvus(command: &str) -> bool {
+    let names_script =
+        |text: &str| text.contains("luvus-agent-hook") || text.contains("bohay-agent-hook");
+    names_script(command) || encoded_command_texts(command).any(|text| names_script(&text))
 }
 
 #[cfg(unix)]
@@ -370,6 +512,13 @@ pub(crate) fn set_executable(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The script Claude and Codex install on this platform.
+    const CLAUDE_SCRIPT: &str = if cfg!(windows) {
+        POWERSHELL_HOOK_SCRIPT
+    } else {
+        "luvus-agent-hook.sh"
+    };
 
     fn kimi_entry_is_luvus(table: &toml_edit::Table) -> bool {
         table
@@ -401,7 +550,7 @@ mod tests {
             .is_some());
         assert!(operation("claude")
             .and_then(|operations| operations.hook)
-            .is_none());
+            .is_some());
     }
 
     #[test]
@@ -497,15 +646,38 @@ mod tests {
         install("claude").unwrap();
         install("claude").unwrap(); // idempotent
 
-        let script = tmp.join("luvus-agent-hook.sh");
+        let script = tmp.join(CLAUDE_SCRIPT);
         assert!(script.exists());
         let body = fs::read_to_string(&script).unwrap();
         // Devin imports Claude-format hooks and marks its hook processes; the
         // script must bail on that marker and otherwise still report as claude.
         assert!(body.contains("DEVIN_PROJECT_DIR"), "devin guard");
-        assert!(body.contains("--agent claude"), "reports as claude");
+        if cfg!(windows) {
+            assert!(
+                body.contains("integration hook claude"),
+                "reports as claude"
+            );
+        } else {
+            assert!(body.contains("--agent claude"), "reports as claude");
+        }
         let settings: Value =
             serde_json::from_str(&fs::read_to_string(tmp.join("settings.json")).unwrap()).unwrap();
+        // The exact command each platform's hook shell runs.
+        let expected = if cfg!(windows) {
+            powershell_hook_command(script.to_str().unwrap())
+        } else {
+            script.to_string_lossy().into_owned()
+        };
+        for event in ["SessionStart", "Notification", "Stop", "UserPromptSubmit"] {
+            assert!(
+                settings["hooks"][event]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|group| group["hooks"][0]["command"] == expected.as_str()),
+                "{event} runs {expected}"
+            );
+        }
         let groups = settings["hooks"]["SessionStart"].as_array().unwrap();
         // Only one luvus entry despite installing twice.
         let count = groups.iter().filter(|g| group_mentions_luvus(g)).count();
@@ -571,6 +743,7 @@ mod tests {
             invalid_toml
         );
         assert!(!claude.join("luvus-agent-hook.sh").exists());
+        assert!(!claude.join(POWERSHELL_HOOK_SCRIPT).exists());
         assert!(!kimi.join("luvus-agent-hook.sh").exists());
 
         std::env::remove_var("CLAUDE_CONFIG_DIR");
@@ -664,14 +837,11 @@ mod tests {
 
         install("claude").unwrap();
         assert!(is_installed("claude"));
-        assert!(tmp.join("luvus-agent-hook.sh").exists());
+        assert!(tmp.join(CLAUDE_SCRIPT).exists());
 
         uninstall("claude").unwrap();
         assert!(!is_installed("claude"), "luvus hook removed");
-        assert!(
-            !tmp.join("luvus-agent-hook.sh").exists(),
-            "luvus script removed"
-        );
+        assert!(!tmp.join(CLAUDE_SCRIPT).exists(), "luvus script removed");
         // The user's own hook + other settings survive; the file is intact.
         let v: Value =
             serde_json::from_str(&fs::read_to_string(tmp.join("settings.json")).unwrap()).unwrap();
@@ -716,6 +886,57 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    /// The raw `.sh` path an earlier release registered is the working install
+    /// on Unix, but it never ran on Windows. There it must show as not
+    /// installed, so re-enabling replaces it, and a missing script must not
+    /// count as installed either.
+    #[test]
+    fn codex_status_reports_a_raw_path_install_only_where_it_runs() {
+        let _env = crate::persist::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("luvus-codex-legacy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("CODEX_HOME", &tmp);
+        let raw = tmp.join("luvus-agent-hook.sh");
+        fs::write(&raw, "old managed script").unwrap();
+        let group = |matcher: Option<&str>| {
+            let mut group =
+                json!({"hooks": [{"type": "command", "command": raw.to_string_lossy()}]});
+            if let Some(matcher) = matcher {
+                group["matcher"] = json!(matcher);
+            }
+            group
+        };
+        fs::write(
+            tmp.join("hooks.json"),
+            serde_json::to_string_pretty(&json!({"hooks": {
+                "SessionStart": [group(Some("startup|resume"))],
+                "UserPromptSubmit": [group(None)],
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(is_installed("codex"), !cfg!(windows));
+
+        install("codex").unwrap();
+        assert!(is_installed("codex"));
+        let script = tmp.join(CLAUDE_SCRIPT);
+        if cfg!(windows) {
+            assert!(!raw.exists(), "the raw-path script is replaced");
+        }
+        fs::remove_file(&script).unwrap();
+        assert_eq!(
+            is_installed("codex"),
+            !cfg!(windows),
+            "on Windows the PowerShell script must exist"
+        );
+
+        std::env::remove_var("CODEX_HOME");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn codex_hook_installs_start_and_prompt_session_reporting() {
         let _env = crate::persist::TEST_ENV_LOCK
@@ -728,7 +949,7 @@ mod tests {
         install("codex").unwrap();
         install("codex").unwrap(); // idempotent
 
-        let script = fs::read_to_string(tmp.join("luvus-agent-hook.sh")).unwrap();
+        let script = fs::read_to_string(tmp.join(CLAUDE_SCRIPT)).unwrap();
         assert!(
             script.contains("integration hook codex"),
             "the Codex adapter handles the payload"
@@ -759,10 +980,18 @@ mod tests {
             "the hook calls the installing binary, not an inherited path that a \
              shared Codex server may have taken from another pane"
         );
+        let expected = if cfg!(windows) {
+            powershell_hook_command(tmp.join(CLAUDE_SCRIPT).to_str().unwrap())
+        } else {
+            tmp.join(CLAUDE_SCRIPT).to_string_lossy().into_owned()
+        };
+        assert_eq!(start_luvus[0]["hooks"][0]["command"], expected.as_str());
+        assert_eq!(prompt_luvus[0]["hooks"][0]["command"], expected.as_str());
         assert!(is_installed("codex"));
 
         uninstall("codex").unwrap();
         assert!(!is_installed("codex"));
+        assert!(!tmp.join(CLAUDE_SCRIPT).exists());
         let after: Value =
             serde_json::from_str(&fs::read_to_string(tmp.join("hooks.json")).unwrap()).unwrap();
         for event in ["SessionStart", "UserPromptSubmit"] {
@@ -1334,5 +1563,263 @@ console.log(JSON.stringify(calls));
             "pane report-event --agent claude --kind Notification --message Waiting for input --notification-type idle_prompt",
         );
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A home directory with a space, like `C:\Users\Jane Doe`, whose raw
+    /// path Git Bash and cmd.exe split into two words.
+    const SPACED_DIR: &str = "Jane Doe $HOME `x c'd %PATH%";
+
+    #[test]
+    fn powershell_hook_command_keeps_a_spaced_windows_path_literal() {
+        let command = powershell_hook_command(&format!(
+            r"C:\Users\{SPACED_DIR}\.claude\{POWERSHELL_HOOK_SCRIPT}"
+        ));
+        let (prefix, _) = command.rsplit_once(' ').unwrap();
+        assert_eq!(
+            prefix,
+            "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand"
+        );
+        assert!(command
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b" .-+/=".contains(&byte)));
+        assert_eq!(
+            encoded_command_texts(&command).collect::<Vec<_>>(),
+            [r"& 'C:\Users\Jane Doe $HOME `x c''d %PATH%\.claude\luvus-agent-hook.ps1'"]
+        );
+        assert!(command_mentions_luvus(&command));
+        // Another tool's encoded hook, like the ones Orca installs, is not ours.
+        let foreign: Vec<u8> = r"& 'C:\tools\other-hook.ps1'"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(!command_mentions_luvus(&format!(
+            "powershell.exe -NoProfile -EncodedCommand {}",
+            crate::base64_encode(&foreign)
+        )));
+    }
+
+    /// An install from before the Windows fix registered the raw `.sh` path,
+    /// which never ran. Installing again replaces exactly those entries, keeps
+    /// every other hook and setting, and uninstall removes only Luvus's part.
+    #[test]
+    fn powershell_hook_replaces_raw_path_installs_and_uninstalls_surgically() {
+        let tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/integration")
+            .join(format!("powershell-hook-{}", std::process::id()))
+            .join(SPACED_DIR);
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let spec = || HookSpec {
+            dir: tmp.clone(),
+            file: "settings.json",
+            event: "SessionStart",
+            matcher: Some("startup|resume"),
+        };
+        let extra = ["Stop", "UserPromptSubmit"];
+        let old_script = tmp.join("luvus-agent-hook.sh");
+        fs::write(&old_script, "old managed script").unwrap();
+        let raw = old_script.to_string_lossy().into_owned();
+        let user = |event: &str| json!({"hooks": [{"type": "command", "command": format!("orca hook {event}")}]});
+        let luvus = |command: &str| json!({"hooks": [{"type": "command", "command": command}]});
+        let original = json!({
+            "model": "opus",
+            "env": {"TOKEN": "keep"},
+            "hooks": {
+                "SessionStart": [user("SessionStart"), luvus(&raw)],
+                "Stop": [luvus(&raw), user("Stop")],
+                "PreToolUse": [user("PreToolUse")],
+            },
+        });
+        fs::write(
+            tmp.join("settings.json"),
+            serde_json::to_string_pretty(&original).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !powershell_hook_installed(&spec(), &extra),
+            "a raw-path install is reported as not installed, so it gets replaced"
+        );
+
+        let events = [("Stop", None), ("UserPromptSubmit", Some(5))];
+        install_powershell_hook(&spec(), "managed script", &events).unwrap();
+        install_powershell_hook(&spec(), "managed script", &events).unwrap();
+
+        let command = powershell_hook_command(tmp.join(POWERSHELL_HOOK_SCRIPT).to_str().unwrap());
+        assert!(powershell_hook_installed(&spec(), &extra));
+        assert!(
+            !old_script.exists(),
+            "the script no shell could run is gone"
+        );
+        assert_eq!(
+            fs::read(tmp.join(POWERSHELL_HOOK_SCRIPT)).unwrap(),
+            b"\xef\xbb\xbfmanaged script",
+            "the script starts with a UTF-8 BOM for Windows PowerShell 5.1"
+        );
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(tmp.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(value["model"], "opus");
+        assert_eq!(value["env"], original["env"]);
+        assert_eq!(
+            value["hooks"]["PreToolUse"],
+            original["hooks"]["PreToolUse"]
+        );
+        let mut start = luvus(&command);
+        start["matcher"] = json!("startup|resume");
+        let mut prompt = luvus(&command);
+        prompt["hooks"][0]["timeout"] = json!(5);
+        assert_eq!(
+            value["hooks"]["SessionStart"],
+            json!([user("SessionStart"), start])
+        );
+        assert_eq!(
+            value["hooks"]["Stop"],
+            json!([user("Stop"), luvus(&command)])
+        );
+        assert_eq!(value["hooks"]["UserPromptSubmit"], json!([prompt]));
+
+        uninstall_shell_hook(spec(), &extra).unwrap();
+        uninstall_shell_hook(spec(), &extra).unwrap();
+        assert!(!powershell_hook_installed(&spec(), &extra));
+        assert!(!tmp.join(POWERSHELL_HOOK_SCRIPT).exists());
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(tmp.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(value["model"], "opus");
+        assert_eq!(value["env"], original["env"]);
+        assert_eq!(
+            value["hooks"]["SessionStart"],
+            json!([user("SessionStart")])
+        );
+        assert_eq!(value["hooks"]["Stop"], json!([user("Stop")]));
+        assert_eq!(value["hooks"]["UserPromptSubmit"], json!([]));
+        assert_eq!(
+            value["hooks"]["PreToolUse"],
+            original["hooks"]["PreToolUse"]
+        );
+
+        let _ = fs::remove_dir_all(tmp.parent().unwrap());
+    }
+
+    #[test]
+    fn powershell_hook_refuses_a_malformed_config_unchanged() {
+        let tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/integration")
+            .join(format!("powershell-malformed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("hooks.json"), "{ user config").unwrap();
+        let spec = HookSpec {
+            dir: tmp.clone(),
+            file: "hooks.json",
+            event: "SessionStart",
+            matcher: None,
+        };
+        assert!(install_powershell_hook(&spec, "managed script", &[]).is_err());
+        assert_eq!(
+            fs::read_to_string(tmp.join("hooks.json")).unwrap(),
+            "{ user config"
+        );
+        assert!(!tmp.join(POWERSHELL_HOOK_SCRIPT).exists());
+        let _ = fs::remove_dir_all(tmp);
+    }
+
+    /// Runs the installed Windows command for real, the way each agent does:
+    /// Claude Code through Git Bash, Codex as `cmd.exe /C`. The script sits
+    /// under a directory with a space and shell metacharacters, and must hand
+    /// the hook payload on stdin to the native program it starts, as the real
+    /// script does with `luvus integration hook`.
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_command_runs_under_git_bash_and_cmd_with_a_spaced_home() {
+        use std::process::{Command, Stdio};
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/integration")
+            .join(format!("windows-shells-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let directory = root.join(SPACED_DIR).join(".claude");
+        fs::create_dir_all(&directory).unwrap();
+        let received = root.join("received.txt");
+        let sort =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join(r"System32\sort.exe");
+        let script = directory.join(POWERSHELL_HOOK_SCRIPT);
+        let literal = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', "''"));
+        fs::write(
+            &script,
+            format!("& {} /O {}\nexit 0\n", literal(&sort), literal(&received)),
+        )
+        .unwrap();
+        let command = powershell_hook_command(script.to_str().unwrap());
+        let payload = r#"{"hook_event_name":"SessionStart","session_id":"quote-check"}"#;
+
+        let mut shells: Vec<(PathBuf, Vec<&str>)> = vec![("cmd.exe".into(), vec!["/C"])];
+        let bash = std::env::var_os("ProgramFiles")
+            .map(|dir| PathBuf::from(dir).join(r"Git\bin\bash.exe"))
+            .filter(|bash| bash.is_file());
+        match bash {
+            Some(bash) => shells.push((bash, vec!["-c"])),
+            None => eprintln!("Git Bash not found; checking cmd.exe only"),
+        }
+        for (shell, args) in shells {
+            let _ = fs::remove_file(&received);
+            let mut child = Command::new(&shell)
+                .args(&args)
+                .arg(&command)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            assert!(child.wait().unwrap().success(), "{}", shell.display());
+            assert_eq!(
+                fs::read_to_string(&received).unwrap_or_default().trim_end(),
+                payload,
+                "{}",
+                shell.display()
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// The Codex script embeds the installing binary's path. Windows
+    /// PowerShell 5.1 reads a script without a BOM in the ANSI code page, so
+    /// a path such as `C:\Users\José\…` must survive the installed script.
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_script_keeps_a_non_ascii_path_literal() {
+        use std::process::Command;
+
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/test-state/integration")
+            .join(format!("windows-non-ascii-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("José Ñandú").join(".codex");
+        fs::create_dir_all(&dir).unwrap();
+        let received = dir.join("received.txt");
+        let spec = HookSpec {
+            dir: dir.clone(),
+            file: "hooks.json",
+            event: "SessionStart",
+            matcher: None,
+        };
+        let script = format!(
+            "[IO.File]::WriteAllText('{}', 'ok')\nexit 0\n",
+            received.display().to_string().replace('\'', "''")
+        );
+        install_powershell_hook(&spec, &script, &[]).unwrap();
+        let command = powershell_hook_command(dir.join(POWERSHELL_HOOK_SCRIPT).to_str().unwrap());
+
+        let status = Command::new("cmd.exe")
+            .args(["/C", &command])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(fs::read_to_string(&received).unwrap(), "ok");
+        let _ = fs::remove_dir_all(root);
     }
 }
