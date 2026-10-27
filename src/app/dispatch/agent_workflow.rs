@@ -531,17 +531,20 @@ impl App {
                 }
                 // idle/done are not composer evidence. Keep the existing
                 // positive-geometry and strict-mode gates, but skip legacy
-                // state rules under active terminal-native authority.
-                let composer = detect::live_composer_ready(
-                    agent,
-                    &*engine,
-                    status.claude_prompt_semantic_ready,
-                );
-                return admits(if composer == Some(true) {
-                    detect::PromptEvidence::Ready
-                } else {
-                    detect::PromptEvidence::Unknown
-                });
+                // state rules under active terminal-native authority. Results
+                // left by an exited producer have none, as in detection.
+                if self.program_status_has_authority(id) {
+                    let composer = detect::live_composer_ready(
+                        agent,
+                        &*engine,
+                        status.claude_prompt_semantic_ready,
+                    );
+                    return admits(if composer == Some(true) {
+                        detect::PromptEvidence::Ready
+                    } else {
+                        detect::PromptEvidence::Unknown
+                    });
+                }
             }
         }
         if !status.force_detect

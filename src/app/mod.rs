@@ -12536,6 +12536,62 @@ mod tests {
     }
 
     #[test]
+    fn osc7501_exited_results_do_not_bypass_replacement_prompt_checks() {
+        use crate::terminal::appearance::PaneAppearance;
+        use crate::terminal::vt::{create_engine, VtEngineKind};
+        let _env = crate::persist::test_env("osc7501-replacement-prompt");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let root = app.panes[&pane]
+            .child_pid
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let engine = create_engine(
+            VtEngineKind::Alacritty,
+            80,
+            24,
+            tx,
+            1024 * 1024,
+            PaneAppearance::default(),
+        );
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_engine_for_test(engine.clone());
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=done:id=old\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        let now = Instant::now();
+        app.detect_tick_with(now, false);
+        let shell = app.panes[&pane].command.clone();
+        app.apply_proc_scan(Some(HashMap::from([(root, vec![shell.clone()])])));
+        app.apply_proc_scan(Some(HashMap::from([(root, vec![shell])])));
+        app.apply_proc_scan(Some(HashMap::from([(root, vec!["pi".into()])])));
+        app.detect_tick(now + Duration::from_millis(200));
+        assert_eq!(app.status[&pane].agent, "pi");
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[2J\x1b[22HAllow this command?\r\nenter to select, esc to cancel");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_millis(400));
+        assert_eq!(app.status[&pane].state, State::Blocked);
+        assert!(engine.lock().unwrap().program_status_state().is_some());
+        assert!(!app.agent_prompt_is_ready(pane, false));
+        // A fresh blocked report keeps refusing input under restored authority.
+        engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b]7501;state=blocked:id=new\x07");
+        app.handle_event(AppEvent::PtyData(pane));
+        app.detect_tick(now + Duration::from_millis(400));
+        assert!(!app.agent_prompt_is_ready(pane, false));
+    }
+
+    #[test]
     fn osc7501_integration_hidden_results_are_not_acknowledged() {
         use crate::terminal::appearance::PaneAppearance;
         use crate::terminal::vt::{create_engine, VtEngineKind};

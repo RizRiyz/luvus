@@ -20,7 +20,7 @@ impl App {
 
     /// Retained results still label an idle shell, but cannot override a
     /// replacement agent that has no fresh reports of its own.
-    fn program_status_has_authority(&self, id: PaneId) -> bool {
+    pub(super) fn program_status_has_authority(&self, id: PaneId) -> bool {
         self.status.get(&id).is_some_and(|status| {
             status.program_status.as_ref().is_some_and(|store| {
                 store.has_current_reports()

@@ -157,7 +157,8 @@ scans find only the pane's shell (no foreground job), `idle`, `working`, and
 `blocked` records reported before the first of those scans are removed. Reports made
 after it are kept, and results are retained. Retained results left behind by a
 prompt or confirmed producer exit remain queryable, but do not override a new
-agent's screen-derived state unless fresh OSC 7501 reports arrive.
+agent's screen-derived state or `agent.send` prompt readiness unless fresh
+OSC 7501 reports arrive.
 Status emitted by the shell itself
 with no child process is treated the same way. This needs a working process
 scan, so a pane whose root is not a shell (an SSH session, or a program launched
