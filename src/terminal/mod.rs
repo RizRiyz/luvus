@@ -8,6 +8,7 @@ pub mod color_depth;
 pub mod host_input;
 pub mod host_key;
 pub mod keyboard;
+pub mod program_status;
 pub mod pty;
 pub mod theme_probe;
 pub mod upload;

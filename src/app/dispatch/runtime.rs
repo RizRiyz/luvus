@@ -18,6 +18,22 @@ impl App {
         }
     }
 
+    /// Retained results still label an idle shell, but cannot override a
+    /// replacement agent that has no fresh reports of its own.
+    pub(super) fn program_status_has_authority(&self, id: PaneId) -> bool {
+        self.status.get(&id).is_some_and(|status| {
+            status.program_status.as_ref().is_some_and(|store| {
+                store.has_current_reports()
+                    || (!self.manifests.is_agent(&status.agent)
+                        && status.agent_session.is_none()
+                        && self
+                            .manifests
+                            .agent_in_processes(self.running_for_detection(id))
+                            .is_none())
+            })
+        })
+    }
+
     /// Recover a stale persisted selection before any periodic work indexes it.
     ///
     /// Workspace and tab mutations normally keep these indices valid. A restored
@@ -66,7 +82,7 @@ impl App {
     /// integration leases, and parked API waits.
     #[cfg(test)]
     pub(crate) fn needs_fast_runtime_tick(&self, now: Instant) -> bool {
-        self.detection_work_pending(now)
+        self.detection_work_pending(now, self.runtime_clients_attached)
             || !self.output_waits.is_empty()
             || !self.agent_waits.is_empty()
             || !self.agent_starts.is_empty()
@@ -76,8 +92,17 @@ impl App {
             || self.search_flash.is_some()
     }
 
-    fn detection_work_pending(&self, now: Instant) -> bool {
+    fn detection_work_pending(&self, now: Instant, clients_attached: bool) -> bool {
         !self.detection_dirty.is_empty()
+            || (clients_attached
+                && self
+                    .workspaces
+                    .get(self.active_ws)
+                    .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
+                    .filter(|tab| self.program_status_has_authority(tab.layout.focus))
+                    .and_then(|tab| self.status.get(&tab.layout.focus))
+                    .and_then(|status| status.program_status.as_ref())
+                    .is_some_and(|store| store.has_unread_done()))
             || self.status.values().any(|status| {
                 status.force_detect
                     || status.candidate != status.state
@@ -154,7 +179,7 @@ impl App {
             consider(exp, true);
         }
 
-        if self.detection_work_pending(now) {
+        if self.detection_work_pending(now, clients_attached) {
             consider(self.last_detect_at + DETECTION_INTERVAL, true);
         }
         if self.detection_audit_needed() {
@@ -535,6 +560,13 @@ impl App {
                     || self.status.get(id).is_some_and(|status| {
                         status.force_detect
                             || status.candidate != status.state
+                            || (clients_attached
+                                && *id == focus
+                                && self.program_status_has_authority(*id)
+                                && status
+                                    .program_status
+                                    .as_ref()
+                                    .is_some_and(|store| store.has_unread_done()))
                             || status.agent_report.is_some()
                             || status.last_resize.is_some_and(|t| now >= t + RESIZE_GRACE)
                             || (status.state == State::Working
@@ -568,12 +600,18 @@ impl App {
                         && status.candidate == status.state
                         && status.state != State::Working
                         && status.agent_report.is_none()
+                        && status
+                            .program_status
+                            .as_ref()
+                            .is_none_or(|store| store.is_empty())
                 });
             self.detection_dirty.remove(&id);
             let Some(pane) = self.panes.get(&id) else {
                 continue;
             };
             if let Some(status) = self.status.get_mut(&id) {
+                presentation_metadata_changed |=
+                    std::mem::take(&mut status.program_status_presentation_changed);
                 if status
                     .agent_report
                     .as_ref()
@@ -589,6 +627,29 @@ impl App {
                 .status
                 .get(&id)
                 .and_then(|status| status.agent_report.clone());
+            let program_status_authority = self.program_status_has_authority(id);
+            if clients_attached && id == focus && report.is_none() && program_status_authority {
+                if let Some(store) = self
+                    .status
+                    .get_mut(&id)
+                    .and_then(|status| status.program_status.as_mut())
+                {
+                    store.acknowledge_done();
+                }
+            }
+            let program_status = self
+                .status
+                .get(&id)
+                .and_then(|status| status.program_status.as_ref())
+                .filter(|_| program_status_authority)
+                .and_then(|store| store.effective_projection())
+                .map(|(state, app, message)| {
+                    (state, app.map(str::to_string), message.map(str::to_string))
+                });
+            let program_message = program_status
+                .as_ref()
+                .and_then(|(_, _, message)| message.as_deref())
+                .map(crate::terminal::program_status::display_message);
             let known_agent = self
                 .status
                 .get(&id)
@@ -648,12 +709,19 @@ impl App {
                     Ok(engine) => {
                         let generation = engine.output_generation();
                         if force_detect || last_generation != Some(generation) {
-                            let text = detect::screen_text_for_detection(
-                                &*engine,
-                                detection_rows,
-                                non_empty_rows,
-                                probe_arc_studio,
-                            );
+                            let text =
+                                if program_status.is_some() && !running_for_detection.is_empty() {
+                                    // A successful process scan already proves identity;
+                                    // OSC state needs no title/screen manifest inputs.
+                                    String::new()
+                                } else {
+                                    detect::screen_text_for_detection(
+                                        &*engine,
+                                        detection_rows,
+                                        non_empty_rows,
+                                        probe_arc_studio,
+                                    )
+                                };
                             let composer_ready = composer_agent.and_then(|agent| {
                                 detect::live_composer_ready(agent, &*engine, claude_semantic_ready)
                             });
@@ -734,6 +802,32 @@ impl App {
                     rule_priority: None,
                     rule_region: None,
                 },
+                None if program_status.is_some() => {
+                    let (state, _app, _message) = program_status.as_ref().expect("checked above");
+                    // OSC owns state, not identity or prompt readiness. Do not
+                    // evaluate the legacy state rules just to discard them.
+                    let (agent, identity_source) = detect::identity(
+                        title.as_deref(),
+                        &bottom,
+                        base,
+                        known,
+                        running,
+                        &self.manifests,
+                    );
+                    detect::Detection {
+                        state: *state,
+                        agent,
+                        prompt_evidence: if *state == State::Blocked {
+                            detect::PromptEvidence::Blocked
+                        } else {
+                            detect::PromptEvidence::Unknown
+                        },
+                        identity_source,
+                        state_source: "program_status",
+                        rule_priority: None,
+                        rule_region: None,
+                    }
+                }
                 None => detect::classify_with_composer(
                     title.as_deref(),
                     &bottom,
@@ -751,10 +845,28 @@ impl App {
             };
 
             if let Some(s) = self.status.get_mut(&id) {
+                if program_status.is_some()
+                    && det.identity_source == "process_tree"
+                    && self.manifests.is_agent(&det.agent)
+                    && s.program_status_agent.is_none()
+                {
+                    s.program_status_agent = Some(det.agent.clone());
+                }
                 s.identity_source = det.identity_source;
                 s.state_source = det.state_source;
                 s.rule_priority = det.rule_priority;
                 s.rule_region = det.rule_region;
+                let program_authority = report.is_none() && program_status.is_some();
+                if program_authority {
+                    // No screen interpretation of protocol msg, even when the
+                    // message is absent or changes without a state transition.
+                    let hint = (det.state == State::Blocked)
+                        .then(|| program_message.clone())
+                        .flatten();
+                    presentation_metadata_changed |= s.blocked_hint != hint;
+                    s.blocked_hint = hint;
+                    s.done = false;
+                }
                 let focused = id == focus;
                 if focused {
                     s.seen = true;
@@ -769,8 +881,10 @@ impl App {
                 // would flip an idle agent to "working" for the whole ~2.5s Idle
                 // dwell. The pane keeps whatever state it already had until the
                 // grid settles (docs/07).
-                if s.last_resize
-                    .is_some_and(|t| now.duration_since(t) < RESIZE_GRACE)
+                if report.is_none()
+                    && !program_authority
+                    && s.last_resize
+                        .is_some_and(|t| now.duration_since(t) < RESIZE_GRACE)
                 {
                     s.prompt_evidence = if det.prompt_evidence == detect::PromptEvidence::Blocked {
                         detect::PromptEvidence::Blocked
@@ -781,7 +895,7 @@ impl App {
                 }
                 s.last_resize = None;
                 // The done-latch and working history track the *raw* reading.
-                if s.prev_working && det.state == State::Idle && !focused {
+                if !program_authority && s.prev_working && det.state == State::Idle && !focused {
                     s.done = true;
                 }
                 s.prev_working = det.state == State::Working;
@@ -801,11 +915,17 @@ impl App {
                 };
                 let was_visible_agent = self.manifests.is_agent(&s.agent)
                     || s.agent_session.is_some()
-                    || s.agent_report.is_some();
+                    || s.agent_report.is_some()
+                    || s.program_status
+                        .as_ref()
+                        .is_some_and(|store| !store.is_empty());
                 let agent_changed = s.agent != detected;
                 let is_visible_agent = self.manifests.is_agent(&detected)
                     || s.agent_session.is_some()
-                    || s.agent_report.is_some();
+                    || s.agent_report.is_some()
+                    || s.program_status
+                        .as_ref()
+                        .is_some_and(|store| !store.is_empty());
                 s.agent = detected;
                 if agent_changed && !s.agent.eq_ignore_ascii_case("claude") {
                     s.claude_prompt_semantic_ready = false;
@@ -836,7 +956,7 @@ impl App {
                     }
                 }
                 // The state the raw reading wants right now.
-                let desired = if s.done && det.state == State::Idle {
+                let desired = if !program_authority && s.done && det.state == State::Idle {
                     State::Done
                 } else {
                     det.state
@@ -856,7 +976,9 @@ impl App {
                 } else {
                     commit_dwell(desired)
                 };
-                if s.state != desired && now.duration_since(s.candidate_since) >= dwell {
+                let state_committed =
+                    s.state != desired && now.duration_since(s.candidate_since) >= dwell;
+                if state_committed {
                     let was_working = s.state == State::Working;
                     let previous = s.state;
                     s.state = desired;
@@ -865,14 +987,41 @@ impl App {
                     // moment it enters Blocked (not every tick), for Mission
                     // Control's "why blocked / answer inline" (docs/54); cleared
                     // when it leaves. No per-tick string allocation.
-                    s.blocked_hint = if desired == State::Blocked {
-                        blocking_hint(&bottom)
-                    } else {
+                    s.blocked_hint = if desired != State::Blocked {
                         None
+                    } else if program_authority {
+                        program_message.clone()
+                    } else if let Some(report) = report.as_ref() {
+                        report.message.clone()
+                    } else {
+                        blocking_hint(&bottom)
                     };
                     changes.push((id, s.state, s.agent.clone()));
-                    if was_working && matches!(desired, State::Idle | State::Done) {
+                    if !program_authority
+                        && was_working
+                        && matches!(desired, State::Idle | State::Done)
+                    {
                         finished.push(id);
+                    }
+                }
+                // Consume visible results even when focus acknowledgment leaves
+                // the published state unchanged. Only a committed transition
+                // earns a completion cue; old results must not chime later.
+                if program_authority
+                    && s.state == desired
+                    && matches!(desired, State::Idle | State::Done)
+                {
+                    if let Some(sequence) = s
+                        .program_status
+                        .as_ref()
+                        .and_then(|store| store.visible_result_sequence())
+                    {
+                        if sequence > s.program_status_completed_through {
+                            s.program_status_completed_through = sequence;
+                            if state_committed {
+                                finished.push(id);
+                            }
+                        }
                     }
                 }
             }
@@ -888,7 +1037,12 @@ impl App {
             self.pane_is_visible(*id)
                 || self.manifests.is_agent(agent)
                 || self.status.get(id).is_some_and(|status| {
-                    status.agent_session.is_some() || status.agent_report.is_some()
+                    status.agent_session.is_some()
+                        || status.agent_report.is_some()
+                        || status
+                            .program_status
+                            .as_ref()
+                            .is_some_and(|store| !store.is_empty())
                 })
                 || self.active_is_orch()
                 || self.active_is_mission()
@@ -937,10 +1091,13 @@ impl App {
             // Optional sound cues (off by default). A plain shell going
             // quiet or blocking is not an agent, so it stays silent either way.
             let is_agent_pane = self.manifests.is_agent(&agent)
-                || self
-                    .status
-                    .get(&id)
-                    .is_some_and(|s| s.agent_session.is_some() || s.agent_report.is_some());
+                || self.status.get(&id).is_some_and(|s| {
+                    s.agent_session.is_some()
+                        || s.agent_report.is_some()
+                        || s.program_status
+                            .as_ref()
+                            .is_some_and(|store| !store.is_empty())
+                });
             // *Done*: one chime per real finish of a working stretch — the
             // debounce already absorbs mid-turn pauses, and it rings whether or
             // not the pane is focused (that's the point: you looked away).

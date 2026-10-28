@@ -478,7 +478,7 @@ impl App {
                     let Some(s) = self.status.get(&id) else {
                         continue;
                     };
-                    if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
+                    if self.is_status_reporter_pane(id) {
                         let usage = s
                             .agent_session
                             .as_ref()
@@ -510,7 +510,10 @@ impl App {
                         }
                         rows.push(MissionRowView {
                             row: MissionRow::Live(id),
-                            agent: s.agent.clone(),
+                            agent: self
+                                .status_reporter_label(id)
+                                .unwrap_or(&s.agent)
+                                .to_string(),
                             state: s.state,
                             resumable: false,
                             location,

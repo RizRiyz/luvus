@@ -107,6 +107,103 @@ reconcile ownership without guessing from a release number. Requests that omit
 the field keep the original create-response shape. This policy intentionally
 does not persist and replay arbitrary original command arguments.
 
+## Program status
+
+Programs running in a pane can report structured lifecycle state with OSC 7501,
+for example `ESC ] 7501 ; state=blocked:kind=permission:msg=<base64> ESC \\`.
+Luvus treats valid reports as authoritative state evidence and exposes the
+bounded records through `agent.explain`, with `state_source: "program_status"`.
+Identity continues to come from process, launch, title, and session evidence.
+The self-reported `app` value is grouping metadata only; it cannot grant native
+agent capabilities or impersonate a built-in agent identity. An `app` that names
+a built-in or manifest agent — its id, a distinct executable, or an ambiguous
+alias — is displayed as `program` unless process or session evidence proves
+that agent is running in the pane. An active leased
+integration report takes precedence over OSC 7501 state.
+
+While valid OSC 7501 records provide state, Luvus skips legacy screen-state
+manifest rules. If a process scan proves identity, it also skips the screen
+text extraction needed only by those rules. Where process evidence is
+unavailable, bounded title/screen identity detection remains available.
+Agent-specific input-composer checks remain independent: a protocol `idle` or
+`done` does not prove that the program can receive a prompt, and a fresh
+protocol `blocked` report rejects submission even before the normal detection
+pass. Clearing all records restores the heuristic state path. Messages shown
+outside the terminal grid (such as blocked hints in Mission Control) disarm
+invisible/directional formatting; `agent.explain.program_status` retains the
+raw decoded data.
+
+Reports support `idle`, `working`, `blocked`, `done`, `error`, and `clear`, with
+nested `id` records, optional progress, titles, and messages. Malformed or
+oversized reports are ignored. Existing heuristic detection remains the
+fallback when a pane does not report OSC 7501 or clears its records.
+
+Each report replaces one record completely. The terminal retains at most 256
+records, evicting the least recently updated one on insertion past capacity.
+Updates are reduced in PTY wire order into a bounded metadata snapshot, not a
+lossy report queue. A query `OSC 7501 ; ? ST` receives the fixed `?` reply.
+
+OSC 133 `A` prompt starts remove unfinished records (`idle`, `working`, and
+`blocked`). Confirmed producer exit removes `idle`, `working`, and `blocked`
+records from that producer. Both retain `done` and `error` results. OSC 133 `C`
+command starts remove only results left behind before that prompt, not freshly
+reported records. RIS clears every record;
+alternate-screen switches do not. Pane closure removes the pane and its
+metadata.
+
+A program that is interrupted or crashes never sends its clear. Without OSC 133
+markers, Luvus uses its existing process scan instead: when two consecutive
+scans find only the pane's shell (no foreground job), `idle`, `working`, and
+`blocked` records reported before the first of those scans are removed. Reports made
+after it are kept, and results are retained. Retained results left behind by a
+prompt or confirmed producer exit remain queryable, but do not override a new
+agent's screen-derived state or `agent.send` prompt readiness unless fresh
+OSC 7501 reports arrive.
+Status emitted by the shell itself
+with no child process is treated the same way. This needs a working process
+scan, so a pane whose root is not a shell (an SSH session, or a program launched
+directly) still relies on explicit clears, prompt markers, or exit. No heartbeat
+or new process polling is added.
+
+OSC 7501 follows the existing asymmetric state debounce: `working` and
+`blocked` publish immediately; a quiet `idle` or `done` candidate must remain
+stable for the existing 2500 ms `QUIET_DWELL`. Renewed work cancels a pending
+quiet transition. Active leased integration reports retain their existing
+immediate-publication policy.
+
+Multiple records are summarized as `blocked`, then `working`, then an unread
+`done`/`error` result, then `idle`. A finished child cannot hide ongoing root or
+background work. Results hidden behind working/blocked records stay unread
+until they become the pane's representative result.
+
+A result in an unfocused pane shows `done` after the dwell. Focusing the pane
+acknowledges a visible result at the next detection, then `done` remains visible
+until the `idle` candidate has held for 2500 ms. Results in an already focused
+pane are acknowledged when visible to an active client but still use the same
+quiet-state debounce. Detached servers retain unread results until a client views
+the pane.
+Acknowledgement does not alter raw protocol state in `agent.explain.program_status`.
+Repeated identical reports from the same run do not re-arm unread results;
+a state change or a new report after a prompt does. `blocked` cannot be dismissed
+by focus. Protocol working-to-idle without an explicit result is not a completion
+notification. Retained results from before a new working/blocked stretch do not
+trigger that stretch's completion sound.
+
+The existing four-state Luvus presentation maps protocol `error` to `done`;
+`agent.explain.program_status` preserves the original `error` state. Consumers
+that need to distinguish failed results should inspect those records rather
+than interpreting `done` as success.
+
+Ordinary program reporters appear in the AGENTS dock, Mission Control, and
+status navigation using `app` (or `program`) as a display label; progress appears
+in the AGENTS row when supplied. This visibility does not make the pane a native
+agent. `agent.list` keeps the trusted `agent` identity and adds `display_agent`
+and `is_agent`; retained results do not reject `agent.start` in a shell pane.
+`agent.explain.program_status` preserves raw `app` and includes `effective_app`
+for ancestor inheritance. Summary reads are cached; no full record walk occurs
+on the UI render path. The pane's output path checks a lock-free flag and only
+takes the terminal lock when the records actually changed.
+
 Capture responses include `content_revision`. To initialize without a race,
 subscribe first, request a snapshot on another connection, discard
 buffered events up through `event_sequence`, then apply later events. Each
