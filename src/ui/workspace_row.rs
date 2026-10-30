@@ -150,14 +150,13 @@ pub(crate) fn scrollbar(
     let pos = ((len - thumb) * scroll.min(span))
         .checked_div(span)
         .unwrap_or(0);
+    // The thumb is half a cell wide so it is easy to find against the sidebar
+    // edge; the track stays a faint one-eighth line.
     for i in 0..len {
+        let on_thumb = i >= pos && i < pos + thumb;
         buf[(track.x, track.y + i as u16)]
-            .set_symbol("▕")
-            .set_fg(if i >= pos && i < pos + thumb {
-                thumb_color
-            } else {
-                track_color
-            });
+            .set_symbol(if on_thumb { "▐" } else { "▕" })
+            .set_fg(if on_thumb { thumb_color } else { track_color });
     }
 }
 
