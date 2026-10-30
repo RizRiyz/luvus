@@ -2875,6 +2875,77 @@ mod tests {
             .join("\n")
     }
 
+    /// The FILES dock shares the sidebar scrollbar, so its tree scrolls by click
+    /// and drag on the bar like WORKSPACES and AGENTS do.
+    #[test]
+    fn files_dock_scrollbar_drags_the_tree() {
+        let _env = crate::persist::test_env("files-dock-bar");
+        use crate::app::BarDrag;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        // More files than a 24-row sidebar can show.
+        let root = std::env::temp_dir().join(format!("luvus-ft-bar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..40 {
+            std::fs::write(root.join(format!("f{i:02}.txt")), b"x").unwrap();
+        }
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        app.file_tree
+            .apply_dir(root.clone(), crate::files::read_dir_entries(&root));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut draw = |app: &mut App| {
+            term.draw(|f| crate::ui::render(f, app))
+                .map(|_| ())
+                .unwrap()
+        };
+        draw(&mut app);
+        let bar = app
+            .sidebar_bars
+            .iter()
+            .find(|b| b.list == BarDrag::Files)
+            .copied()
+            .expect("the overflowing FILES tree drew a scrollbar");
+
+        let at = |app: &mut App, kind, row| {
+            app.handle_event(crate::event::AppEvent::Mouse(MouseEvent {
+                kind,
+                column: bar.track.x,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        // Press at the bottom of the track → jump to the end of the tree.
+        at(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            bar.track.bottom() - 1,
+        );
+        draw(&mut app);
+        assert_eq!(
+            app.file_tree.scroll,
+            bar.total - bar.cap,
+            "clicking the bottom of the bar shows the end of the tree"
+        );
+        // Drag back to the top → the tree follows instead of opening a file.
+        at(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            bar.track.y,
+        );
+        draw(&mut app);
+        assert_eq!(app.file_tree.scroll, 0, "the drag followed the pointer");
+        at(&mut app, MouseEventKind::Up(MouseButton::Left), bar.track.y);
+        assert!(app.bar_drag.is_none(), "release ends the drag");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The dock renders the tree, and a click on a folder row expands it in place.
     #[test]
     fn files_dock_renders_and_a_click_expands() {

@@ -291,6 +291,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     let diff_note_rects = std::mem::take(&mut app.diff_note_rects);
     let preview_link_rects = std::mem::take(&mut app.preview_link_rects);
     let module_dock_rects = std::mem::take(&mut app.module_dock_rects);
+    let sidebar_bars = std::mem::take(&mut app.sidebar_bars);
     let dock_dividers = std::mem::take(&mut app.dock_dividers);
     let picker_rects = std::mem::take(&mut app.picker_rects);
     let worktree_open_rects = std::mem::take(&mut app.worktree_open_rects);
@@ -447,6 +448,7 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     app.diff_note_rects = diff_note_rects;
     app.preview_link_rects = preview_link_rects;
     app.module_dock_rects = module_dock_rects;
+    app.sidebar_bars = sidebar_bars;
     app.dock_dividers = dock_dividers;
     app.picker_rects = picker_rects;
     app.worktree_open_rects = worktree_open_rects;
@@ -820,6 +822,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.version_rect = None;
     app.workspaces_area = Rect::ZERO;
     app.agents_area = Rect::ZERO;
+    app.sidebar_bars.clear();
     app.agents_filter_rects.clear();
     app.agents_elsewhere_rect = None;
     app.module_dock_rects.clear();

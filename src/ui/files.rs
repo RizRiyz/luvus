@@ -148,6 +148,20 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
     app.file_tree.scroll = app.file_tree.scroll.min(max_scroll);
     let scroll = app.file_tree.scroll;
     let hover = app.hover;
+    // Same bar the other docks get (docs/29): drawn only when the tree overflows,
+    // and recorded so a click or drag on it scrolls the tree.
+    crate::ui::sidebar::draw_scrollbar(
+        f,
+        &mut app.sidebar_bars,
+        crate::app::SidebarBar {
+            list: crate::app::BarDrag::Files,
+            track: Rect::new(area.right().saturating_sub(2), list_top, 1, cap as u16),
+            total: n,
+            cap,
+        },
+        scroll,
+        t,
+    );
     let keyboard_cursor = app.files_focused.then_some(app.file_tree.cursor);
     // Native views and Luvus-launched editors carry an exact file identity.
     // Never infer a file from terminal text or perform filesystem work here.

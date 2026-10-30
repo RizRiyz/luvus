@@ -290,6 +290,10 @@ struct DockState {
     collapsed_machines: HashSet<String>,
     hits: Vec<(DockHit, Rect)>,
     hover: Option<DockHit>,
+    /// The scrollbar painted last frame (track, total rows, visible rows), so a
+    /// click or drag can scroll the list; `None` while the list fits.
+    scrollbar: Option<(Rect, usize, usize)>,
+    scrollbar_drag: bool,
     navigation: Option<usize>,
     navigation_reveal: bool,
     focus_seen: bool,
@@ -370,6 +374,8 @@ impl Default for DockState {
             collapsed_machines: HashSet::new(),
             hits: Vec::new(),
             hover: None,
+            scrollbar: None,
+            scrollbar_drag: false,
             navigation: None,
             navigation_reveal: false,
             focus_seen: false,
@@ -2719,6 +2725,9 @@ fn handle_dock_input(
     if rect.workspace_modal {
         return Ok(false);
     }
+    if scrollbar_mouse(dock, rect.overlay, mouse) {
+        return Ok(true);
+    }
     let point = (mouse.column, mouse.row).into();
     let dock_area = Rect::new(rect.x, rect.y, rect.width, rect.height);
     if matches!(mouse.kind, MouseEventKind::Moved) {
@@ -3638,6 +3647,37 @@ fn reveal_workspace(
     }
 }
 
+/// The client paints the Workspaces scrollbar, so it owns the click and the
+/// drag, which keeps following the pointer even after it leaves the dock.
+/// `overlay` is a server-owned popup whose cells stay authoritative.
+fn scrollbar_mouse(
+    dock: &mut DockState,
+    overlay: Option<protocol::ShellDockBlock>,
+    mouse: &ratatui::crossterm::event::MouseEvent,
+) -> bool {
+    let grab = mouse.kind == MouseEventKind::Down(MouseButton::Left)
+        && !dock.overlay_open()
+        && !overlay.is_some_and(|overlay| shell_block_contains(overlay, mouse.column, mouse.row))
+        && dock.scrollbar.is_some_and(|(track, ..)| {
+            crate::ui::workspace_row::scrollbar_hit(track, mouse.column, mouse.row)
+        });
+    let dragging = dock.scrollbar_drag
+        && matches!(
+            mouse.kind,
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+        );
+    if !(grab || dragging) {
+        return false;
+    }
+    dock.scrollbar_drag = mouse.kind != MouseEventKind::Up(MouseButton::Left);
+    if let Some((track, total, cap)) = dock.scrollbar {
+        // Painting clamps this to the real end of the list.
+        dock.scroll = crate::ui::workspace_row::scrollbar_offset(track, total, cap, mouse.row);
+        dock.dirty = true;
+    }
+    true
+}
+
 fn dock_max_scroll(rows: &[MachineDockRow], height: u16, paths: bool) -> usize {
     let mut used = 0;
     let mut start = rows.len();
@@ -4426,8 +4466,10 @@ fn paint_dock_content(
             .push((hit, Rect::new(rect.x, rect.y + row, content_width, stride)));
     }
 
+    dock.scrollbar = None;
     if rect.width >= 3 && list_height > 0 {
         let track = Rect::new(rect.x + rect.width - 2, rect.y + 1, 1, list_height);
+        dock.scrollbar = (total_rows > visible_rows).then_some((track, total_rows, visible_rows));
         dock.workspace_buffer.resize(track);
         for cell in &mut dock.workspace_buffer.content {
             *cell = paint_base.clone();
@@ -6663,6 +6705,64 @@ mod tests {
         dock.revealed_workspace = None;
         reveal_workspace(&rows, &Endpoint::Local, &mut dock, 0, false);
         assert_eq!(dock.scroll, 2, "short layouts remain bounded");
+    }
+
+    #[test]
+    fn workspace_scrollbar_can_be_clicked_and_dragged() {
+        use ratatui::crossterm::event::MouseEvent;
+        let mouse = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let down = MouseEventKind::Down(MouseButton::Left);
+        let drag = MouseEventKind::Drag(MouseButton::Left);
+        let up = MouseEventKind::Up(MouseButton::Left);
+        // 20 rows, 10 visible, on a bar at column 28, rows 1..11.
+        let mut dock = DockState {
+            scrollbar: Some((Rect::new(28, 1, 1, 10), 20, 10)),
+            ..DockState::default()
+        };
+
+        assert!(!scrollbar_mouse(&mut dock, None, &mouse(down, 26, 5)));
+        assert!(
+            !scrollbar_mouse(&mut dock, None, &mouse(down, 29, 5)),
+            "the seam column"
+        );
+        assert!(
+            scrollbar_mouse(&mut dock, None, &mouse(down, 27, 10)),
+            "two cells wide"
+        );
+        assert_eq!(dock.scroll, 10, "the bottom of the track is the end");
+        assert!(
+            scrollbar_mouse(&mut dock, None, &mouse(drag, 40, 0)),
+            "drag off the dock"
+        );
+        assert_eq!(dock.scroll, 0);
+        assert!(scrollbar_mouse(&mut dock, None, &mouse(up, 40, 0)));
+        assert!(!dock.scrollbar_drag);
+        assert!(
+            !scrollbar_mouse(&mut dock, None, &mouse(drag, 28, 5)),
+            "released"
+        );
+
+        let popup = protocol::ShellDockBlock {
+            x: 20,
+            y: 0,
+            width: 10,
+            height: 4,
+        };
+        assert!(!scrollbar_mouse(
+            &mut dock,
+            Some(popup),
+            &mouse(down, 28, 2)
+        ));
+        dock.scrollbar = None;
+        assert!(
+            !scrollbar_mouse(&mut dock, None, &mouse(down, 28, 5)),
+            "a list that fits"
+        );
     }
 
     #[test]

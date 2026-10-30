@@ -175,6 +175,25 @@ pub enum Side {
     Right,
 }
 
+/// Which sidebar list a scrollbar belongs to (docs/29).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BarDrag {
+    Workspaces,
+    Agents,
+    Files,
+}
+
+/// A sidebar scrollbar as drawn last frame: the 1-cell track, how many items the
+/// list holds and how many of them fit. Recorded by the renderer so a click or
+/// drag on the bar can be mapped back to a scroll offset.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SidebarBar {
+    pub list: BarDrag,
+    pub track: Rect,
+    pub total: usize,
+    pub cap: usize,
+}
+
 /// One row a module pushes into its dock (docs/29, DOCK-4). `dot` is an optional
 /// state name (`working`/`blocked`/`done`/`idle`) rendered as a coloured dot;
 /// `action` is a module action id invoked when the row is clicked.
@@ -3155,6 +3174,9 @@ pub struct App {
     pub agents_scroll: usize,
     pub workspaces_area: Rect,
     pub agents_area: Rect,
+    /// The scrollbars the sidebar docks drew last frame, for the click/drag that
+    /// scrolls them. Re-recorded every frame; empty means no list overflows.
+    pub sidebar_bars: Vec<SidebarBar>,
     /// Explicit keyboard ownership for WORKSPACES or AGENTS.
     pub sidebar_focus: Option<SidebarListFocus>,
     /// Display-order cursors for the two built-in sidebar lists.
@@ -3302,6 +3324,9 @@ pub struct App {
     /// `None` when idle. Width updates live during the drag and is persisted once
     /// on release, so no `config.json` write lands on the per-event path.
     pub sidebar_resize: Option<Side>,
+    /// Active sidebar-scrollbar drag — which list the pressed thumb belongs to;
+    /// `None` when idle.
+    pub bar_drag: Option<BarDrag>,
     /// Sidebar whose edge seam is under the cursor, for the hover highlight.
     pub hover_sidebar: Option<Side>,
     /// The draggable edge seam (`│` column) of each shown sidebar, set every frame
@@ -3734,6 +3759,7 @@ impl App {
             agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            sidebar_bars: Vec::new(),
             sidebar_focus: None,
             workspace_cursor: 0,
             agent_cursor: 0,
@@ -3807,6 +3833,7 @@ impl App {
             resize_drag: None,
             hover_divider: None,
             sidebar_resize: None,
+            bar_drag: None,
             hover_sidebar: None,
             left_seam: None,
             right_seam: None,
@@ -4470,6 +4497,7 @@ impl App {
             agents_this_workspace,
             workspaces_area: Rect::ZERO,
             agents_area: Rect::ZERO,
+            sidebar_bars: Vec::new(),
             sidebar_focus: None,
             workspace_cursor: 0,
             agent_cursor: 0,
@@ -4543,6 +4571,7 @@ impl App {
             resize_drag: None,
             hover_divider: None,
             sidebar_resize: None,
+            bar_drag: None,
             hover_sidebar: None,
             left_seam: None,
             right_seam: None,
@@ -19766,6 +19795,77 @@ fi
         assert!(
             app.workspaces_scroll > 0,
             "the active workspace was scrolled into view"
+        );
+    }
+
+    /// The WORKSPACES/AGENTS scrollbar is interactive: a press jumps the list to
+    /// the clicked position (instead of selecting the row under the bar) and the
+    /// drag that follows keeps the list glued to the pointer until release.
+    #[test]
+    fn sidebar_scrollbar_can_be_clicked_and_dragged() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        // The bar's geometry depends on how many docks share the sidebar, so this
+        // needs the default layout, not whatever the machine running the tests has
+        // in its real config. Without it the test passes or fails on run order.
+        let _env = crate::persist::test_env("scrollbar-drag");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        for _ in 0..9 {
+            app.new_workspace(); // 10 workspaces — more than fit in a short sidebar
+        }
+        app.active_ws = 0;
+        app.last_active_ws_shown = 0;
+
+        let mut term = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        let mut draw = |app: &mut App| {
+            term.draw(|f| crate::ui::render(f, app))
+                .map(|_| ())
+                .unwrap()
+        };
+        draw(&mut app);
+        let na = app.workspaces_area;
+        let bar = na.right() - 2;
+        let at = |app: &mut App, kind, column, row| {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+
+        // Press at the bottom of the track → jump to the end of the list.
+        at(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            bar,
+            na.bottom() - 1,
+        );
+        draw(&mut app);
+        let end = app.workspaces_scroll;
+        assert!(end > 0, "clicking the bar scrolled the list, got {end}");
+        assert_eq!(app.active_ws, 0, "the bar is not a workspace row");
+
+        // Drag back to the top of the track → the list follows, then release drops
+        // the grab so later motion over the sidebar scrolls nothing.
+        at(&mut app, MouseEventKind::Drag(MouseButton::Left), bar, na.y);
+        draw(&mut app);
+        assert_eq!(app.workspaces_scroll, 0, "the drag followed the pointer");
+        at(&mut app, MouseEventKind::Up(MouseButton::Left), bar, na.y);
+        assert!(app.bar_drag.is_none(), "release ends the scrollbar drag");
+        at(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            bar,
+            na.bottom() - 1,
+        );
+        draw(&mut app);
+        assert_eq!(
+            app.workspaces_scroll, 0,
+            "a drag that never grabbed the bar scrolls nothing"
         );
     }
 
