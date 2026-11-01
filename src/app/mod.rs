@@ -19837,6 +19837,11 @@ fi
             }))
         };
 
+        // Keyboard focus keeps the cursor (top row) in view on every draw; the bar
+        // must still scroll, so grabbing it hands input back to the pane.
+        app.sidebar_focus = Some(SidebarListFocus::Workspaces);
+        app.workspace_cursor = 0;
+
         // Press at the bottom of the track → jump to the end of the list.
         at(
             &mut app,
@@ -19848,6 +19853,10 @@ fi
         let end = app.workspaces_scroll;
         assert!(end > 0, "clicking the bar scrolled the list, got {end}");
         assert_eq!(app.active_ws, 0, "the bar is not a workspace row");
+        assert!(
+            app.sidebar_focus.is_none(),
+            "grabbing the bar ends keyboard focus"
+        );
 
         // Drag back to the top of the track → the list follows, then release drops
         // the grab so later motion over the sidebar scrolls nothing.

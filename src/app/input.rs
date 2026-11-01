@@ -3205,6 +3205,13 @@ impl App {
         // Rows span the full dock width (bar column included), so this has to come
         // before the row hit-tests below.
         if let Some(which) = self.bar_hit(c, r) {
+            // A keyboard-focused list scrolls its cursor back into view on every
+            // draw, which would undo the drag. The bar is a pointer action, so it
+            // returns input to the pane exactly as a row click does.
+            match which {
+                BarDrag::Files => self.files_focused = false,
+                BarDrag::Workspaces | BarDrag::Agents => self.sidebar_focus = None,
+            }
             self.bar_drag = Some(which);
             self.update_bar_drag(which, r);
             return;
