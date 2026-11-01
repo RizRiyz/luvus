@@ -2963,6 +2963,36 @@ mod tests {
         assert_eq!(app.file_tree.scroll, 0, "the drag followed the pointer");
         at(&mut app, MouseEventKind::Up(MouseButton::Left), bar.track.y);
         assert!(app.bar_drag.is_none(), "release ends the drag");
+
+        // An open filter prompt is still taking text, so the bar keeps FILES
+        // focused and carries the cursor along instead of letting it pull back.
+        let rows = app.file_tree.visible_rows().to_vec();
+        let mut filter =
+            crate::files::filter::FileFilter::start(root.clone(), app.app_tx.clone(), (0, 0));
+        filter.loading = false;
+        filter.rows = rows;
+        app.file_tree.filter = Some(filter);
+        app.files_focused = true;
+        app.file_tree.cursor = 0;
+        draw(&mut app);
+        let filtered = app
+            .sidebar_bars
+            .iter()
+            .find(|b| b.list == BarDrag::Files)
+            .copied()
+            .expect("the overflowing filter results drew a scrollbar");
+        at(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            filtered.track.bottom() - 1,
+        );
+        draw(&mut app);
+        assert_eq!(
+            app.file_tree.scroll,
+            filtered.total - filtered.cap,
+            "the bar scrolls the filter results"
+        );
+        assert!(app.files_focused, "an open filter keeps keyboard focus");
         let _ = std::fs::remove_dir_all(&root);
     }
 

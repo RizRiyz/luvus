@@ -3207,8 +3207,11 @@ impl App {
         if let Some(which) = self.bar_hit(c, r) {
             // A keyboard-focused list scrolls its cursor back into view on every
             // draw, which would undo the drag. The bar is a pointer action, so it
-            // returns input to the pane exactly as a row click does.
+            // returns input to the pane exactly as a row click does. An open FILES
+            // filter keeps the keyboard (its prompt is still taking text);
+            // `update_bar_drag` moves its cursor with the list instead.
             match which {
+                BarDrag::Files if self.file_tree.filter.is_some() => {}
                 BarDrag::Files => self.files_focused = false,
                 BarDrag::Workspaces | BarDrag::Agents => self.sidebar_focus = None,
             }
@@ -3443,7 +3446,12 @@ impl App {
         match which {
             BarDrag::Workspaces => self.workspaces_scroll = off,
             BarDrag::Agents => self.agents_scroll = off,
-            BarDrag::Files => self.file_tree.scroll = off,
+            BarDrag::Files => {
+                self.file_tree.scroll = off;
+                if self.file_tree.filter.is_some() {
+                    self.file_tree.cursor = off;
+                }
+            }
         }
     }
 
