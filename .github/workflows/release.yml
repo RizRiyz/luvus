@@ -29,9 +29,9 @@ jobs:
           # SDKs, so it is just `rustup target add` + `--target`. No Intel runner
           # needed, and Intel macs get a real binary instead of a source build.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
