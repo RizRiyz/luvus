@@ -11,6 +11,11 @@ use ratatui::crossterm::event::Event;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+mod input;
+#[cfg(unix)]
+pub(crate) use input::run_input_loop;
+
 /// Colors reported by the terminal that is displaying a luvus client.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TerminalColors {
@@ -171,8 +176,9 @@ fn split_responses_and_input(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
                 i += len;
                 continue;
             }
-            // A truncated recognized reply is terminal traffic, not a key.
-            responses.extend_from_slice(rest);
+            // Hand the prefix to the persistent input filter, so a reply split
+            // across the probe deadline is still recognized with its late tail.
+            input.extend_from_slice(rest);
             break;
         }
         input.push(data[i]);
@@ -462,6 +468,85 @@ fn xterm_modifiers(value: u16) -> KeyModifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn late_color_replies_do_not_become_pane_input() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        const CHILD: &str = "LUVUS_TEST_LATE_COLOR_REPLY";
+        if std::env::var_os(CHILD).is_some() {
+            ratatui::crossterm::terminal::enable_raw_mode().unwrap();
+            let probe = probe();
+            assert!(probe.colors.is_none());
+            print!("PROBE_DONE");
+            std::io::stdout().flush().unwrap();
+            let mut keys = Vec::new();
+            run_input_loop(probe.pending, |event| {
+                let done = matches!(
+                    event,
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Char('!'),
+                        ..
+                    })
+                );
+                keys.push(event);
+                !done
+            });
+            ratatui::crossterm::terminal::disable_raw_mode().unwrap();
+            assert_eq!(keys, vec![Event::Key(KeyCode::Char('!').into())]);
+            return;
+        }
+
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let mut command = portable_pty::CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "terminal::theme_probe::tests::late_color_replies_do_not_become_pane_input",
+            "--nocapture",
+        ]);
+        command.env(CHILD, "1");
+        command.env_remove("LUVUS_ENV");
+        command.env_remove("LUVUS_SOCKET_PATH");
+        command.env_remove("LUVUS_SESSION");
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut chunk = [0; 1024];
+            while let Ok(n) = reader.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                output.extend_from_slice(&chunk[..n]);
+                if output
+                    .windows(b"PROBE_DONE".len())
+                    .any(|s| s == b"PROBE_DONE")
+                {
+                    // Deliberately reply only after the 50ms probe has returned.
+                    writer.write_all(b"\x1b]10;rgb:3c3c/3838/3636\x1b\\\x1b]11;rgb:fbfb/f1f1/c7c7\x07\x1b]4;1;rgb:cccc/2424/1d1d\x1b\\!").unwrap();
+                    writer.flush().unwrap();
+                    output.clear();
+                }
+            }
+            let _ = tx.send(output);
+        });
+        let output = match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = child.kill();
+                panic!("isolated terminal test timed out: {error}");
+            }
+        };
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{}", String::from_utf8_lossy(&output));
+    }
 
     #[test]
     fn parses_st_and_bel_color_replies() {
