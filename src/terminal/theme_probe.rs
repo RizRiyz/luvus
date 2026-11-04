@@ -338,6 +338,13 @@ fn decode_pending_input(data: &[u8]) -> Vec<Event> {
     let mut events = Vec::new();
     let mut i = 0;
     while i < data.len() {
+        // A user Escape immediately before a reply is independent input, not
+        // an Alt modifier applied to the reply's OSC introducer.
+        if data[i] == 0x1b && is_color_response_start(&data[i + 1..]) {
+            events.push(Event::Key(KeyCode::Esc.into()));
+            i += 1;
+            continue;
+        }
         let (event, used) = decode_one(&data[i..]);
         if let Some(event) = event {
             events.push(Event::Key(event));

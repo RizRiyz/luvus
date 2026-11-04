@@ -75,6 +75,12 @@ impl ColorReplyFilter {
     /// Reconstruct only ASCII control traffic exposed by Crossterm 0.29.
     fn push_current(&mut self, event: Event, now: Instant) -> DecodedEvents {
         let Event::Key(key) = &event else {
+            // Resize comes from the host window, not the terminal byte stream.
+            // It neither interrupts a confirmed OSC nor renews its deadline.
+            if matches!(event, Event::Resize(..)) && matches!(self.state, ReplyState::Reply { .. })
+            {
+                return DecodedEvents::One(event);
+            }
             return self.passthrough(event);
         };
         if key.kind != KeyEventKind::Press {
@@ -116,6 +122,16 @@ impl ColorReplyFilter {
         }
         if self.pending.is_empty() && bytes != b"\x1b" && bytes != b"\x1b]" {
             return DecodedEvents::One(event);
+        }
+        if self.bytes == b"\x1b" && bytes == b"\x1b]" {
+            // Crossterm exposes an independent Esc followed by OSC as Esc,
+            // Alt+]. Release only the first key; keep framing the reply.
+            let first = self.replay();
+            let next = self.push_current(event, now);
+            let mut events = Vec::new();
+            first.for_each(|event| events.push(event));
+            next.for_each(|event| events.push(event));
+            return DecodedEvents::Many(events);
         }
         self.bytes.extend_from_slice(bytes);
         self.pending.push(event);
@@ -403,6 +419,75 @@ mod tests {
                 .for_each(|event| output.push(event));
             assert_eq!(output, vec![event]);
             assert!(filter.deadline.is_none());
+        }
+    }
+
+    #[test]
+    fn resize_preserves_confirmed_reply_and_original_deadline() {
+        for terminator in [b"\x07".as_slice(), b"\x1b\\"] {
+            let mut filter = ColorReplyFilter::default();
+            let mut output = Vec::new();
+            let now = Instant::now();
+            for key in super::super::decode_pending_input(b"\x1b]10;rgb:ffff/") {
+                filter.push(key, now).for_each(|event| output.push(event));
+            }
+            let deadline = filter.deadline;
+            let resize = Event::Resize(120, 40);
+            for step in 1..=3 {
+                filter
+                    .push(resize.clone(), now + PREFIX_TIMEOUT * step)
+                    .for_each(|event| output.push(event));
+                assert_eq!(
+                    filter.deadline, deadline,
+                    "resize must not reset or extend reply lifetime"
+                );
+            }
+            let tail = [b"aaaa/bbbb".as_slice(), terminator, b"z"].concat();
+            for key in super::super::decode_pending_input(&tail) {
+                filter
+                    .push(key, now + PREFIX_TIMEOUT * 4)
+                    .for_each(|event| output.push(event));
+            }
+            filter.expire().for_each(|event| output.push(event));
+            assert_eq!(
+                output,
+                vec![
+                    resize.clone(),
+                    resize.clone(),
+                    resize,
+                    Event::Key(KeyCode::Char('z').into())
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn probe_handoff_preserves_escape_before_fragmented_reply() {
+        for prefix in super::super::requested_reply_prefixes() {
+            let reply = format!("{prefix}rgb:aaaa/bbbb/cccc\x1b\\");
+            for split in prefix.len()..reply.len() {
+                let raw = [b"\x1b".as_slice(), &reply.as_bytes()[..split]].concat();
+                let (_, input) = super::super::split_responses_and_input(&raw);
+                let pending = super::super::decode_pending_input(&input);
+                assert_eq!(pending.first(), Some(&Event::Key(KeyCode::Esc.into())));
+                let mut filter = ColorReplyFilter::default();
+                let mut output = Vec::new();
+                let now = Instant::now();
+                for event in pending {
+                    filter.push(event, now).for_each(|event| output.push(event));
+                }
+                for event in super::super::decode_pending_input(&reply.as_bytes()[split..]) {
+                    filter
+                        .push(event, now + PREFIX_TIMEOUT * 3)
+                        .for_each(|event| output.push(event));
+                }
+                filter.expire().for_each(|event| output.push(event));
+                assert_eq!(
+                    output,
+                    vec![Event::Key(KeyCode::Esc.into())],
+                    "prefix {prefix:?}, split {split}"
+                );
+            }
         }
     }
 
