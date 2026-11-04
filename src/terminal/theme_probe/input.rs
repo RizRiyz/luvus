@@ -28,31 +28,52 @@ impl DecodedEvents {
     }
 }
 
-const PREFIXES: [&[u8]; 8] = [
-    b"\x1b]10;rgb:",
-    b"\x1b]11;rgb:",
-    b"\x1b]4;1;rgb:",
-    b"\x1b]4;2;rgb:",
-    b"\x1b]4;3;rgb:",
-    b"\x1b]4;4;rgb:",
-    b"\x1b]4;6;rgb:",
-    b"\x1b]4;8;rgb:",
-];
-// Only tentative Esc/Alt+] prefixes wait, and never add a startup sleep.
-const IDLE_TIMEOUT: Duration = Duration::from_millis(40);
-const MAX_REPLY_BYTES: usize = 64;
+// Tentative Esc/Alt+] prefixes must not delay normal keys for long.
+const PREFIX_TIMEOUT: Duration = Duration::from_millis(40);
+// Prefer normal input after an abandoned reply, as Herdr does. This is an idle
+// limit, not a startup sleep; only an unfinished reply arms the one-shot wait.
+const REPLY_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+// Even continuous unterminated traffic cannot hold the input route indefinitely.
+const REPLY_MAX_DURATION: Duration = Duration::from_secs(2);
+
+#[derive(Default)]
+enum ReplyState {
+    #[default]
+    Input,
+    Prefix,
+    // Once confirmed, no reply body or events are retained. Invalid and oversized
+    // replies are consumed exactly like valid replies, never replayed as keys.
+    Reply {
+        escape: bool,
+        until: Instant,
+    },
+}
 
 #[derive(Default)]
 struct ColorReplyFilter {
+    state: ReplyState,
     bytes: Vec<u8>,
     pending: Vec<Event>,
     deadline: Option<Instant>,
 }
 
 impl ColorReplyFilter {
-    /// Buffer only possible color traffic; replay mismatches without reordering input.
+    /// Expire stale state before processing an arriving event, even when poll
+    /// remains ready continuously. Only tentative prefixes may be replayed.
     fn push(&mut self, event: Event, now: Instant) -> DecodedEvents {
-        // Paste, mouse, focus, and resize events are never color reply bytes.
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            let expired = self.expire();
+            let current = self.push_current(event, now);
+            let mut events = Vec::new();
+            expired.for_each(|event| events.push(event));
+            current.for_each(|event| events.push(event));
+            return DecodedEvents::Many(events);
+        }
+        self.push_current(event, now)
+    }
+
+    /// Reconstruct only ASCII control traffic exposed by Crossterm 0.29.
+    fn push_current(&mut self, event: Event, now: Instant) -> DecodedEvents {
         let Event::Key(key) = &event else {
             return self.passthrough(event);
         };
@@ -73,64 +94,73 @@ impl ColorReplyFilter {
             }
             _ => &[],
         };
+        if let ReplyState::Reply { escape, until } = &mut self.state {
+            if bytes.is_empty() {
+                return self.passthrough(event);
+            }
+            for byte in bytes {
+                if *byte == 0x07 || (*escape && *byte == b'\\') {
+                    self.clear();
+                    return DecodedEvents::None;
+                }
+                if *escape || (*byte == 0x1b && bytes.len() == 2 && bytes[1] != b'\\') {
+                    // A new escape sequence interrupts the abandoned reply.
+                    // Reprocess its event, but never replay the old reply body.
+                    self.clear();
+                    return self.push_current(event, now);
+                }
+                *escape = *byte == 0x1b;
+            }
+            self.deadline = Some((now + REPLY_IDLE_TIMEOUT).min(*until));
+            return DecodedEvents::None;
+        }
         if self.pending.is_empty() && bytes != b"\x1b" && bytes != b"\x1b]" {
             return DecodedEvents::One(event);
         }
         self.bytes.extend_from_slice(bytes);
         self.pending.push(event);
-        if bytes.is_empty() || self.bytes.len() > MAX_REPLY_BYTES {
-            return self.replay();
-        }
-        if PREFIXES
-            .iter()
-            .any(|prefix| prefix.starts_with(&self.bytes))
-        {
-            self.deadline = Some(now + IDLE_TIMEOUT);
-            return DecodedEvents::None;
-        }
-        if let Some(prefix) = PREFIXES
-            .iter()
-            .find(|prefix| self.bytes.starts_with(prefix))
-        {
-            let body = &self.bytes[prefix.len()..];
-            let payload = body
-                .strip_suffix(b"\x07")
-                .or_else(|| body.strip_suffix(b"\x1b\\"));
-            if let Some(payload) = payload {
-                if std::str::from_utf8(payload).is_ok_and(|value| {
-                    let mut parts = value.split('/');
-                    (0..3).all(|_| parts.next().and_then(super::parse_component).is_some())
-                        && parts.next().is_none()
-                }) {
-                    self.clear();
-                    return DecodedEvents::None;
-                }
-            } else {
-                let body = body.strip_suffix(b"\x1b").unwrap_or(body);
-                if body.iter().all(|b| b.is_ascii_hexdigit() || *b == b'/') {
-                    self.deadline = Some(now + IDLE_TIMEOUT);
-                    return DecodedEvents::None;
-                }
+        if !bytes.is_empty() {
+            let prefixes = super::requested_reply_prefixes();
+            if prefixes
+                .iter()
+                .any(|prefix| prefix.as_bytes() == self.bytes)
+            {
+                self.bytes.clear();
+                self.pending.clear();
+                self.state = ReplyState::Reply {
+                    escape: false,
+                    until: now + REPLY_MAX_DURATION,
+                };
+                self.deadline = Some(now + REPLY_IDLE_TIMEOUT);
+                return DecodedEvents::None;
+            }
+            if prefixes
+                .iter()
+                .any(|prefix| prefix.as_bytes().starts_with(&self.bytes))
+            {
+                self.state = ReplyState::Prefix;
+                self.deadline = Some(now + PREFIX_TIMEOUT);
+                return DecodedEvents::None;
             }
         }
         self.replay()
     }
 
-    /// Resolve tentative key prefixes, but retain recognized replies across idle gaps.
+    /// Abandon confirmed control traffic, or release an unconfirmed key prefix.
     fn expire(&mut self) -> DecodedEvents {
-        if PREFIXES.iter().any(|prefix| self.bytes.starts_with(prefix)) {
-            // The tail may arrive arbitrarily late. Retain the bounded parser
-            // state, but remove the deadline so the input loop blocks, not polls.
-            // `push` still enforces MAX_REPLY_BYTES and replays invalid input.
-            self.deadline = None;
+        if matches!(self.state, ReplyState::Reply { .. }) {
+            self.clear();
             DecodedEvents::None
         } else {
             self.replay()
         }
     }
 
-    /// Flush any tentative keys before an event that cannot belong to an OSC reply.
+    /// Preserve order for tentative keys; confirmed reply bytes are not keys.
     fn passthrough(&mut self, event: Event) -> DecodedEvents {
+        if matches!(self.state, ReplyState::Reply { .. }) {
+            self.clear();
+        }
         if self.pending.is_empty() {
             return DecodedEvents::One(event);
         }
@@ -138,15 +168,17 @@ impl ColorReplyFilter {
         self.replay()
     }
 
-    /// Reset parsing state after consuming a complete color reply.
+    /// Reset all state after completion, interruption, or reply abandonment.
     fn clear(&mut self) {
+        self.state = ReplyState::Input;
         self.bytes.clear();
         self.pending.clear();
         self.deadline = None;
     }
 
-    /// Release buffered events unchanged and cancel any prefix deadline.
+    /// Release only tentative events unchanged and cancel their deadline.
     fn replay(&mut self) -> DecodedEvents {
+        self.state = ReplyState::Input;
         self.bytes.clear();
         self.deadline = None;
         DecodedEvents::Many(std::mem::take(&mut self.pending))
@@ -154,7 +186,7 @@ impl ColorReplyFilter {
 }
 
 /// One stdin owner for ordinary, federated, and monolithic Unix clients.
-/// Block indefinitely while idle; poll only to resolve a tentative OSC prefix.
+/// Block indefinitely while idle; use one-shot deadlines only for pending traffic.
 pub(crate) fn run_input_loop(pending: Vec<Event>, mut send: impl FnMut(Event) -> bool) {
     let mut filter = ColorReplyFilter::default();
     let mut pending = pending.into_iter();
@@ -215,7 +247,6 @@ mod tests {
         );
         for bytes in [
             b"\x1b]x".as_slice(),
-            b"\x1b]10;hello",
             b"\x1b]4;5;rgb:ff/ff/ff\x07",
             b"10;rgb:ff/ff/ff",
             b"\x1bx",
@@ -253,60 +284,144 @@ mod tests {
     }
 
     #[test]
-    fn recognized_reply_survives_expiry_between_fragments() {
+    fn reply_tail_survives_short_gaps_but_not_abandonment() {
         for terminator in [b"\x07".as_slice(), b"\x1b\\"] {
+            for gap in [PREFIX_TIMEOUT * 3, REPLY_IDLE_TIMEOUT + PREFIX_TIMEOUT] {
+                let mut filter = ColorReplyFilter::default();
+                let mut output = Vec::new();
+                let now = Instant::now();
+                for event in super::super::decode_pending_input(b"\x1b]10;rgb:ffff/") {
+                    filter.push(event, now).for_each(|event| output.push(event));
+                }
+                assert!(filter.bytes.is_empty());
+                assert!(filter.pending.is_empty());
+                assert_eq!(filter.deadline, Some(now + REPLY_IDLE_TIMEOUT));
+                let tail = [b"aaaa/bbbb".as_slice(), terminator, b"z"].concat();
+                for event in super::super::decode_pending_input(&tail) {
+                    filter
+                        .push(event, now + gap)
+                        .for_each(|event| output.push(event));
+                }
+                filter.expire().for_each(|event| output.push(event));
+                let expected = if gap < REPLY_IDLE_TIMEOUT {
+                    b"z".as_slice()
+                } else {
+                    tail.as_slice()
+                };
+                assert_eq!(output, super::super::decode_pending_input(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn abandoned_reply_does_not_capture_later_hex_input() {
+        for flush in [false, true] {
             let mut filter = ColorReplyFilter::default();
             let mut output = Vec::new();
             let now = Instant::now();
             for event in super::super::decode_pending_input(b"\x1b]10;rgb:ffff/") {
                 filter.push(event, now).for_each(|event| output.push(event));
             }
-            filter.expire().for_each(|event| output.push(event));
-            assert!(output.is_empty());
-            for _ in 0..3 {
+            if flush {
                 filter.expire().for_each(|event| output.push(event));
             }
-            assert!(filter.bytes.len() <= MAX_REPLY_BYTES);
-            assert!(filter.pending.len() <= MAX_REPLY_BYTES);
-            assert!(
-                filter.deadline.is_none(),
-                "no polling while waiting for the tail"
-            );
-            let tail = [b"aaaa/bbbb".as_slice(), terminator, b"z"].concat();
-            for event in super::super::decode_pending_input(&tail) {
+            for event in super::super::decode_pending_input(b"abc123") {
                 filter
-                    .push(event, now + IDLE_TIMEOUT * 3)
+                    .push(event, now + REPLY_IDLE_TIMEOUT * 2)
                     .for_each(|event| output.push(event));
             }
-            filter.expire().for_each(|event| output.push(event));
-            assert_eq!(output, super::super::decode_pending_input(b"z"));
-            assert!(filter.bytes.is_empty());
-            assert!(filter.pending.is_empty());
+            assert_eq!(output, super::super::decode_pending_input(b"abc123"));
+            assert!(filter.deadline.is_none());
         }
     }
 
     #[test]
-    fn expired_reply_replays_invalid_or_oversized_continuations() {
-        for tail in ["quit".to_string(), "a".repeat(MAX_REPLY_BYTES)] {
-            let prefix = b"\x1b]10;rgb:ffff/";
+    fn malformed_and_oversized_replies_never_replay_confirmed_headers() {
+        for body in ["not-a-color".to_string(), "a".repeat(4096)] {
+            let bytes = format!("\x1b]10;{body}\x07z");
+            assert_eq!(
+                filter_bytes(bytes.as_bytes()),
+                super::super::decode_pending_input(b"z")
+            );
+        }
+    }
+
+    #[test]
+    fn continuously_unterminated_reply_has_a_total_time_limit() {
+        let mut filter = ColorReplyFilter::default();
+        let mut output = Vec::new();
+        let now = Instant::now();
+        for event in super::super::decode_pending_input(b"\x1b]10;") {
+            filter.push(event, now).for_each(|event| output.push(event));
+        }
+        for i in 1..=3 {
+            filter
+                .push(
+                    Event::Key(KeyCode::Char('a').into()),
+                    now + PREFIX_TIMEOUT * (i * 10),
+                )
+                .for_each(|event| output.push(event));
+            assert!(filter.bytes.is_empty());
+            assert!(filter.pending.is_empty());
+        }
+        filter
+            .push(
+                Event::Key(KeyCode::Char('z').into()),
+                now + REPLY_MAX_DURATION,
+            )
+            .for_each(|event| output.push(event));
+        assert_eq!(output, super::super::decode_pending_input(b"z"));
+    }
+
+    #[test]
+    fn new_escape_sequence_interrupts_a_truncated_reply() {
+        for follow in [b"\x1b[A".as_slice(), b"\x1b]11;rgb:aa/bb/cc\x07z"] {
+            let bytes = [b"\x1b]10;rgb:ffff/".as_slice(), follow].concat();
+            let expected = if follow.starts_with(b"\x1b]") {
+                b"z".as_slice()
+            } else {
+                follow
+            };
+            assert_eq!(
+                filter_bytes(&bytes),
+                super::super::decode_pending_input(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn confirmed_reply_does_not_replay_on_paste_or_special_key() {
+        for event in [Event::Paste("text".into()), Event::Key(KeyCode::Up.into())] {
             let mut filter = ColorReplyFilter::default();
             let mut output = Vec::new();
             let now = Instant::now();
-            for event in super::super::decode_pending_input(prefix) {
-                filter.push(event, now).for_each(|event| output.push(event));
+            for key in super::super::decode_pending_input(b"\x1b]10;rgb:ffff/") {
+                filter.push(key, now).for_each(|event| output.push(event));
             }
-            filter.expire().for_each(|event| output.push(event));
-            for event in super::super::decode_pending_input(tail.as_bytes()) {
-                filter
-                    .push(event, now + IDLE_TIMEOUT * 3)
-                    .for_each(|event| output.push(event));
-                assert!(filter.bytes.len() <= MAX_REPLY_BYTES);
-                assert!(filter.pending.len() <= MAX_REPLY_BYTES);
-            }
-            let expected = [prefix, tail.as_bytes()].concat();
-            assert_eq!(output, super::super::decode_pending_input(&expected));
+            filter
+                .push(event.clone(), now)
+                .for_each(|event| output.push(event));
+            assert_eq!(output, vec![event]);
             assert!(filter.deadline.is_none());
         }
+    }
+
+    #[test]
+    fn query_inventory_is_shared_with_late_reply_filter() {
+        for prefix in super::super::requested_reply_prefixes() {
+            let reply = format!("{prefix}#123456\x07z");
+            assert_eq!(
+                filter_bytes(reply.as_bytes()),
+                super::super::decode_pending_input(b"z")
+            );
+            let (responses, input) = super::super::split_responses_and_input(reply.as_bytes());
+            assert_eq!(input, b"z");
+            assert_eq!(responses, reply.as_bytes()[..reply.len() - 1]);
+        }
+        assert_eq!(
+            super::super::requested_reply_prefixes().len(),
+            2 + super::super::PALETTE_QUERIES.len()
+        );
     }
 
     #[test]
@@ -373,16 +488,13 @@ mod tests {
     #[test]
     fn truncated_replies_are_bounded_and_alt_bracket_is_replayed() {
         assert!(filter_bytes(b"\x1b]10;rgb:ffff/").is_empty());
-        for bytes in [b"\x1b".as_slice(), b"\x1b]", b"\x1b]10;"] {
+        for bytes in [b"\x1b".as_slice(), b"\x1b]", b"\x1b]1"] {
             assert_eq!(
                 filter_bytes(bytes),
                 super::super::decode_pending_input(bytes)
             );
         }
-        let oversized = format!("\x1b]10;rgb:{}", "a".repeat(MAX_REPLY_BYTES));
-        assert_eq!(
-            filter_bytes(oversized.as_bytes()),
-            super::super::decode_pending_input(oversized.as_bytes())
-        );
+        let oversized = format!("\x1b]10;rgb:{}", "a".repeat(4096));
+        assert!(filter_bytes(oversized.as_bytes()).is_empty());
     }
 }

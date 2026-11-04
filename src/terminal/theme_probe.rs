@@ -32,8 +32,26 @@ pub struct ProbeResult {
 }
 
 /// Query only the palette entries used by `Theme::from_terminal`.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 const PALETTE_QUERIES: [u8; 6] = [1, 2, 3, 4, 6, 8];
+
+/// The single query inventory used for emission, raw splitting, and late replies.
+/// Prefixes end at the OSC parameter separator, independent of color encoding.
+#[cfg(any(unix, test))]
+fn requested_reply_prefixes() -> &'static [String] {
+    static PREFIXES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    PREFIXES.get_or_init(|| {
+        [10, 11]
+            .into_iter()
+            .map(|command| format!("\x1b]{command};"))
+            .chain(
+                PALETTE_QUERIES
+                    .into_iter()
+                    .map(|index| format!("\x1b]4;{index};")),
+            )
+            .collect()
+    })
+}
 /// Unsupported terminals must not add a visible pause to attachment.
 #[cfg(unix)]
 const PROBE_TIMEOUT_MS: u64 = 50;
@@ -58,11 +76,8 @@ pub fn probe() -> ProbeResult {
     }
 
     let mut stdout = std::io::stdout();
-    if write!(stdout, "\x1b]10;?\x07\x1b]11;?\x07").is_err() {
-        return ProbeResult::default();
-    }
-    for index in PALETTE_QUERIES {
-        if write!(stdout, "\x1b]4;{index};?\x07").is_err() {
+    for prefix in requested_reply_prefixes() {
+        if write!(stdout, "{prefix}?\x07").is_err() {
             return ProbeResult::default();
         }
     }
@@ -86,7 +101,7 @@ pub fn probe() -> ProbeResult {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 bytes.extend_from_slice(&chunk[..n]);
-                if complete_color_responses(&bytes) >= 2 + PALETTE_QUERIES.len() {
+                if complete_color_responses(&bytes) >= requested_reply_prefixes().len() {
                     break;
                 }
             }
@@ -144,7 +159,9 @@ pub fn probe() -> ProbeResult {
 
 #[cfg(any(unix, test))]
 fn is_color_response_start(data: &[u8]) -> bool {
-    data.starts_with(b"\x1b]10;") || data.starts_with(b"\x1b]11;") || data.starts_with(b"\x1b]4;")
+    requested_reply_prefixes()
+        .iter()
+        .any(|prefix| data.starts_with(prefix.as_bytes()))
 }
 
 #[cfg(any(unix, test))]
