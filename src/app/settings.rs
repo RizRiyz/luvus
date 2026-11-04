@@ -90,6 +90,7 @@ pub enum LayoutRow {
     DiffLineNumbers,
     DiffMarkers,
     DiffColors,
+    DiffProvider,
     DiffLiveRefresh,
     #[cfg(windows)]
     Shell,
@@ -189,6 +190,7 @@ impl App {
         v.push(LayoutRow::DiffLineNumbers);
         v.push(LayoutRow::DiffMarkers);
         v.push(LayoutRow::DiffColors);
+        v.push(LayoutRow::DiffProvider);
         v.push(LayoutRow::DiffLiveRefresh);
         v.push(LayoutRow::LeftVisible);
         v.push(LayoutRow::RightVisible);
@@ -1103,6 +1105,22 @@ impl App {
                 self.config.layout.diff_color_mode = self.config.layout.diff_color_mode.cycle();
                 self.persist_config();
             }
+            LayoutRow::DiffProvider => {
+                use crate::diff::model::DiffProvider;
+                self.config.layout.diff_provider = match self.config.layout.diff_provider {
+                    DiffProvider::Git => DiffProvider::Difftastic,
+                    DiffProvider::Difftastic => DiffProvider::Git,
+                };
+                self.persist_config();
+                let ids: Vec<_> = self
+                    .views
+                    .iter()
+                    .filter_map(|(id, view)| matches!(view, ViewKind::Diff(_)).then_some(*id))
+                    .collect();
+                for id in ids {
+                    self.schedule_diff_read(id);
+                }
+            }
             LayoutRow::DiffLiveRefresh => {
                 self.config.layout.diff_live_refresh = !self.config.layout.diff_live_refresh;
                 self.persist_config();
@@ -1756,6 +1774,32 @@ mod tests {
             crate::diff::DiffMarkerStyle::Bars,
             "reverse navigation follows the same ordering"
         );
+    }
+
+    #[test]
+    fn diff_provider_setting_cycles_and_persists() {
+        use crate::diff::model::DiffProvider;
+        let _env = crate::persist::test_env("diff-provider");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(120, 32, tx).unwrap();
+        app.open_settings();
+        app.settings.as_mut().unwrap().tab = SettingsTab::Layout;
+        let row = app
+            .layout_rows()
+            .iter()
+            .position(|r| matches!(r, LayoutRow::DiffProvider))
+            .unwrap();
+        assert_eq!(app.config.layout.diff_provider, DiffProvider::Git);
+        app.settings_adjust(row, 1);
+        app.flush_config_for_test(&rx);
+        assert_eq!(
+            crate::config::load().layout.diff_provider,
+            DiffProvider::Difftastic
+        );
+        app.settings_adjust(row, -1);
+        assert_eq!(app.config.layout.diff_provider, DiffProvider::Git);
+        let unknown: DiffProvider = serde_json::from_str("\"future-provider\"").unwrap();
+        assert_eq!(unknown, DiffProvider::Git);
     }
 
     #[test]

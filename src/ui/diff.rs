@@ -105,6 +105,16 @@ pub(super) fn draw_diff_view(
         Style::new().fg(t.overlay1),
     )];
     if let DiffLoad::Ready(diff) = &view.load {
+        if let Some(presentation) = &diff.presentation {
+            metadata.push(Span::styled(
+                if presentation.fallback.is_some() {
+                    "  GIT (fallback)"
+                } else {
+                    "  DIFFTASTIC"
+                },
+                Style::new().fg(t.overlay1),
+            ));
+        }
         metadata.push(Span::styled("  ", Style::new().fg(t.overlay1)));
         metadata.push(Span::styled(
             format!("+{}", diff.additions),
@@ -134,7 +144,13 @@ pub(super) fn draw_diff_view(
         DiffLoad::Ready(diff) if diff.binary => {
             center(f, body, "binary content is not rendered", t.overlay1)
         }
-        DiffLoad::Ready(diff) if diff.hunks.is_empty() => {
+        DiffLoad::Ready(diff)
+            if diff.hunks.is_empty()
+                || (diff
+                    .presentation
+                    .as_ref()
+                    .is_some_and(|p| p.fallback.is_none() && p.is_empty())) =>
+        {
             center(f, body, "no textual changes", t.overlay1)
         }
         DiffLoad::Ready(_) if effective == DiffLayoutPreference::Split => {
@@ -172,6 +188,11 @@ pub(super) fn draw_diff_view(
     };
     if truncated {
         hint.push_str("  TRUNCATED");
+    }
+    if let DiffLoad::Ready(diff) = &view.load {
+        if let Some(reason) = diff.presentation.as_ref().and_then(|p| p.fallback.as_ref()) {
+            hint = format!(" Git fallback: {reason} · {hint}");
+        }
     }
     if show_footer {
         f.buffer_mut().set_line(
@@ -1029,7 +1050,7 @@ fn search_fragment_spans<'a>(
         .as_ref()
         .filter(|search| !search.query.is_empty())
     else {
-        return vec![Span::styled(&text[range], base_style)];
+        return token_fragment_spans(view, row, text, range, base_style, t);
     };
     let hits = search
         .matches
@@ -1046,7 +1067,14 @@ fn search_fragment_spans<'a>(
         let start = search_match.byte_start.max(range.start);
         let end = search_match.byte_end.min(range.end);
         if cursor < start {
-            spans.push(Span::styled(&text[cursor..start], base_style));
+            spans.extend(token_fragment_spans(
+                view,
+                row,
+                text,
+                cursor..start,
+                base_style,
+                t,
+            ));
         }
         let highlight = if match_index == search.current {
             Style::new().fg(t.base).bg(t.accent).bold()
@@ -1057,12 +1085,66 @@ fn search_fragment_spans<'a>(
         cursor = end;
     }
     if cursor < range.end {
-        spans.push(Span::styled(&text[cursor..range.end], base_style));
+        spans.extend(token_fragment_spans(
+            view,
+            row,
+            text,
+            cursor..range.end,
+            base_style,
+            t,
+        ));
     }
     if spans.is_empty() {
-        spans.push(Span::styled(&text[range], base_style));
+        spans.extend(token_fragment_spans(view, row, text, range, base_style, t));
     }
     spans
+}
+
+fn token_fragment_spans<'a>(
+    view: &DiffView,
+    row: usize,
+    text: &'a str,
+    range: std::ops::Range<usize>,
+    base: Style,
+    t: &Theme,
+) -> Vec<Span<'a>> {
+    let tokens = match (&view.load, view.stack_rows.get(row).and_then(line_anchor)) {
+        (DiffLoad::Ready(diff), Some(anchor)) => diff
+            .presentation
+            .as_ref()
+            .and_then(|p| p.changes.get(&anchor)),
+        _ => None,
+    };
+    let Some(tokens) = tokens else {
+        return vec![Span::styled(&text[range], base)];
+    };
+    let mut result = Vec::new();
+    let mut cursor = range.start;
+    let color =
+        if view.stack_rows[row].old_line.is_some() && view.stack_rows[row].new_line.is_none() {
+            t.coral
+        } else {
+            t.mint
+        };
+    for token in tokens {
+        let start = token.start.max(range.start);
+        let end = token.end.min(range.end);
+        if start >= end {
+            continue;
+        }
+        if cursor < start {
+            result.push(Span::styled(&text[cursor..start], base));
+        }
+        result.push(Span::styled(
+            &text[start..end],
+            base.fg(color).bold().underlined(),
+        ));
+        cursor = end;
+    }
+    if cursor < range.end {
+        result.push(Span::styled(&text[cursor..range.end], base));
+    }
+    result
 }
 
 struct WrappedText<'a> {
@@ -1188,6 +1270,37 @@ mod tests {
             marker_style,
             color_mode: DiffColorMode::Theme,
         }
+    }
+
+    #[test]
+    fn structured_tokens_survive_wrapping_and_search_takes_precedence() {
+        let theme = Theme::quattro_rally();
+        let text = "a新z";
+        let mut view = test_view(vec![changed_line(DiffLineKind::Addition, text)]);
+        let presentation = crate::diff::provider::parse(br#"{"status":"changed","aligned_lines":[[0,0]],"chunks":[[{"rhs":{"line_number":0,"changes":[{"start":1,"end":4,"content":"\u65b0"}]}}]]}"#, "a旧z", text, 3).unwrap();
+        view.load = DiffLoad::Ready(std::sync::Arc::new(FileDiff {
+            key: view.key.clone(),
+            status: crate::diff::DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: Vec::new(),
+            presentation: Some(presentation),
+        }));
+        let base = Style::new().fg(theme.text);
+        let spans = search_fragment_spans(&view, 0, text, 1..4, base, &theme);
+        assert_eq!(spans[0].content, "新");
+        assert!(spans[0]
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::UNDERLINED));
+        view.search_begin();
+        view.search_push('新');
+        view.search_commit();
+        let spans = search_fragment_spans(&view, 0, text, 1..4, base, &theme);
+        assert_eq!(spans[0].style.bg, Some(theme.accent));
     }
 
     #[test]
@@ -1695,6 +1808,7 @@ mod tests {
         view.preference = DiffLayoutPreference::Split;
         view.wrap = false;
         view.load = DiffLoad::Ready(std::sync::Arc::new(FileDiff {
+            presentation: None,
             key: view.key.clone(),
             status: crate::diff::DiffFileStatus::Modified,
             additions: 1,

@@ -8,6 +8,7 @@ pub mod git;
 pub mod message;
 pub mod model;
 pub mod notes;
+pub mod provider;
 pub mod rows;
 
 pub use model::{
