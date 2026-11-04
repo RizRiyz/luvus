@@ -18,6 +18,7 @@ enum DecodedEvents {
 }
 
 impl DecodedEvents {
+    /// Emit decoded input in its original order without allocating on the single-event path.
     fn for_each(self, emit: impl FnMut(Event)) {
         match self {
             Self::None => {}
@@ -49,13 +50,14 @@ struct ColorReplyFilter {
 }
 
 impl ColorReplyFilter {
+    /// Buffer only possible color traffic; replay mismatches without reordering input.
     fn push(&mut self, event: Event, now: Instant) -> DecodedEvents {
         // Paste, mouse, focus, and resize events are never color reply bytes.
         let Event::Key(key) = &event else {
-            return DecodedEvents::One(event);
+            return self.passthrough(event);
         };
         if key.kind != KeyEventKind::Press {
-            return DecodedEvents::One(event);
+            return self.passthrough(event);
         }
         let mut encoded = [0; 2];
         let bytes: &[u8] = match (key.code, key.modifiers) {
@@ -114,22 +116,36 @@ impl ColorReplyFilter {
         self.replay()
     }
 
+    /// Resolve tentative key prefixes, but retain recognized replies across idle gaps.
     fn expire(&mut self) -> DecodedEvents {
         if PREFIXES.iter().any(|prefix| self.bytes.starts_with(prefix)) {
-            // A recognized but truncated reply must not become keyboard input.
-            self.clear();
+            // The tail may arrive arbitrarily late. Retain the bounded parser
+            // state, but remove the deadline so the input loop blocks, not polls.
+            // `push` still enforces MAX_REPLY_BYTES and replays invalid input.
+            self.deadline = None;
             DecodedEvents::None
         } else {
             self.replay()
         }
     }
 
+    /// Flush any tentative keys before an event that cannot belong to an OSC reply.
+    fn passthrough(&mut self, event: Event) -> DecodedEvents {
+        if self.pending.is_empty() {
+            return DecodedEvents::One(event);
+        }
+        self.pending.push(event);
+        self.replay()
+    }
+
+    /// Reset parsing state after consuming a complete color reply.
     fn clear(&mut self) {
         self.bytes.clear();
         self.pending.clear();
         self.deadline = None;
     }
 
+    /// Release buffered events unchanged and cancel any prefix deadline.
     fn replay(&mut self) -> DecodedEvents {
         self.bytes.clear();
         self.deadline = None;
@@ -232,6 +248,108 @@ mod tests {
                 }
                 filter.expire().for_each(|event| output.push(event));
                 assert!(output.is_empty(), "split {split}: {output:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn recognized_reply_survives_expiry_between_fragments() {
+        for terminator in [b"\x07".as_slice(), b"\x1b\\"] {
+            let mut filter = ColorReplyFilter::default();
+            let mut output = Vec::new();
+            let now = Instant::now();
+            for event in super::super::decode_pending_input(b"\x1b]10;rgb:ffff/") {
+                filter.push(event, now).for_each(|event| output.push(event));
+            }
+            filter.expire().for_each(|event| output.push(event));
+            assert!(output.is_empty());
+            for _ in 0..3 {
+                filter.expire().for_each(|event| output.push(event));
+            }
+            assert!(filter.bytes.len() <= MAX_REPLY_BYTES);
+            assert!(filter.pending.len() <= MAX_REPLY_BYTES);
+            assert!(
+                filter.deadline.is_none(),
+                "no polling while waiting for the tail"
+            );
+            let tail = [b"aaaa/bbbb".as_slice(), terminator, b"z"].concat();
+            for event in super::super::decode_pending_input(&tail) {
+                filter
+                    .push(event, now + IDLE_TIMEOUT * 3)
+                    .for_each(|event| output.push(event));
+            }
+            filter.expire().for_each(|event| output.push(event));
+            assert_eq!(output, super::super::decode_pending_input(b"z"));
+            assert!(filter.bytes.is_empty());
+            assert!(filter.pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn expired_reply_replays_invalid_or_oversized_continuations() {
+        for tail in ["quit".to_string(), "a".repeat(MAX_REPLY_BYTES)] {
+            let prefix = b"\x1b]10;rgb:ffff/";
+            let mut filter = ColorReplyFilter::default();
+            let mut output = Vec::new();
+            let now = Instant::now();
+            for event in super::super::decode_pending_input(prefix) {
+                filter.push(event, now).for_each(|event| output.push(event));
+            }
+            filter.expire().for_each(|event| output.push(event));
+            for event in super::super::decode_pending_input(tail.as_bytes()) {
+                filter
+                    .push(event, now + IDLE_TIMEOUT * 3)
+                    .for_each(|event| output.push(event));
+                assert!(filter.bytes.len() <= MAX_REPLY_BYTES);
+                assert!(filter.pending.len() <= MAX_REPLY_BYTES);
+            }
+            let expected = [prefix, tail.as_bytes()].concat();
+            assert_eq!(output, super::super::decode_pending_input(&expected));
+            assert!(filter.deadline.is_none());
+        }
+    }
+
+    #[test]
+    fn pending_escape_precedes_passthrough_events() {
+        use ratatui::crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
+
+        for event in [
+            Event::Paste("text".into()),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 3,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            }),
+            Event::Resize(80, 24),
+            Event::FocusGained,
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )),
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+        ] {
+            for prefix in [b"\x1b".as_slice(), b"\x1b]"] {
+                let mut filter = ColorReplyFilter::default();
+                let mut output = Vec::new();
+                let now = Instant::now();
+                let mut expected = super::super::decode_pending_input(prefix);
+                for key in expected.iter().cloned() {
+                    filter.push(key, now).for_each(|event| output.push(event));
+                }
+                filter
+                    .push(event.clone(), now)
+                    .for_each(|event| output.push(event));
+                expected.push(event.clone());
+                assert_eq!(output, expected);
+                assert!(filter.bytes.is_empty());
+                assert!(filter.pending.is_empty());
+                assert!(filter.deadline.is_none());
             }
         }
     }
