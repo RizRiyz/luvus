@@ -1022,6 +1022,13 @@ fn build_row_indices(
     }
 
     let mut header = 0;
+    // No-newline markers have no source number. Their occurrence order is
+    // stable across both projections, so preserve that order independently
+    // of source-numbered rows.
+    let mut no_newline = stack_rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| (line.kind == DiffLineKind::NoNewline).then_some(index));
     let split_indices = split_rows
         .iter()
         .map(|row| {
@@ -1033,6 +1040,15 @@ fn build_row_indices(
             {
                 let index = headers.get(header).copied();
                 header += 1;
+                return (index, index);
+            }
+            if row
+                .old
+                .as_ref()
+                .or(row.new.as_ref())
+                .is_some_and(|line| line.kind == DiffLineKind::NoNewline)
+            {
+                let index = no_newline.next();
                 return (index, index);
             }
             let old = row
@@ -1228,6 +1244,93 @@ mod tests {
         assert_eq!(view.stack_row_for_split(1), Some(1));
         assert_eq!(view.stack_row_for_split(2), Some(2));
         assert_eq!(view.split_row_for_stack(3), 1);
+    }
+
+    #[test]
+    fn no_newline_markers_keep_their_split_and_stack_positions() {
+        let mut view = DiffView::new(
+            PathBuf::from("/repo"),
+            test_key(),
+            DiffLayoutPreference::Split,
+            3,
+            false,
+            false,
+        );
+        view.stack_rows = vec![
+            DiffLine {
+                kind: DiffLineKind::Header,
+                old_line: None,
+                new_line: None,
+                text: "@@ -1 +1 @@".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Deletion,
+                old_line: Some(1),
+                new_line: None,
+                text: "old".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::NoNewline,
+                old_line: None,
+                new_line: None,
+                text: "\\ No newline at end of file".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Header,
+                old_line: None,
+                new_line: None,
+                text: "@@ -8 +8 @@".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::Addition,
+                old_line: None,
+                new_line: Some(8),
+                text: "new".into(),
+            },
+            DiffLine {
+                kind: DiffLineKind::NoNewline,
+                old_line: None,
+                new_line: None,
+                text: "\\ No newline at end of file".into(),
+            },
+        ];
+        view.split_rows = vec![
+            crate::diff::rows::SplitRow {
+                old: Some(view.stack_rows[0].clone()),
+                new: Some(view.stack_rows[0].clone()),
+            },
+            crate::diff::rows::SplitRow {
+                old: Some(view.stack_rows[1].clone()),
+                new: None,
+            },
+            crate::diff::rows::SplitRow {
+                old: Some(view.stack_rows[2].clone()),
+                new: None,
+            },
+            crate::diff::rows::SplitRow {
+                old: Some(view.stack_rows[3].clone()),
+                new: Some(view.stack_rows[3].clone()),
+            },
+            crate::diff::rows::SplitRow {
+                old: None,
+                new: Some(view.stack_rows[4].clone()),
+            },
+            crate::diff::rows::SplitRow {
+                old: None,
+                new: Some(view.stack_rows[5].clone()),
+            },
+        ];
+        view.rebuild_row_indices();
+
+        assert_eq!(view.split_indices[2], (Some(2), Some(2)));
+        assert_eq!(view.split_indices[5], (Some(5), Some(5)));
+        assert_eq!(view.split_row_for_stack(2), 2);
+        assert_eq!(view.split_row_for_stack(5), 5);
+        for side in [DiffSide::Old, DiffSide::New] {
+            view.selected_side = side;
+            assert_eq!(view.stack_row_for_split(2), Some(2));
+            assert_eq!(view.stack_row_for_split(5), Some(5));
+        }
     }
 
     #[test]

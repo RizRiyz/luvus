@@ -1996,18 +1996,15 @@ impl App {
                     view.scroll = view.selected.saturating_sub(viewport.saturating_sub(1));
                 }
                 // Source-row counts underestimate height when rows wrap or notes
-                // occupy screen space. Use the last frame's hit geometry before
-                // the selection leaves the viewport; anchor the newly selected
-                // source row at the top if its predecessor was not visible.
+                // occupy screen space. The previous frame records every rendered
+                // stack row, including headers and no-newline markers. When the
+                // newly selected row was not among them, anchor it at the top.
                 if view.selected != old_selected
                     && !self
                         .diff_source_rects
                         .iter()
                         .any(|(pane, row, _, _)| *pane == id && *row == view.selected)
-                    && view
-                        .stack_rows
-                        .get(view.selected)
-                        .is_some_and(|row| row.kind != crate::diff::DiffLineKind::Header)
+                    && view.stack_rows.get(view.selected).is_some()
                 {
                     view.scroll = view.selected;
                 }
@@ -2902,7 +2899,9 @@ mod tests {
         let mut new_hits: Vec<_> = app
             .diff_source_rects
             .iter()
-            .filter(|(pane, _, side, _)| *pane == id && *side == crate::diff::DiffSide::New)
+            .filter(|(pane, _, side, rect)| {
+                *pane == id && *side == crate::diff::DiffSide::New && rect.width > 0
+            })
             .copied()
             .collect();
         new_hits.sort_by_key(|(_, row, _, _)| *row);
@@ -3176,6 +3175,244 @@ mod tests {
                 "wheel must reach final wrapped row"
             );
         }
+    }
+
+    #[test]
+    fn marker_and_header_selection_stays_visible_without_blank_overscroll() {
+        let _env = crate::persist::test_env("diff-marker-follow");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 24, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let marker = |text: &str| DiffLine {
+            kind: DiffLineKind::NoNewline,
+            old_line: None,
+            new_line: None,
+            text: text.into(),
+        };
+        let diff = Arc::new(FileDiff {
+            key,
+            status: DiffFileStatus::Modified,
+            additions: 2,
+            deletions: 1,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: vec![
+                DiffHunk {
+                    id: "h1".into(),
+                    old_start: 1,
+                    new_start: 1,
+                    header: "@@ -1 +1 @@".into(),
+                    lines: vec![
+                        DiffLine {
+                            kind: DiffLineKind::Deletion,
+                            old_line: Some(1),
+                            new_line: None,
+                            text: format!("old {}", "wide content ".repeat(24)).into(),
+                        },
+                        marker("\\ No newline at end of file"),
+                    ],
+                },
+                DiffHunk {
+                    id: "pad".into(),
+                    old_start: 2,
+                    new_start: 2,
+                    header: "@@ -2,20 +2,20 @@".into(),
+                    lines: (2..22)
+                        .map(|line| DiffLine {
+                            kind: DiffLineKind::Context,
+                            old_line: Some(line),
+                            new_line: Some(line),
+                            text: format!("context {line}").into(),
+                        })
+                        .collect(),
+                },
+                DiffHunk {
+                    id: "h2".into(),
+                    old_start: 8,
+                    new_start: 8,
+                    header: "@@ -8 +8 @@".into(),
+                    lines: vec![
+                        DiffLine {
+                            kind: DiffLineKind::Addition,
+                            old_line: None,
+                            new_line: Some(8),
+                            text: "short addition".into(),
+                        },
+                        marker("\\ No newline at end of file"),
+                    ],
+                },
+            ],
+        });
+        let loaded = crate::diff::LoadedDiff::prepare(diff, Vec::new());
+        let token = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.request_token,
+            _ => unreachable!(),
+        };
+        app.apply_diff_loaded(id, token, Ok(loaded));
+        if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+            view.preference = crate::diff::DiffLayoutPreference::Split;
+            view.wrap = true;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let view = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view,
+            _ => unreachable!(),
+        };
+        assert_eq!(view.stack_rows[view.selected].kind, DiffLineKind::NoNewline);
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == view.selected),
+            "selected no-newline marker is off screen (scroll={})",
+            view.scroll
+        );
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == view.selected),
+            "selected no-newline marker is off screen (scroll={})",
+            view.scroll
+        );
+
+        // A wrapped row can consume the remaining body before the next header.
+        if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+            view.scroll = 0;
+            view.selected = 2;
+        }
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let view = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view,
+            _ => unreachable!(),
+        };
+        assert_eq!(view.stack_rows[view.selected].kind, DiffLineKind::Header);
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == view.selected),
+            "selected hunk header is off screen (scroll={})",
+            view.scroll
+        );
+
+        // The widened wheel bound must stop on the final marker instead of
+        // leaving an all-blank viewport once no further row exists.
+        let rect = app
+            .pane_content_rects
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .unwrap()
+            .1;
+        for _ in 0..20 {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: rect.x + 1,
+                row: rect.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let view = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view,
+            _ => unreachable!(),
+        };
+        let last = view.stack_rows.len() - 1;
+        assert_eq!(view.scroll, last);
+        assert_eq!(view.selected, last);
+        assert_eq!(view.stack_rows[last].kind, DiffLineKind::NoNewline);
+        let before = view.scroll;
+        for _ in 0..3 {
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: rect.x + 1,
+                row: rect.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        let view = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            view.scroll, before,
+            "wheel must not advance past the final row"
+        );
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == last),
+            "final no-newline marker is not rendered"
+        );
+
+        // Several keys before one draw use only the last geometry. A tall
+        // wrapped source row must not hide the marker reached after it.
+        if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+            view.scroll = 0;
+            view.selected = 0;
+        }
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        for _ in 0..2 {
+            app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let view = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view,
+            _ => unreachable!(),
+        };
+        assert_eq!(view.selected, 2);
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == 2),
+            "batched navigation must still reveal the selected marker"
+        );
+
+        // A passive projection must not replace the interactive geometry used
+        // by the next key. Render it at a size that hides the active selection.
+        let active_rects = app.diff_source_rects.clone();
+        let mut passive = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 40, 8));
+        let passive_area = passive.area;
+        crate::ui::render_projection(
+            &mut crate::ui::RenderTarget::new(&mut passive, passive_area),
+            &mut app,
+        );
+        assert_eq!(app.diff_source_rects, active_rects);
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let view = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view,
+            _ => unreachable!(),
+        };
+        assert_eq!(view.selected, 1);
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == 1),
+            "passive geometry must not move the active selection off screen"
+        );
     }
 
     #[test]

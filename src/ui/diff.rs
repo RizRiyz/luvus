@@ -345,14 +345,7 @@ fn draw_stack(
                 f.buffer_mut()
                     .set_line(area.x, y, &Line::from(spans), area.width);
                 if hits.interactive {
-                    if let Some((side, _)) = line_anchor(line) {
-                        hits.source.push((
-                            hits.pane,
-                            index,
-                            side,
-                            Rect::new(area.x, y, area.width, 1),
-                        ));
-                    }
+                    record_stack_source_hit(hits, index, line, Rect::new(area.x, y, area.width, 1));
                 }
                 y = y.saturating_add(1);
                 fragment_byte_start = fragment_byte_end;
@@ -377,10 +370,7 @@ fn draw_stack(
             f.buffer_mut()
                 .set_line(area.x, y, &Line::from(spans), area.width);
             if hits.interactive {
-                if let Some((side, _)) = line_anchor(line) {
-                    hits.source
-                        .push((hits.pane, index, side, Rect::new(area.x, y, area.width, 1)));
-                }
+                record_stack_source_hit(hits, index, line, Rect::new(area.x, y, area.width, 1));
             }
             y = y.saturating_add(1);
         }
@@ -497,18 +487,22 @@ fn draw_split(
                 t,
             );
             if hits.interactive {
-                if let Some(number) = row.old.as_ref().and_then(|line| line.old_line) {
-                    if let Some(index) = view.stack_indices.get(&(DiffSide::Old, number)) {
-                        hits.source
-                            .push((hits.pane, *index, DiffSide::Old, old_rect));
-                    }
-                }
-                if let Some(number) = row.new.as_ref().and_then(|line| line.new_line) {
-                    if let Some(index) = view.stack_indices.get(&(DiffSide::New, number)) {
-                        hits.source
-                            .push((hits.pane, *index, DiffSide::New, new_rect));
-                    }
-                }
+                record_split_source_hit(
+                    hits,
+                    view,
+                    row.old.as_ref(),
+                    DiffSide::Old,
+                    old_stack_index,
+                    old_rect,
+                );
+                record_split_source_hit(
+                    hits,
+                    view,
+                    row.new.as_ref(),
+                    DiffSide::New,
+                    new_stack_index,
+                    new_rect,
+                );
             }
             y = y.saturating_add(1);
             fragment_index += 1;
@@ -550,6 +544,55 @@ fn draw_split(
         if selected_here && view.note_draft.is_some() {
             y = draw_note_composer(f, area, y, view, t);
         }
+    }
+}
+
+fn record_stack_source_hit(
+    hits: &mut DiffInteractionHits<'_>,
+    index: usize,
+    line: &DiffLine,
+    rect: Rect,
+) {
+    if let Some((side, _)) = line_anchor(line) {
+        hits.source.push((hits.pane, index, side, rect));
+        return;
+    }
+    if matches!(line.kind, DiffLineKind::Header | DiffLineKind::NoNewline) {
+        // Structural rows have no source side. Keep them out of the source-side
+        // hit stream by using a zero-width rect at the rendered row.
+        hits.source.push((
+            hits.pane,
+            index,
+            DiffSide::New,
+            Rect::new(rect.x, rect.y, 0, rect.height),
+        ));
+    }
+}
+
+fn record_split_source_hit(
+    hits: &mut DiffInteractionHits<'_>,
+    view: &DiffView,
+    line: Option<&DiffLine>,
+    side: DiffSide,
+    mapped_index: Option<usize>,
+    rect: Rect,
+) {
+    let Some(line) = line else { return };
+    let structural = matches!(line.kind, DiffLineKind::Header | DiffLineKind::NoNewline);
+    // A source-less row is drawn on both split columns, but it has one stack
+    // identity. Record that identity once on the old column so it cannot hide
+    // a real source hit occupying the same screen row on the new column.
+    if structural && side != DiffSide::Old {
+        return;
+    }
+    let index = line
+        .old_line
+        .filter(|_| side == DiffSide::Old)
+        .or_else(|| line.new_line.filter(|_| side == DiffSide::New))
+        .and_then(|number| view.stack_indices.get(&(side, number)).copied())
+        .or(structural.then_some(mapped_index).flatten());
+    if let Some(index) = index {
+        hits.source.push((hits.pane, index, side, rect));
     }
 }
 
