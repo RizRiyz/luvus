@@ -3007,7 +3007,11 @@ impl App {
                                 let split = if scroll < 0 {
                                     current.saturating_sub(3)
                                 } else {
-                                    current.saturating_add(3).min(rows.saturating_sub(viewport))
+                                    current.saturating_add(3).min(
+                                        rows.saturating_sub(viewport)
+                                            .max(current.saturating_add(1))
+                                            .min(rows.saturating_sub(1)),
+                                    )
                                 };
                                 if let Some(stack) = v.stack_row_for_split(split) {
                                     v.scroll = stack;
@@ -3017,10 +3021,7 @@ impl App {
                                 v.scroll = v.scroll.saturating_sub(3);
                                 v.selected = v.scroll;
                             } else {
-                                v.scroll = v
-                                    .scroll
-                                    .saturating_add(3)
-                                    .min(rows.saturating_sub(viewport));
+                                v.scroll = v.scroll.saturating_add(3).min(rows.saturating_sub(1));
                                 v.selected = v.scroll;
                             }
                         }

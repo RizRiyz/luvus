@@ -402,15 +402,8 @@ fn draw_split(
 ) {
     let notes = DiffNotes { view, state };
     let selected_anchor = view.stack_rows.get(view.selected).and_then(line_anchor);
-    let scroll_anchor = view.stack_rows.get(view.scroll).and_then(line_anchor);
-    let start = scroll_anchor
-        .and_then(|anchor| {
-            view.split_rows.iter().position(|row| {
-                row.old.as_ref().and_then(line_anchor) == Some(anchor)
-                    || row.new.as_ref().and_then(line_anchor) == Some(anchor)
-            })
-        })
-        .unwrap_or(0);
+    // Includes hunk headers, which deliberately have no source-line anchor.
+    let start = view.split_row_for_stack(view.scroll);
     let half = area.width.saturating_sub(1) / 2;
     let mut y = area.y;
     for (split_index, row) in view.split_rows.iter().enumerate().skip(start) {

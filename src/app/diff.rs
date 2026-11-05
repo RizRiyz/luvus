@@ -1995,6 +1995,22 @@ impl App {
                 } else if view.selected >= view.scroll.saturating_add(viewport) {
                     view.scroll = view.selected.saturating_sub(viewport.saturating_sub(1));
                 }
+                // Source-row counts underestimate height when rows wrap or notes
+                // occupy screen space. Use the last frame's hit geometry before
+                // the selection leaves the viewport; anchor the newly selected
+                // source row at the top if its predecessor was not visible.
+                if view.selected != old_selected
+                    && !self
+                        .diff_source_rects
+                        .iter()
+                        .any(|(pane, row, _, _)| *pane == id && *row == view.selected)
+                    && view
+                        .stack_rows
+                        .get(view.selected)
+                        .is_some_and(|row| row.kind != crate::diff::DiffLineKind::Header)
+                {
+                    view.scroll = view.selected;
+                }
                 // Recompute effective split after s/w may have changed
                 // preference or wrap.
                 let now_split = view.effective_split(pane_width);
@@ -3002,6 +3018,164 @@ mod tests {
             app.views.get(&id),
             Some(ViewKind::Diff(view)) if view.horizontal == 0
         ));
+    }
+
+    #[test]
+    fn long_git_diff_keeps_keyboard_selection_visible_after_wheel_scroll() {
+        let _env = crate::persist::test_env("diff-long-follow");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 24, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let hunks = (0..30)
+            .map(|i| DiffHunk {
+                id: format!("h{i}"),
+                old_start: i + 1,
+                new_start: i + 1,
+                header: format!("@@ -{} +{} @@", i + 1, i + 1),
+                lines: vec![
+                    DiffLine {
+                        kind: DiffLineKind::Deletion,
+                        old_line: Some(i + 1),
+                        new_line: None,
+                        text: format!("old {i} {}", "wide content ".repeat(12)).into(),
+                    },
+                    DiffLine {
+                        kind: DiffLineKind::Addition,
+                        old_line: None,
+                        new_line: Some(i + 1),
+                        text: format!("new {i} {}", "wide content ".repeat(12)).into(),
+                    },
+                ],
+            })
+            .collect();
+        let diff = Arc::new(FileDiff {
+            key,
+            status: DiffFileStatus::Modified,
+            additions: 30,
+            deletions: 30,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks,
+        });
+        let loaded = crate::diff::LoadedDiff::prepare(diff, Vec::new());
+        let token = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.request_token,
+            _ => unreachable!(),
+        };
+        app.apply_diff_loaded(id, token, Ok(loaded));
+        for (preference, width) in [
+            (crate::diff::DiffLayoutPreference::Split, 160),
+            (crate::diff::DiffLayoutPreference::Stack, 160),
+            (crate::diff::DiffLayoutPreference::Auto, 80),
+        ] {
+            if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+                view.preference = preference;
+                view.wrap = true;
+                view.scroll = 0;
+                view.selected = 0;
+            }
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal
+                .draw(|frame| crate::ui::render(frame, &mut app))
+                .unwrap();
+            // A source-less hunk header must still resolve to its split row,
+            // rather than making the renderer restart from the first hunk.
+            if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+                view.scroll = 60;
+                view.selected = 61;
+            }
+            terminal
+                .draw(|frame| crate::ui::render(frame, &mut app))
+                .unwrap();
+            assert!(
+                app.diff_source_rects
+                    .iter()
+                    .any(|(pane, row, _, _)| *pane == id && *row == 61),
+                "scrolling to a later hunk header must not jump to the beginning"
+            );
+            if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+                view.scroll = 0;
+                view.selected = 0;
+            }
+            terminal
+                .draw(|frame| crate::ui::render(frame, &mut app))
+                .unwrap();
+            let rect = app
+                .pane_content_rects
+                .iter()
+                .find(|(pane, _)| *pane == id)
+                .unwrap()
+                .1;
+            app.handle_event(AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: rect.x + 1,
+                row: rect.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }));
+            for _ in 0..90 {
+                app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+                terminal
+                    .draw(|frame| crate::ui::render(frame, &mut app))
+                    .unwrap();
+                let view = match app.views.get(&id) {
+                    Some(ViewKind::Diff(view)) => view,
+                    _ => unreachable!(),
+                };
+                if view.stack_rows[view.selected].kind == DiffLineKind::Header {
+                    continue;
+                }
+                assert!(
+                    app.diff_source_rects
+                        .iter()
+                        .any(|(pane, row, _, _)| *pane == id && *row == view.selected),
+                    "selected row {} is off screen (scroll={})",
+                    view.selected,
+                    view.scroll
+                );
+            }
+            for _ in 0..60 {
+                app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+                terminal
+                    .draw(|frame| crate::ui::render(frame, &mut app))
+                    .unwrap();
+                let view = match app.views.get(&id) {
+                    Some(ViewKind::Diff(view)) => view,
+                    _ => unreachable!(),
+                };
+                if view.stack_rows[view.selected].kind != DiffLineKind::Header {
+                    assert!(
+                        app.diff_source_rects
+                            .iter()
+                            .any(|(pane, row, _, _)| *pane == id && *row == view.selected),
+                        "upward navigation must keep source visible"
+                    );
+                }
+            }
+            for _ in 0..100 {
+                app.handle_event(AppEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: rect.x + 1,
+                    row: rect.y + 1,
+                    modifiers: KeyModifiers::NONE,
+                }));
+                terminal
+                    .draw(|frame| crate::ui::render(frame, &mut app))
+                    .unwrap();
+            }
+            let view = match app.views.get(&id) {
+                Some(ViewKind::Diff(view)) => view,
+                _ => unreachable!(),
+            };
+            assert!(
+                app.diff_source_rects
+                    .iter()
+                    .any(|(pane, row, _, _)| *pane == id && *row == view.stack_rows.len() - 1),
+                "wheel must reach final wrapped row"
+            );
+        }
     }
 
     #[test]
