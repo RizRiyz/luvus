@@ -1327,6 +1327,8 @@ impl App {
                 self.apply_diff_note_removed(id, result)
             }
             AppEvent::DiffProgressSaved { result } => {
+                self.diff.progress_save_inflight = false;
+                self.schedule_diff_progress_save();
                 if let Err(error) = result {
                     log_worker_failed(crate::logging::Worker::Diff, "progress_save");
                     self.show_toast(format!("review progress not saved: {error}"));

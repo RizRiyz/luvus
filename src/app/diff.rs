@@ -906,7 +906,7 @@ impl App {
         })
     }
 
-    pub fn mark_active_diff_viewed(&mut self) {
+    pub fn toggle_active_diff_viewed(&mut self) {
         let focus = self.layout().focus;
         let Some(ViewKind::Diff(view)) = self.views.get(&focus) else {
             return;
@@ -918,19 +918,20 @@ impl App {
             .as_mut()
             .and_then(|snapshot| snapshot.files.iter_mut().find(|file| file.key == key))
         {
-            file.viewed_fingerprint = Some(file.fingerprint.clone());
+            let viewed = !file.viewed();
             let key = file.key.clone();
-            let fingerprint = file.fingerprint.clone();
-            let repo_id = key.repo_id.clone();
-            let review_id = crate::diff::notes::review_id(&key);
-            if let Some(existing) = self
+            let fingerprint = viewed.then(|| file.fingerprint.clone());
+            file.viewed_fingerprint = fingerprint.clone();
+            if !viewed {
+                self.diff.progress.viewed.retain(|entry| entry.key != key);
+            } else if let Some(existing) = self
                 .diff
                 .progress
                 .viewed
                 .iter_mut()
                 .find(|entry| entry.key == key)
             {
-                existing.fingerprint = fingerprint.clone();
+                existing.fingerprint = file.fingerprint.clone();
                 existing.viewed_at_ms = crate::diff::notes::now_ms();
             } else {
                 self.diff
@@ -938,19 +939,45 @@ impl App {
                     .viewed
                     .push(crate::diff::notes::ViewedChange {
                         key: key.clone(),
-                        fingerprint: fingerprint.clone(),
+                        fingerprint: file.fingerprint.clone(),
                         viewed_at_ms: crate::diff::notes::now_ms(),
                     });
             }
-            let tx = self.app_tx.clone();
-            std::thread::spawn(move || {
-                let result =
-                    crate::diff::notes::mark_viewed(&repo_id, &review_id, &key, &fingerprint);
-                let _ = tx.send(AppEvent::DiffProgressSaved { result });
-            });
+            self.diff
+                .pending_progress
+                .retain(|(pending, _)| pending != &key);
+            self.diff.pending_progress.push_back((key, fingerprint));
+            self.schedule_diff_progress_save();
             self.diff.rebuild_rows();
-            self.show_toast("marked viewed".to_string());
+            self.show_toast(
+                if viewed {
+                    "marked viewed"
+                } else {
+                    "marked unviewed"
+                }
+                .to_string(),
+            );
         }
+    }
+
+    pub(crate) fn schedule_diff_progress_save(&mut self) {
+        if self.diff.progress_save_inflight {
+            return;
+        }
+        let Some((key, fingerprint)) = self.diff.pending_progress.pop_front() else {
+            return;
+        };
+        self.diff.progress_save_inflight = true;
+        let tx = self.app_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::diff::notes::set_viewed(
+                &key.repo_id,
+                &crate::diff::notes::review_id(&key),
+                &key,
+                fingerprint.as_deref(),
+            );
+            let _ = tx.send(AppEvent::DiffProgressSaved { result });
+        });
     }
 
     fn schedule_diff_notes_load(&mut self, repo_id: String, review_id: String) {
@@ -2010,7 +2037,7 @@ impl App {
             Deferred::None => {}
             Deferred::Save(body) => self.commit_diff_note(id, body),
             Deferred::Refresh => self.schedule_diff_read(id),
-            Deferred::Viewed => self.mark_active_diff_viewed(),
+            Deferred::Viewed => self.toggle_active_diff_viewed(),
             Deferred::Filter => {
                 self.diff.filter = self.diff.filter.cycle();
                 self.diff.rebuild_rows();
@@ -2119,6 +2146,81 @@ mod tests {
         DiffFile, DiffFileStatus, DiffLayer, DiffLine, DiffLineKind, DiffLoad, DiffSnapshot,
         RepoPath,
     };
+
+    #[test]
+    fn viewed_toggle_updates_filters_and_persists_latest_rapid_intent() {
+        let _env = crate::persist::test_env("diff-viewed-toggle");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        app.diff.filter = crate::diff::model::DiffFilter::Unviewed;
+        let press = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert!(app.handle_diff_key(id, press));
+        assert!(app.diff.snapshot.as_ref().unwrap().files[0].viewed());
+        assert!(app
+            .diff
+            .progress
+            .viewed
+            .iter()
+            .any(|entry| entry.key == key));
+        assert!(!app
+            .diff
+            .rows
+            .iter()
+            .any(|row| matches!(row, crate::diff::DiffListRow::File(_))));
+        let repeat = KeyEvent {
+            kind: ratatui::crossterm::event::KeyEventKind::Repeat,
+            ..press
+        };
+        app.handle_diff_key(id, repeat);
+        assert!(app.diff.snapshot.as_ref().unwrap().files[0].viewed());
+        // Toggle repeatedly before consuming completion events. Saves must not
+        // race and restore an older viewed fingerprint on disk.
+        for _ in 0..3 {
+            app.handle_diff_key(id, press);
+        }
+        assert!(!app.diff.snapshot.as_ref().unwrap().files[0].viewed());
+        assert!(app.diff.progress.viewed.is_empty());
+        assert!(app
+            .diff
+            .rows
+            .iter()
+            .any(|row| matches!(row, crate::diff::DiffListRow::File(_))));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.diff.progress_save_inflight {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap();
+            if let AppEvent::DiffProgressSaved { .. } = event {
+                app.handle_event(event);
+            }
+        }
+        assert!(crate::diff::notes::load_progress(
+            &key.repo_id,
+            &crate::diff::notes::review_id(&key)
+        )
+        .unwrap()
+        .viewed
+        .is_empty());
+        // A previously viewed version that has changed is marked current, not
+        // cleared, on the next press.
+        app.diff.snapshot.as_mut().unwrap().files[0].viewed_fingerprint =
+            Some("older-version".into());
+        app.handle_diff_key(id, press);
+        assert!(app.diff.snapshot.as_ref().unwrap().files[0].viewed());
+        while app.diff.progress_save_inflight {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if let AppEvent::DiffProgressSaved { .. } = event {
+                app.handle_event(event);
+            }
+        }
+        let progress =
+            crate::diff::notes::load_progress(&key.repo_id, &crate::diff::notes::review_id(&key))
+                .unwrap();
+        assert_eq!(progress.viewed[0].fingerprint, "file");
+    }
 
     fn run_git(repo: &Path, args: &[&str]) {
         let output = std::process::Command::new("git")

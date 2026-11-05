@@ -384,6 +384,9 @@ pub struct DiffState {
     pub loaded_review: Option<String>,
     pub notes: Vec<crate::diff::notes::ReviewNote>,
     pub progress: crate::diff::notes::ReviewProgress,
+    /// One save in flight; later toggles coalesce per key and drain in order.
+    pub progress_save_inflight: bool,
+    pub pending_progress: VecDeque<(DiffKey, Option<String>)>,
     pub selected_notes: std::collections::HashSet<String>,
     pub viewport: usize,
     pub scroll_detached: bool,
@@ -406,6 +409,8 @@ impl Default for DiffState {
             loaded_review: None,
             notes: Vec::new(),
             progress: crate::diff::notes::ReviewProgress::default(),
+            progress_save_inflight: false,
+            pending_progress: VecDeque::new(),
             selected_notes: std::collections::HashSet::new(),
             viewport: 0,
             scroll_detached: false,
