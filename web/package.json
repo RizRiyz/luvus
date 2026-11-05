@@ -19,7 +19,7 @@
     "check": "npm run check -w @luvus/uhp-client && npm run check -w @luvus/web-app && npm run check -w @luvus/web-bridge",
     "dev": "node scripts/dev.mjs",
     "dev:stop": "node scripts/stop.mjs",
-    "test": "npm run build && npm run test -w @luvus/uhp-client && npm run test -w @luvus/web-app && npm run test -w @luvus/web-bridge",
+    "test": "node --test scripts/*.test.mjs && npm run build && npm run test -w @luvus/uhp-client && npm run test -w @luvus/web-app && npm run test -w @luvus/web-bridge",
     "test:integration": "npm run build && node bridge/test/live-integration.mjs",
     "test:native": "node scripts/test-native.mjs",
     "test:browser-pairing": "node scripts/test-browser-pairing.mjs",
