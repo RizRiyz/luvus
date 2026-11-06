@@ -296,6 +296,9 @@ pub struct LayoutConfig {
     /// user is working; turn this on to always reset to the workspace root.
     #[serde(default)]
     pub new_pane_to_workspace_root: bool,
+    /// Focus a pane when the mouse moves over it.
+    #[serde(default)]
+    pub focus_follows_mouse: bool,
     /// Default action when a file is opened from the FILES tree (docs/38):
     /// `"readonly"` (the native viewer) or an editor run-command such as `"vim"`
     /// / `"emacs -nw"`. Consulted whenever a file opens in a *tab* — see
@@ -566,6 +569,7 @@ impl Default for LayoutConfig {
             agent_paths: true,
             resume_in_new_workspace: true,
             new_pane_to_workspace_root: false,
+            focus_follows_mouse: false,
             file_open: default_file_open(),
             file_click: default_file_click(),
             scrollback_bytes: Some(SCROLLBACK_BYTES_DEFAULT),

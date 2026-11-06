@@ -1761,6 +1761,7 @@ impl App {
             .map(|d| (d.path.clone(), d.axis, d.line, d.span));
         let sidebar_before = self.hover_sidebar;
         let link_before = self.hover_link.clone();
+        let focus_before = self.layout().focus;
 
         self.apply_mouse(m);
 
@@ -1776,6 +1777,7 @@ impl App {
             || divider_before != divider_after
             || sidebar_before != self.hover_sidebar
             || link_before != self.hover_link
+            || focus_before != self.layout().focus
     }
 
     /// The hover-highlighted rectangle containing `at`, if any. Moving within
@@ -2876,6 +2878,25 @@ impl App {
                             if let Some(seq) = hover_motion_seq(&m, content, pane.mouse_mode()) {
                                 pane.send(&seq);
                             }
+                        }
+                    }
+                }
+                if self.config.layout.focus_follows_mouse
+                    && self.mode == Mode::Normal
+                    && self.pane_search.is_none()
+                    && self.copy_mode.is_none()
+                    && self.selection.is_none()
+                    && self.mouse_grab.is_none()
+                    && self.suppressed_mouse_buttons == 0
+                    && self.resize_drag.is_none()
+                    && self.sidebar_resize.is_none()
+                    && self.dock_resize.is_none()
+                    && self.diff_note_drag.is_none()
+                    && self.link_press.is_none()
+                {
+                    if let Some((id, _)) = self.pane_content_at(m.column, m.row) {
+                        if id != self.layout().focus {
+                            self.focus_pane_global(id);
                         }
                     }
                 }
@@ -8989,6 +9010,137 @@ mod link_click_tests {
             row: at.1,
             modifiers: mods,
         })
+    }
+
+    fn split_hover_fixture() -> (App, crate::ids::PaneId, crate::ids::PaneId, (u16, u16)) {
+        let Fixture {
+            mut app,
+            mut term,
+            pane,
+            ..
+        } = fixture();
+        let other = app
+            .split_pane(pane, crate::layout::Axis::Col, false)
+            .expect("second pane");
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let rect = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == other)
+            .unwrap()
+            .1;
+        (app, pane, other, (rect.x, rect.y))
+    }
+
+    #[test]
+    fn hover_focus_is_opt_in_and_requests_a_frame_only_on_transition() {
+        let _env = crate::persist::test_env("hover-focus-opt-in");
+        let (mut app, first, second, at) = split_hover_fixture();
+        assert!(!app.config.layout.focus_follows_mouse);
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+
+        app.config.layout.focus_follows_mouse = true;
+        assert!(app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE)));
+        assert_eq!(app.layout().focus, second);
+        assert!(!app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE)));
+        assert_eq!(app.focus_history_back.last(), Some(&first));
+    }
+
+    #[test]
+    fn hover_focus_respects_modal_selection_and_drag_ownership() {
+        let _env = crate::persist::test_env("hover-focus-ownership");
+        let (mut app, first, second, at) = split_hover_fixture();
+        app.config.layout.focus_follows_mouse = true;
+        app.help_open = true;
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+        app.help_open = false;
+        app.mode = Mode::PaneNavigate;
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+        app.mode = Mode::Normal;
+
+        let first_rect = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == first)
+            .unwrap()
+            .1;
+        let start = (first_rect.x, first_rect.y);
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            start,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+        app.clear_selection();
+        app.sidebar_resize = Some(crate::app::Side::Left);
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+        app.sidebar_resize = None;
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, second);
+    }
+
+    #[test]
+    fn hover_focus_waits_for_a_forwarded_mouse_grab() {
+        let _env = crate::persist::test_env("hover-focus-grab");
+        let (mut app, first, second, at) = split_hover_fixture();
+        app.config.layout.focus_follows_mouse = true;
+        enable_mouse_tracking(&app, first);
+        let rect = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == first)
+            .unwrap()
+            .1;
+        let start = (rect.x, rect.y);
+        app.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Middle),
+            start,
+            KeyModifiers::NONE,
+        ));
+        assert!(app.mouse_grab.is_some());
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+        app.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Middle),
+            at,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, second);
+    }
+
+    #[test]
+    fn hover_reports_1003_before_focusing_without_marking_input() {
+        let _env = crate::persist::test_env("hover-focus-1003");
+        let (mut app, first, second, at) = split_hover_fixture();
+        app.config.layout.focus_follows_mouse = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let pane = app.panes.get_mut(&second).unwrap();
+        pane.replace_input_sender_for_test(tx);
+        pane.engine
+            .lock()
+            .unwrap()
+            .advance(b"\x1b[?1003h\x1b[?1006h");
+        let before = app.status.get(&second).unwrap().last_input;
+        assert!(app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE)));
+        assert_eq!(app.layout().focus, second);
+        assert_eq!(app.focus_history_back.last(), Some(&first));
+        assert_eq!(app.status.get(&second).unwrap().last_input, before);
+        match rx.try_recv().expect("1003 hover report") {
+            crate::terminal::pty::InputAction::Bytes(bytes) => assert_eq!(bytes, b"\x1b[<35;1;1M"),
+            _ => panic!("expected mouse bytes"),
+        }
     }
 
     /// The feature: `Ctrl`+click a URL in a pane and it goes to the client to be

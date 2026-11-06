@@ -908,6 +908,16 @@ fn draw_content(
                         toggle(app.config.layout.new_pane_to_workspace_root, t),
                         t,
                     )),
+                    GeneralRow::FocusFollowsMouse => ctls.push(ctl_row(
+                        f,
+                        area,
+                        y,
+                        i,
+                        cursor,
+                        cat.set_focus_follows_mouse,
+                        toggle(app.config.layout.focus_follows_mouse, t),
+                        t,
+                    )),
                     GeneralRow::AgentTitle => ctls.push(ctl_row(
                         f,
                         area,
