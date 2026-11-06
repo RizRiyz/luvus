@@ -139,12 +139,15 @@ impl Inputs {
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         let path = std::env::temp_dir().join(format!("luvus-diff-{name}"));
-        let mut builder = std::fs::DirBuilder::new();
+        // `mode` is Unix-only. A mutable builder is an unused-mut error on Windows.
+        let builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
             builder.mode(0o700);
-        }
+            builder
+        };
         builder
             .create(&path)
             .map_err(|e| format!("create private diff inputs: {e}"))?;
@@ -883,6 +886,15 @@ mod tests {
         let inputs = Inputs::new().unwrap();
         std::os::unix::fs::symlink("/etc/passwd", inputs.0.join("sample.rs")).unwrap();
         assert!(sources(&inputs.0, &file(DiffLayer::Untracked)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_diff_inputs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let inputs = Inputs::new().unwrap();
+        let mode = std::fs::metadata(&inputs.0).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]
