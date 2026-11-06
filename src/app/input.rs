@@ -7653,6 +7653,20 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
+        let (response_tx, _response_rx) = std::sync::mpsc::channel();
+        let shell_engine = std::mem::replace(
+            &mut app.panes.get_mut(&pane).unwrap().engine,
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::terminal::vt::alacritty::AlacrittyEngine::new(
+                    80,
+                    24,
+                    response_tx,
+                    crate::config::SCROLLBACK_BYTES_DEFAULT,
+                ),
+            )),
+        );
+        // Shell output must not reach the fixture's terminal grid.
+        shell_engine.lock().unwrap().advance(b"shell prompt needle");
         add_scrollback(&app, pane, &["hello Needle world"]);
         app.pane_content_rects = vec![(pane, ratatui::layout::Rect::new(0, 0, 80, 24))];
         app.scroll_pane = Some(pane);
@@ -7737,6 +7751,7 @@ mod tests {
         let _env = crate::persist::test_env("prefix-shifted-workspace-jump");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.workspaces[0].worktree = None;
         let focus = app.layout().focus;
         for position in 2..=9 {
             app.workspaces[0]

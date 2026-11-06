@@ -15571,6 +15571,16 @@ fi
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         let pane = app.layout().focus;
+        // The live shell reader keeps its original engine, away from this fixture.
+        let (response_tx, _response_rx) = std::sync::mpsc::channel();
+        app.panes.get_mut(&pane).unwrap().engine = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(
+                120,
+                40,
+                response_tx,
+                crate::config::SCROLLBACK_BYTES_DEFAULT,
+            ),
+        ));
         app.panes
             .get(&pane)
             .expect("focused pane exists")
@@ -20469,6 +20479,16 @@ fi
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let id = app.layout().focus;
+        // The live shell reader keeps its original engine, away from this fixture.
+        let (response_tx, _response_rx) = std::sync::mpsc::channel();
+        app.panes.get_mut(&id).unwrap().engine = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(
+                80,
+                24,
+                response_tx,
+                crate::config::SCROLLBACK_BYTES_DEFAULT,
+            ),
+        ));
         if let Some(pane) = app.panes.get(&id) {
             if let Ok(mut engine) = pane.engine.lock() {
                 for i in 0..80 {
