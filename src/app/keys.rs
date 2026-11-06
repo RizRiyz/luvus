@@ -1187,11 +1187,20 @@ mod tests {
         assert_eq!(app.key_for(Cmd::JumpWorkspace(2)), "");
     }
 
+    /// Sidebar tests must not inherit the process checkout. `App::new` records
+    /// it as workspace 0, and a linked Git worktree changes group order.
+    fn neutralize_initial_workspace(app: &mut App) {
+        let workspace = &mut app.workspaces[0];
+        workspace.cwd = std::path::PathBuf::from("/tmp/luvus-neutral-workspace");
+        workspace.worktree = None;
+    }
+
     #[test]
     fn workspace_jump_uses_sidebar_order_and_preserves_target_focus() {
         let _env = crate::persist::test_env("jump-workspace-display-order");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        neutralize_initial_workspace(&mut app);
         let focus = app.layout().focus;
         for position in 2..=3 {
             app.workspaces.push(Workspace {
@@ -1846,11 +1855,12 @@ mod tests {
         let _env = crate::persist::test_env("focus-workspaces-command");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        neutralize_initial_workspace(&mut app);
         let pane = app.layout().focus;
         app.workspaces.push(Workspace {
             id: crate::ids::public_id("workspace"),
             name: "second".into(),
-            cwd: std::env::current_dir().unwrap(),
+            cwd: std::path::PathBuf::from("/tmp/luvus-second-workspace"),
             branch: None,
             git_ahead_behind: None,
             worktree: None,
