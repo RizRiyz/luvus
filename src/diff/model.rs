@@ -369,6 +369,13 @@ pub enum DiffListRow {
 }
 
 #[derive(Debug)]
+pub struct ProgressSaveWorker {
+    pub key: DiffKey,
+    pub fingerprint: Option<String>,
+    pub handle: std::thread::JoinHandle<Result<(), String>>,
+}
+
+#[derive(Debug)]
 pub struct DiffState {
     pub snapshot: Option<DiffSnapshot>,
     pub error: Option<String>,
@@ -382,11 +389,16 @@ pub struct DiffState {
     /// Workspace folder owned by the newest scheduled status scan.
     pub status_root: Option<PathBuf>,
     pub loaded_review: Option<String>,
+    pub review_load_generation: u64,
     pub notes: Vec<crate::diff::notes::ReviewNote>,
     pub progress: crate::diff::notes::ReviewProgress,
     /// One save in flight; later toggles coalesce per key and drain in order.
     pub progress_save_inflight: bool,
     pub pending_progress: VecDeque<(DiffKey, Option<String>)>,
+    /// Retained for the shutdown barrier, even if its completion is undispatched.
+    pub progress_save_worker: Option<ProgressSaveWorker>,
+    /// Local intent since the current review load began, including removals.
+    pub progress_load_edits: Option<HashMap<DiffKey, Option<String>>>,
     pub selected_notes: std::collections::HashSet<String>,
     pub viewport: usize,
     pub scroll_detached: bool,
@@ -407,10 +419,13 @@ impl Default for DiffState {
             status_inflight: false,
             status_root: None,
             loaded_review: None,
+            review_load_generation: 0,
             notes: Vec::new(),
             progress: crate::diff::notes::ReviewProgress::default(),
             progress_save_inflight: false,
             pending_progress: VecDeque::new(),
+            progress_save_worker: None,
+            progress_load_edits: None,
             selected_notes: std::collections::HashSet::new(),
             viewport: 0,
             scroll_detached: false,

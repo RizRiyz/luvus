@@ -255,6 +255,7 @@ pub enum AppEvent {
     },
     DiffNotesLoaded {
         review_id: String,
+        generation: u64,
         result: Result<
             (
                 Vec<crate::diff::ReviewNote>,

@@ -943,6 +943,9 @@ impl App {
                         viewed_at_ms: crate::diff::notes::now_ms(),
                     });
             }
+            if let Some(edits) = &mut self.diff.progress_load_edits {
+                edits.insert(key.clone(), fingerprint.clone());
+            }
             self.diff
                 .pending_progress
                 .retain(|(pending, _)| pending != &key);
@@ -969,32 +972,84 @@ impl App {
         };
         self.diff.progress_save_inflight = true;
         let tx = self.app_tx.clone();
-        std::thread::spawn(move || {
+        let saved_key = key.clone();
+        let saved_fingerprint = fingerprint.clone();
+        let worker = std::thread::spawn(move || {
             let result = crate::diff::notes::set_viewed(
                 &key.repo_id,
                 &crate::diff::notes::review_id(&key),
                 &key,
                 fingerprint.as_deref(),
             );
-            let _ = tx.send(AppEvent::DiffProgressSaved { result });
+            let _ = tx.send(AppEvent::DiffProgressSaved {
+                result: result.clone(),
+            });
+            result
         });
+        self.diff.progress_save_worker = Some(crate::diff::model::ProgressSaveWorker {
+            key: saved_key,
+            fingerprint: saved_fingerprint,
+            handle: worker,
+        });
+    }
+
+    /// Build a shutdown-only barrier. Waiting and final writes stay off the app
+    /// loop; joining the in-flight write prevents an old mark winning after undo.
+    pub(crate) fn final_diff_progress_save(&mut self) -> impl FnOnce() -> bool + Send + 'static {
+        let worker = self.diff.progress_save_worker.take();
+        let pending = std::mem::take(&mut self.diff.pending_progress);
+        move || {
+            let mut saved = worker.is_none_or(|worker| matches!(worker.handle.join(), Ok(Ok(()))));
+            for (key, fingerprint) in pending {
+                if crate::diff::notes::set_viewed(
+                    &key.repo_id,
+                    &crate::diff::notes::review_id(&key),
+                    &key,
+                    fingerprint.as_deref(),
+                )
+                .is_err()
+                {
+                    saved = false;
+                }
+            }
+            if !saved {
+                eprintln!("Luvus: review progress not saved during shutdown");
+            }
+            saved
+        }
     }
 
     fn schedule_diff_notes_load(&mut self, repo_id: String, review_id: String) {
         self.diff.loaded_review = Some(review_id.clone());
+        self.diff.review_load_generation = self.diff.review_load_generation.wrapping_add(1);
+        let generation = self.diff.review_load_generation;
+        let mut edits = HashMap::new();
+        // Switching reviews must not hide local writes still queued for this one.
+        if let Some(worker) = &self.diff.progress_save_worker {
+            edits.insert(worker.key.clone(), worker.fingerprint.clone());
+        }
+        for (key, fingerprint) in &self.diff.pending_progress {
+            edits.insert(key.clone(), fingerprint.clone());
+        }
+        self.diff.progress_load_edits = Some(edits);
         let tx = self.app_tx.clone();
         std::thread::spawn(move || {
             let result = crate::diff::notes::load(&repo_id, &review_id).and_then(|notes| {
                 crate::diff::notes::load_progress(&repo_id, &review_id)
                     .map(|progress| (notes, progress))
             });
-            let _ = tx.send(AppEvent::DiffNotesLoaded { review_id, result });
+            let _ = tx.send(AppEvent::DiffNotesLoaded {
+                review_id,
+                generation,
+                result,
+            });
         });
     }
 
     pub fn apply_diff_notes_loaded(
         &mut self,
         review_id: String,
+        generation: u64,
         result: Result<
             (
                 Vec<crate::diff::ReviewNote>,
@@ -1003,11 +1058,25 @@ impl App {
             String,
         >,
     ) -> bool {
-        if self.diff.loaded_review.as_deref() != Some(review_id.as_str()) {
+        if self.diff.loaded_review.as_deref() != Some(review_id.as_str())
+            || generation != self.diff.review_load_generation
+        {
             return false;
         }
         match result {
-            Ok((notes, progress)) => {
+            Ok((notes, mut progress)) => {
+                for (key, fingerprint) in self.diff.progress_load_edits.take().unwrap_or_default() {
+                    progress.viewed.retain(|entry| entry.key != key);
+                    if crate::diff::notes::review_id(&key) == review_id {
+                        if let Some(fingerprint) = fingerprint {
+                            progress.viewed.push(crate::diff::notes::ViewedChange {
+                                key,
+                                fingerprint,
+                                viewed_at_ms: crate::diff::notes::now_ms(),
+                            });
+                        }
+                    }
+                }
                 self.diff.notes = notes;
                 self.diff.progress = progress;
                 self.apply_diff_progress();
@@ -2220,6 +2289,197 @@ mod tests {
             crate::diff::notes::load_progress(&key.repo_id, &crate::diff::notes::review_id(&key))
                 .unwrap();
         assert_eq!(progress.viewed[0].fingerprint, "file");
+    }
+
+    #[test]
+    fn diff_progress_shutdown_saves_queued_undo_without_completion_dispatch() {
+        let _env = crate::persist::test_env("diff-progress-shutdown");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        app.toggle_active_diff_viewed();
+        app.toggle_active_diff_viewed();
+        // The event loop can stop before dispatching the first completion.
+        loop {
+            if matches!(
+                rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+                AppEvent::DiffProgressSaved { .. }
+            ) {
+                break;
+            }
+        }
+        assert_eq!(app.diff.pending_progress.len(), 1);
+        app.finish_session_persistence();
+        assert!(crate::diff::notes::load_progress(
+            &key.repo_id,
+            &crate::diff::notes::review_id(&key)
+        )
+        .unwrap()
+        .viewed
+        .is_empty());
+    }
+
+    #[test]
+    fn diff_progress_completion_without_workspace_drains_other_review() {
+        let _env = crate::persist::test_env("diff-progress-no-workspace");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let first = install_snapshot(&mut app);
+        app.open_diff_view(first.clone(), OpenTarget::Tab);
+        app.toggle_active_diff_viewed();
+        app.toggle_active_diff_viewed();
+        let mut other = first.clone();
+        other.worktree_id = "other-workspace".into();
+        app.diff
+            .pending_progress
+            .push_back((other.clone(), Some("other".into())));
+        app.workspaces.clear();
+        while app.diff.progress_save_inflight {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if matches!(event, AppEvent::DiffProgressSaved { .. }) {
+                assert!(
+                    app.handle_event(event),
+                    "completion must settle without a workspace"
+                );
+            }
+        }
+        assert!(app.diff.pending_progress.is_empty());
+        assert!(crate::diff::notes::load_progress(
+            &first.repo_id,
+            &crate::diff::notes::review_id(&first)
+        )
+        .unwrap()
+        .viewed
+        .is_empty());
+        let progress = crate::diff::notes::load_progress(
+            &other.repo_id,
+            &crate::diff::notes::review_id(&other),
+        )
+        .unwrap();
+        assert_eq!(progress.viewed[0].key, other);
+    }
+
+    #[test]
+    fn diff_progress_replaced_load_cannot_consume_current_toggle_edits() {
+        let _env = crate::persist::test_env("diff-progress-replaced-load");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let review = crate::diff::notes::review_id(&key);
+        app.schedule_diff_notes_load(key.repo_id.clone(), review.clone());
+        let old = loop {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if matches!(event, AppEvent::DiffNotesLoaded { .. }) {
+                break event;
+            }
+        };
+        // An A -> B -> A workspace switch can issue another load for A.
+        app.schedule_diff_notes_load(key.repo_id.clone(), review);
+        let current = loop {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if matches!(event, AppEvent::DiffNotesLoaded { .. }) {
+                break event;
+            }
+        };
+        app.toggle_active_diff_viewed();
+        app.handle_event(old);
+        app.handle_event(current);
+        assert!(app.diff.snapshot.as_ref().unwrap().files[0].viewed());
+        app.finish_session_persistence();
+    }
+
+    #[test]
+    fn diff_progress_failed_write_reports_error_and_allows_later_saves() {
+        let _env = crate::persist::test_env("diff-progress-write-failure");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let review = crate::diff::notes::review_id(&key);
+        let path = crate::diff::notes::notes_root()
+            .join(&key.repo_id)
+            .join(&review)
+            .join("review.json");
+        // A directory at the file path makes persistence fail on every OS.
+        std::fs::create_dir_all(&path).unwrap();
+        app.toggle_active_diff_viewed();
+        loop {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if let AppEvent::DiffProgressSaved { ref result } = event {
+                assert!(result.is_err());
+                app.workspaces.clear();
+                assert!(app.handle_event(event));
+                break;
+            }
+        }
+        assert!(!app.diff.progress_save_inflight);
+        assert!(app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .starts_with("review progress not saved:"));
+        std::fs::remove_dir(&path).unwrap();
+        app.diff
+            .pending_progress
+            .push_back((key.clone(), Some("recovered".into())));
+        app.schedule_diff_progress_save();
+        loop {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if let AppEvent::DiffProgressSaved { ref result } = event {
+                assert!(result.is_ok());
+                assert!(app.handle_event(event));
+                break;
+            }
+        }
+        assert_eq!(
+            crate::diff::notes::load_progress(&key.repo_id, &review)
+                .unwrap()
+                .viewed[0]
+                .fingerprint,
+            "recovered"
+        );
+    }
+
+    #[test]
+    fn diff_progress_load_does_not_overwrite_toggle_while_loading() {
+        let _env = crate::persist::test_env("diff-progress-load-toggle");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 32, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let review = crate::diff::notes::review_id(&key);
+        app.schedule_diff_notes_load(key.repo_id.clone(), review);
+        // Hold the old load result while the user toggles the visible file.
+        let loaded = loop {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if let AppEvent::DiffNotesLoaded { .. } = event {
+                break event;
+            }
+        };
+        app.toggle_active_diff_viewed();
+        while app.diff.progress_save_inflight {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if matches!(event, AppEvent::DiffProgressSaved { .. }) {
+                app.handle_event(event);
+            }
+        }
+        app.handle_event(loaded);
+        assert!(app.diff.snapshot.as_ref().unwrap().files[0].viewed());
+        // The same race must preserve removal, not only newly viewed marks.
+        app.schedule_diff_notes_load(key.repo_id.clone(), crate::diff::notes::review_id(&key));
+        let loaded = loop {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+            if matches!(event, AppEvent::DiffNotesLoaded { .. }) {
+                break event;
+            }
+        };
+        app.toggle_active_diff_viewed();
+        app.handle_event(loaded);
+        assert!(!app.diff.snapshot.as_ref().unwrap().files[0].viewed());
+        app.finish_session_persistence();
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
