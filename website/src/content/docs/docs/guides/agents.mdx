@@ -168,6 +168,10 @@ pane, while Luvus leaves the shared service and its live SQLite database alone.
 Exact-ID resume uses `opencode --session <id>`, and scheduled work is offered
 only for explicit **Full access** through `opencode run --auto`.
 
+Scheduled automation workers are the exception. Their panes restore as plain
+shells, and a headless run is never reopened as an interactive conversation.
+See [Automation](/docs/guides/automation/).
+
 You'll also see **recent sessions** listed at the bottom of the AGENTS sidebar
 (toggle *All*): click one to reopen it into a new pane, even sessions from
 before you installed luvus. The ✕ hides an entry from the list. It never
@@ -275,7 +279,10 @@ luvus integration install claude    # or: copilot · codex · antigravity · let
 or toggle it in **Settings → Integrations**. What it does per agent:
 
 - **claude / copilot / codex**: registers a small session-start hook script in
-  the agent's own settings file.
+  the agent's own settings file. On Windows, Claude Code and Codex run a
+  PowerShell script through an encoded command, so a home path with spaces
+  works under Git Bash and `cmd.exe` and no `python3` is needed. Re-enable an
+  integration installed by an earlier release to replace its old hook entries.
 - **antigravity**: adds one Luvus-owned `PreInvocation` entry to
   `~/.gemini/config/hooks.json`. It reports only the exact conversation id for
   `agy --conversation <id>` restore; screen detection continues to own agent
@@ -291,7 +298,11 @@ or toggle it in **Settings → Integrations**. What it does per agent:
   to the inherited owner-local Luvus endpoint. No `luvus` process is spawned per
   update and no agent database is opened.
 - **kimi**: adds a `[[hooks]]` entry to `~/.kimi-code/config.toml`, edited in
-  place so your API keys, comments, and own hooks are left untouched.
+  place so your API keys, comments, and own hooks are left untouched. On
+  Windows, Kimi Code runs hooks through `cmd.exe`, so the entry runs a
+  PowerShell script through an encoded command and needs no `python3`.
+  Re-enable an integration installed by an earlier release to replace its old
+  hook entries.
 - **grok**: installs its own hook file without editing Grok's authentication
   configuration.
 - **hermes**: installs an opt-in plugin under the active `HERMES_HOME`. It
@@ -363,6 +374,10 @@ agent = "cursor"
 distinct = ["cursor-agent"]   # the CLI binary: unmistakable
 ambiguous = ["cursor"]        # also a normal English word
 ```
+
+Cursor's short command is `agent`. Luvus recognizes that process from the
+install path `cursor-agent/versions/<version>/index.js`. The word `agent` alone
+is not an identity, so do not add it to either list.
 
 Naming an agent luvus does not ship teaches it a new one, no rebuild and no
 waiting for a release:

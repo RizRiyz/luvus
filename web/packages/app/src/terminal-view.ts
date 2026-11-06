@@ -38,6 +38,8 @@ export class TerminalView {
   #pendingPaint: { text: string; cursorOffset: number | undefined; cursorPadding: number } | undefined;
   #renderedPaint: { text: string; cursorOffset: number | undefined; cursorPadding: number } | undefined;
   #input: NativeTerminalInput | undefined;
+  #modifierButtons: Partial<Record<"ctrl" | "shift", HTMLButtonElement>> = {};
+  #inputPlaceholder = element("span", { className: "terminal-input-placeholder", text: "Type or hold to paste", attrs: { "aria-hidden": "true" } });
   #inputHint = element("span", { className: "terminal-input-hint", text: "Tap terminal to type" });
   #attach: HTMLButtonElement | undefined;
   #uploadTail: Promise<void> = Promise.resolve();
@@ -83,6 +85,7 @@ export class TerminalView {
     private readonly canUploadFiles: boolean,
     private readonly streamCursor: boolean,
     private readonly viewportSizing: boolean,
+    private readonly modifiedKeys: boolean,
     private readonly paneOptions: () => TerminalPaneOption[],
     private readonly onSelectPane: (pane: PaneSnapshot) => void,
     onBack: () => void,
@@ -98,6 +101,11 @@ export class TerminalView {
         (message) => this.#inputFailed(message),
         (files) => {
           if (this.canUploadFiles) this.#queueFiles(files);
+        },
+        (modifiers) => {
+          for (const modifier of ["ctrl", "shift"] as const) this.#modifierButtons[modifier]?.setAttribute("aria-pressed", String(modifiers[modifier]));
+          const active = [modifiers.ctrl ? "Ctrl" : "", modifiers.shift ? "Shift" : ""].filter(Boolean).join(" + ");
+          this.#inputPlaceholder.textContent = active ? `${active} · next key` : "Type or hold to paste";
         },
       );
       this.#input.element.addEventListener("focus", () => this.#scheduleViewport(true));
@@ -161,10 +169,24 @@ export class TerminalView {
     keyboard.disabled = !control;
     keyboard.setAttribute("aria-label", "Show or hide keyboard");
     keyboard.title = "Keyboard";
+    keyboard.addEventListener("pointerdown", (event) => event.preventDefault());
+
+    const modifiers = (["ctrl", "shift"] as const).map((modifier) => {
+      const label = modifier === "ctrl" ? "Ctrl" : "Shift";
+      const toggle = button(label, "terminal-tool terminal-modifier", () => this.#input?.toggleModifier(modifier));
+      toggle.disabled = !control || !modifiedKeys;
+      toggle.setAttribute("aria-label", modifier === "ctrl" ? "Control modifier" : "Shift modifier");
+      toggle.setAttribute("aria-pressed", "false");
+      toggle.title = modifiedKeys ? `${label} — next key` : "Update the Luvus server to use terminal modifiers";
+      toggle.addEventListener("pointerdown", (event) => event.preventDefault());
+      this.#modifierButtons[modifier] = toggle;
+      return toggle;
+    });
 
     const keySpecs = [
       ["escape", "Esc"],
       ["tab", "Tab"],
+      ["enter", "↵"],
       ["up", "↑"],
       ["down", "↓"],
       ["left", "←"],
@@ -178,12 +200,19 @@ export class TerminalView {
       controlButton.addEventListener("pointerdown", (event) => event.preventDefault());
       return controlButton;
     });
-    const tools = element("div", { className: "terminal-tools" }, attach, keyboard, ...keys);
+    const tools = element("div", { className: "terminal-tools" }, attach, keyboard, ...modifiers, ...keys);
+    tools.inert = true;
+    tools.setAttribute("aria-hidden", "true");
     const controlsToggle = button("", "terminal-controls-toggle", () => {
       const expanded = this.root.classList.toggle("controls-expanded");
+      tools.inert = !expanded;
+      tools.setAttribute("aria-hidden", String(!expanded));
+      if (!expanded) this.#input?.clearModifiers();
       controlsToggle.setAttribute("aria-expanded", String(expanded));
       controlsToggle.setAttribute("aria-label", expanded ? "Hide terminal controls" : "Show terminal controls");
       controlsToggle.title = expanded ? "Hide terminal controls" : "Show terminal controls";
+      if (this.#followTail) this.#scrollToLatest();
+      this.#scheduleViewport();
     });
     controlsToggle.setAttribute("aria-expanded", "false");
     controlsToggle.setAttribute("aria-label", "Show terminal controls");
@@ -224,6 +253,10 @@ export class TerminalView {
     this.#main = element("div", { className: "terminal-main" },
       this.#output,
       element("div", { className: "terminal-controls-wrap" },
+        this.#input ? element("div", { className: "terminal-input-surface" },
+          this.#input.element,
+          this.#inputPlaceholder,
+        ) : undefined,
         element("div", { className: "terminal-controls" },
           this.#inputHint,
           tools,
@@ -236,12 +269,14 @@ export class TerminalView {
       this.#navigation,
       this.#contentFrame,
       fileInput,
-      ...(this.#input ? [this.#input.element] : []),
     );
     this.#output.append(this.#cellProbe);
     this.#placePaneSidebar();
     if (this.viewportSizing) {
-      this.#outputResize = new ResizeObserver(() => this.#scheduleViewport());
+      this.#outputResize = new ResizeObserver(() => {
+        if (this.#followTail) this.#scrollToLatest();
+        this.#scheduleViewport();
+      });
       this.#outputResize.observe(this.#output);
     }
     this.#output.addEventListener("scroll", () => {

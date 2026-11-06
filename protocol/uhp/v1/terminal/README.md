@@ -69,8 +69,18 @@ The bounded `send_key` vocabulary includes `ctrl-w` and `alt-d` for backward
 and forward word deletion plus `ctrl-u` and `ctrl-k` for deletion toward the
 start and end of the current line. It also carries the common shell and agent
 controls `ctrl-a`, `ctrl-b`, `ctrl-e`, `ctrl-f`, `ctrl-g`, `ctrl-l`, `ctrl-n`,
-`ctrl-o`, `ctrl-p`, `ctrl-r`, `ctrl-t`, and `ctrl-y`. Job-control and
-flow-control keys such as `ctrl-z`, `ctrl-s`, and `ctrl-q` remain excluded.
+`ctrl-o`, `ctrl-p`, `ctrl-r`, `ctrl-t`, and `ctrl-y`. Without the
+`modified_keys` feature, job-control and flow-control keys such as `ctrl-z`,
+`ctrl-s`, and `ctrl-q` remain excluded.
+
+With `terminal.features: ["modified_keys", ...]`, it also accepts `ctrl-a`
+through `ctrl-z`, their `ctrl-shift-` variants, `ctrl-space` and
+`ctrl-shift-space`. Navigation, Enter and Tab accept `ctrl-`, `shift-` and
+`ctrl-shift-` prefixes. Encoding uses the pane's negotiated keyboard protocol
+and Luvus's configured Shift+Enter sequence, just like TUI input. No raw escape
+sequences or arbitrary key names are accepted.
+Each `send_key` action is one complete tap; when the child negotiates Kitty
+event reporting, supported keys include both press and release events.
 
 Protocol 1.0 capture includes a monotonic `content_revision` and provides a
 sequence-fenced snapshot, bounded terminal-only event streams, and event-driven

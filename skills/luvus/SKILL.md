@@ -406,6 +406,17 @@ Native forks currently support Claude, Grok, Codex, Kilo Code, Pi, and OMP. Repo
 Do not approximate a failed fork with `pane split`, `agent start`, or `resume`,
 because those paths do not guarantee an independent copy of the conversation.
 
+Transpose a split only after resolving its pane ID:
+
+```sh
+luvus pane transpose <pane-id>
+```
+
+This toggles only the split immediately containing that pane, preserving focus,
+zoom, ratios, and live terminals. A single-pane tab returns `changed:false`.
+After a lost response, inspect the layout before retrying: this toggle is not
+idempotent, and transposing twice restores the original.
+
 Move an existing pane only after resolving its id and listing the destination
 tabs in that pane's workspace. Tab numbers are 1-based:
 

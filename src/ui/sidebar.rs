@@ -641,7 +641,7 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
         for tab in &ws.tabs {
             for id in tab.layout.leaves() {
                 if let Some(s) = app.status.get(&id) {
-                    let is_agent = app.manifests.is_agent(&s.agent) || s.agent_session.is_some();
+                    let is_agent = app.is_status_reporter_pane(id);
                     if !is_agent {
                         continue;
                     }
@@ -800,11 +800,19 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
                 let id = *id;
                 let focused = id == focus;
                 let st = pane_state(app, id);
-                let agent = app
+                let mut agent = app
+                    .status_reporter_label(id)
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(progress) = app
                     .status
                     .get(&id)
-                    .map(|s| s.agent.clone())
-                    .unwrap_or_default();
+                    .filter(|s| s.state_source == "program_status")
+                    .and_then(|s| s.program_status.as_ref())
+                    .and_then(|store| store.effective_progress())
+                {
+                    agent.push_str(&format!(" · {progress}%"));
+                }
                 let name_style = if focused {
                     Style::new().fg(t.accent).bold()
                 } else {
@@ -1506,6 +1514,28 @@ mod tests {
             !sidebar.contains(long),
             "the full over-long name is never rendered in the sidebar"
         );
+    }
+
+    #[test]
+    fn osc7501_program_reporter_has_display_row_without_agent_capabilities() {
+        let _env = crate::persist::test_env("osc7501-sidebar-program");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let pane = app.layout().focus;
+        let mut store = crate::terminal::program_status::ProgramStatusStore::default();
+        store.apply(
+            crate::terminal::program_status::parse_report(b"state=working:app=cargo:progress=40")
+                .unwrap(),
+        );
+        app.status.get_mut(&pane).unwrap().agent = "zsh".into();
+        app.sync_program_status(pane, store);
+        app.status.get_mut(&pane).unwrap().state = crate::ui::theme::State::Working;
+        app.status.get_mut(&pane).unwrap().state_source = "program_status";
+        assert!(!app.is_agent_pane(pane));
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(buffer_contains(&term, "cargo · 40%"));
+        assert!(app.agent_rects.iter().any(|(id, _)| *id == pane));
     }
 
     // The focused agent's "project · =pane" line sits on the selection

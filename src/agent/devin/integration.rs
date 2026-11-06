@@ -7,7 +7,9 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use super::super::types::IntegrationOperations;
-use crate::integration;
+#[cfg(any(windows, test))]
+use crate::integration::powershell_hook_command;
+use crate::integration::{self, decode_base64};
 
 pub(super) const OPERATIONS: IntegrationOperations = IntegrationOperations {
     install,
@@ -75,21 +77,6 @@ fn hook_command(path: &Path) -> Result<String> {
     Ok(powershell_hook_command(path))
 }
 
-/// Devin runs hook commands through the user's shell (Git Bash, cmd, or
-/// PowerShell), and each one rewrites a quoted path that contains `$`,
-/// backticks, `%`, or apostrophes. The script path therefore travels as a
-/// single-quoted PowerShell literal inside `-EncodedCommand`, whose base64 text
-/// no shell can alter.
-#[cfg(any(windows, test))]
-fn powershell_hook_command(path: &str) -> String {
-    let literal = format!("& '{}'", path.replace('\'', "''"));
-    let utf16: Vec<u8> = literal.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    format!(
-        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}",
-        crate::base64_encode(&utf16)
-    )
-}
-
 /// Devin's hook parser rejects the whole file for one unknown event, so the
 /// managed group uses only fields Devin already accepts from other tools.
 fn managed_group(command: &str) -> Value {
@@ -100,33 +87,6 @@ fn managed_group(command: &str) -> Value {
             "timeout": HOOK_TIMEOUT_SECS,
         }]
     })
-}
-
-/// Decodes one standard base64 token, or returns `None` when it is not one.
-fn decode_base64(token: &str) -> Option<Vec<u8>> {
-    if token.is_empty() || !token.len().is_multiple_of(4) {
-        return None;
-    }
-    let (mut bits, mut count) = (0u32, 0u32);
-    let mut output = Vec::with_capacity(token.len() / 4 * 3);
-    for byte in token.trim_end_matches('=').bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        };
-        bits = (bits << 6) | u32::from(value);
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            output.push((bits >> count) as u8);
-            bits &= (1 << count) - 1;
-        }
-    }
-    Some(output)
 }
 
 /// Whether `text` names the Luvus script. Windows file names are

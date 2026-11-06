@@ -94,7 +94,7 @@
       ]
     },
     "agentListTitles": {
-      "description": "Each agent.list row may carry the same bounded session title as the snapshot. Other row fields remain extensible.",
+      "description": "Each agent.list row may carry the same bounded session title as the snapshot. display_agent is a presentation label that may come from an OSC 7501 program report; agent remains the trusted identity and is_agent tells whether the pane is a native or manifest agent. Older servers omit both. Other row fields remain extensible.",
       "type": "object",
       "required": ["agents"],
       "properties": {
@@ -102,7 +102,11 @@
           "type": "array",
           "items": {
             "type": "object",
-            "properties": { "agent_session_title": { "$ref": "#/$defs/agentSessionTitle" } }
+            "properties": {
+              "agent_session_title": { "$ref": "#/$defs/agentSessionTitle" },
+              "display_agent": { "type": ["string", "null"] },
+              "is_agent": { "type": "boolean" }
+            }
           }
         }
       }

@@ -10,4 +10,7 @@
 {"id":"input-4","action":"send_key","params":{"key":"ctrl-k"}}
 {"id":"input-5","action":"send_key","params":{"key":"alt-d"}}
 {"id":"input-6","action":"send_key","params":{"key":"ctrl-r"}}
+{"id":"modifier-1","action":"send_key","params":{"key":"ctrl-a"}}
+{"id":"modifier-2","action":"send_key","params":{"key":"shift-enter"}}
+{"id":"modifier-3","action":"send_key","params":{"key":"ctrl-shift-left"}}
 {"id":"size-1","action":"set_viewport","params":{"cols":40,"rows":18}}

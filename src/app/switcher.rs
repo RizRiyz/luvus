@@ -100,7 +100,8 @@ impl App {
                     let pane_count = panes.len();
                     for (pi, id) in panes.into_iter().enumerate() {
                         if let Some(s) = self.status.get(&id) {
-                            if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
+                            if self.is_status_reporter_pane(id) {
+                                let agent = self.status_reporter_label(id).unwrap_or(&s.agent);
                                 let location = format!(
                                     "{} · tab {} · p{}/{}",
                                     ws.name,
@@ -108,11 +109,11 @@ impl App {
                                     pi + 1,
                                     pane_count
                                 );
-                                if matches(&format!("{} {}", s.agent, location)) {
+                                if matches(&format!("{} {}", agent, location)) {
                                     agents.push(SwitcherRow::Agent {
                                         target: SwitcherTarget::Pane(id),
                                         state: s.state,
-                                        title: s.agent.clone(),
+                                        title: agent.to_string(),
                                         location,
                                     });
                                 }
@@ -297,7 +298,7 @@ impl App {
             for tab in &ws.tabs {
                 for id in tab.layout.leaves() {
                     if let Some(s) = self.status.get(&id) {
-                        if self.manifests.is_agent(&s.agent) || s.agent_session.is_some() {
+                        if self.is_status_reporter_pane(id) {
                             match s.state {
                                 State::Blocked => c[0] += 1,
                                 State::Working => c[1] += 1,

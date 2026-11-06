@@ -287,6 +287,11 @@ launched occurrence without creating it twice. A worker from a previous server
 lifetime cannot still be trusted as live and is recorded as failed on recovery.
 There is no automatic retry of a failed agent run.
 
+A worker pane restores as a plain shell. Luvus never reopens a scheduled run's
+headless agent conversation as an interactive session, whether the run finished
+or was interrupted by the restart. The conversation stays in the agent's own
+store, so you can still resume it deliberately with the agent's resume command.
+
 ## Manage definitions and runs
 
 ```sh

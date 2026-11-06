@@ -474,6 +474,37 @@ pub trait VtEngine: Send {
         None
     }
 
+    /// Coalesced bounded OSC 7501 metadata snapshot, only when changed.
+    fn take_pending_program_status(
+        &mut self,
+    ) -> Option<crate::terminal::program_status::ProgramStatusStore> {
+        None
+    }
+
+    /// Current OSC authority without consuming a pending metadata snapshot.
+    /// Prompt admission uses this to reject blocked state even before detection.
+    fn program_status_state(&self) -> Option<crate::ui::theme::State> {
+        None
+    }
+
+    /// Revision observed at the first absent producer process scan.
+    fn program_status_revision(&self) -> u64 {
+        0
+    }
+
+    /// Clear only transient reports belonging to the absent producer boundary.
+    fn program_status_process_exited_through(&mut self, _boundary: u64) {}
+
+    /// Clear transient terminal metadata after an attached process exit.
+    fn program_status_process_exited(&mut self) {}
+
+    /// The sender this engine answers through, so a test that swaps a pane's
+    /// engine can keep the pane's lock-free status gate wired to it.
+    #[cfg(test)]
+    fn response_sender_for_test(&self) -> Option<InputSender> {
+        None
+    }
+
     /// Scroll the viewport `delta` lines through scrollback: **positive scrolls
     /// up into history**, negative back toward the live bottom. Clamped to the
     /// retained history. No-op while on the alternate screen.

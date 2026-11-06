@@ -796,6 +796,48 @@ impl Pane {
         self.engine.lock().ok()?.take_pending_clipboard()
     }
 
+    pub(crate) fn take_pending_program_status(
+        &self,
+    ) -> Option<crate::terminal::program_status::ProgramStatusStore> {
+        // Called on every output wake; skip the engine lock unless a report,
+        // reset, or prompt marker actually changed the records.
+        if !self.input_tx.program_status_pending() {
+            return None;
+        }
+        self.engine.lock().ok()?.take_pending_program_status()
+    }
+
+    pub(crate) fn program_status_revision(&self) -> u64 {
+        self.engine
+            .lock()
+            .map(|engine| engine.program_status_revision())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn program_status_process_exited_through(&self, boundary: u64) {
+        if let Ok(mut engine) = self.engine.lock() {
+            engine.program_status_process_exited_through(boundary);
+        }
+    }
+
+    pub(crate) fn program_status_process_exited(&self) {
+        if let Ok(mut engine) = self.engine.lock() {
+            engine.program_status_process_exited();
+        }
+    }
+
+    /// Swap in a test engine together with the sender it reports through.
+    #[cfg(test)]
+    pub(crate) fn replace_engine_for_test(
+        &mut self,
+        engine: Arc<Mutex<dyn crate::terminal::vt::VtEngine>>,
+    ) {
+        if let Some(sender) = engine.lock().unwrap().response_sender_for_test() {
+            self.input_tx = sender;
+        }
+        self.engine = engine;
+    }
+
     #[cfg(test)]
     pub(crate) fn mark_data_pending_for_test(&self) {
         self.data_pending.store(true, Ordering::Release);
@@ -1057,16 +1099,6 @@ impl Pane {
     /// input to the app there instead of scrolling scrollback.
     pub fn alt_screen(&self) -> bool {
         self.engine.lock().map(|e| e.alt_screen()).unwrap_or(false)
-    }
-
-    /// Whether the child enabled application cursor mode (DECCKM). When it has,
-    /// the key encoder sends SS3 (`ESC O` + letter) cursor-key codes so apps
-    /// like `less` that are strict about the mode recognize the keys.
-    pub fn application_cursor(&self) -> bool {
-        self.engine
-            .lock()
-            .map(|e| e.application_cursor())
-            .unwrap_or(false)
     }
 
     /// Input modes read together under one engine lock.

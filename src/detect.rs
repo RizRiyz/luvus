@@ -40,6 +40,10 @@ struct AgentIdent {
     distinct: Vec<String>,
     ambiguous: Vec<String>,
     binary_matcher: Option<fn(&str) -> bool>,
+    /// Adapter check for a wrapper that rewrites argv0. Returns the script
+    /// token's index in the lowercased argv. Cleared when a manifest replaces
+    /// the agent's identity.
+    argv_script: Option<crate::agent::cursor::ArgvScript>,
     interpreter_packages: Vec<String>,
     overlap_priority: u8,
 }
@@ -70,6 +74,7 @@ fn builtin_agents() -> Vec<AgentIdent> {
                 .map(|value| value.to_string())
                 .collect(),
             binary_matcher: agent.identity.binary_matcher,
+            argv_script: crate::agent::cursor::argv_script(agent.id),
             interpreter_packages: agent
                 .identity
                 .interpreter_packages
@@ -256,6 +261,16 @@ pub(crate) fn builtin_agent_in_argv(argv: &[String]) -> Option<String> {
     .agent_in_argv(argv)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static STATE_RULE_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn state_rule_evaluations_for_test() -> usize {
+    STATE_RULE_EVALUATIONS.with(std::cell::Cell::get)
+}
+
 impl Manifests {
     /// Just the compiled-in defaults (test helper; production uses `load`).
     #[cfg(test)]
@@ -301,6 +316,23 @@ impl Manifests {
         self.agents.iter().any(|a| a.name == low)
     }
 
+    /// True when `name` is any string Luvus uses to recognise an agent: the
+    /// canonical id, a distinct executable, or an ambiguous alias. A program
+    /// report can claim these without a process to back them up.
+    pub(crate) fn identifies_agent(&self, name: &str) -> bool {
+        self.agents.iter().any(|agent| {
+            agent.name.eq_ignore_ascii_case(name)
+                || agent
+                    .distinct
+                    .iter()
+                    .any(|pattern| pattern.eq_ignore_ascii_case(name))
+                || agent
+                    .ambiguous
+                    .iter()
+                    .any(|pattern| pattern.eq_ignore_ascii_case(name))
+        })
+    }
+
     fn best_agent(&self, matches: impl Fn(&AgentIdent) -> bool) -> Option<&AgentIdent> {
         self.agents
             .iter()
@@ -318,6 +350,8 @@ impl Manifests {
         regions: &Regions,
         skip_screen_blocked: bool,
     ) -> Option<RuleMatch> {
+        #[cfg(test)]
+        STATE_RULE_EVALUATIONS.with(|count| count.set(count.get() + 1));
         let mut best: Option<RuleMatch> = None;
         for r in &self.rules {
             if !(r.agent.is_empty() || r.agent == agent) {
@@ -1022,6 +1056,7 @@ impl ManifestFile {
                     distinct: Vec::new(),
                     ambiguous: Vec::new(),
                     binary_matcher: None,
+                    argv_script: None,
                     interpreter_packages: Vec::new(),
                     overlap_priority: 0,
                 });
@@ -1032,6 +1067,7 @@ impl ManifestFile {
             entry.distinct.clear();
             entry.ambiguous.clear();
             entry.binary_matcher = None;
+            entry.argv_script = None;
             entry.interpreter_packages.clear();
         }
         entry.distinct.extend(lc(&id.distinct));
@@ -1242,6 +1278,49 @@ fn is_claude_status_line(line: &str) -> bool {
     busy || done
 }
 
+/// Resolve identity independently of screen-state rules. A successful process
+/// scan is decisive; text is used only where process evidence is unavailable.
+pub(crate) fn identity(
+    title: Option<&str>,
+    bottom: &str,
+    base_command: &str,
+    known_agent: &str,
+    running: &[String],
+    manifests: &Manifests,
+) -> (String, &'static str) {
+    if running.is_empty() {
+        text_identity(
+            title,
+            &bottom.to_lowercase(),
+            base_command,
+            known_agent,
+            manifests,
+        )
+    } else {
+        manifests
+            .agent_in_processes(running)
+            .map(|agent| (agent, "process_tree"))
+            .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
+    }
+}
+
+fn text_identity(
+    title: Option<&str>,
+    lowercase_bottom: &str,
+    base_command: &str,
+    known_agent: &str,
+    manifests: &Manifests,
+) -> (String, &'static str) {
+    manifests
+        .detect_agent(title, lowercase_bottom, base_command)
+        .or_else(|| {
+            manifests
+                .is_agent(known_agent)
+                .then(|| (known_agent.to_string(), "prior_identity"))
+        })
+        .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
+}
+
 /// Classify a pane from its title, bottom-buffer text, whether it produced
 /// output recently, whether the user typed into it recently, and the active
 /// rule set. `base_command` is the spawned program, used as a fallback label.
@@ -1277,19 +1356,9 @@ pub(crate) fn classify_with_composer(
     // prompt box and a model label, so a repaint would otherwise resolve to the
     // bare shell and read its own redraw as work).
     let (agent, identity_source) = if running.is_empty() {
-        manifests
-            .detect_agent(title, &regions.screen, base_command)
-            .or_else(|| {
-                manifests
-                    .is_agent(known_agent)
-                    .then(|| (known_agent.to_string(), "prior_identity"))
-            })
-            .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
+        text_identity(title, &regions.screen, base_command, known_agent, manifests)
     } else {
-        manifests
-            .agent_in_processes(running)
-            .map(|agent| (agent, "process_tree"))
-            .unwrap_or_else(|| (base_command.to_string(), "command_fallback"))
+        identity(title, bottom, base_command, known_agent, running, manifests)
     };
 
     // A recognised agent is *working* only on positive evidence — a spinner or
@@ -1470,10 +1539,13 @@ impl Manifests {
         // is `node` / `python` and the real name is the script slot. Nothing
         // later counts -- `cargo test --example amp` must not resolve to amp.
         if is_interpreter(first) {
-            let i = interpreter_script_slot(rest)?;
-            return self.match_interpreter_script(&rest[i]);
+            if let Some(i) = interpreter_script_slot(rest) {
+                if let Some(name) = self.match_interpreter_script(&rest[i]) {
+                    return Some(name);
+                }
+            }
         }
-        None
+        self.match_argv_script(tokens).map(|(name, _slot)| name)
     }
 
     /// The launch flags an agent pane was started with: the argv tokens **after**
@@ -1501,6 +1573,21 @@ impl Manifests {
                     let t_low = rest[i].to_lowercase();
                     if self.match_interpreter_script(&t_low).as_deref() == Some(agent) {
                         return Some(rest[(i + 1)..].iter().map(|s| s.to_string()).collect());
+                    }
+                }
+            }
+            if self
+                .agents
+                .iter()
+                .any(|candidate| candidate.argv_script.is_some())
+            {
+                let argv_low: Vec<String> = std::iter::once(first_low.clone())
+                    .chain(rest.iter().map(|arg| arg.to_lowercase()))
+                    .collect();
+                if let Some((name, slot)) = self.match_argv_script(&argv_low) {
+                    if name == agent {
+                        let argv = std::iter::once(first).chain(rest.iter());
+                        return Some(argv.skip(slot + 1).map(|s| s.to_string()).collect());
                     }
                 }
             }
@@ -1609,6 +1696,17 @@ impl Manifests {
             })
     }
 
+    /// An adapter's full-argv predicate. The returned index is the script token.
+    fn match_argv_script(&self, argv: &[String]) -> Option<(String, usize)> {
+        let agent = self.best_agent(|agent| {
+            agent
+                .argv_script
+                .is_some_and(|matcher| matcher(argv).is_some())
+        })?;
+        let slot = (agent.argv_script?)(argv)?;
+        Some((agent.name.clone(), slot))
+    }
+
     /// The agent whose patterns name exactly this binary.
     fn match_binary(&self, base: &str) -> Option<String> {
         if let Some(agent) =
@@ -1678,6 +1776,31 @@ fn strip_script_extension(token: &str) -> &str {
         .or_else(|| token.strip_suffix(".js"))
         .or_else(|| token.strip_suffix(".py"))
         .unwrap_or(token)
+}
+
+/// Whether a process command line is an interactive shell. A pane whose scan
+/// finds only its shell root has no foreground job left.
+pub(crate) fn is_shell_command(command: &str) -> bool {
+    let Some(first) = Manifests::command_tokens(command).into_iter().next() else {
+        return false;
+    };
+    matches!(
+        binary_name(&first.to_lowercase()),
+        "sh" | "bash"
+            | "zsh"
+            | "dash"
+            | "ksh"
+            | "mksh"
+            | "fish"
+            | "tcsh"
+            | "csh"
+            | "nu"
+            | "elvish"
+            | "xonsh"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+    )
 }
 
 /// Runtimes that execute an agent as a script, so the name to look for is the
@@ -1778,6 +1901,85 @@ mod tests {
     use super::*;
     use crate::terminal::vt::alacritty::AlacrittyEngine;
     use crate::terminal::vt::VtEngine;
+
+    #[test]
+    fn agent_identity_strings_include_aliases_beyond_the_canonical_id() {
+        let manifests = Manifests::builtin();
+        for name in [
+            "claude",
+            "cursor-agent",
+            "kilocode",
+            "pi-coding-agent",
+            "opencode2",
+            "agy",
+            "letta-code",
+            "hermes-cli",
+        ] {
+            assert!(manifests.identifies_agent(name), "{name}");
+        }
+        for name in ["terraform", "zsh", "program", "cursoragent"] {
+            assert!(!manifests.identifies_agent(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn shell_commands_are_recognized_across_platform_forms() {
+        for command in [
+            "-zsh",
+            "/bin/bash --login",
+            "fish",
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#,
+            r"C:\Windows\System32\cmd.exe",
+        ] {
+            assert!(is_shell_command(command), "{command}");
+        }
+        for command in [
+            "",
+            "terraform apply",
+            "node /usr/lib/claude/cli.js",
+            "zshrc",
+        ] {
+            assert!(!is_shell_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn identity_resolution_never_evaluates_state_rules() {
+        let manifests = Manifests::builtin();
+        let before = state_rule_evaluations_for_test();
+        for (title, bottom, base, known, running) in [
+            (
+                None,
+                "do you want to proceed",
+                "zsh",
+                "",
+                vec!["pi".to_string()],
+            ),
+            (Some("Claude"), "esc to interrupt", "zsh", "", vec![]),
+            (None, "", "zsh", "pi", vec![]),
+            (None, "Claude", "zsh", "pi", vec!["zsh".to_string()]),
+        ] {
+            let resolved = identity(title, bottom, base, known, &running, &manifests);
+            let full = classify_with_composer(
+                title, bottom, false, false, base, known, &running, &manifests, None,
+            );
+            assert_eq!(resolved, (full.agent, full.identity_source));
+        }
+        assert_eq!(state_rule_evaluations_for_test() - before, 4);
+        let before = state_rule_evaluations_for_test();
+        assert_eq!(
+            identity(
+                None,
+                "do you want to proceed",
+                "zsh",
+                "",
+                &["pi".to_string()],
+                &manifests
+            ),
+            ("pi".to_string(), "process_tree")
+        );
+        assert_eq!(state_rule_evaluations_for_test(), before);
+    }
 
     fn state(bottom: &str, activity: bool, input: bool) -> State {
         classify(
@@ -2285,6 +2487,128 @@ Would you like to proceed?
             pi.state,
             State::Idle,
             "OMP's branded title contract must not change Pi state"
+        );
+    }
+
+    #[test]
+    fn cursor_agent_command_matches_only_the_install_script() {
+        let m = Manifests::builtin();
+        let unix = "agent --use-system-ca /Users/me/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js";
+        let live = "/Users/me/.local/bin/agent --use-system-ca /Users/me/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js --continue";
+        let windows = r#""C:\Users\Ada Lovelace\AppData\Local\cursor-agent\versions\2026.10.19-6bbf2c4\index.js""#;
+        assert_eq!(
+            m.agent_in_processes(&[unix.into()]),
+            Some("cursor".into()),
+            "the short agent command is Cursor when it execs the install script"
+        );
+        assert_eq!(
+            m.agent_in_processes(&[live.into()]),
+            Some("cursor".into()),
+            "ps records the launcher's full path as argv0"
+        );
+        assert_eq!(
+            m.launch_args_for(&[live.into()], "cursor"),
+            Some(vec!["--continue".into()])
+        );
+        assert_eq!(
+            m.agent_in_processes(&["/usr/sbin/distnoted agent".into()]),
+            None,
+            "a later argument named agent is not the launcher"
+        );
+        assert_eq!(
+            m.agent_in_processes(&[
+                "node --use-system-ca /Users/me/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js"
+                    .into()
+            ]),
+            Some("cursor".into()),
+            "Node running the same install script is Cursor"
+        );
+        assert_eq!(
+            m.agent_in_processes(&[
+                r#"node "C:\Users\Ada Lovelace\AppData\Local\cursor-agent\versions\2026.10.19-6bbf2c4\index.js""#
+                    .into()
+            ]),
+            Some("cursor".into())
+        );
+        assert_eq!(
+            m.agent_in_processes(&[format!("agent.cmd --use-system-ca {windows}")]),
+            Some("cursor".into())
+        );
+        assert_eq!(
+            m.launch_args_for(&[format!("{unix} --resume chat-1")], "cursor"),
+            Some(vec!["--resume".into(), "chat-1".into()]),
+            "launcher flags before the script are not user arguments"
+        );
+        assert_eq!(m.agent_in_processes(&["agent".into()]), None);
+        assert_eq!(m.agent_in_processes(&["agent --help".into()]), None);
+        assert_eq!(
+            m.agent_in_processes(&["agent /tmp/index.js".into()]),
+            None,
+            "another program named agent is not Cursor"
+        );
+        assert_eq!(
+            m.agent_in_processes(&[
+                "vim /Users/me/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js"
+                    .into()
+            ]),
+            None,
+            "opening the install script must not name the pane"
+        );
+        assert_eq!(
+            m.agent_in_processes(&[
+                "agent --use-system-ca /home/cursor-agent/.local/share/cursor-agent/versions/2026.10.19/index.js"
+                    .into()
+            ]),
+            Some("cursor".into()),
+            "an earlier cursor-agent directory must not hide the install"
+        );
+        assert_eq!(
+            m.agent_in_processes(&["node /work/cursor-agent/index.js".into()]),
+            None
+        );
+        assert_eq!(
+            m.agent_in_processes(&[
+                "node /work/cursor-agent/versions/2026.10.19-6bbf2c4/readme.md".into()
+            ]),
+            None
+        );
+
+        let incidental = classify(
+            Some("zsh"),
+            "start the agent\n",
+            true,
+            false,
+            "zsh",
+            "",
+            &["zsh".into()],
+            &m,
+        );
+        assert_eq!(incidental.agent, "zsh");
+    }
+
+    #[test]
+    fn cursor_identity_replace_disables_the_install_script() {
+        let mut m = Manifests::builtin();
+        toml::from_str::<ManifestFile>(
+            r#"
+            agent = "cursor"
+            [identity]
+            distinct = ["cursor-agent"]
+            replace = true
+        "#,
+        )
+        .unwrap()
+        .apply_identity(&mut m.agents);
+        assert_eq!(
+            m.agent_in_processes(&[
+                "agent --use-system-ca /Users/me/.local/share/cursor-agent/versions/2026.10.19-6bbf2c4/index.js"
+                    .into()
+            ]),
+            None
+        );
+        assert_eq!(
+            m.agent_in_processes(&["cursor-agent".into()]),
+            Some("cursor".into())
         );
     }
 

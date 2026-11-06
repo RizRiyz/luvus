@@ -39,6 +39,8 @@ pub enum AppEvent {
     Resize,
     /// The given pane produced output; the screen changed.
     PtyData(PaneId),
+    /// Coalesced terminal metadata wake, separate from PTY repaint rearming.
+    ProgramStatusChanged(PaneId),
     /// Deferred PTY spawn failed before a child result was available.
     PtyExit(PaneId),
     /// The PTY reader finished draining output (which can precede reaping).

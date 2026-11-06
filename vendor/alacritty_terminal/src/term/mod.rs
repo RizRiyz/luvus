@@ -1938,6 +1938,23 @@ impl<T: EventListener> Handler for Term<T> {
         self.colors[index] = None;
     }
 
+    /// Forward an OSC 7501 Program Status Protocol report to the host.
+    #[inline]
+    fn program_status(&mut self, body: &[u8], bell_terminated: bool) {
+        self.event_proxy
+            .send_event(Event::ProgramStatus(body.to_vec(), bell_terminated));
+    }
+
+    #[inline]
+    fn prompt_start(&mut self) {
+        self.event_proxy.send_event(Event::ProgramStatusPromptStart);
+    }
+
+    #[inline]
+    fn command_start(&mut self) {
+        self.event_proxy.send_event(Event::ProgramStatusCommandStart);
+    }
+
     /// Store data into clipboard.
     #[inline]
     fn clipboard_store(&mut self, clipboard: u8, base64: &[u8]) {
@@ -2092,6 +2109,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.mode.insert(TermMode::default());
 
         self.event_proxy.send_event(Event::CursorBlinkingChange);
+        self.event_proxy.send_event(Event::ProgramStatusReset);
         self.mark_fully_damaged();
     }
 
