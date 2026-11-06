@@ -2910,6 +2910,18 @@ impl App {
                 }
                 if self.config.layout.focus_follows_mouse
                     && self.mode == Mode::Normal
+                    && !self
+                        .commander
+                        .as_ref()
+                        .is_some_and(|commander| commander.focused)
+                    && !self.views.get(&self.layout().focus).is_some_and(|view| {
+                        let search = match view {
+                            ViewKind::File(view) => &view.search,
+                            ViewKind::Preview(view) => &view.search,
+                            ViewKind::Diff(view) => &view.search,
+                        };
+                        search.as_ref().is_some_and(|search| search.editing)
+                    })
                     && self.pane_search.is_none()
                     && self.copy_mode.is_none()
                     && self.selection.is_none()
@@ -9095,6 +9107,71 @@ mod link_click_tests {
         assert_eq!(app.layout().focus, second);
         assert!(!app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE)));
         assert_eq!(app.focus_history_back.last(), Some(&first));
+    }
+
+    #[test]
+    fn hover_focus_preserves_commander_input() {
+        let _env = crate::persist::test_env("hover-focus-commander");
+        let (mut app, first, second, at) = split_hover_fixture();
+        app.config.layout.focus_follows_mouse = true;
+        app.open_commander();
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+        app.commander.as_mut().unwrap().focused = false;
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, second);
+    }
+
+    #[test]
+    fn hover_focus_preserves_native_search_input() {
+        let _env = crate::persist::test_env("hover-focus-native-search");
+        let (mut app, first, second, at) = split_hover_fixture();
+        app.config.layout.focus_follows_mouse = true;
+        let path = std::path::PathBuf::from("sample.txt");
+        let diff_path = crate::diff::RepoPath::from_path(&path).unwrap();
+        let mut views = vec![
+            ViewKind::File(crate::files::FileView::new(path.clone())),
+            ViewKind::Preview(crate::files::preview::DocumentView::new(
+                path,
+                crate::files::preview::PreviewKind::Markdown,
+            )),
+            ViewKind::Diff(Box::new(crate::diff::DiffView::new(
+                std::path::PathBuf::from("/repo"),
+                crate::diff::DiffKey {
+                    repo_id: "repo".into(),
+                    worktree_id: "tree".into(),
+                    layer: crate::diff::DiffLayer::Worktree,
+                    old_path: Some(diff_path.clone()),
+                    new_path: Some(diff_path),
+                },
+                crate::diff::DiffLayoutPreference::Stack,
+                3,
+                false,
+                false,
+            ))),
+        ];
+        app.panes.remove(&first);
+        for mut view in views.drain(..) {
+            let search = match &mut view {
+                ViewKind::File(view) => &mut view.search,
+                ViewKind::Preview(view) => &mut view.search,
+                ViewKind::Diff(view) => &mut view.search,
+            };
+            *search = Some(crate::search::local::LocalSearch::editing());
+            app.views.insert(first, view);
+            app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+            assert_eq!(app.layout().focus, first);
+            app.handle_event(crate::event::AppEvent::Paste("needle".into()));
+            let search = match app.views.get(&first).unwrap() {
+                ViewKind::File(view) => &view.search,
+                ViewKind::Preview(view) => &view.search,
+                ViewKind::Diff(view) => &view.search,
+            };
+            assert_eq!(search.as_ref().unwrap().query, "needle");
+        }
+        app.views.remove(&first);
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, second);
     }
 
     #[test]
