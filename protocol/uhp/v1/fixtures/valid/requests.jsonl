@@ -55,3 +55,5 @@
 {"id":"pane-list-all-tabs","method":"pane.list","params":{"all_tabs":true}}
 {"id":"pane-list-current-tab","method":"pane.list","params":{"all_tabs":false}}
 {"id":"pane-list-default","method":"pane.list","params":{}}
+{"id":"transpose-pane","method":"pane.transpose","params":{"pane":"7","if_revision":41}}
+{"id":"transpose-current","method":"pane.transpose","params":{}}

@@ -233,6 +233,22 @@ mobile keyboards write to the actual PTY, so the running shell or agent still
 owns editing, history, cursor movement, and Tab completion. The compact control
 dock supplies keys that are awkward on touch keyboards.
 
+On touch devices, the compact input field beside the controls supports the
+browser's native long-press **Paste** menu. Hold the keyboard's Backspace key
+to delete continuously. Long-press terminal output itself to select and copy
+output; the input field does not replace the shell's own editing state.
+
+Expand the floating controls to use **Ctrl**, **Shift**, **Enter**, **Tab**,
+**Esc**, and the arrows. Ctrl and Shift are one-shot: tap either or both,
+then type a letter or tap a terminal key. For example, Ctrl then `a` moves to
+the start of a shell command, Shift then Tab sends Backtab, and Shift then
+Enter sends Shift+Enter (the configured newline sequence in legacy keyboard
+mode). Tap an armed modifier again to cancel it. Paste, committing IME input,
+closing the controls, and leaving the input clear modifiers; pasted text and
+non-ASCII IME input are never changed. Touch controls wrap into rows instead
+of hiding keys off-screen. Modifier buttons are disabled when the selected
+server does not advertise `modified_keys`.
+
 Useful editing shortcuts include:
 
 - Alt/Option+Backspace or Ctrl+Backspace: delete the previous word;

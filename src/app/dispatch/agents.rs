@@ -30,10 +30,7 @@ impl App {
                             continue;
                         };
                         // Only real agent sessions, not the shells behind tabs.
-                        if !(self.manifests.is_agent(&s.agent)
-                            || s.agent_session.is_some()
-                            || s.agent_report.is_some())
-                        {
+                        if !self.is_status_reporter_pane(id) {
                             continue;
                         }
                         let cwd = self
@@ -54,6 +51,8 @@ impl App {
                         let session = s.agent_session.as_ref().map(|a| a.session_id.clone());
                         arr.push(json!({
                             "pane": id.0.to_string(), "agent": s.agent,
+                            "display_agent":self.status_reporter_label(id),
+                            "is_agent":self.is_agent_pane(id),
                             "terminal_id": terminal_id,
                             "name": self.agent_name_for(id),
                             // Display text only; target panes by id or alias.
@@ -680,7 +679,7 @@ impl App {
             _ => "none",
         };
         let state_confidence = match status.state_source {
-            "integration_report" => "authoritative",
+            "integration_report" | "program_status" => "authoritative",
             "manifest_rule" => "high",
             "shell_activity" => "heuristic",
             _ => "none",
@@ -699,6 +698,24 @@ impl App {
                 "rule_region":status.rule_region,
                 "blocked_hint":status.blocked_hint,
             },
+            "program_status":status.program_status.as_ref().map(|store| {
+                store.records().map(|record| json!({
+                    "id":record.id,
+                    "state":match record.state {
+                        crate::terminal::program_status::ProgramState::Idle => "idle",
+                        crate::terminal::program_status::ProgramState::Working => "working",
+                        crate::terminal::program_status::ProgramState::Blocked => "blocked",
+                        crate::terminal::program_status::ProgramState::Done => "done",
+                        crate::terminal::program_status::ProgramState::Error => "error",
+                    },
+                    "kind":record.kind,
+                    "progress":record.progress,
+                    "app":record.app,
+                    "effective_app":store.inherited_app(record),
+                    "title":record.title,
+                    "message":record.message,
+                })).collect::<Vec<_>>()
+            }),
             "authority":report.map(|report| json!({
                 "source":report.source,
                 "sequence":report.sequence,
@@ -762,6 +779,34 @@ impl App {
                 || s.agent_session.is_some()
                 || s.agent_report.is_some()
         })
+    }
+
+    /// Read-only result visibility is separate from trusted live-agent identity.
+    /// A retained done/error record must not reject agent.start in an idle shell.
+    pub(crate) fn is_status_reporter_pane(&self, pane: PaneId) -> bool {
+        self.is_agent_pane(pane)
+            || self
+                .status
+                .get(&pane)
+                .and_then(|s| s.program_status.as_ref())
+                .is_some_and(|store| !store.is_empty())
+    }
+
+    pub(crate) fn status_reporter_label(&self, pane: PaneId) -> Option<&str> {
+        let s = self.status.get(&pane)?;
+        if self.is_agent_pane(pane) {
+            return Some(&s.agent);
+        }
+        // Any output can claim `app=claude` or `app=cursor-agent`. Only
+        // process or session evidence may put a known agent's name — id or
+        // alias — on a row that offers inline answers.
+        s.program_status
+            .as_ref()?
+            .effective_projection()
+            .map(|(_, app, _)| {
+                app.filter(|app| !self.manifests.identifies_agent(app))
+                    .unwrap_or("program")
+            })
     }
 
     /// Resolve an `agent.*` `target` param (a live alias or a numeric pane id) to a

@@ -41,9 +41,11 @@ resume flag; Luvus does not advertise resume, fork, precise hooks, or
 scheduled automation for Arc Studio. Arc Studio currently deploys to Arc
 testnet.
 
-- **Live status** (blocked/working/done/idle) needs no setup. luvus identifies
-  the agent from the processes running in the pane, then reads the pane's screen
-  to tell what state it is in.
+- **Live status** (blocked/working/done/idle) needs no setup. A program may
+  report authoritative status over OSC 7501, the terminal-native Program Status
+  Protocol. Luvus keeps bounded records for nested tasks, while process and
+  launch evidence still determines the agent identity. Programs without OSC
+  7501 support continue to use process and screen detection.
 - **Session resume** discovers the agent's latest session from its own on-disk
   store, keyed by the pane's folder, and runs the agent's resume command on
   restore.
@@ -137,6 +139,12 @@ testnet.
 Luvus resumes an exactly reported Hermes session with `hermes --resume <id>`.
 Hermes currently exposes branching only from inside its own TUI, so Luvus does
 not present **Fork to New Pane** for Hermes.
+
+Cursor's short command is `agent`. That process is recognized when its script
+is `cursor-agent/versions/<version>/index.js`, which is how the installed
+launcher execs Node. A different program named `agent` is left alone. Resume
+is the command `cursor-agent --resume <id>` when the session id is already
+known; Luvus does not scan Cursor's session store.
 
 Missing your agent? You can add it yourself without waiting for a release: drop
 an `[identity]` block in `~/.luvus/manifests/<agent>.toml` and luvus will

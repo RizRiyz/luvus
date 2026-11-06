@@ -113,12 +113,25 @@ export class WebApp {
     document.addEventListener("keydown", (event) => {
       const dialog = this.#devicePanelOpen ? this.#overlays.querySelector<HTMLElement>(".device-panel")
         : !this.#terminal && this.#dashboardNavigationOpen ? this.#dashboardNavigation : undefined;
-      if (!dialog) return;
+      if (!dialog) {
+        if (event.key === "Escape" && this.#sessionPanelOpen) {
+          event.preventDefault();
+          this.#closeSessionPanel(true);
+        }
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         if (this.#devicePanelOpen) this.#closeDevicePanel();
         else this.#closeDashboardNavigation(true);
       } else trapNavigationFocus(event, dialog);
+    });
+    document.addEventListener("click", (event) => {
+      if (!this.#sessionPanelOpen) return;
+      // Opening the menu can replace its trigger during this same click.
+      // Use the original event path, not containment in the freshly drawn DOM.
+      if (event.composedPath().some((node) => node instanceof HTMLElement && node.classList.contains("hero-session-wrap"))) return;
+      this.#closeSessionPanel();
     });
     // Hold live redraws while a pointer is pressed, so the pressed element
     // is still there when it is released and the click is delivered.
@@ -351,9 +364,11 @@ export class WebApp {
     });
     const savePublicUrl = button("Save address", "ghost device-url-save", () => void this.#setPublicUrl(publicUrl.value));
     savePublicUrl.disabled = this.#deviceLoading || !status;
-    const disconnectButton = button("Disconnect this browser", "ghost device-disconnect", () => void this.#disconnectBrowser());
+    const disconnectButton = button("Disconnect", "device-disconnect", () => void this.#disconnectBrowser());
+    disconnectButton.setAttribute("aria-label", "Disconnect this browser");
+    disconnectButton.prepend(missionIcon("disconnect"));
     disconnectButton.disabled = this.#deviceLoading || !status;
-    const panel = element("section", { className: "device-panel", attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "device-title" } },
+    const panel = element("section", { className: "device-panel", attrs: { role: "dialog", "aria-modal": "true", "aria-labelledby": "device-title", "data-scroll-key": "device-panel" } },
       element("div", { className: "device-panel-head" },
         element("div", {},
           element("p", { className: "eyebrow", text: "BROWSER ACCESS" }),
@@ -382,7 +397,13 @@ export class WebApp {
           : "Access lasts until the bridge stops or this browser is revoked. ")
         + "Pairing links expire after five minutes." }),
       this.#pairingUrl ? this.#pairingCard(this.#pairingUrl) : pairButton,
-      disconnectButton,
+      element("footer", { className: "device-browser-access" },
+        element("div", { className: "device-browser-info" },
+          element("strong", { text: "This browser" }),
+          element("span", { text: "Paired across all tabs" }),
+        ),
+        disconnectButton,
+      ),
     );
     const overlay = element("div", {
       className: "device-overlay",
@@ -550,9 +571,10 @@ export class WebApp {
     void this.#refreshSessions();
   }
 
-  #closeSessionPanel(): void {
+  #closeSessionPanel(restoreFocus = false): void {
     this.#sessionPanelOpen = false;
     this.#render();
+    if (restoreFocus) this.root.querySelector<HTMLButtonElement>(".hero-session")?.focus({ preventScroll: true });
   }
 
   async #refreshSessions(): Promise<void> {
@@ -597,7 +619,7 @@ export class WebApp {
     return element("div", { className: "session-menu", attrs: { role: "dialog", "aria-label": "Switch Luvus session" } },
       element("div", { className: "session-menu-head" },
         element("strong", { text: "Switch session" }),
-        button("Close", "session-menu-close", () => this.#closeSessionPanel()),
+        button("Close", "session-menu-close", () => this.#closeSessionPanel(true)),
       ),
       this.#sessionLoading || !this.#sessions
         ? element("p", { className: "session-menu-empty", text: "Loading sessions…" })
@@ -750,6 +772,7 @@ export class WebApp {
       canUploadFiles,
       streamCursor,
       viewportSizing,
+      this.#session.capabilities?.terminal?.features?.includes("modified_keys") ?? false,
       () => this.#terminalPaneOptions(),
       (selectedPane) => {
         const currentSnapshot = this.#session.snapshot;
@@ -831,7 +854,7 @@ function asBrowserSessions(value: unknown): BrowserSession[] {
   });
 }
 
-type MissionIconName = "overview" | "workspaces" | "devices" | "status" | "arrow";
+type MissionIconName = "overview" | "workspaces" | "devices" | "status" | "arrow" | "disconnect";
 type MissionNavIconName = MissionIconName | "luvus";
 
 function missionNavButton(label: string, icon: MissionNavIconName, onClick: () => void, active = false, disabled = false): HTMLButtonElement {
@@ -859,6 +882,7 @@ function missionIcon(name: MissionIconName): SVGSVGElement {
     devices: ["M8 2h8a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z", "M10 18h4"],
     status: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z", "m8 12 2.5 2.5L16 9"],
     arrow: ["M5 12h14m-5-5 5 5-5 5"],
+    disconnect: ["M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4", "m16 17 5-5-5-5", "M21 12H9"],
   };
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "mission-icon");

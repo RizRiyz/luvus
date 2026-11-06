@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -72,9 +72,11 @@ try {
   await foreground(restarted);
   await evaluate(restarted.sessionId, "document.querySelector('[aria-label=Devices]').click()");
   await until(() => evaluate(restarted.sessionId, "!!document.querySelector('.device-pair:not(:disabled)')"));
+  await checkDeviceFooter(restarted, false);
   await evaluate(restarted.sessionId, "document.querySelector('.device-pair').click()");
   await until(() => evaluate(restarted.sessionId, "!!document.querySelector('.pairing-link')?.value"));
   const phoneLink = await evaluate(restarted.sessionId, "document.querySelector('.pairing-link').value");
+  await checkDeviceFooter(restarted, true);
   const { browserContextId } = await cdp.call("Target.createBrowserContext");
   const phone = await page(phoneLink, browserContextId);
   await ready(phone);
@@ -84,7 +86,8 @@ try {
   // frames. Activate the tab before checking its newly painted device count.
   await foreground(restarted);
   await until(() => evaluate(restarted.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('2 authorized') && !!document.querySelector('.device-disconnect:not(:disabled)')"));
-  assert.equal(await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect')?.textContent"), "Disconnect this browser");
+  assert.equal(await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect')?.textContent"), "Disconnect");
+  assert.equal(await evaluate(restarted.sessionId, "document.querySelector('.device-disconnect')?.getAttribute('aria-label')"), "Disconnect this browser");
   await cdp.call("Network.enable", {}, restarted.sessionId);
   let forgetRequests = 0;
   cdp.events.on("Network.webSocketFrameSent", (event) => {
@@ -120,7 +123,7 @@ try {
   await ready(phone);
   await until(() => evaluate(phone.sessionId, "document.querySelector('.device-copy')?.textContent?.startsWith('1 authorized')"));
   assert.equal(exceptions.length, 0, `Unexpected browser exceptions: ${exceptions.length}`);
-  console.log("real Chromium browser passed: one QR/code pairing across eight tabs, close/reopen tabs, browser restart, separate profile, disconnect cancellation, and cross-tab revocation");
+  console.log("real Chromium browser passed: one QR/code pairing across eight tabs, close/reopen tabs, browser restart, separate profile, desktop/mobile device footer, disconnect cancellation, and cross-tab revocation");
 } finally {
   await closeBrowser().catch(() => browser?.kill("SIGKILL"));
   if (bridge?.exitCode === null) { bridge.kill("SIGINT"); await exited(bridge).catch(() => bridge.kill("SIGKILL")); }
@@ -128,6 +131,62 @@ try {
     spawnSync(executable, args, { cwd: workspace, env, stdio: "ignore", timeout: 20_000, windowsHide: true });
   }
   await rm(home, { recursive: true, force: true });
+}
+
+async function checkDeviceFooter(page, pairingOpen) {
+  try {
+    for (const [width, height, mobile] of [[1440, 900, false], [390, 844, true], [320, 568, true]]) {
+      await cdp.call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile }, page.sessionId);
+      await until(() => evaluate(page.sessionId, `innerWidth === ${width} && innerHeight === ${height}`));
+      await evaluate(page.sessionId, "document.querySelector('.device-browser-access').scrollIntoView({block: 'nearest'})");
+      await evaluate(page.sessionId, "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+      if (pairingOpen && mobile) {
+        // Saving the unchanged limit causes a real live redraw without changing
+        // authority. A scrolled QR panel must retain access to its footer.
+        const before = await evaluate(page.sessionId, `(() => {
+          const panel = document.querySelector('.device-panel');
+          panel.setAttribute('data-qa-before-refresh', '');
+          const scroll = panel.scrollTop;
+          document.querySelector('.device-limit').dispatchEvent(new Event('change', {bubbles: true}));
+          return scroll;
+        })()`);
+        assert.ok(before > 0, "short mobile QR panel needs scrolling");
+        await until(() => evaluate(page.sessionId, "!!document.querySelector('.device-disconnect:not(:disabled)') && !document.querySelector('.device-panel')?.hasAttribute('data-qa-before-refresh')"));
+        assert.equal(await evaluate(page.sessionId, "document.querySelector('.device-panel').scrollTop"), before, "live redraw preserves the device panel scroll position");
+      }
+      const geometry = await evaluate(page.sessionId, `(() => {
+        const panel = document.querySelector('.device-panel').getBoundingClientRect();
+        const footer = document.querySelector('.device-browser-access').getBoundingClientRect();
+        const info = document.querySelector('.device-browser-info').getBoundingClientRect();
+        const button = document.querySelector('.device-disconnect');
+        const control = button.getBoundingClientRect();
+        const previous = document.querySelector('${pairingOpen ? ".pairing-card" : ".device-pair"}').getBoundingClientRect();
+        return {
+          panelFits: panel.top >= 0 && panel.bottom <= innerHeight + 1,
+          footerFits: footer.left >= panel.left && footer.right <= panel.right && footer.bottom <= panel.bottom,
+          separated: footer.top - previous.bottom,
+          buttonHeight: control.height,
+          infoGap: control.left - info.right,
+          clickable: button.contains(document.elementFromPoint(control.left + control.width / 2, control.top + control.height / 2)),
+          panel: {top: panel.top, bottom: panel.bottom, left: panel.left, right: panel.right},
+          clip: {x: footer.left, y: footer.top, width: footer.width, height: footer.height, scale: 1},
+        };
+      })()`);
+      assert.equal(geometry.panelFits, true, `device panel fits ${width}×${height}`);
+      assert.equal(geometry.footerFits, true, `browser access stays inside the device panel at ${width}×${height}: ${JSON.stringify({ panel: geometry.panel, footer: geometry.clip })}`);
+      assert.ok(geometry.separated >= 16, "disconnect footer is separated from pairing actions");
+      assert.ok(geometry.buttonHeight >= 44, "disconnect retains a touch-sized target");
+      assert.ok(geometry.infoGap >= 12, "browser label and disconnect button do not overlap");
+      assert.equal(geometry.clickable, true, "disconnect remains reachable on short mobile screens");
+      if (screenshots) {
+        // Capture only the footer, never an unspent pairing URL or QR code.
+        const result = await cdp.call("Page.captureScreenshot", { format: "png", clip: geometry.clip, captureBeyondViewport: false }, page.sessionId);
+        await writeFile(path.join(screenshots, `device-footer-${pairingOpen ? "pairing" : "idle"}-${width}.png`), Buffer.from(result.data, "base64"));
+      }
+    }
+  } finally {
+    await cdp.call("Emulation.clearDeviceMetricsOverride", {}, page.sessionId);
+  }
 }
 
 async function launchBrowser() {

@@ -207,7 +207,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .toast.success { color: #e6ffdf; background: #243b27; border-color: #9ed68a66; }
 
 .device-overlay { position: fixed; z-index: 25; inset: 0; display: grid; place-items: end center; padding: 1rem; background: #090a10aa; backdrop-filter: blur(10px); }
-.device-panel { width: min(32rem, 100%); padding: 1.2rem; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 1.25rem; box-shadow: 0 1.5rem 5rem #000a; }
+.device-panel { width: min(32rem, 100%); max-height: calc(100dvh - 2rem); overflow-y: auto; overscroll-behavior: contain; padding: 1.2rem; background: var(--panel-raised); border: 1px solid var(--line); border-radius: 1.25rem; box-shadow: 0 1.5rem 5rem #000a; }
 .device-panel-head { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
 .device-panel h2 { margin: .25rem 0 0; font-size: 1.25rem; }
 .device-close { padding: .35rem .45rem; color: var(--muted); background: transparent; border: 0; cursor: pointer; }
@@ -223,6 +223,14 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .device-help { margin: .65rem 0 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
 .device-help + .device-help { margin-bottom: 1rem; }
 .device-pair { width: 100%; }
+.device-browser-access { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-top: 1.1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.device-browser-info { display: grid; gap: .25rem; min-width: 0; }
+.device-browser-info strong { color: #e2dfeb; font-size: .85rem; font-weight: 600; }
+.device-browser-info span { color: var(--muted); font-size: .75rem; }
+.device-disconnect { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: .45rem; min-height: 2.75rem; padding: .55rem .8rem; color: var(--red); background: #ed8f9e08; border: 1px solid #ed8f9e33; border-radius: .65rem; font-size: .82rem; font-weight: 600; cursor: pointer; }
+.device-disconnect .mission-icon { width: 1rem; height: 1rem; }
+.device-disconnect:hover:not(:disabled) { background: #ed8f9e14; border-color: #ed8f9e66; }
+.device-disconnect:focus-visible { outline: 2px solid var(--red); outline-offset: 3px; }
 .pairing-card { padding: .9rem; background: #11121988; border: 1px solid #ead77855; border-radius: .8rem; }
 .pairing-card strong, .pairing-card p { display: block; }
 .pairing-card p { margin: .35rem 0 .7rem; color: var(--muted); font-size: .82rem; }
@@ -391,6 +399,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .terminal-tool { display: grid; flex: 0 0 auto; place-items: center; min-width: 2.1rem; height: 2.1rem; padding: 0 .5rem; color: #c2c0cc; background: transparent; border: 0; border-radius: 999px; font: .68rem ui-monospace, monospace; cursor: pointer; }
 .terminal-tool:hover, .terminal-tool:focus-visible { color: #f4f1ff; background: #ffffff0d; outline: none; }
 .terminal-tool:active { color: var(--accent-ink); background: var(--accent); }
+.terminal-tool[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent); }
 .terminal-tool:disabled { cursor: not-allowed; opacity: .38; }
 .keyboard-toggle { color: var(--accent); font-family: inherit; font-size: .9rem; }
 .attach-file { color: var(--accent); font-family: inherit; font-size: 1.2rem; font-weight: 600; }
@@ -403,6 +412,26 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .terminal-input-proxy {
   position: fixed; right: 0; bottom: 0; width: 1px; height: 1px; padding: 0;
   overflow: hidden; opacity: 0; border: 0; outline: 0; resize: none; pointer-events: none;
+}
+.terminal-input-surface { flex: 0 0 0; width: 0; }
+.terminal-input-placeholder { display: none; }
+
+@media (pointer: coarse) {
+  .terminal-output { padding-bottom: calc(var(--terminal-circle-size) + 1.5rem); }
+  .controls-expanded .terminal-output { padding-bottom: calc(3 * var(--terminal-circle-size) + 2rem); }
+  .terminal-controls-wrap { flex-wrap: wrap; gap: .5rem; padding-left: max(1rem, env(safe-area-inset-left)); }
+  .terminal-input-surface { position: relative; flex: 1 1 0; min-width: 0; pointer-events: auto; }
+  .controls-expanded .terminal-input-surface { flex-basis: 100%; }
+  .controls-expanded .terminal-controls { width: 100%; align-items: flex-start; gap: .25rem; border-radius: 1rem; }
+  .controls-expanded .terminal-tools { flex: 1 1 auto; display: grid; grid-template-columns: repeat(auto-fit, minmax(44px, 1fr)); max-width: none; overflow: visible; }
+  .terminal-tools .terminal-tool { min-width: 44px; min-height: 44px; padding-inline: .25rem; touch-action: manipulation; }
+  .terminal-input-proxy { position: static; display: block; width: 100%; height: var(--terminal-circle-size); padding: .85rem .8rem; opacity: 1; color: #d9d7e7; background: #1b1c24e8; border: 1px solid var(--rally-border); border-radius: .85rem; font: 16px/1.3 ui-monospace, monospace; caret-color: var(--accent); pointer-events: auto; -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+  .terminal-input-proxy:focus { border-color: var(--rally-border-focus); }
+  .terminal-input-proxy[data-empty="true"] + .terminal-input-placeholder { display: block; position: absolute; top: 50%; left: .8rem; right: .8rem; overflow: hidden; color: var(--muted); font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; transform: translateY(-50%); }
+}
+
+@media (pointer: coarse) and (max-width: 360px) {
+  .controls-expanded .terminal-output { padding-bottom: calc(4 * var(--terminal-circle-size) + 2rem); }
 }
 
 @media (min-width: 1024px) {
@@ -506,7 +535,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   .pane-grid { grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr)); }
   .terminal-screen::before { display: none; }
   .terminal-header { width: calc(100% - 1.8rem); gap: .45rem; }
-  .terminal-output { padding: 4.8rem .8rem 1.25rem; font-size: .9rem; line-height: 1.6; }
+  .terminal-output { padding-top: 4.8rem; padding-inline: .8rem; font-size: .9rem; line-height: 1.6; }
   .terminal-controls-wrap { bottom: max(.55rem, env(safe-area-inset-bottom)); padding-right: max(.9rem, env(safe-area-inset-right)); }
   .terminal-tools { gap: .05rem; }
   .terminal-tool { min-width: 2.35rem; height: 2.35rem; padding-inline: .5rem; font-size: .82rem; }

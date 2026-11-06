@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "private": true,
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.23.4"
   },
   "scripts": {
     "brand": "node scripts/make-brand-assets.mjs && node scripts/make-og.mjs",
@@ -16,6 +16,7 @@
     "preview": "astro preview"
   },
   "dependencies": {
+    "@astrojs/markdown-remark": "^7.3.4",
     "@astrojs/starlight": "^0.41.10",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",

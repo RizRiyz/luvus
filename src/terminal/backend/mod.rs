@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 
 use crate::terminal::vt::VtEngine;
 
+mod keys;
+pub(crate) use keys::control_key;
+
 pub const PROTOCOL_NAME: &str = "luvus-uhp";
 pub const PROTOCOL_MAJOR: u64 = 1;
 pub const PROTOCOL_MINOR: u64 = 0;
@@ -83,7 +86,7 @@ pub fn advertised_capabilities() -> Vec<&'static str> {
         .collect()
 }
 
-pub const FEATURES: &[&str] = &["stream_cursor", "create_restore_policy"];
+pub const FEATURES: &[&str] = &["stream_cursor", "create_restore_policy", "modified_keys"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureMode {

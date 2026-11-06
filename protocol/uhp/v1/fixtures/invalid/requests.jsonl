@@ -42,3 +42,6 @@
 {"id":"bad-task-retry-missing-id","method":"task.retry","params":{}}
 {"id":"bad-task-retry-extra","method":"task.retry","params":{"id":"t1","extra":true}}
 {"id":"bad-worktree-remove-force","method":"worktree.remove","params":{"path":"/workspace/topic","force":"yes"}}
+{"id":"transpose-extra","method":"pane.transpose","params":{"pane":"7","all":true}}
+{"id":"transpose-bool","method":"pane.transpose","params":{"pane":true}}
+{"id":"transpose-out-of-range-pane","method":"pane.transpose","params":{"pane":"4294967296"}}

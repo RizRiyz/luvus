@@ -1499,6 +1499,17 @@ static HELP: &[Translation] = &[
         "패널 분할 (기본값: 크기에 따라 자동 분할, 비어 있으면 작업 공간 생성)"
     ),
     tr!(
+        "transpose the nearest split without changing focus",
+        "transponer la división más cercana sin cambiar el foco",
+        "transpor a divisão mais próxima sem mudar o foco",
+        "transposer la division la plus proche sans changer le focus",
+        "nächste Teilung umkehren, ohne den Fokus zu ändern",
+        "transpose pembagian terdekat tanpa mengubah fokus",
+        "互换最近的分屏方向，不改变焦点",
+        "フォーカスを変えずに最も近い分割方向を入れ替え",
+        "포커스를 바꾸지 않고 가장 가까운 분할 방향 바꾸기"
+    ),
+    tr!(
         "focus a pane (jumps to its workspace/tab)",
         "enfocar un panel (salta a su espacio/pestaña)",
         "focar um painel (vai para seu espaço/aba)",

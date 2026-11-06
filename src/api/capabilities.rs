@@ -54,6 +54,7 @@ pub const METHODS: &[&str] = &[
     "pane.split",
     "pane.move",
     "pane.swap",
+    "pane.transpose",
     "pane.focus",
     "pane.focus_direction",
     "pane.resize",
@@ -421,7 +422,7 @@ pub fn capabilities(event_sequence: u64) -> Value {
         },
         "identity":{"workspace":"stable","tab":"stable","terminal":"pty_lifetime"},
         "events":{"resume":"after_sequence","loss":"resync_required"},
-        "agent_authorities":["integration_report","process_tree","launch_command","osc_title","screen_text","prior_identity","command_fallback"],
+        "agent_authorities":["integration_report","program_status","process_tree","launch_command","osc_title","screen_text","prior_identity","command_fallback"],
         "agent_states":["idle","working","blocked","done"],
         "terminal":{
             "capabilities":crate::terminal::backend::advertised_capabilities(),
@@ -491,7 +492,7 @@ mod tests {
         assert_eq!(capabilities["limits"]["agent_row_title_agent_bytes"], 64);
         assert_eq!(
             capabilities["terminal"]["features"],
-            json!(["stream_cursor", "create_restore_policy"])
+            json!(["stream_cursor", "create_restore_policy", "modified_keys"])
         );
         let terminal_capabilities = capabilities["terminal"]["capabilities"]
             .as_array()

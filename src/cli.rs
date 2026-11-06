@@ -146,6 +146,7 @@ panes / agents:
   pane list [--all-tabs]     list panes across every workspace and tab
   pane list --current-tab    list panes and read-only history metrics in the current tab
   pane split [<id>] [--auto|--right|--down] [--no-focus] [--cwd <path>]   split a pane (default: auto by size, creates a workspace if empty)
+  pane transpose [<id>]     transpose the nearest split without changing focus
   pane focus <id>            focus a pane (jumps to its workspace/tab)
   pane move [<id>] (--tab <n> | --new-tab)  move a pane within its workspace
   pane run [<id>] <cmd...>   run a command in a pane
@@ -3429,6 +3430,12 @@ fn parse(args: &[String]) -> Result<(String, Value)> {
             }
             ("pane.split".into(), with_pane(obj))
         }
+        ("pane", "transpose") => {
+            if rest.len() > 1 || rest.first().is_some_and(|id| id.parse::<u32>().is_err()) {
+                return Err(anyhow!("usage: luvus pane transpose [<id>]"));
+            }
+            ("pane.transpose".into(), with_pane(serde_json::Map::new()))
+        }
         ("pane", "focus") => ("pane.focus".into(), with_pane(serde_json::Map::new())),
         ("pane", "move") => {
             let usage = "usage: luvus pane move [<id>] (--tab <n> | --new-tab)";
@@ -5242,6 +5249,28 @@ mod tests {
             parse(&argv(&long)).is_err(),
             "41-character name is rejected"
         );
+    }
+
+    #[test]
+    fn transpose_parser_and_focused_help() {
+        let (method, params) = parse(&argv("luvus pane transpose 7")).unwrap();
+        assert_eq!(method, "pane.transpose");
+        assert_eq!(params, json!({"pane":"7"}));
+        assert_eq!(
+            parse(&argv("luvus pane transpose")).unwrap().0,
+            "pane.transpose"
+        );
+        for command in [
+            "luvus pane transpose 7 8",
+            "luvus pane transpose --right",
+            "luvus pane transpose bad",
+            "luvus pane transpose -1",
+        ] {
+            assert!(parse(&argv(command)).is_err(), "{command}");
+        }
+        let help = rendered_topic_help("pane", Some("transpose"));
+        assert!(help.contains("pane transpose [<id>]"));
+        assert!(!help.contains("pane split"));
     }
 
     #[test]
