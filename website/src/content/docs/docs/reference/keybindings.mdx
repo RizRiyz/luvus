@@ -14,7 +14,7 @@ or apply a preset in **Settings → Keys**.
 | `←↓↑→` | preview panes and an already-open Commander; arrows move, `Enter` focuses, `Esc` cancels | `c` | new tab |
 | `hjkl` | focus one pane immediately | | |
 | `;` | next pane (cycle) | `n` / `p` / `⇥` | cycle tabs |
-| `[` / `]` | focus history back / forward | `.` / `>` | next blocked / done agent |
+| `[` / `]` | focus history back / forward | `.` / `'` / `>` | next blocked / running / done agent |
 | `,` | rename tab | `v` / `s` / `+` | split right / down / auto |
 | `x` | close pane | `N` | new workspace (folder picker) |
 | `z` | zoom pane | `D` | close workspace |
@@ -69,8 +69,10 @@ and workspaces. `Ctrl+Space [` walks backward through previously focused panes;
 `Ctrl+Space ]` walks forward again. A new ordinary focus change after going back
 starts a new branch and clears the forward history. Closed panes are skipped.
 
-Agent navigation is separate: `Ctrl+Space .` cycles through Blocked agents and
-`Ctrl+Space >` cycles through Done agents.
+Agent navigation is separate: `Ctrl+Space .` cycles through Blocked panes,
+`Ctrl+Space '` cycles through Working panes, and `Ctrl+Space >` cycles through
+Done panes. These shortcuts include detected agents and panes with program
+status reports. Plain shell panes without either are not included.
 
 `Ctrl+Space Enter` toggles [Commander](/docs/guides/commander/), a
 bottom composer for prompting an exact agent pane or sending a command to an

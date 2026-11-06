@@ -95,6 +95,7 @@ pub enum Cmd {
     FocusBack,
     FocusForward,
     NextAttention,
+    NextWorkingAgent,
     NextDoneAgent,
     SplitRight,
     SplitDown,
@@ -148,6 +149,7 @@ impl Cmd {
         Cmd::FocusBack,
         Cmd::FocusForward,
         Cmd::NextAttention,
+        Cmd::NextWorkingAgent,
         Cmd::NextDoneAgent,
         Cmd::SplitRight,
         Cmd::SplitDown,
@@ -205,6 +207,7 @@ impl Cmd {
             Cmd::FocusBack => "focus_back",
             Cmd::FocusForward => "focus_forward",
             Cmd::NextAttention => "next_attention",
+            Cmd::NextWorkingAgent => "next_working_agent",
             Cmd::NextDoneAgent => "next_done_agent",
             Cmd::SplitRight => "split_right",
             Cmd::SplitDown => "split_down",
@@ -267,6 +270,7 @@ impl Cmd {
             Cmd::FocusBack => cat.cmd_focus_back,
             Cmd::FocusForward => cat.cmd_focus_forward,
             Cmd::NextAttention => cat.cmd_next_attention,
+            Cmd::NextWorkingAgent => cat.cmd_next_working_agent,
             Cmd::NextDoneAgent => cat.cmd_next_done_agent,
             Cmd::SplitRight => cat.cmd_split_right,
             Cmd::SplitDown => cat.cmd_split_down,
@@ -318,6 +322,7 @@ impl Cmd {
             | Cmd::FocusBack
             | Cmd::FocusForward
             | Cmd::NextAttention
+            | Cmd::NextWorkingAgent
             | Cmd::NextDoneAgent
             | Cmd::SplitRight
             | Cmd::SplitDown
@@ -365,6 +370,7 @@ impl Cmd {
             Cmd::FocusBack => "[",
             Cmd::FocusForward => "]",
             Cmd::NextAttention => ".",
+            Cmd::NextWorkingAgent => "'",
             Cmd::NextDoneAgent => ">",
             Cmd::SplitRight => "v",
             Cmd::SplitDown => "s",
@@ -971,6 +977,7 @@ impl App {
             Cmd::FocusBack => self.focus_history_back(),
             Cmd::FocusForward => self.focus_history_forward(),
             Cmd::NextAttention => self.focus_next_attention(),
+            Cmd::NextWorkingAgent => self.focus_next_working_agent(),
             Cmd::NextDoneAgent => self.focus_next_done_agent(),
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
@@ -1098,6 +1105,14 @@ impl App {
         );
     }
 
+    /// Jump to the next agent that is currently working.
+    pub fn focus_next_working_agent(&mut self) {
+        self.focus_next_agent_in_state(
+            crate::ui::theme::State::Working,
+            self.catalog.no_agents_working,
+        );
+    }
+
     /// Jump to the next agent that finished while unfocused.
     pub fn focus_next_done_agent(&mut self) {
         self.focus_next_agent_in_state(crate::ui::theme::State::Done, self.catalog.no_agents_done);
@@ -1126,6 +1141,7 @@ mod tests {
         assert_eq!(m.get("["), Some(&Cmd::FocusBack));
         assert_eq!(m.get("]"), Some(&Cmd::FocusForward));
         assert_eq!(m.get("."), Some(&Cmd::NextAttention));
+        assert_eq!(m.get("'"), Some(&Cmd::NextWorkingAgent));
         assert_eq!(m.get(">"), Some(&Cmd::NextDoneAgent));
         assert_eq!(m.get("M"), Some(&Cmd::Switcher));
         assert_eq!(m.get("w"), Some(&Cmd::FocusWorkspaces));
@@ -2041,6 +2057,75 @@ mod tests {
             app.layout().focus,
             first,
             "new navigation clears forward history"
+        );
+    }
+
+    #[test]
+    fn next_working_agent_cycles_only_running_agents() {
+        let _env = crate::persist::test_env("next-working-agent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(Cmd::SplitRight);
+        app.run_cmd(Cmd::SplitDown);
+        let ids = app.layout().leaves();
+        assert_eq!(ids.len(), 3, "splits gave three panes");
+        for (index, id) in ids.iter().enumerate() {
+            let mut status = PaneStatus::new("claude".to_string());
+            status.state = if index == 1 {
+                crate::ui::theme::State::Done
+            } else {
+                crate::ui::theme::State::Working
+            };
+            app.status.insert(*id, status);
+        }
+
+        let origin = app.layout().focus;
+        app.run_cmd(Cmd::NextWorkingAgent);
+        let running = app.layout().focus;
+        assert_ne!(running, origin);
+        assert_ne!(running, ids[1], "done agents are not running panes");
+        app.run_cmd(Cmd::FocusBack);
+        assert_eq!(app.layout().focus, origin);
+
+        for id in ids {
+            app.status.get_mut(&id).unwrap().state = crate::ui::theme::State::Blocked;
+        }
+        let before = app.layout().focus;
+        app.focus_next_working_agent();
+        assert_eq!(app.layout().focus, before, "blocked agents are not running");
+    }
+
+    #[test]
+    fn next_working_agent_includes_program_status_but_skips_plain_panes() {
+        use crate::terminal::program_status::{parse_report, ProgramStatusStore};
+
+        let _env = crate::persist::test_env("next-working-program-status");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let plain = app.layout().focus;
+        app.run_cmd(Cmd::SplitRight);
+        let reporter = app.layout().focus;
+        for id in [plain, reporter] {
+            let mut status = PaneStatus::new("sh".to_string());
+            status.state = crate::ui::theme::State::Working;
+            app.status.insert(id, status);
+            assert!(!app.is_agent_pane(id));
+        }
+        let mut store = ProgramStatusStore::default();
+        store.apply(parse_report(b"state=working:app=build").unwrap());
+        app.status.get_mut(&reporter).unwrap().program_status = Some(store);
+        assert!(app.is_status_reporter_pane(reporter));
+        assert!(app.status[&plain].program_status.is_none());
+        assert!(!app.is_status_reporter_pane(plain));
+        app.focus_pane_global(plain);
+
+        app.run_cmd(Cmd::NextWorkingAgent);
+        assert_eq!(app.layout().focus, reporter, "working program is included");
+        app.run_cmd(Cmd::NextWorkingAgent);
+        assert_eq!(
+            app.layout().focus,
+            reporter,
+            "plain pane is skipped on wrap"
         );
     }
 
