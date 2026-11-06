@@ -14,7 +14,7 @@ pub(super) struct SettingsHits {
     pub ctls: Vec<(usize, Rect)>,
     pub theme_remove: Vec<(String, Rect)>,
     pub arrows: Vec<(usize, i32, Rect)>,
-    pub layout_scroll: usize,
+    pub list_scroll: usize,
 }
 
 fn format_history_budget(bytes: usize) -> String {
@@ -103,10 +103,10 @@ pub(super) fn draw_settings(
     let inner = block.inner(modal);
     f.render_widget(block, modal);
 
-    let (tab, cursor, layout_scroll) = app
+    let (tab, cursor, list_scroll) = app
         .settings
         .as_ref()
-        .map(|u| (u.tab, u.cursor, u.layout_scroll))
+        .map(|u| (u.tab, u.cursor, u.list_scroll))
         .unwrap_or((SettingsTab::Theme, 0, 0));
 
     // ── title bar ──
@@ -153,7 +153,7 @@ pub(super) fn draw_settings(
             ctls: Vec::new(),
             theme_remove: Vec::new(),
             arrows: Vec::new(),
-            layout_scroll,
+            list_scroll,
         };
     }
 
@@ -242,8 +242,8 @@ pub(super) fn draw_settings(
         inner.width,
         content_bottom.saturating_sub(content_y),
     );
-    let (ctls, theme_remove, arrows, layout_scroll) =
-        draw_content(f, content, tab, cursor, layout_scroll, app, t);
+    let (ctls, theme_remove, arrows, list_scroll) =
+        draw_content(f, content, tab, cursor, list_scroll, app, t);
 
     // ── footer hint (Keys tab gets its own rebind/reset hints) ──
     let footer_y = inner.bottom().saturating_sub(1);
@@ -299,7 +299,7 @@ pub(super) fn draw_settings(
         ctls,
         theme_remove,
         arrows,
-        layout_scroll,
+        list_scroll,
     }
 }
 
@@ -315,14 +315,14 @@ fn draw_content(
     area: Rect,
     tab: SettingsTab,
     cursor: usize,
-    layout_scroll: usize,
+    list_scroll: usize,
     app: &App,
     t: &Theme,
 ) -> Content {
     let mut ctls = Vec::new();
     let mut theme_remove = Vec::new();
     let mut arrows = Vec::new();
-    let mut resolved_layout_scroll = layout_scroll;
+    let mut resolved_list_scroll = list_scroll;
     let cat = app.catalog;
     match tab {
         SettingsTab::Theme => {
@@ -489,8 +489,8 @@ fn draw_content(
                 .iter()
                 .position(|v| matches!(v, V::Ctl(i) if *i == cursor))
                 .unwrap_or(0);
-            let scroll = keep_visible_scroll(layout_scroll, cur_vis, avail, vis.len());
-            resolved_layout_scroll = scroll;
+            let scroll = keep_visible_scroll(list_scroll, cur_vis, avail, vis.len());
+            resolved_list_scroll = scroll;
             for (row_i, v) in vis.iter().enumerate().skip(scroll).take(avail) {
                 let y = area.y + (row_i - scroll) as u16;
                 let i = match v {
@@ -777,35 +777,54 @@ fn draw_content(
         SettingsTab::General => {
             // The two file choosers (which viewer, then what a click does), then
             // a blank gap + `── Notifications ──` divider and the sound rows,
-            // mirroring the Layout tab's Docks section.
+            // mirroring the Layout tab's Docks section. The list scrolls to keep
+            // the cursor visible, so every row stays reachable on a short
+            // terminal.
             let rows = app.general_rows();
             let sec = app.general_section_start();
             let n = &app.config.notifications;
             let file_open = app.file_open_label();
             let file_click = app.file_click_label();
-            let mut y = area.y;
-            for (i, row) in rows.iter().enumerate() {
+            enum V {
+                Ctl(usize),
+                Blank,
+                Divider,
+            }
+            let mut vis = Vec::with_capacity(rows.len() + 2);
+            for i in 0..rows.len() {
                 if i == sec {
-                    y += 1; // blank line before the section
-                    if y >= area.bottom() {
-                        break;
+                    vis.push(V::Blank);
+                    vis.push(V::Divider);
+                }
+                vis.push(V::Ctl(i));
+            }
+            let avail = area.height.max(1) as usize;
+            let cur_vis = vis
+                .iter()
+                .position(|v| matches!(v, V::Ctl(i) if *i == cursor))
+                .unwrap_or(0);
+            let scroll = keep_visible_scroll(list_scroll, cur_vis, avail, vis.len());
+            resolved_list_scroll = scroll;
+            for (row_i, v) in vis.iter().enumerate().skip(scroll).take(avail) {
+                let y = area.y + (row_i - scroll) as u16;
+                let i = match v {
+                    V::Blank => continue,
+                    V::Divider => {
+                        hline(f, area.x, y, area.width, t);
+                        let label = format!(" {} ", cat.tab_notify);
+                        let w = (display_width(&label) as u16).min(area.width);
+                        f.render_widget(
+                            Paragraph::new(Span::styled(
+                                label,
+                                Style::new().fg(t.subtext0).bg(t.surface0),
+                            )),
+                            Rect::new(area.x + 2, y, w, 1),
+                        );
+                        continue;
                     }
-                    hline(f, area.x, y, area.width, t);
-                    let label = format!(" {} ", cat.tab_notify);
-                    let w = (display_width(&label) as u16).min(area.width);
-                    f.render_widget(
-                        Paragraph::new(Span::styled(
-                            label,
-                            Style::new().fg(t.subtext0).bg(t.surface0),
-                        )),
-                        Rect::new(area.x + 2, y, w, 1),
-                    );
-                    y += 1;
-                }
-                if y >= area.bottom() {
-                    break;
-                }
-                match row {
+                    V::Ctl(i) => *i,
+                };
+                match rows[i] {
                     GeneralRow::FileOpen => {
                         let r = slider_row(
                             f,
@@ -989,7 +1008,6 @@ fn draw_content(
                         t,
                     )),
                 }
-                y += 1;
             }
         }
         SettingsTab::Integrations => {
@@ -1395,7 +1413,7 @@ fn draw_content(
             }
         }
     }
-    (ctls, theme_remove, arrows, resolved_layout_scroll)
+    (ctls, theme_remove, arrows, resolved_list_scroll)
 }
 
 /// Preserve the current viewport whenever the selected row is already visible;
@@ -1845,12 +1863,47 @@ mod tests {
     }
 
     #[test]
-    fn layout_scroll_moves_only_when_selection_leaves_the_viewport() {
+    fn list_scroll_moves_only_when_selection_leaves_the_viewport() {
         assert_eq!(keep_visible_scroll(10, 15, 12, 40), 10);
         assert_eq!(keep_visible_scroll(10, 10, 12, 40), 10);
         assert_eq!(keep_visible_scroll(10, 9, 12, 40), 9);
         assert_eq!(keep_visible_scroll(10, 22, 12, 40), 11);
         assert_eq!(keep_visible_scroll(30, 15, 12, 20), 8);
+    }
+
+    #[test]
+    fn general_rows_stay_reachable_on_a_short_terminal() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-general-short-terminal");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        app.open_settings();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+        let last = app.general_rows().len() - 1;
+        app.settings.as_mut().unwrap().cursor = last;
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+
+        let rect = app
+            .settings_ctl_rects
+            .iter()
+            .find(|(i, _)| *i == last)
+            .map(|(_, r)| *r)
+            .expect("the last General row is drawn");
+        let modal = app.settings_modal_rect.unwrap();
+        assert!(
+            rect.y >= modal.y && rect.bottom() <= modal.bottom(),
+            "row lies inside the modal"
+        );
+        assert!(app.settings.as_ref().unwrap().list_scroll > 0);
+        let label = app.catalog.set_test_blocked_sound;
+        let drawn: String = (rect.x..rect.right())
+            .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
+            .collect();
+        assert!(drawn.contains(label), "{drawn:?}");
     }
 
     #[test]

@@ -63,10 +63,10 @@ pub struct SettingsUi {
     /// Candidate prefix captured once and waiting for the same chord again.
     /// Nothing is persisted until confirmation succeeds.
     pub prefix_candidate: Option<String>,
-    /// First visual row shown in the Layout tab. Persisting this while the modal
-    /// is open prevents a visible dock/bar button click from re-anchoring the
-    /// list around its newly selected row.
-    pub layout_scroll: usize,
+    /// First visual row shown in the scrolling tabs (General and Layout).
+    /// Persisting this while the modal is open prevents a visible button click
+    /// from re-anchoring the list around its newly selected row.
+    pub list_scroll: usize,
     /// In the Keys tab: capturing the next key press to rebind `cursor`'s command.
     pub capturing: bool,
 }
@@ -243,7 +243,7 @@ impl App {
             tab: SettingsTab::General,
             cursor: 0,
             prefix_candidate: None,
-            layout_scroll: 0,
+            list_scroll: 0,
             capturing: false,
         });
     }
@@ -509,7 +509,7 @@ impl App {
             ui.tab = tab;
             ui.cursor = cursor;
             ui.prefix_candidate = None;
-            ui.layout_scroll = 0;
+            ui.list_scroll = 0;
             ui.capturing = false;
         }
     }
@@ -1692,7 +1692,7 @@ mod tests {
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
-        let before = app.settings.as_ref().unwrap().layout_scroll;
+        let before = app.settings.as_ref().unwrap().list_scroll;
         assert!(before > 0, "the regression requires a scrolled Layout list");
 
         let rows = app.layout_rows();
@@ -1715,7 +1715,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            app.settings.as_ref().unwrap().layout_scroll,
+            app.settings.as_ref().unwrap().list_scroll,
             before,
             "clicking a visible placement button must not re-anchor the modal"
         );

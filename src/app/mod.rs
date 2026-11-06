@@ -20747,7 +20747,7 @@ fi
             tab: SettingsTab::Layout,
             cursor: idx,
             prefix_candidate: None,
-            layout_scroll: 0,
+            list_scroll: 0,
             capturing: false,
         });
         app.handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
