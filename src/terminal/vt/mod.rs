@@ -469,6 +469,18 @@ pub trait VtEngine: Send {
         Vec::new()
     }
 
+    /// Deletes for the images this pane taught the host, for use as the pane
+    /// is closed. The default reports that the pane never sent any.
+    fn release_graphics(&mut self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
+    /// Host id assigned to a child image id, when this pane has shown it.
+    #[cfg(test)]
+    fn host_image_id(&self, _child: u32) -> Option<u32> {
+        None
+    }
+
     /// Latest window title set by the child via OSC 0/2, if any.
     fn title(&self) -> Option<String>;
 

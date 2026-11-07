@@ -1,6 +1,7 @@
 //! `alacritty_terminal` implementation of `VtEngine`. Pure Rust — no Zig, no FFI.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -72,6 +73,42 @@ fn placeholder_color(image_id: u32) -> VtColor {
         g: (image_id >> 8) as u8,
         b: image_id as u8,
     })
+}
+
+fn image_id_from_cell(cell: &alacritty_terminal::term::cell::Cell) -> Option<u32> {
+    if cell.c != placeholder::PLACEHOLDER {
+        return None;
+    }
+    let VtColor::Spec(rgb) = cell.fg else {
+        return None;
+    };
+    let mut id = (u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b);
+    if let Some(marks) = cell.zerowidth() {
+        if let Some(mark) = marks.get(2) {
+            if let Some(index) = placeholder::diacritic_index(*mark) {
+                id |= (index as u32) << 24;
+            }
+        }
+    }
+    Some(id)
+}
+
+/// Foreground the host should see for a placeholder, when this pane remapped
+/// the child's image id. `strip_id_mark` drops a third diacritic that carried
+/// the child's high id byte; host ids fit in the color alone.
+fn host_placeholder(
+    cell: &alacritty_terminal::term::cell::Cell,
+    ids: &HashMap<u32, u32>,
+) -> Option<(Color, bool)> {
+    let child = image_id_from_cell(cell)?;
+    let host = *ids.get(&child)?;
+    if host == child {
+        return None;
+    }
+    Some((
+        Color::Rgb((host >> 16) as u8, (host >> 8) as u8, host as u8),
+        child >> 24 != 0,
+    ))
 }
 
 impl EventListener for EventProxy {
@@ -266,6 +303,13 @@ const MAX_PARTIAL_DAMAGE_ROWS: usize = 8;
 const MAX_PARTIAL_DAMAGE_CELLS: usize = 2_048;
 
 impl AlacrittyEngine {
+    fn host_image_ids(&self) -> HashMap<u32, u32> {
+        self.graphics_queue
+            .lock()
+            .map(|queue| queue.host_image_ids())
+            .unwrap_or_default()
+    }
+
     #[cfg(test)]
     pub fn new(
         cols: u16,
@@ -1000,6 +1044,7 @@ impl VtEngine for AlacrittyEngine {
         // spills into `combined`, a `String` allocated lazily (at most once, then
         // reused) and never touched otherwise. Zero allocation in the common case,
         // correctness in the rare one.
+        let ids = self.host_image_ids();
         let mut stack = [0u8; 4];
         let mut combined = String::new();
         for indexed in grid.display_iter() {
@@ -1011,13 +1056,23 @@ impl VtEngine for AlacrittyEngine {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let sym: &str = match cell.zerowidth() {
-                None => cell.c.encode_utf8(&mut stack),
-                Some(zw) => {
-                    combined.clear();
-                    combined.push(cell.c);
-                    combined.extend(zw.iter());
-                    &combined
+            let presented = host_placeholder(cell, &ids);
+            let sym: &str = if presented.is_some_and(|(_, strip)| strip) {
+                combined.clear();
+                combined.push(cell.c);
+                if let Some(marks) = cell.zerowidth() {
+                    combined.extend(marks.iter().take(2).copied());
+                }
+                &combined
+            } else {
+                match cell.zerowidth() {
+                    None => cell.c.encode_utf8(&mut stack),
+                    Some(zw) => {
+                        combined.clear();
+                        combined.push(cell.c);
+                        combined.extend(zw.iter());
+                        &combined
+                    }
                 }
             };
             f(
@@ -1025,7 +1080,9 @@ impl VtEngine for AlacrittyEngine {
                 indexed.point.column.0 as u16,
                 sym,
                 RenderCell {
-                    fg: map_color(cell.fg),
+                    fg: presented
+                        .map(|(color, _)| color)
+                        .unwrap_or_else(|| map_color(cell.fg)),
                     bg: map_color(cell.bg),
                     mods: map_flags(cell.flags),
                 },
@@ -1037,6 +1094,7 @@ impl VtEngine for AlacrittyEngine {
         let grid = self.term.grid();
         let rows = grid.screen_lines() as i32;
         let offset = grid.display_offset() as i32;
+        let ids = self.host_image_ids();
         let mut stack = [0u8; 4];
         let mut combined = String::new();
         for indexed in grid.display_iter() {
@@ -1048,13 +1106,23 @@ impl VtEngine for AlacrittyEngine {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let sym: &str = match cell.zerowidth() {
-                None => cell.c.encode_utf8(&mut stack),
-                Some(zw) => {
-                    combined.clear();
-                    combined.push(cell.c);
-                    combined.extend(zw.iter());
-                    &combined
+            let presented = host_placeholder(cell, &ids);
+            let sym: &str = if presented.is_some_and(|(_, strip)| strip) {
+                combined.clear();
+                combined.push(cell.c);
+                if let Some(marks) = cell.zerowidth() {
+                    combined.extend(marks.iter().take(2).copied());
+                }
+                &combined
+            } else {
+                match cell.zerowidth() {
+                    None => cell.c.encode_utf8(&mut stack),
+                    Some(zw) => {
+                        combined.clear();
+                        combined.push(cell.c);
+                        combined.extend(zw.iter());
+                        &combined
+                    }
                 }
             };
             let hyperlink = cell.hyperlink();
@@ -1063,7 +1131,9 @@ impl VtEngine for AlacrittyEngine {
                 indexed.point.column.0 as u16,
                 sym,
                 RenderCell {
-                    fg: map_color(cell.fg),
+                    fg: presented
+                        .map(|(color, _)| color)
+                        .unwrap_or_else(|| map_color(cell.fg)),
                     bg: map_color(cell.bg),
                     mods: map_flags(cell.flags),
                 },
@@ -1120,6 +1190,7 @@ impl VtEngine for AlacrittyEngine {
             });
         }
         damaged_rows.truncate(row_indices.len());
+        let ids = self.host_image_ids();
         for (damaged_row, row) in damaged_rows.iter_mut().zip(row_indices.iter().copied()) {
             if row as usize >= grid.screen_lines() {
                 continue;
@@ -1146,24 +1217,34 @@ impl VtEngine for AlacrittyEngine {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
+                let presented = host_placeholder(cell, &ids);
                 let style = RenderCell {
-                    fg: map_color(cell.fg),
+                    fg: presented
+                        .map(|(color, _)| color)
+                        .unwrap_or_else(|| map_color(cell.fg)),
                     bg: map_color(cell.bg),
                     mods: map_flags(cell.flags),
                 };
+                let marks = cell.zerowidth().map(|marks| {
+                    if presented.is_some_and(|(_, strip)| strip) {
+                        marks.iter().take(2).copied().collect::<Vec<_>>()
+                    } else {
+                        marks.to_vec()
+                    }
+                });
                 if let Some(damage_cell) = damaged_row.cells.get_mut(used) {
                     damage_cell.column = column as u16;
                     damage_cell.character = cell.c;
                     damage_cell.zero_width.clear();
-                    if let Some(zero_width) = cell.zerowidth() {
-                        damage_cell.zero_width.extend(zero_width);
+                    if let Some(marks) = marks.as_ref() {
+                        damage_cell.zero_width.extend(marks);
                     }
                     damage_cell.style = style;
                 } else {
                     damaged_row.cells.push(DamageCell {
                         column: column as u16,
                         character: cell.c,
-                        zero_width: cell.zerowidth().unwrap_or_default().to_vec(),
+                        zero_width: marks.unwrap_or_default(),
                         style,
                     });
                 }
@@ -1539,7 +1620,10 @@ impl VtEngine for AlacrittyEngine {
     fn take_graphics(&mut self) -> Vec<Vec<u8>> {
         self.graphics_queue
             .lock()
-            .map(|mut queue| queue.drain())
+            .map(|mut queue| {
+                let commands = queue.drain();
+                queue.export_commands(commands)
+            })
             .unwrap_or_default()
     }
 
@@ -1552,8 +1636,20 @@ impl VtEngine for AlacrittyEngine {
     fn retained_graphics(&self) -> Vec<Vec<u8>> {
         self.graphics_queue
             .lock()
-            .map(|queue| queue.retained())
+            .map(|queue| queue.export_commands(queue.retained()))
             .unwrap_or_default()
+    }
+
+    fn release_graphics(&mut self) -> Vec<Vec<u8>> {
+        self.graphics_queue
+            .lock()
+            .map(|mut queue| queue.release_host_images())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn host_image_id(&self, child: u32) -> Option<u32> {
+        self.host_image_ids().get(&child).copied()
     }
 
     fn title(&self) -> Option<String> {

@@ -18,18 +18,41 @@
 //!
 //! **Commands are forwarded, not interpreted.** Luvus does not decode pixels.
 //! A graphics command is opaque bytes that mean something to the terminal
-//! holding the image, and passing it through unchanged is what lets that
-//! terminal learn the image. Only commands that do not decide *where* the
-//! image appears are passed on; position comes from the placeholder cells the
-//! child writes into the grid, which are ordinary text that Luvus already
-//! clips, scrolls, and reflows. See [`is_forwardable`].
+//! holding the image, and passing it through is what lets that terminal learn
+//! the image. Image ids are the exception: one host terminal shows every pane,
+//! so each pane's ids are rewritten into a private range before they leave.
+//! Only commands that do not decide *where* the image appears are passed on;
+//! position comes from the placeholder cells the child writes into the grid,
+//! which are ordinary text that Luvus already clips, scrolls, and reflows.
 
 pub(crate) mod placeholder;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::terminal::theme_probe::CellSize;
+
+/// Host image ids stay inside 24 bits, which is what a placeholder cell can
+/// carry in its foreground color without a third diacritic.
+const HOST_ID_LIMIT: u32 = 0x00FF_FFFF;
+
+struct HostIdBank {
+    next: u32,
+}
+
+fn allocate_host_id() -> Option<u32> {
+    let mut bank = HOST_IDS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if bank.next >= HOST_ID_LIMIT {
+        return None;
+    }
+    bank.next += 1;
+    Some(bank.next)
+}
+
+static HOST_IDS: Mutex<HostIdBank> = Mutex::new(HostIdBank { next: 0 });
 
 /// What the terminals displaying the attached clients can do with an image.
 ///
@@ -57,6 +80,10 @@ struct HostGraphicsState {
     /// consistent pair rather than a width from one client and a height from
     /// another. Zero means no client has reported one.
     cell_size: AtomicU32,
+    /// Deletes for panes that have already been dropped, waiting for the next
+    /// graphics collection. The pane is gone, so its queue can no longer be
+    /// drained, but the host terminal still holds the images it was taught.
+    released: Mutex<Vec<Vec<u8>>>,
 }
 
 impl HostGraphics {
@@ -120,6 +147,29 @@ impl HostGraphics {
     pub(crate) fn take_pending(&self) -> bool {
         self.0.pending.swap(false, Ordering::AcqRel)
     }
+
+    /// Remember deletes for a pane that is about to disappear.
+    pub(crate) fn push_released(&self, commands: Vec<Vec<u8>>) {
+        if commands.is_empty() {
+            return;
+        }
+        self.0
+            .released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(commands);
+        self.mark_pending();
+    }
+
+    pub(crate) fn take_released(&self) -> Vec<Vec<u8>> {
+        std::mem::take(
+            &mut *self
+                .0
+                .released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
 }
 
 /// Most bytes of graphics commands a pane may hold between two frames, and the
@@ -129,7 +179,7 @@ impl HostGraphics {
 /// emitted since the last frame was sent. A transmission arrives base64-encoded
 /// in chunks of at most 4 KiB, so the budget carries a large image comfortably
 /// while keeping a runaway child from growing a pane without limit.
-const MAX_PENDING_GRAPHICS_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PENDING_GRAPHICS_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PENDING_GRAPHICS_COMMANDS: usize = 4_096;
 
 /// Most bytes of images a pane keeps so a client attaching later can be taught
@@ -141,8 +191,8 @@ const MAX_PENDING_GRAPHICS_COMMANDS: usize = 4_096;
 /// to draw something it was never given. Only the newest version of each image
 /// is worth keeping — an id names one image, and a child that redraws replaces
 /// it — so this holds a working set, not a history.
-const MAX_RETAINED_GRAPHICS_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_RETAINED_IMAGES: usize = 64;
+const MAX_RETAINED_GRAPHICS_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_RETAINED_IMAGES: usize = 256;
 
 /// Graphics commands a pane's child emitted, waiting to reach the terminals
 /// that can draw them.
@@ -184,6 +234,10 @@ pub(crate) struct GraphicsQueue {
     /// Direct placements that could not be turned into cells. Written into the
     /// grid so a first `icat` is not met with a blank pane.
     notices: Vec<DropNotice>,
+    /// Child image ids this pane has shown, and the host ids that stand for
+    /// them. The host terminal has one id space for every pane.
+    child_to_host: HashMap<u32, u32>,
+    host_ids: Vec<u32>,
 }
 
 /// One line the engine owes the grid when a direct placement was dropped.
@@ -221,6 +275,9 @@ enum Retain {
     /// Adds a placement to an image already held, which is only worth keeping
     /// alongside the transmission it refers to.
     Place(u32),
+    /// An animation frame for an image already held. Unlike [`Retain::Open`]
+    /// it must not forget the image it continues.
+    Frame(u32),
     /// Continues the transfer already being collected.
     Chunk,
     /// Teaches no image, so there is nothing to keep.
@@ -414,6 +471,7 @@ impl GraphicsQueue {
                 None => Retain::No,
             },
             b'p' => control.image_id.map_or(Retain::No, Retain::Place),
+            b'f' => control.image_id.map_or(Retain::No, Retain::Frame),
             _ => Retain::No,
         }
     }
@@ -463,6 +521,7 @@ impl GraphicsQueue {
                 None => return,
             },
             Retain::Open(id) => {
+                self.note_host_id(id);
                 self.forget(id);
                 self.retained.push(RetainedImage {
                     id,
@@ -473,7 +532,21 @@ impl GraphicsQueue {
                 self.retaining = Some(id);
                 id
             }
-            Retain::Place(id) => id,
+            Retain::Place(id) | Retain::Frame(id) => {
+                self.note_host_id(id);
+                if self.retained.iter().all(|image| image.id != id) {
+                    self.retained.push(RetainedImage {
+                        id,
+                        commands: Vec::new(),
+                        placement: None,
+                        bytes: 0,
+                    });
+                }
+                if matches!(retain, Retain::Frame(_)) {
+                    self.retaining = Some(id);
+                }
+                id
+            }
         };
 
         let Some(image) = self.retained.iter_mut().find(|image| image.id == id) else {
@@ -512,6 +585,68 @@ impl GraphicsQueue {
             let dropped = self.retained.remove(index);
             self.retained_bytes -= dropped.bytes;
         }
+    }
+
+    /// The host id standing for `child`, allocated the first time this pane
+    /// shows it. The same child id keeps the same host id for the life of the
+    /// pane, including after the image itself is deleted, so the delete that
+    /// follows still names the image the host was taught.
+    fn note_host_id(&mut self, child: u32) {
+        if self.child_to_host.contains_key(&child) {
+            return;
+        }
+        let Some(host) = allocate_host_id() else {
+            return;
+        };
+        self.child_to_host.insert(child, host);
+        self.host_ids.push(host);
+    }
+
+    pub(crate) fn host_image_ids(&self) -> HashMap<u32, u32> {
+        self.child_to_host.clone()
+    }
+
+    /// Commands as the host terminal must see them: this pane's image ids
+    /// rewritten, and a delete-all narrowed to those ids.
+    pub(crate) fn export_commands(&self, commands: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        let mut exported = Vec::with_capacity(commands.len());
+        for command in commands {
+            match export_command(&command, &self.child_to_host) {
+                Exported::Keep(command) => exported.push(command),
+                Exported::Drop => {}
+                Exported::DeleteAll { data } => {
+                    let scope = if data { "I" } else { "i" };
+                    for id in &self.host_ids {
+                        exported.push(format!("\x1b_Ga=d,d={scope},i={id},q=2\x1b\\").into_bytes());
+                    }
+                }
+            }
+        }
+        exported
+    }
+
+    /// Deletes for every image this pane taught the host, then forgets them.
+    ///
+    /// The ids are not reused. A later pane could otherwise be given an id
+    /// whose delete is still in flight and lose an image it just transmitted.
+    pub(crate) fn release_host_images(&mut self) -> Vec<Vec<u8>> {
+        let commands = self
+            .host_ids
+            .iter()
+            .map(|id| format!("\x1b_Ga=d,d=I,i={id},q=2\x1b\\").into_bytes())
+            .collect();
+        self.host_ids.clear();
+        self.child_to_host.clear();
+        self.retained.clear();
+        self.retained_bytes = 0;
+        self.retaining = None;
+        self.commands.clear();
+        self.placements.clear();
+        self.bytes = 0;
+        self.forwarding_transfer = false;
+        self.continuation_index = None;
+        self.transfer_start = None;
+        commands
     }
 
     fn forget(&mut self, id: u32) {
@@ -579,8 +714,8 @@ impl GraphicsQueue {
 /// The budget matches a pane's queue: coalescing means a client can never owe
 /// more than the panes emitted, and one image is the largest thing that has to
 /// fit whole.
-const MAX_BACKLOG_BYTES: usize = 8 * 1024 * 1024;
-const MAX_BACKLOG_ENTRIES: usize = 256;
+const MAX_BACKLOG_BYTES: usize = 32 * 1024 * 1024;
+const MAX_BACKLOG_ENTRIES: usize = 512;
 
 /// Graphics commands one client has yet to be sent, coalesced by image id.
 ///
@@ -666,7 +801,7 @@ impl GraphicsBacklog {
             }
             // A placement only means anything alongside the image it places,
             // so it travels with that image when one is still waiting.
-            b'p' => match control.image_id.and_then(|id| self.sequence_of(id)) {
+            b'p' | b'f' => match control.image_id.and_then(|id| self.sequence_of(id)) {
                 Some(seq) => self.append(seq, command, control.more),
                 None => self.open(control.image_id, command, control.more),
             },
@@ -806,6 +941,77 @@ fn payload(command: &[u8]) -> Option<&[u8]> {
         .strip_suffix(b"\x1b\\".as_slice())
 }
 
+enum Exported {
+    Keep(Vec<u8>),
+    Drop,
+    /// `d=A` frees image data as well as placements; `d=a` frees placements.
+    DeleteAll {
+        data: bool,
+    },
+}
+
+/// Rewrite one command into the id space of a single pane.
+///
+/// A delete-all is not forwarded: the host terminal would free every pane's
+/// images. An id this pane never allocated is not forwarded either, because
+/// that number may already be some other pane's host id.
+fn export_command(command: &[u8], ids: &HashMap<u32, u32>) -> Exported {
+    let Some(body) = payload(command) else {
+        return Exported::Keep(command.to_vec());
+    };
+    let Some(control) = ControlData::parse(body) else {
+        return Exported::Keep(command.to_vec());
+    };
+    if control.action == b'd' && matches!(control.delete_scope, b'A' | b'a') {
+        return Exported::DeleteAll {
+            data: control.delete_scope == b'A',
+        };
+    }
+    let Some(child) = control.image_id else {
+        return Exported::Keep(command.to_vec());
+    };
+    let Some(&host) = ids.get(&child) else {
+        return Exported::Drop;
+    };
+    if host == child {
+        return Exported::Keep(command.to_vec());
+    }
+    Exported::Keep(rewrite_image_id(command, host))
+}
+
+fn rewrite_image_id(command: &[u8], host: u32) -> Vec<u8> {
+    let Some(body) = payload(command) else {
+        return command.to_vec();
+    };
+    let (control, data) = match body.iter().position(|byte| *byte == b';') {
+        Some(end) => (&body[..end], Some(&body[end + 1..])),
+        None => (body, None),
+    };
+    let mut rewritten = Vec::with_capacity(command.len() + 8);
+    rewritten.extend_from_slice(b"\x1b_G");
+    let mut first = true;
+    for pair in control.split(|byte| *byte == b',') {
+        if pair.is_empty() {
+            continue;
+        }
+        if !first {
+            rewritten.push(b',');
+        }
+        first = false;
+        if pair.starts_with(b"i=") && pair[2..].iter().all(|byte| byte.is_ascii_digit()) {
+            rewritten.extend_from_slice(format!("i={host}").as_bytes());
+        } else {
+            rewritten.extend_from_slice(pair);
+        }
+    }
+    if let Some(data) = data {
+        rewritten.push(b';');
+        rewritten.extend_from_slice(data);
+    }
+    rewritten.extend_from_slice(b"\x1b\\");
+    rewritten
+}
+
 /// What Luvus does with one graphics command.
 enum Handling {
     /// Not something Luvus can pass on, so the child's command stops here.
@@ -859,7 +1065,10 @@ fn classify(control: &ControlData, payload: &[u8], cell_size: Option<CellSize>) 
         b'T' | b'p' if control.virtual_placement => forward_virtual(control),
         b'T' | b'p' => virtualize(control, payload, cell_size),
         // Transmit without displaying, and delete, place nothing by themselves.
-        b't' | b'd' => Handling::Forward,
+        // Transmit without displaying, animation frames, and delete place
+        // nothing by themselves. Frames belong to an image the pane already
+        // holds; dropping them is how an animation never starts.
+        b't' | b'd' | b'f' => Handling::Forward,
         _ => Handling::Drop,
     }
 }
@@ -2144,5 +2353,73 @@ mod tests {
         // The backlog recovers: the next image is not punished for the last.
         backlog.push(&[wrapped("a=T,U=1,i=1,c=1,r=1;AAAA")]);
         assert_eq!(backlog.take().len(), 1);
+    }
+
+    #[test]
+    fn an_animation_frame_is_kept_with_the_image_it_continues() {
+        let mut queue = GraphicsQueue::default();
+        queue.push(b"a=t,i=1,f=100;AAAA", (0, 0), Some(CELL));
+        queue.push(b"a=f,i=1;FRAME", (0, 0), Some(CELL));
+        assert_eq!(queue.drain().len(), 2, "the frame is forwarded");
+        let kept = String::from_utf8(queue.retained().concat()).unwrap();
+        assert!(kept.contains("AAAA") && kept.contains("FRAME"), "{kept}");
+
+        let replaced = backlogged(&["a=T,U=1,i=7,c=1,r=1;AAAA", "a=f,i=7;FRAME", "a=d,d=I,i=7"]);
+        assert!(
+            !replaced.iter().any(|command| command.contains("FRAME")),
+            "{replaced:?}"
+        );
+        assert!(replaced.iter().any(|command| command.contains("a=d")));
+    }
+
+    #[test]
+    fn each_pane_is_given_its_own_host_image_ids() {
+        let mut first = GraphicsQueue::default();
+        let mut second = GraphicsQueue::default();
+        first.push(b"a=t,i=1,f=100;AAAA", (0, 0), Some(CELL));
+        second.push(b"a=t,i=1,f=100;BBBB", (0, 0), Some(CELL));
+        let first_host = first.host_image_ids()[&1];
+        let second_host = second.host_image_ids()[&1];
+        assert_ne!(first_host, second_host);
+        let first_pending = first.drain();
+        let second_pending = second.drain();
+        let first_cmds = first.export_commands(first_pending);
+        let second_cmds = second.export_commands(second_pending);
+        let first_text = String::from_utf8(first_cmds[0].clone()).unwrap();
+        let second_text = String::from_utf8(second_cmds[0].clone()).unwrap();
+        assert!(
+            first_text.contains(&format!("i={first_host},")),
+            "{first_text}"
+        );
+        assert!(
+            second_text.contains(&format!("i={second_host},")),
+            "{second_text}"
+        );
+        assert!(first_text.contains("AAAA") && second_text.contains("BBBB"));
+
+        let host = first_host;
+        let mut deleting = GraphicsQueue::default();
+        deleting.push(b"a=t,i=4,f=100;CCCC", (0, 0), Some(CELL));
+        deleting.push(b"a=d,d=A", (0, 0), Some(CELL));
+        let deleting_pending = deleting.drain();
+        let deleted = deleting
+            .export_commands(deleting_pending)
+            .into_iter()
+            .map(|command| String::from_utf8(command).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            deleted.iter().all(|command| !command.contains("d=A")),
+            "{deleted:?}"
+        );
+        assert!(
+            deleted.iter().any(|command| command.contains("d=I")),
+            "{deleted:?}"
+        );
+
+        let released = first.release_host_images();
+        assert_eq!(released.len(), 1);
+        let released = String::from_utf8(released[0].clone()).unwrap();
+        assert!(released.contains("d=I") && released.contains(&format!("i={host},")));
+        assert!(first.host_image_ids().is_empty());
     }
 }

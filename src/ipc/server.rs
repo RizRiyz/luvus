@@ -4198,7 +4198,14 @@ mod tests {
         assert_ne!((cols, rows), (100, 30));
         assert!(drawing.render());
         let commands = received_images(&drawing.rx);
-        assert!(commands.contains(&image(&format!("a=p,i=9,p=1,U=1,c={cols},r={rows},q=2"))));
+        let placement = format!("U=1,c={cols},r={rows},q=2");
+        assert!(
+            commands.iter().any(|command| {
+                let command = String::from_utf8_lossy(command);
+                command.contains("a=p,") && command.contains(&placement)
+            }),
+            "{commands:?}"
+        );
         assert_eq!(received_frame_size(&drawing.rx), (100, 30));
         assert!(!drawing.client().behind);
     }
@@ -4271,10 +4278,16 @@ mod tests {
             .sender
             .frame_pending
             .store(false, Ordering::Release);
+        let host = drawing
+            .engine
+            .lock()
+            .unwrap()
+            .host_image_id(7)
+            .expect("the initial image has a host id");
         drawing
             .client()
             .graphics_backlog
-            .push(&[image("a=T,U=1,i=7,c=2,r=2;OLD")]);
+            .push(&[image(&format!("a=T,U=1,i={host},c=2,r=2;OLD"))]);
         // Virtual image-only refresh: no grid mutation, but commands after the
         // collection boundary still cannot be mixed with this older backlog.
         drawing
@@ -4295,9 +4308,11 @@ mod tests {
         assert!(!drawing.client().graphics_backlog.is_empty());
         assert!(drawing.client().behind);
         assert!(drawing.render());
-        assert_eq!(
-            received_images(&drawing.rx),
-            vec![image("a=T,U=1,i=7,c=2,r=2;NEW")]
+        let commands = received_images(&drawing.rx);
+        assert_eq!(commands.len(), 1, "{commands:?}");
+        assert!(
+            commands[0].ends_with(b";NEW\x1b\\"),
+            "the redraw replaces the older backlog entry: {commands:?}"
         );
         received_frame_size(&drawing.rx);
     }

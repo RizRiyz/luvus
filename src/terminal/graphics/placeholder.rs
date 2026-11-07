@@ -90,6 +90,10 @@ pub(crate) fn diacritic(index: usize) -> Option<char> {
     DIACRITICS.get(index).copied()
 }
 
+pub(crate) fn diacritic_index(mark: char) -> Option<usize> {
+    DIACRITICS.iter().position(|item| *item == mark)
+}
+
 /// Whether one cell's symbol is an image cell rather than text.
 ///
 /// The base character decides it, so the cell is recognized whichever
