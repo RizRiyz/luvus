@@ -411,6 +411,8 @@ pub(super) fn draw_pane_menu(
         return;
     };
     let anchor = menu.anchor;
+    let selected = menu.selected;
+    let move_selected = menu.move_selected;
     let extras = menu.module_actions.clone();
     let move_targets = menu.move_targets.clone();
     // Submenu rects from the *previous* frame, to keep the submenu open while the
@@ -434,7 +436,7 @@ pub(super) fn draw_pane_menu(
         t,
         PopupCtx {
             hover: app.hover,
-            selected: None,
+            selected,
             mobile: app.compact,
             id: PopupId::Pane,
             scroll: &mut app.menu_scroll,
@@ -455,19 +457,21 @@ pub(super) fn draw_pane_menu(
     // Sticky open/close of the submenu based on where the cursor is: over the
     // "Move to tab" row or the submenu opens it; over another main row closes it;
     // over the border gap between them leaves it unchanged (so it doesn't flicker).
-    if let (Some(mrect), Some(hov)) = (move_rect, app.hover) {
-        let in_r =
-            |r: &Rect| hov.0 >= r.x && hov.0 < r.right() && hov.1 >= r.y && hov.1 < r.bottom();
-        let over_move = in_r(&mrect);
-        let over_submenu = prev_tab_rects.iter().any(|(_, r)| in_r(r));
-        let over_other = items.iter().zip(&rects).any(|(it, r)| {
-            !matches!(it, PaneMenuItem::MoveToTab | PaneMenuItem::Divider) && in_r(r)
-        });
-        if let Some(menu) = app.pane_menu.as_mut() {
-            if over_move || over_submenu {
-                menu.move_open = true;
-            } else if over_other {
-                menu.move_open = false;
+    if selected.is_none() {
+        if let (Some(mrect), Some(hov)) = (move_rect, app.hover) {
+            let in_r =
+                |r: &Rect| hov.0 >= r.x && hov.0 < r.right() && hov.1 >= r.y && hov.1 < r.bottom();
+            let over_move = in_r(&mrect);
+            let over_submenu = prev_tab_rects.iter().any(|(_, r)| in_r(r));
+            let over_other = items.iter().zip(&rects).any(|(it, r)| {
+                !matches!(it, PaneMenuItem::MoveToTab | PaneMenuItem::Divider) && in_r(r)
+            });
+            if let Some(menu) = app.pane_menu.as_mut() {
+                if over_move || over_submenu {
+                    menu.move_open = true;
+                } else if over_other {
+                    menu.move_open = false;
+                }
             }
         }
     }
@@ -493,7 +497,7 @@ pub(super) fn draw_pane_menu(
                 t,
                 PopupCtx {
                     hover: app.hover,
-                    selected: None,
+                    selected: move_selected,
                     mobile: app.compact,
                     id: PopupId::PaneMove,
                     scroll: &mut app.menu_scroll,

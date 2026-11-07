@@ -97,6 +97,7 @@ pub enum Cmd {
     NextAttention,
     NextWorkingAgent,
     NextDoneAgent,
+    PaneMenu,
     SplitRight,
     SplitDown,
     SplitAuto,
@@ -151,6 +152,7 @@ impl Cmd {
         Cmd::NextAttention,
         Cmd::NextWorkingAgent,
         Cmd::NextDoneAgent,
+        Cmd::PaneMenu,
         Cmd::SplitRight,
         Cmd::SplitDown,
         Cmd::SplitAuto,
@@ -209,6 +211,7 @@ impl Cmd {
             Cmd::NextAttention => "next_attention",
             Cmd::NextWorkingAgent => "next_working_agent",
             Cmd::NextDoneAgent => "next_done_agent",
+            Cmd::PaneMenu => "pane_menu",
             Cmd::SplitRight => "split_right",
             Cmd::SplitDown => "split_down",
             Cmd::SplitAuto => "split_auto",
@@ -272,6 +275,7 @@ impl Cmd {
             Cmd::NextAttention => cat.cmd_next_attention,
             Cmd::NextWorkingAgent => cat.cmd_next_working_agent,
             Cmd::NextDoneAgent => cat.cmd_next_done_agent,
+            Cmd::PaneMenu => cat.cmd_pane_menu,
             Cmd::SplitRight => cat.cmd_split_right,
             Cmd::SplitDown => cat.cmd_split_down,
             Cmd::SplitAuto => cat.cmd_split_auto,
@@ -324,6 +328,7 @@ impl Cmd {
             | Cmd::NextAttention
             | Cmd::NextWorkingAgent
             | Cmd::NextDoneAgent
+            | Cmd::PaneMenu
             | Cmd::SplitRight
             | Cmd::SplitDown
             | Cmd::SplitAuto
@@ -372,8 +377,11 @@ impl Cmd {
             // Right-hand cluster on the period key: `.` is Blocked, `'` is
             // Working and needs no Shift, and `>` is Shift+. for Done.
             Cmd::NextAttention => ".",
+            // Agent states are one right-hand group. Working is unshifted;
+            // Done is Shift plus period. The pane menu is the key above Tab.
             Cmd::NextWorkingAgent => "'",
             Cmd::NextDoneAgent => ">",
+            Cmd::PaneMenu => "`",
             Cmd::SplitRight => "v",
             Cmd::SplitDown => "s",
             Cmd::SplitAuto => "+",
@@ -981,6 +989,7 @@ impl App {
             Cmd::NextAttention => self.focus_next_attention(),
             Cmd::NextWorkingAgent => self.focus_next_working_agent(),
             Cmd::NextDoneAgent => self.focus_next_done_agent(),
+            Cmd::PaneMenu => self.open_focused_pane_menu(),
             Cmd::SplitRight => self.split(Axis::Col),
             Cmd::SplitDown => self.split(Axis::Row),
             Cmd::SplitAuto => self.split_auto(),
@@ -1145,6 +1154,7 @@ mod tests {
         assert_eq!(m.get("."), Some(&Cmd::NextAttention));
         assert_eq!(m.get("'"), Some(&Cmd::NextWorkingAgent));
         assert_eq!(m.get(">"), Some(&Cmd::NextDoneAgent));
+        assert_eq!(m.get("`"), Some(&Cmd::PaneMenu));
         assert_eq!(m.get("M"), Some(&Cmd::Switcher));
         assert_eq!(m.get("w"), Some(&Cmd::FocusWorkspaces));
         assert_eq!(m.get("u"), Some(&Cmd::NextWorkspace));
@@ -2129,6 +2139,34 @@ mod tests {
             reporter,
             "plain pane is skipped on wrap"
         );
+    }
+
+    #[test]
+    fn pane_menu_opens_from_the_prefix_and_runs_the_selected_action() {
+        let _env = crate::persist::test_env("pane-menu-key");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let before = app.layout().leaves().len();
+        app.run_cmd(Cmd::PaneMenu);
+        assert!(app.pane_menu.is_some(), "the focused pane menu opens");
+        assert_eq!(
+            app.pane_menu.as_ref().and_then(|menu| menu.selected),
+            Some(0)
+        );
+        app.handle_pane_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.pane_menu.is_none(),
+            "choosing an action closes the menu"
+        );
+        assert_eq!(
+            app.layout().leaves().len(),
+            before + 1,
+            "the first row splits"
+        );
+
+        app.run_cmd(Cmd::PaneMenu);
+        app.handle_pane_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.pane_menu.is_none());
     }
 
     #[test]
