@@ -69,10 +69,11 @@ and workspaces. `Ctrl+Space [` walks backward through previously focused panes;
 `Ctrl+Space ]` walks forward again. A new ordinary focus change after going back
 starts a new branch and clears the forward history. Closed panes are skipped.
 
-Agent navigation is separate: `Ctrl+Space .` cycles through Blocked panes,
-`Ctrl+Space '` cycles through Working panes, and `Ctrl+Space >` cycles through
-Done panes. These shortcuts include detected agents and panes with program
-status reports. Plain shell panes without either are not included.
+Agent navigation is a right-hand cluster around the period key.
+`Ctrl+Space .` cycles through Blocked panes, `Ctrl+Space '` cycles through
+Working panes without Shift, and `Ctrl+Space >` is Shift+period and cycles
+through Done panes. These shortcuts include detected agents and panes with
+program status reports. Plain shell panes without either are not included.
 
 `Ctrl+Space Enter` toggles [Commander](/docs/guides/commander/), a
 bottom composer for prompting an exact agent pane or sending a command to an

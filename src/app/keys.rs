@@ -369,6 +369,8 @@ impl Cmd {
             Cmd::NextPane => ";",
             Cmd::FocusBack => "[",
             Cmd::FocusForward => "]",
+            // Right-hand cluster on the period key: `.` is Blocked, `'` is
+            // Working and needs no Shift, and `>` is Shift+. for Done.
             Cmd::NextAttention => ".",
             Cmd::NextWorkingAgent => "'",
             Cmd::NextDoneAgent => ">",
