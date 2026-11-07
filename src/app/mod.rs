@@ -8209,9 +8209,18 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => self.pane_menu = None,
             KeyCode::Left | KeyCode::Char('h') => {
+                // Select the parent row. A mouse-opened menu has no selection,
+                // and the pointer may still be over Move to Tab; without a
+                // selection the next frame treats that hover as a request to
+                // open the destinations again.
+                let parent = self
+                    .pane_menu_items()
+                    .iter()
+                    .position(|item| *item == PaneMenuItem::MoveToTab);
                 if let Some(menu) = self.pane_menu.as_mut() {
                     menu.move_open = false;
                     menu.move_selected = None;
+                    menu.selected = parent;
                 }
             }
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') if len > 0 => {

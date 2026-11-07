@@ -2027,6 +2027,19 @@ impl App {
         }
         // Track the cursor for hover affordances (e.g. the session delete ✕).
         self.hover = Some((m.column, m.row));
+        // A pointer gesture takes the pane menu back from the keyboard. Leaving
+        // the selected row set makes the next frame scroll that row into view
+        // and ignore hover, including a wheel the user just aimed at the menu.
+        if self
+            .pane_menu
+            .as_ref()
+            .is_some_and(|menu| menu.selected.is_some() || menu.move_selected.is_some())
+        {
+            if let Some(menu) = self.pane_menu.as_mut() {
+                menu.selected = None;
+                menu.move_selected = None;
+            }
+        }
         if let MouseEventKind::Down(_) = m.kind {
             self.menu_scroll.press(m.column, m.row);
         }

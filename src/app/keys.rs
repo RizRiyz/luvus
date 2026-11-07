@@ -2170,6 +2170,48 @@ mod tests {
     }
 
     #[test]
+    fn pointer_motion_releases_a_keyboard_selected_pane_menu() {
+        let _env = crate::persist::test_env("pane-menu-pointer");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(Cmd::PaneMenu);
+        assert!(app.pane_menu.as_ref().unwrap().selected.is_some());
+        app.handle_event(crate::event::AppEvent::Mouse(
+            ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::Moved,
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+        ));
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert!(menu.selected.is_none());
+        assert!(menu.move_selected.is_none());
+    }
+
+    #[test]
+    fn leaving_move_to_tab_by_keyboard_keeps_the_parent_selected() {
+        let _env = crate::persist::test_env("pane-menu-back-to-parent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.run_cmd(Cmd::SplitRight);
+        app.run_cmd(Cmd::PaneMenu);
+        let parent = app
+            .pane_menu_items()
+            .iter()
+            .position(|item| *item == crate::app::PaneMenuItem::MoveToTab)
+            .expect("a split pane can move to a new tab");
+        app.pane_menu.as_mut().unwrap().selected = None;
+        app.pane_menu.as_mut().unwrap().move_open = true;
+        app.pane_menu.as_mut().unwrap().move_selected = Some(0);
+        app.handle_pane_menu_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert!(!menu.move_open);
+        assert!(menu.move_selected.is_none());
+        assert_eq!(menu.selected, Some(parent));
+    }
+
+    #[test]
     fn next_done_agent_cycles_and_records_focus_history() {
         let _env = crate::persist::test_env("next-done-agent");
         let (tx, _rx) = std::sync::mpsc::channel();
