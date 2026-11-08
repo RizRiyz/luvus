@@ -34,6 +34,64 @@ pub fn directory_identity(path: &Path) -> Option<DirectoryIdentity> {
     }
 }
 
+/// Restore a staged directory without replacing any newly-created destination.
+/// Unsupported platforms fail closed, leaving the staged checkout recoverable.
+pub(crate) fn rename_directory_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let source = CString::new(source.as_os_str().as_bytes())?;
+        let destination = CString::new(destination.as_os_str().as_bytes())?;
+        // SAFETY: both paths are valid NUL-terminated strings. The exclusive
+        // rename flag prevents replacing a directory created during rollback.
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        let result =
+            unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileW;
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        // SAFETY: both paths are NUL-terminated. MoveFileW does not replace an
+        // existing destination, unlike replace-existing rename helpers.
+        if unsafe { MoveFileW(source.as_ptr(), destination.as_ptr()) } != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        let _ = (source, destination);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "exclusive directory restoration is unavailable",
+        ))
+    }
+}
+
 /// Atomically move a completed same-directory temporary file over `destination`.
 /// Windows needs replace-existing semantics that `std::fs::rename` does not
 /// provide consistently; Unix rename already has the required behavior.
