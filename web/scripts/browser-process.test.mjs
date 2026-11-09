@@ -31,6 +31,20 @@ test("browser startup handles a missing executable without an unhandled error", 
   assert.equal(watch.finished, true);
 });
 
+test("spawn failure remains after the following close event", async () => {
+  const executable = path.resolve("target", "missing-browser-executable");
+  const child = spawn(executable, [], { stdio: ["ignore", "ignore", "pipe"] });
+  const watch = watchBrowser(child);
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  await watch.done;
+  await closed;
+  const error = watch.error("startup failed");
+  assert.match(error.message, /Chromium spawn failed:/);
+  assert.match(error.message, /ENOENT/);
+  assert.match(error.message, /missing-browser-executable/);
+  assert.doesNotMatch(error.message, /exited \(code=/);
+});
+
 test("browser startup diagnostics are bounded", async (t) => {
   const { profile, watch } = await fixture(t, "process.stderr.write('x'.repeat(32 * 1024) + 'END', () => process.exit(1))");
   await assert.rejects(browserAddress(watch, profile), (error) => {

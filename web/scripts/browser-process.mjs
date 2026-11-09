@@ -19,13 +19,14 @@ export function watchBrowser(child) {
     });
     // `close` follows stderr drainage; `exit` can precede its final data.
     child.once("close", (code, signal) => {
-      failure = `exited (code=${code}, signal=${signal})`;
+      failure ??= `exited (code=${code}, signal=${signal})`;
       finished = true;
       resolve();
     });
   });
+  child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (chunk) => {
-    stderr = (stderr + chunk.toString()).slice(-stderrLimit);
+    stderr = (stderr + chunk).slice(-stderrLimit);
   });
   return {
     done,
