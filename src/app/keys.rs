@@ -377,10 +377,9 @@ impl Cmd {
             // Right-hand cluster on the period key: `.` is Blocked, `'` is
             // Working and needs no Shift, and `>` is Shift+. for Done.
             Cmd::NextAttention => ".",
-            // Agent states are one right-hand group. Working is unshifted;
-            // Done is Shift plus period. The pane menu is the key above Tab.
             Cmd::NextWorkingAgent => "'",
             Cmd::NextDoneAgent => ">",
+            // The pane menu is the unshifted key above Tab.
             Cmd::PaneMenu => "`",
             Cmd::SplitRight => "v",
             Cmd::SplitDown => "s",
@@ -2187,6 +2186,143 @@ mod tests {
         let menu = app.pane_menu.as_ref().unwrap();
         assert!(menu.selected.is_none());
         assert!(menu.move_selected.is_none());
+    }
+
+    #[test]
+    fn pane_menu_same_row_motion_redraws_only_when_selection_is_cleared() {
+        use ratatui::{backend::TestBackend, crossterm::event::MouseEventKind, Terminal};
+
+        let _env = crate::persist::test_env("pane-menu-same-row");
+        for submenu in [false, true] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(120, 40, tx).unwrap();
+            app.run_cmd(Cmd::SplitRight);
+            app.run_cmd(Cmd::PaneMenu);
+            if submenu {
+                let menu = app.pane_menu.as_mut().unwrap();
+                menu.selected = None;
+                menu.move_open = true;
+                menu.move_selected = Some(0);
+            }
+            let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let menu = app.pane_menu.as_ref().unwrap();
+            let rect = if submenu {
+                menu.tab_rects[0].1
+            } else {
+                menu.items[1].1
+            };
+            assert!(rect.width > 2 && rect.height > 0);
+            app.hover = Some((rect.x, rect.y));
+            let motion = AppEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: rect.x + 1,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert!(app.handle_event(motion), "clearing selection must redraw");
+            let menu = app.pane_menu.as_ref().unwrap();
+            assert!(menu.selected.is_none());
+            assert!(menu.move_selected.is_none());
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            assert!(
+                !app.handle_event(AppEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    column: rect.x + 2,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                })),
+                "unchanged hover and selection need no redraw"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_menu_enter_activates_hover_after_pointer_clears_selection() {
+        use ratatui::{backend::TestBackend, crossterm::event::MouseEventKind, Terminal};
+
+        let _env = crate::persist::test_env("pane-menu-hover-enter");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.run_cmd(Cmd::PaneMenu);
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let rect = app
+            .pane_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(item, _)| *item == crate::app::PaneMenuItem::RenamePane)
+            .unwrap()
+            .1;
+        app.handle_event(AppEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: rect.x + 1,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(app.pane_menu.as_ref().unwrap().selected.is_none());
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.pane_menu.is_none());
+        assert!(
+            app.pane_rename.is_some(),
+            "Enter runs the hovered rename row"
+        );
+    }
+
+    #[test]
+    fn pane_menu_submenu_enter_activates_hover_after_pointer_clears_selection() {
+        use ratatui::{backend::TestBackend, crossterm::event::MouseEventKind, Terminal};
+
+        let _env = crate::persist::test_env("pane-menu-submenu-hover-enter");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.run_cmd(Cmd::SplitRight);
+        let pane = app.layout().focus;
+        app.run_cmd(Cmd::NewTab);
+        app.focus_tab(0).unwrap();
+        app.run_cmd(Cmd::PaneMenu);
+        let parent = app
+            .pane_menu_items()
+            .iter()
+            .position(|item| *item == crate::app::PaneMenuItem::MoveToTab)
+            .unwrap();
+        app.pane_menu.as_mut().unwrap().selected = Some(parent);
+        app.handle_pane_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let rect = app
+            .pane_menu
+            .as_ref()
+            .unwrap()
+            .tab_rects
+            .iter()
+            .find(|(target, _)| *target == crate::app::MoveTarget::NewTab)
+            .unwrap()
+            .1;
+        app.handle_event(AppEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: rect.x + 1,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert!(menu.selected.is_none());
+        assert!(menu.move_selected.is_none());
+        app.handle_event(AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.pane_menu.is_none());
+        assert_eq!(app.ws().tabs.len(), 3, "Enter runs the hovered New Tab row");
+        assert_eq!(app.layout().focus, pane);
+        assert_eq!(app.ws().active_tab, 2);
     }
 
     #[test]

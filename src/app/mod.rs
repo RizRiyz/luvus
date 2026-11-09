@@ -8183,8 +8183,25 @@ impl App {
                 }
             }
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
-                let selected = self.pane_menu.as_ref().and_then(|menu| menu.selected);
-                let item = selected.and_then(|index| items.get(index)).copied();
+                let item = self.pane_menu.as_ref().and_then(|menu| {
+                    if let Some(index) = menu.selected {
+                        items.get(index).copied()
+                    } else if key.code == KeyCode::Enter {
+                        let (col, row) = self.hover?;
+                        menu.items
+                            .iter()
+                            .find(|(item, rect)| {
+                                *item != PaneMenuItem::Divider
+                                    && col >= rect.x
+                                    && col < rect.right()
+                                    && row >= rect.y
+                                    && row < rect.bottom()
+                            })
+                            .map(|(item, _)| *item)
+                    } else {
+                        None
+                    }
+                });
                 if item == Some(PaneMenuItem::MoveToTab) {
                     if let Some(menu) = self.pane_menu.as_mut() {
                         menu.move_open = true;
@@ -8238,8 +8255,20 @@ impl App {
             }
             KeyCode::Enter => {
                 let choice = self.pane_menu.as_ref().and_then(|menu| {
-                    menu.move_selected
-                        .and_then(|index| menu.move_targets.get(index).map(|(target, _)| *target))
+                    if let Some(index) = menu.move_selected {
+                        menu.move_targets.get(index).map(|(target, _)| *target)
+                    } else {
+                        let (col, row) = self.hover?;
+                        menu.tab_rects
+                            .iter()
+                            .find(|(_, rect)| {
+                                col >= rect.x
+                                    && col < rect.right()
+                                    && row >= rect.y
+                                    && row < rect.bottom()
+                            })
+                            .map(|(target, _)| *target)
+                    }
                 });
                 if let Some(target) = choice {
                     let pane = self.pane_menu.as_ref().map(|menu| menu.pane);

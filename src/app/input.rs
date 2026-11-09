@@ -1791,6 +1791,10 @@ impl App {
             .map(|d| (d.path.clone(), d.axis, d.line, d.span));
         let sidebar_before = self.hover_sidebar;
         let link_before = self.hover_link.clone();
+        let pane_menu_selection_before = self
+            .pane_menu
+            .as_ref()
+            .map(|menu| (menu.selected, menu.move_selected));
 
         self.apply_mouse(m);
 
@@ -1806,6 +1810,11 @@ impl App {
             || divider_before != divider_after
             || sidebar_before != self.hover_sidebar
             || link_before != self.hover_link
+            || pane_menu_selection_before
+                != self
+                    .pane_menu
+                    .as_ref()
+                    .map(|menu| (menu.selected, menu.move_selected))
     }
 
     /// The hover-highlighted rectangle containing `at`, if any. Moving within
