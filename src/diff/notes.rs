@@ -540,14 +540,18 @@ mod tests {
     }
 
     fn note(line: u32, context: &str) -> ReviewNote {
+        note_on(&key(), line, context)
+    }
+
+    fn note_on(diff_key: &DiffKey, line: u32, context: &str) -> ReviewNote {
         ReviewNote {
             id: "n".into(),
-            review_id: review_id(&key()),
+            review_id: review_id(diff_key),
             author: "user".into(),
             kind: NoteKind::Issue,
             body: "check this".into(),
             anchor: NoteAnchor {
-                diff_key: key(),
+                diff_key: diff_key.clone(),
                 side: DiffSide::New,
                 start_line: line,
                 end_line: line,
@@ -564,14 +568,57 @@ mod tests {
 
     #[test]
     fn semantic_presentation_keeps_notes_on_hidden_source_rows_open() {
-        let mut diff = file_diff(1, "changed");
-        let presentation =
-            crate::diff::provider::parse(br#"{"status":"unchanged"}"#, "context", "context", 3)
-                .unwrap();
-        diff.presentation = Some(presentation);
-        let mut notes = vec![note(1, "changed")];
-        reconcile(&mut notes, &diff);
+        let mut anchor = key();
+        anchor.layer = DiffLayer::Untracked;
+        let diff = FileDiff {
+            key: anchor.clone(),
+            hunks: vec![DiffHunk {
+                id: "h".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@".into(),
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Addition,
+                    old_line: None,
+                    new_line: Some(1),
+                    text: "visible hunk".into(),
+                }],
+            }],
+            ..file_diff(1, "visible hunk")
+        };
+        let mut without_sources = diff.clone();
+        without_sources.presentation = Some(
+            crate::diff::provider::parse(
+                br#"{"status":"unchanged"}"#,
+                "visible hunk\nhidden row",
+                "visible hunk\nhidden row",
+                3,
+            )
+            .unwrap(),
+        );
+        let mut notes = vec![note_on(&anchor, 2, "hidden row")];
+        reconcile(&mut notes, &without_sources);
+        assert_ne!(notes[0].state, NoteState::Open);
+
+        let root =
+            std::env::temp_dir().join(format!("luvus-note-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "visible hunk\nhidden row\n").unwrap();
+        let file = crate::diff::model::DiffFile {
+            key: anchor.clone(),
+            status: DiffFileStatus::Untracked,
+            additions: Some(2),
+            deletions: None,
+            binary: false,
+            unresolved_notes: 0,
+            viewed_fingerprint: None,
+            fingerprint: String::new(),
+        };
+        let mut notes = vec![note_on(&anchor, 2, "hidden row")];
+        crate::diff::provider::reconcile(&root, &file, &mut notes, &diff);
+        let _ = std::fs::remove_dir_all(&root);
         assert_eq!(notes[0].state, NoteState::Open);
+        assert_eq!(notes[0].anchor.start_line, 2);
         assert_eq!(notes[0].revision, 1);
     }
 

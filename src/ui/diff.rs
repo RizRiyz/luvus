@@ -189,11 +189,7 @@ pub(super) fn draw_diff_view(
     if truncated {
         hint.push_str("  TRUNCATED");
     }
-    if let DiffLoad::Ready(diff) = &view.load {
-        if let Some(reason) = diff.presentation.as_ref().and_then(|p| p.fallback.as_ref()) {
-            hint = format!(" Git fallback: {reason} · {hint}");
-        }
-    }
+    let hint = diff_footer_text(mobile, view, &hint);
     if show_footer {
         f.buffer_mut().set_line(
             footer.x,
@@ -239,7 +235,36 @@ fn draw_diff_header(f: &mut RenderTarget, area: Rect, path: &str, metadata: Line
 }
 
 fn diff_footer_visible(mobile: bool, view: &DiffView) -> bool {
-    !mobile || view.note_draft.is_some() || view.note_selecting || view.search.is_some()
+    !mobile
+        || view.note_draft.is_some()
+        || view.note_selecting
+        || view.search.is_some()
+        || git_fallback_reason(view).is_some()
+}
+
+fn git_fallback_reason(view: &DiffView) -> Option<&str> {
+    match &view.load {
+        DiffLoad::Ready(diff) => diff
+            .presentation
+            .as_ref()
+            .and_then(|presentation| presentation.fallback.as_deref()),
+        _ => None,
+    }
+}
+
+/// A phone hides the ordinary key hint. A Git fallback still has to show its
+/// reason, without also opening that full hint.
+fn diff_footer_text(mobile: bool, view: &DiffView, hint: &str) -> String {
+    let Some(reason) = git_fallback_reason(view) else {
+        return hint.to_string();
+    };
+    let reason_only =
+        mobile && view.note_draft.is_none() && !view.note_selecting && view.search.is_none();
+    if reason_only {
+        format!(" Git fallback: {reason}")
+    } else {
+        format!(" Git fallback: {reason} · {hint}")
+    }
 }
 
 fn effective_layout(preference: DiffLayoutPreference, width: u16) -> DiffLayoutPreference {
@@ -313,6 +338,7 @@ fn draw_stack(
                     &line.text,
                     fragment_byte_start..fragment_byte_end,
                     Style::new().fg(style.text).bg(style.bg),
+                    options.color_mode,
                     t,
                 ));
                 fill_bg(f, Rect::new(area.x, y, area.width, 1), style.bg);
@@ -344,6 +370,7 @@ fn draw_stack(
                 &line.text,
                 text_start..text_end,
                 Style::new().fg(style.text).bg(style.bg),
+                options.color_mode,
                 t,
             ));
             fill_bg(f, Rect::new(area.x, y, area.width, 1), style.bg);
@@ -899,6 +926,7 @@ fn draw_split_side(
             &line.text,
             fragment_range,
             text_style,
+            options.color_mode,
             t,
         ));
     } else {
@@ -1043,6 +1071,7 @@ fn search_fragment_spans<'a>(
     text: &'a str,
     range: std::ops::Range<usize>,
     base_style: Style,
+    color_mode: DiffColorMode,
     t: &Theme,
 ) -> Vec<Span<'a>> {
     let Some(search) = view
@@ -1050,7 +1079,7 @@ fn search_fragment_spans<'a>(
         .as_ref()
         .filter(|search| !search.query.is_empty())
     else {
-        return token_fragment_spans(view, row, text, range, base_style, t);
+        return token_fragment_spans(view, row, text, range, base_style, color_mode, t);
     };
     let hits = search
         .matches
@@ -1073,6 +1102,7 @@ fn search_fragment_spans<'a>(
                 text,
                 cursor..start,
                 base_style,
+                color_mode,
                 t,
             ));
         }
@@ -1091,11 +1121,14 @@ fn search_fragment_spans<'a>(
             text,
             cursor..range.end,
             base_style,
+            color_mode,
             t,
         ));
     }
     if spans.is_empty() {
-        spans.extend(token_fragment_spans(view, row, text, range, base_style, t));
+        spans.extend(token_fragment_spans(
+            view, row, text, range, base_style, color_mode, t,
+        ));
     }
     spans
 }
@@ -1106,6 +1139,7 @@ fn token_fragment_spans<'a>(
     text: &'a str,
     range: std::ops::Range<usize>,
     base: Style,
+    color_mode: DiffColorMode,
     t: &Theme,
 ) -> Vec<Span<'a>> {
     let tokens = match (&view.load, view.stack_rows.get(row).and_then(line_anchor)) {
@@ -1120,11 +1154,12 @@ fn token_fragment_spans<'a>(
     };
     let mut result = Vec::new();
     let mut cursor = range.start;
+    let (addition, deletion) = change_colors(color_mode, t);
     let color =
         if view.stack_rows[row].old_line.is_some() && view.stack_rows[row].new_line.is_none() {
-            t.coral
+            deletion
         } else {
-            t.mint
+            addition
         };
     for token in tokens {
         let start = token.start.max(range.start);
@@ -1290,7 +1325,7 @@ mod tests {
             presentation: Some(presentation),
         }));
         let base = Style::new().fg(theme.text);
-        let spans = search_fragment_spans(&view, 0, text, 1..4, base, &theme);
+        let spans = search_fragment_spans(&view, 0, text, 1..4, base, DiffColorMode::Theme, &theme);
         assert_eq!(spans[0].content, "新");
         assert!(spans[0]
             .style
@@ -1299,8 +1334,47 @@ mod tests {
         view.search_begin();
         view.search_push('新');
         view.search_commit();
-        let spans = search_fragment_spans(&view, 0, text, 1..4, base, &theme);
+        let spans = search_fragment_spans(&view, 0, text, 1..4, base, DiffColorMode::Theme, &theme);
         assert_eq!(spans[0].style.bg, Some(theme.accent));
+    }
+
+    #[test]
+    fn standard_color_mode_keeps_token_emphasis_off_the_theme() {
+        let theme = Theme::quattro_rally();
+        let (addition, deletion) = change_colors(DiffColorMode::Standard, &theme);
+        assert_ne!(addition, theme.mint);
+        assert_ne!(deletion, theme.coral);
+        let old = "a旧z";
+        let new = "a新z";
+        let mut view = test_view(vec![
+            changed_line(DiffLineKind::Deletion, old),
+            changed_line(DiffLineKind::Addition, new),
+        ]);
+        let presentation = crate::diff::provider::parse(
+            br#"{"status":"changed","aligned_lines":[[0,null],[null,0]],"chunks":[[{"lhs":{"line_number":0,"changes":[{"start":1,"end":4,"content":"\u65e7"}]}},{"rhs":{"line_number":0,"changes":[{"start":1,"end":4,"content":"\u65b0"}]}}]]}"#,
+            old,
+            new,
+            3,
+        )
+        .unwrap();
+        view.load = DiffLoad::Ready(std::sync::Arc::new(FileDiff {
+            key: view.key.clone(),
+            status: crate::diff::DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: Vec::new(),
+            presentation: Some(presentation),
+        }));
+        let base = Style::new().fg(theme.text);
+        let removed =
+            token_fragment_spans(&view, 0, old, 1..4, base, DiffColorMode::Standard, &theme);
+        let added =
+            token_fragment_spans(&view, 1, new, 1..4, base, DiffColorMode::Standard, &theme);
+        assert_eq!(removed[0].style.fg, Some(deletion));
+        assert_eq!(added[0].style.fg, Some(addition));
     }
 
     #[test]
@@ -1329,6 +1403,30 @@ mod tests {
     }
 
     #[test]
+    fn mobile_footer_shows_git_fallback_reason_without_the_normal_hint() {
+        let mut hidden = test_view(vec![changed_line(DiffLineKind::Addition, "same")]);
+        assert!(!diff_footer_visible(true, &hidden));
+        hidden.load = DiffLoad::Ready(std::sync::Arc::new(FileDiff {
+            key: hidden.key.clone(),
+            status: crate::diff::DiffFileStatus::Modified,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            hunks: Vec::new(),
+            presentation: Some(crate::diff::provider::Presentation::git_fallback(
+                "cannot start difft: missing",
+            )),
+        }));
+        assert!(diff_footer_visible(true, &hidden));
+        let mobile = diff_footer_text(true, &hidden, " [j/k] move  [q] close");
+        assert_eq!(mobile, " Git fallback: cannot start difft: missing");
+        assert!(!mobile.contains("[j/k]"));
+        assert!(diff_footer_text(false, &hidden, " [j/k] move").contains("[j/k]"));
+    }
+
+    #[test]
     fn search_highlight_projects_unicode_matches_into_visible_fragments() {
         let theme = Theme::quattro_rally();
         let line = "a界Needle x needle";
@@ -1340,7 +1438,15 @@ mod tests {
         view.search_commit();
 
         let base = Style::new().fg(theme.text).bg(theme.mantle);
-        let full = search_fragment_spans(&view, 0, line, 0..line.len(), base, &theme);
+        let full = search_fragment_spans(
+            &view,
+            0,
+            line,
+            0..line.len(),
+            base,
+            DiffColorMode::Theme,
+            &theme,
+        );
         assert_eq!(
             full.iter()
                 .map(|span| span.content.as_ref())
@@ -1355,8 +1461,24 @@ mod tests {
             .any(|span| span.content == "needle" && span.style.bg == Some(theme.amber)));
 
         let first_end = "a界Nee".len();
-        let first = search_fragment_spans(&view, 0, line, 0..first_end, base, &theme);
-        let second = search_fragment_spans(&view, 0, line, first_end..line.len(), base, &theme);
+        let first = search_fragment_spans(
+            &view,
+            0,
+            line,
+            0..first_end,
+            base,
+            DiffColorMode::Theme,
+            &theme,
+        );
+        let second = search_fragment_spans(
+            &view,
+            0,
+            line,
+            first_end..line.len(),
+            base,
+            DiffColorMode::Theme,
+            &theme,
+        );
         assert!(first
             .iter()
             .any(|span| span.content == "Nee" && span.style.bg == Some(theme.accent)));

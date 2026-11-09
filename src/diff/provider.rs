@@ -26,6 +26,15 @@ pub struct Presentation {
 }
 
 impl Presentation {
+    pub(crate) fn git_fallback(reason: impl Into<String>) -> Self {
+        Self {
+            fallback: Some(reason.into()),
+            rows: Vec::new(),
+            sources: Vec::new(),
+            changes: BTreeMap::new(),
+        }
+    }
+
     pub fn stack_rows(&self) -> Vec<DiffLine> {
         self.rows
             .iter()
@@ -65,12 +74,7 @@ pub fn load(
         return Ok(diff);
     }
     let result = prepare(root, file, context, &diff);
-    diff.presentation = Some(result.unwrap_or_else(|reason| Presentation {
-        fallback: Some(reason),
-        rows: Vec::new(),
-        sources: Vec::new(),
-        changes: BTreeMap::new(),
-    }));
+    diff.presentation = Some(result.unwrap_or_else(Presentation::git_fallback));
     Ok(diff)
 }
 
@@ -366,7 +370,9 @@ fn text(bytes: Vec<u8>) -> Result<String, String> {
 }
 
 /// Concurrent drains prevent pipe deadlocks; the child is killed on timeout or
-/// overflow before joining the readers. Never uses a shell or an interactive tool.
+/// overflow before joining the readers. Those joins have the same deadline: an
+/// untracked grandchild can keep a pipe open after the observed tree is gone.
+/// Never uses a shell or an interactive tool.
 fn run(command: &mut Command, timeout: Duration, cap: usize) -> Result<Vec<u8>, String> {
     command
         .stdin(Stdio::null())
@@ -443,19 +449,40 @@ fn run(command: &mut Command, timeout: Duration, cap: usize) -> Result<Vec<u8>, 
         }
     };
     tree.terminate();
-    let bytes = out
-        .join()
-        .map_err(|_| "difftastic reader failed")?
-        .map_err(|e| e.to_string());
-    let _ = err.join();
+    let bytes = finish_readers(out, err, timeout)?;
     if !status?.success() {
         return Err("difftastic failed".into());
     }
-    let bytes = bytes?;
     if bytes.len() > cap {
         return Err("difftastic output exceeds limit".into());
     }
     Ok(bytes)
+}
+
+/// Wait until both pipe readers finish, then return stdout. A blocked reader is
+/// detached instead of stalling the DIFF loader and its Difftastic permit.
+fn finish_readers(
+    stdout: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stderr: std::thread::JoinHandle<()>,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let start = Instant::now();
+    loop {
+        if stdout.is_finished() && stderr.is_finished() {
+            let bytes = stdout
+                .join()
+                .map_err(|_| "difftastic reader failed")?
+                .map_err(|error| error.to_string())?;
+            stderr.join().map_err(|_| "difftastic reader failed")?;
+            return Ok(bytes);
+        }
+        if start.elapsed() >= timeout {
+            drop(stdout);
+            drop(stderr);
+            return Err("difftastic reader timed out".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[derive(Deserialize)]
@@ -895,6 +922,21 @@ mod tests {
         let inputs = Inputs::new().unwrap();
         let mode = std::fs::metadata(&inputs.0).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn stuck_reader_wait_is_bounded() {
+        use std::io::Read;
+        let (reader, _writer) = std::io::pipe().expect("pipe");
+        let stdout = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            reader.take(64).read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let stderr = std::thread::spawn(|| {});
+        let start = Instant::now();
+        let error = finish_readers(stdout, stderr, Duration::from_millis(80)).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
