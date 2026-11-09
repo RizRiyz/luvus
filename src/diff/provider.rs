@@ -459,8 +459,13 @@ fn run(command: &mut Command, timeout: Duration, cap: usize) -> Result<Vec<u8>, 
     Ok(bytes)
 }
 
-/// Wait until both pipe readers finish, then return stdout. A blocked reader is
-/// detached instead of stalling the DIFF loader and its Difftastic permit.
+/// Wait until both pipe readers finish, then return stdout.
+///
+/// Dropping the handles on timeout only detaches those threads; it does not
+/// stop them. An unobserved grandchild that still holds the pipe leaves both
+/// readers blocked in `read`. Returning releases the Difftastic permit, so
+/// this is a slow thread leak rather than a hung DIFF load. Those grandchildren
+/// are not joined or killed.
 fn finish_readers(
     stdout: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
     stderr: std::thread::JoinHandle<()>,
