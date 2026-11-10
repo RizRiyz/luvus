@@ -1470,6 +1470,7 @@ mod tests {
         let _env = crate::persist::test_env("agent-mention");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].name = "project".into();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -1546,6 +1547,7 @@ mod tests {
         let _env = crate::persist::test_env("agent-meta-colour");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        app.workspaces[0].name = "project".into();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
