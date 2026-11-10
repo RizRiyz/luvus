@@ -1674,7 +1674,13 @@ fn render_client(
             damage,
             &mut client.retained_hyperlinks,
         )
-        .map(|()| (target.cursor(), target.cursor_visible()))
+        .map(|()| {
+            (
+                target.cursor(),
+                target.cursor_visible(),
+                target.cursor_style(),
+            )
+        })
         .ok()
     } else {
         None
@@ -1728,123 +1734,126 @@ fn render_client(
     app.client_shell_owns_workspaces = client.shell_dock_layout.owns_workspaces;
     app.client_shell_owns_session_chrome = client.shell_dock_layout.owns_session_chrome;
     app.client_shell_dock_rect = None;
-    let (cursor, cursor_visible, shell_dock, shell_workspaces) = if let Some(cursor) = patched {
-        PARTIAL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
-        (
-            cursor.0,
-            cursor.1,
-            client.last_shell_dock,
-            client.last_shell_workspaces.clone(),
-        )
-    } else {
-        if partial_pass {
-            RETAINED_RENDER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-        }
-        FULL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
-        client.render_buf.reset();
-        let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
-        let (shell_overlay, session_slot, session_button, shell_geometry) = if interactive {
-            ui::render_into(&mut target, app);
-            client
-                .retained_pane_content
-                .clone_from(&app.pane_content_rects);
-            client
-                .retained_hyperlinks
-                .clone_from(&app.rendered_hyperlinks);
-            client.retained_ready = true;
+    let (cursor, cursor_visible, cursor_style, shell_dock, shell_workspaces) =
+        if let Some(cursor) = patched {
+            PARTIAL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
             (
-                ui::shell_overlay_rect(app, area),
-                app.named_session_slot_rect,
-                app.named_session_button_rect,
-                (
-                    app.left_seam,
-                    app.right_seam,
-                    app.last_main_area,
-                    app.last_pane_area,
-                ),
+                cursor.0,
+                cursor.1,
+                cursor.2,
+                client.last_shell_dock,
+                client.last_shell_workspaces.clone(),
             )
         } else {
-            let projection = ui::render_projection(&mut target, app);
-            client.retained_pane_content = projection.pane_content;
-            client.retained_hyperlinks = projection.hyperlinks;
-            client.retained_ready = true;
-            app.client_shell_dock_rect = projection.shell_dock;
-            (
-                projection.shell_overlay,
-                projection.session_slot,
-                projection.session_button,
+            if partial_pass {
+                RETAINED_RENDER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+            }
+            FULL_TERMINAL_PROJECTIONS.fetch_add(1, Ordering::Relaxed);
+            client.render_buf.reset();
+            let mut target = ui::RenderTarget::new(&mut client.render_buf, area);
+            let (shell_overlay, session_slot, session_button, shell_geometry) = if interactive {
+                ui::render_into(&mut target, app);
+                client
+                    .retained_pane_content
+                    .clone_from(&app.pane_content_rects);
+                client
+                    .retained_hyperlinks
+                    .clone_from(&app.rendered_hyperlinks);
+                client.retained_ready = true;
                 (
-                    projection.left_seam,
-                    projection.right_seam,
-                    projection.main_area,
-                    projection.pane_area,
-                ),
+                    ui::shell_overlay_rect(app, area),
+                    app.named_session_slot_rect,
+                    app.named_session_button_rect,
+                    (
+                        app.left_seam,
+                        app.right_seam,
+                        app.last_main_area,
+                        app.last_pane_area,
+                    ),
+                )
+            } else {
+                let projection = ui::render_projection(&mut target, app);
+                client.retained_pane_content = projection.pane_content;
+                client.retained_hyperlinks = projection.hyperlinks;
+                client.retained_ready = true;
+                app.client_shell_dock_rect = projection.shell_dock;
+                (
+                    projection.shell_overlay,
+                    projection.session_slot,
+                    projection.session_button,
+                    (
+                        projection.left_seam,
+                        projection.right_seam,
+                        projection.main_area,
+                        projection.pane_area,
+                    ),
+                )
+            };
+            (
+                target.cursor(),
+                target.cursor_visible(),
+                target.cursor_style(),
+                app.client_shell_dock_rect
+                    .map(|rect| protocol::ShellDockRect {
+                        resize: shell_resize_projection(
+                            rect,
+                            shell_geometry.0,
+                            shell_geometry.1,
+                            shell_geometry.2,
+                            shell_geometry.3,
+                        ),
+                        session_slot: session_slot.map(|slot| protocol::ShellDockBlock {
+                            x: slot.x,
+                            y: slot.y,
+                            width: slot.width,
+                            height: slot.height,
+                        }),
+                        session_button: session_button.map(|button| protocol::ShellDockBlock {
+                            x: button.x,
+                            y: button.y,
+                            width: button.width,
+                            height: button.height,
+                        }),
+                        overlay: shell_overlay.map(|overlay| protocol::ShellDockBlock {
+                            x: overlay.x,
+                            y: overlay.y,
+                            width: overlay.width,
+                            height: overlay.height,
+                        }),
+                        overlay_dims_background: app.picker.is_some(),
+                        workspace_focused: app.sidebar_focus
+                            == Some(crate::app::SidebarListFocus::Workspaces),
+                        workspace_modal: app.mode != crate::app::Mode::Normal
+                            || app.ws_menu.is_some()
+                            || app.ws_rename.is_some()
+                            || app.named_session_menu.is_some(),
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                        show_paths: app.config.layout.workspace_paths,
+                        normal_fg: protocol::pack(app.theme.subtext1),
+                        secondary_fg: protocol::pack(app.theme.overlay0),
+                        active_fg: protocol::pack(app.theme.accent),
+                        active_secondary_fg: protocol::pack(app.theme.subtext0),
+                        active_bg: protocol::pack(app.theme.sel_bg),
+                        branch_fg: protocol::pack(app.theme.green),
+                        chrome: protocol::MachineFormTheme {
+                            surface: protocol::pack(app.theme.surface0),
+                            border: protocol::pack(app.theme.border_focus),
+                            text: protocol::pack(app.theme.text),
+                            subtext0: protocol::pack(app.theme.subtext0),
+                            subtext1: protocol::pack(app.theme.subtext1),
+                            accent: protocol::pack(app.theme.accent),
+                            accent_text: protocol::pack(app.theme.crust),
+                            divider: protocol::pack(app.theme.overlay0),
+                            rule: protocol::pack(app.theme.surface1),
+                            error: protocol::pack(app.theme.coral),
+                        },
+                    }),
+                shell_workspace_projection(app),
             )
         };
-        (
-            target.cursor(),
-            target.cursor_visible(),
-            app.client_shell_dock_rect
-                .map(|rect| protocol::ShellDockRect {
-                    resize: shell_resize_projection(
-                        rect,
-                        shell_geometry.0,
-                        shell_geometry.1,
-                        shell_geometry.2,
-                        shell_geometry.3,
-                    ),
-                    session_slot: session_slot.map(|slot| protocol::ShellDockBlock {
-                        x: slot.x,
-                        y: slot.y,
-                        width: slot.width,
-                        height: slot.height,
-                    }),
-                    session_button: session_button.map(|button| protocol::ShellDockBlock {
-                        x: button.x,
-                        y: button.y,
-                        width: button.width,
-                        height: button.height,
-                    }),
-                    overlay: shell_overlay.map(|overlay| protocol::ShellDockBlock {
-                        x: overlay.x,
-                        y: overlay.y,
-                        width: overlay.width,
-                        height: overlay.height,
-                    }),
-                    overlay_dims_background: app.picker.is_some(),
-                    workspace_focused: app.sidebar_focus
-                        == Some(crate::app::SidebarListFocus::Workspaces),
-                    workspace_modal: app.mode != crate::app::Mode::Normal
-                        || app.ws_menu.is_some()
-                        || app.ws_rename.is_some()
-                        || app.named_session_menu.is_some(),
-                    x: rect.x,
-                    y: rect.y,
-                    width: rect.width,
-                    height: rect.height,
-                    show_paths: app.config.layout.workspace_paths,
-                    normal_fg: protocol::pack(app.theme.subtext1),
-                    secondary_fg: protocol::pack(app.theme.overlay0),
-                    active_fg: protocol::pack(app.theme.accent),
-                    active_secondary_fg: protocol::pack(app.theme.subtext0),
-                    active_bg: protocol::pack(app.theme.sel_bg),
-                    branch_fg: protocol::pack(app.theme.green),
-                    chrome: protocol::MachineFormTheme {
-                        surface: protocol::pack(app.theme.surface0),
-                        border: protocol::pack(app.theme.border_focus),
-                        text: protocol::pack(app.theme.text),
-                        subtext0: protocol::pack(app.theme.subtext0),
-                        subtext1: protocol::pack(app.theme.subtext1),
-                        accent: protocol::pack(app.theme.accent),
-                        accent_text: protocol::pack(app.theme.crust),
-                        divider: protocol::pack(app.theme.overlay0),
-                        rule: protocol::pack(app.theme.surface1),
-                        error: protocol::pack(app.theme.coral),
-                    },
-                }),
-            shell_workspace_projection(app),
-        )
-    };
     // Hover changes terminal styling, so it disables retained row patching,
     // but it does not cover the freshly rendered link text. Test eligibility
     // without that one style-only state; every real overlay remains fail-closed.
@@ -1923,7 +1932,12 @@ fn render_client(
                 || previous.height != client.render_buf.area.height
         });
     let message = if full {
-        let mut frame = protocol::frame_from_buffer(&client.render_buf, cursor, cursor_visible);
+        let mut frame = protocol::frame_from_buffer(
+            &client.render_buf,
+            cursor,
+            cursor_visible,
+            protocol::HostCursorStyle::from_appearance(cursor_style),
+        );
         frame.hyperlinks = protocol::frame_hyperlinks(&frame, &client.retained_hyperlinks);
         client.last_frame = Some(frame);
         Some(ServerMessage::Frame(
@@ -1931,7 +1945,10 @@ fn render_client(
         ))
     } else {
         let previous = client.last_frame.as_mut().expect("frame baseline exists");
-        let cursor_moved = previous.cursor != cursor || previous.cursor_visible != cursor_visible;
+        let cursor_style = protocol::HostCursorStyle::from_appearance(cursor_style);
+        let cursor_moved = previous.cursor != cursor
+            || previous.cursor_visible != cursor_visible
+            || previous.cursor_style != cursor_style;
         let runs = protocol::diff_buffer(previous, &client.render_buf);
         let current_hyperlinks = protocol::frame_hyperlinks(previous, &client.retained_hyperlinks);
         let hyperlinks_changed = previous.hyperlinks != current_hyperlinks;
@@ -1939,6 +1956,7 @@ fn render_client(
         previous.hyperlinks = current_hyperlinks;
         previous.cursor = cursor;
         previous.cursor_visible = cursor_visible;
+        previous.cursor_style = cursor_style;
         if hyperlinks_changed || linked_cells_changed {
             Some(ServerMessage::Frame(previous.clone()))
         } else if runs.is_empty() && !cursor_moved {
@@ -1950,6 +1968,7 @@ fn render_client(
                 runs,
                 cursor,
                 cursor_visible,
+                cursor_style,
             }))
         }
     };
@@ -3820,6 +3839,7 @@ mod tests {
                 runs: Vec::new(),
                 cursor: None,
                 cursor_visible: false,
+                cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
             })
         };
 
@@ -3896,6 +3916,7 @@ mod tests {
                 runs: Vec::new(),
                 cursor: None,
                 cursor_visible: false,
+                cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
             }))
             .is_ok());
         assert!(client.send_control(ServerMessage::Detach).is_ok());

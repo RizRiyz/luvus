@@ -438,7 +438,8 @@ pub(super) fn run(
     let _logging = crate::logging::init(crate::logging::Role::Client);
     let mut terminal = ratatui::init();
     crate::install_tui_panic_hook();
-    let result = run_inner(reader, writer, profiles, &mut terminal);
+    let mut host_cursor = super::client::AppliedHostCursor::default();
+    let result = run_inner(reader, writer, profiles, &mut terminal, &mut host_cursor);
     let _ = execute!(
         std::io::stdout(),
         crossterm::event::PopKeyboardEnhancementFlags,
@@ -446,6 +447,7 @@ pub(super) fn run(
         DisableMouseCapture,
         DisableBracketedPaste
     );
+    let _ = super::client::restore_applied_host_cursor(&mut std::io::stdout(), &host_cursor);
     ratatui::restore();
     match result? {
         super::client::ClientExit::Done => Ok(()),
@@ -541,6 +543,7 @@ fn run_inner(
     mut writer: crate::ipc::transport::Conn,
     profiles: Vec<MachineProfile>,
     terminal: &mut DefaultTerminal,
+    host_cursor: &mut super::client::AppliedHostCursor,
 ) -> Result<super::client::ClientExit> {
     let truecolor = protocol::truecolor_supported();
     let host_terminal_shares_local_filesystem =
@@ -867,6 +870,7 @@ fn run_inner(
                     host_terminal_shares_local_filesystem,
                     &mut dock,
                     &mut last_cursor,
+                    host_cursor,
                     &mut cursor_visible,
                 )? {
                     exit = reason;
@@ -886,6 +890,7 @@ fn run_inner(
                     host_terminal_shares_local_filesystem,
                     &mut dock,
                     &mut last_cursor,
+                    host_cursor,
                     &mut cursor_visible,
                 )? {
                     exit = reason;
@@ -1333,6 +1338,7 @@ fn handle_link_event(
     host_terminal_shares_local_filesystem: bool,
     dock: &mut DockState,
     last_cursor: &mut Option<(u16, u16)>,
+    last_cursor_style: &mut super::client::AppliedHostCursor,
     cursor_visible: &mut bool,
 ) -> Result<Option<super::client::ClientExit>> {
     match event {
@@ -1376,6 +1382,7 @@ fn handle_link_event(
                 host_terminal_shares_local_filesystem,
                 dock,
                 last_cursor,
+                last_cursor_style,
                 cursor_visible,
             )? {
                 return Ok(Some(exit));
@@ -1480,6 +1487,7 @@ fn handle_surface_message(
     host_terminal_shares_local_filesystem: bool,
     dock: &mut DockState,
     last_cursor: &mut Option<(u16, u16)>,
+    last_cursor_style: &mut super::client::AppliedHostCursor,
     cursor_visible: &mut bool,
 ) -> Result<Option<super::client::ClientExit>> {
     let (message, prepared) = match message {
@@ -1820,22 +1828,20 @@ fn handle_surface_message(
                 }
                 cache_dock_projection(dock, &frame, truecolor, endpoint == Endpoint::Local);
                 super::client::sync_begin();
-                super::client::paint(
+                let allow_links =
+                    allow_host_file_links(&endpoint, host_terminal_shares_local_filesystem);
+                super::client::paint_host_frame(
                     terminal,
                     &super::client::frame_cells(&frame, truecolor),
                     frame.cursor,
                     frame.cursor_visible,
                     true,
                     last_cursor,
-                )?;
-                super::client::paint_hyperlink_runs(
-                    terminal,
-                    &frame,
-                    frame.cursor,
-                    frame.cursor_visible,
-                    last_cursor,
-                    truecolor,
-                    allow_host_file_links(&endpoint, host_terminal_shares_local_filesystem),
+                    frame.cursor_style,
+                    last_cursor_style,
+                    |backend| {
+                        super::client::write_hyperlink_runs(backend, &frame, truecolor, allow_links)
+                    },
                 )?;
                 super::client::sync_end();
                 *cursor_visible = frame.cursor_visible;
@@ -1891,13 +1897,16 @@ fn handle_surface_message(
                     .owner_session_button
                     .is_some_and(|rect| frame_diff_intersects_rect(&diff, rect));
             super::client::sync_begin();
-            super::client::paint(
+            super::client::paint_host_frame(
                 terminal,
                 &super::client::diff_cells(&diff, truecolor),
                 diff.cursor,
                 diff.cursor_visible,
                 false,
                 last_cursor,
+                diff.cursor_style,
+                last_cursor_style,
+                |_| Ok(()),
             )?;
             super::client::sync_end();
             *cursor_visible = diff.cursor_visible;
@@ -5869,6 +5878,7 @@ mod tests {
             }],
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         assert!(frame_diff_intersects_rect(&diff(205, 4), dock));
         assert!(frame_diff_intersects_rect(&diff(195, 10), dock));
