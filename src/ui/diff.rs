@@ -592,6 +592,13 @@ fn record_split_source_hit(
         .and_then(|number| view.stack_indices.get(&(side, number)).copied())
         .or(structural.then_some(mapped_index).flatten());
     if let Some(index) = index {
+        // Structural rows are not note anchors. A zero-width rect still tells
+        // keyboard follow that the row was drawn, without accepting a click.
+        let rect = if structural {
+            Rect::new(rect.x, rect.y, 0, rect.height)
+        } else {
+            rect
+        };
         hits.source.push((hits.pane, index, side, rect));
     }
 }

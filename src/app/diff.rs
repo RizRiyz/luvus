@@ -1889,12 +1889,20 @@ impl App {
                 let row_count = view.stack_rows.len();
                 let max = row_count.saturating_sub(1);
                 let old_selected = view.selected;
+                // Only a one-row move may use the previous frame. Jumps such
+                // as g/G, paging, and hunk navigation already choose a scroll
+                // position for a row that was not drawn.
+                let mut single_step = false;
                 match key.code {
                     KeyCode::Char('j') | KeyCode::Down => {
-                        view.selected = (view.selected + 1).min(max)
+                        let next = (view.selected + 1).min(max);
+                        single_step = next != view.selected;
+                        view.selected = next;
                     }
                     KeyCode::Char('k') | KeyCode::Up => {
-                        view.selected = view.selected.saturating_sub(1)
+                        let next = view.selected.saturating_sub(1);
+                        single_step = next != view.selected;
+                        view.selected = next;
                     }
                     KeyCode::Char('d') | KeyCode::PageDown => {
                         view.selected = (view.selected + viewport / 2).min(max)
@@ -1997,9 +2005,10 @@ impl App {
                 }
                 // Source-row counts underestimate height when rows wrap or notes
                 // occupy screen space. The previous frame records every rendered
-                // stack row, including headers and no-newline markers. When the
-                // newly selected row was not among them, anchor it at the top.
-                if view.selected != old_selected
+                // stack row, including headers and no-newline markers. A one-row
+                // move that was not among them anchors at the top. Longer jumps
+                // keep the scroll chosen above.
+                if single_step
                     && !self
                         .diff_source_rects
                         .iter()
@@ -3058,6 +3067,7 @@ mod tests {
             truncated: false,
             omitted_lines: 0,
             hunks,
+            presentation: None,
         });
         let loaded = crate::diff::LoadedDiff::prepare(diff, Vec::new());
         let token = match app.views.get(&id) {
@@ -3178,6 +3188,73 @@ mod tests {
     }
 
     #[test]
+    fn end_jump_keeps_the_viewport_scroll_position() {
+        let _env = crate::persist::test_env("diff-end-jump");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 24, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let diff = Arc::new(FileDiff {
+            key,
+            status: DiffFileStatus::Modified,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            presentation: None,
+            hunks: vec![DiffHunk {
+                id: "h".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@ -1,80 +1,80 @@".into(),
+                lines: (1..=80)
+                    .map(|line| DiffLine {
+                        kind: DiffLineKind::Context,
+                        old_line: Some(line),
+                        new_line: Some(line),
+                        text: format!("context {line}").into(),
+                    })
+                    .collect(),
+            }],
+        });
+        let loaded = crate::diff::LoadedDiff::prepare(diff, Vec::new());
+        let token = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.request_token,
+            _ => unreachable!(),
+        };
+        app.apply_diff_loaded(id, token, Ok(loaded));
+        if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+            view.preference = crate::diff::DiffLayoutPreference::Stack;
+            view.wrap = false;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        let view = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view,
+            _ => unreachable!(),
+        };
+        let last = view.stack_rows.len() - 1;
+        let viewport = app
+            .pane_content_rects
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .map(|(_, rect)| rect.height.saturating_sub(2) as usize)
+            .unwrap();
+        let expected = last.saturating_sub(viewport.saturating_sub(1));
+        assert_eq!(view.selected, last);
+        assert_ne!(expected, last);
+        assert_eq!(
+            view.scroll, expected,
+            "G must not pin the final row to the top"
+        );
+    }
+
+    #[test]
     fn marker_and_header_selection_stays_visible_without_blank_overscroll() {
         let _env = crate::persist::test_env("diff-marker-follow");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -3199,6 +3276,7 @@ mod tests {
             binary: false,
             truncated: false,
             omitted_lines: 0,
+            presentation: None,
             hunks: vec![
                 DiffHunk {
                     id: "h1".into(),
@@ -3261,6 +3339,34 @@ mod tests {
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
         app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let header = app
+            .diff_source_rects
+            .iter()
+            .find(|(pane, row, _, _)| *pane == id && *row == 0)
+            .map(|(_, _, _, rect)| *rect)
+            .expect("rendered hunk header");
+        assert_eq!(header.width, 0, "structural rows must not accept clicks");
+        let selected_before = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.selected,
+            _ => unreachable!(),
+        };
+        app.handle_event(AppEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: header.x.saturating_add(1),
+            row: header.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        let selected_after = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.selected,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            selected_after, selected_before,
+            "clicking a structural row must not move selection"
+        );
         app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
