@@ -10,8 +10,6 @@ use std::thread;
 use anyhow::{anyhow, Result};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::Cell;
-#[cfg(not(windows))]
-use ratatui::crossterm::event::read as read_event;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, Event,
@@ -718,16 +716,7 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
 
     #[cfg(not(windows))]
     {
-        for event in pending {
-            if !route.send(event) {
-                return;
-            }
-        }
-        while let Ok(event) = read_event() {
-            if !route.send(event) {
-                break;
-            }
-        }
+        crate::terminal::theme_probe::run_input_loop(pending, |event| route.send(event));
     }
 }
 

@@ -4040,12 +4040,15 @@ impl App {
                             fingerprint: String::new(),
                         };
                         let context = context_lines;
+                        let provider = config.layout.diff_provider;
                         std::thread::spawn(move || {
-                            let result =
-                                crate::diff::git::load_diff(&root, &file, context).map(|diff| {
-                                    let diff = std::sync::Arc::new(diff);
-                                    crate::diff::LoadedDiff::prepare(diff, Vec::new())
-                                });
+                            let result = crate::diff::provider::load(
+                                &root, &file, context, provider,
+                            )
+                            .map(|diff| {
+                                let diff = std::sync::Arc::new(diff);
+                                crate::diff::LoadedDiff::prepare(diff, Vec::new())
+                            });
                             let _ = tx.send(crate::event::AppEvent::DiffLoaded {
                                 id,
                                 token: 1,

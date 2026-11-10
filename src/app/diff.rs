@@ -748,9 +748,13 @@ impl App {
             .as_ref()
             .and_then(|snapshot| snapshot.files.iter().find(|file| file.key == key))
             .cloned();
-        let cached = file
-            .as_ref()
-            .and_then(|file| self.diff.cache_get(&key, context, &file.fingerprint));
+        let provider = self.config.layout.diff_provider;
+        let cached = (provider == crate::diff::model::DiffProvider::Git)
+            .then(|| {
+                file.as_ref()
+                    .and_then(|file| self.diff.cache_get(&key, context, &file.fingerprint))
+            })
+            .flatten();
         let Some(ViewKind::Diff(view)) = self.views.get_mut(&id) else {
             return;
         };
@@ -769,17 +773,30 @@ impl App {
         let tx = self.app_tx.clone();
         std::thread::spawn(move || {
             let result = file
-                .ok_or_else(|| "change disappeared before the diff loaded".to_string())
-                .and_then(|file| {
-                    cached.map_or_else(
-                        || crate::diff::git::load_diff(&root, &file, context).map(Arc::new),
-                        Ok,
-                    )
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    crate::diff::git::scan(&root, 0).and_then(|snapshot| {
+                        snapshot
+                            .files
+                            .into_iter()
+                            .find(|file| file.key == key)
+                            .ok_or_else(|| "change disappeared before the diff loaded".to_string())
+                    })
                 })
-                .map(|diff| {
-                    crate::diff::notes::reconcile(&mut notes, &diff);
-                    crate::diff::LoadedDiff::prepare(diff, notes)
-                });
+                .and_then(|file| {
+                    cached
+                        .map_or_else(
+                            || {
+                                crate::diff::provider::load(&root, &file, context, provider)
+                                    .map(Arc::new)
+                            },
+                            Ok,
+                        )
+                        .inspect(|diff| {
+                            crate::diff::provider::reconcile(&root, &file, &mut notes, diff)
+                        })
+                })
+                .map(|diff| crate::diff::LoadedDiff::prepare(diff, notes));
             let _ = tx.send(AppEvent::DiffLoaded { id, token, result });
         });
     }
@@ -842,7 +859,11 @@ impl App {
                 file.deletions = Some(diff.deletions);
                 file.binary = diff.binary;
             }
-            self.diff.cache_insert(context, fingerprint, diff);
+            // Presentation depends on two exact source snapshots, not the status
+            // fingerprint. Never mix it into the canonical patch cache.
+            if diff.presentation.is_none() {
+                self.diff.cache_insert(context, fingerprint, diff);
+            }
         }
         for updated in reconciled {
             if let Some(index) = self
@@ -2830,6 +2851,7 @@ mod tests {
             text: "new second".into(),
         };
         let file_diff = FileDiff {
+            presentation: None,
             key,
             status: DiffFileStatus::Modified,
             additions: 2,
@@ -2991,6 +3013,7 @@ mod tests {
         app.open_diff_view(key.clone(), OpenTarget::Tab);
         let id = app.layout().focus;
         let file_diff = FileDiff {
+            presentation: None,
             key,
             status: DiffFileStatus::Modified,
             additions: 1,
@@ -3059,6 +3082,7 @@ mod tests {
             text: "let corrected = true;".into(),
         };
         let file_diff = FileDiff {
+            presentation: None,
             key: key.clone(),
             status: DiffFileStatus::Modified,
             additions: 1,
@@ -3180,6 +3204,7 @@ mod tests {
             text: "let corrected = true;".into(),
         };
         let file_diff = FileDiff {
+            presentation: None,
             key: key.clone(),
             status: DiffFileStatus::Modified,
             additions: 1,

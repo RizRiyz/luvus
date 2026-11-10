@@ -345,6 +345,9 @@ pub struct LayoutConfig {
     /// familiar fixed red/green review palette.
     #[serde(default)]
     pub diff_color_mode: crate::diff::DiffColorMode,
+    /// Optional structured presentation; canonical patches and notes stay Git-backed.
+    #[serde(default)]
+    pub diff_provider: crate::diff::model::DiffProvider,
     #[serde(default = "yes")]
     pub diff_live_refresh: bool,
     /// Terminal width (columns) at or below which the automatic mobile layout
@@ -578,6 +581,7 @@ impl Default for LayoutConfig {
             diff_marker_style: crate::diff::DiffMarkerStyle::Symbols,
             diff_color_mode: crate::diff::DiffColorMode::Theme,
             diff_live_refresh: true,
+            diff_provider: crate::diff::model::DiffProvider::Git,
             mobile_width: default_mobile_width(),
             shift_enter: default_shift_enter(),
         }

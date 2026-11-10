@@ -97,6 +97,25 @@ impl DiffColorMode {
     }
 }
 
+/// Only reviewed structured adapters are accepted, never arbitrary difftool shell commands.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffProvider {
+    Difftastic,
+    #[default]
+    #[serde(other)]
+    Git,
+}
+
+impl DiffProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Git => "git",
+            Self::Difftastic => "difftastic",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffFilter {
@@ -661,6 +680,18 @@ pub struct FileDiff {
     pub truncated: bool,
     pub omitted_lines: usize,
     pub hunks: Vec<DiffHunk>,
+    /// Presentation is separate from the canonical Git patch and its counts.
+    #[serde(skip)]
+    pub presentation: Option<super::provider::Presentation>,
+}
+
+impl FileDiff {
+    pub fn source_lines(&self) -> impl Iterator<Item = &DiffLine> {
+        self.hunks
+            .iter()
+            .flat_map(|h| &h.lines)
+            .chain(self.presentation.iter().flat_map(|p| p.source_lines()))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -675,8 +706,16 @@ pub struct LoadedDiff {
 
 impl LoadedDiff {
     pub fn prepare(diff: Arc<FileDiff>, reconciled_notes: Vec<crate::diff::ReviewNote>) -> Self {
-        let stack_rows = crate::diff::rows::stack_rows(&diff);
-        let split_rows = crate::diff::rows::split_rows(&diff);
+        let (stack_rows, split_rows) = if let Some(presentation) =
+            diff.presentation.as_ref().filter(|p| p.fallback.is_none())
+        {
+            (presentation.stack_rows(), presentation.split_rows())
+        } else {
+            (
+                crate::diff::rows::stack_rows(&diff),
+                crate::diff::rows::split_rows(&diff),
+            )
+        };
         let (stack_indices, split_indices) = build_row_indices(&stack_rows, &split_rows);
         Self {
             diff,
@@ -697,7 +736,9 @@ pub enum DiffLoad {
     Error(String),
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffSide {
     Old,
@@ -1039,6 +1080,7 @@ mod tests {
     fn parsed_cache_never_reuses_a_stale_file_fingerprint() {
         let key = test_key();
         let diff = FileDiff {
+            presentation: None,
             key: key.clone(),
             status: DiffFileStatus::Modified,
             additions: 0,
@@ -1066,6 +1108,7 @@ mod tests {
             text: "shared source text".into(),
         };
         let diff = Arc::new(FileDiff {
+            presentation: None,
             key: test_key(),
             status: DiffFileStatus::Modified,
             additions: 1,

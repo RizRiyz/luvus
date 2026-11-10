@@ -1,6 +1,6 @@
 use super::model::{DiffLine, DiffLineKind, FileDiff};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SplitRow {
     pub old: Option<DiffLine>,
     pub new: Option<DiffLine>,
@@ -89,6 +89,7 @@ mod tests {
     #[test]
     fn split_projection_aligns_replacement_blocks_without_dropping_lines() {
         let diff = FileDiff {
+            presentation: None,
             key: DiffKey {
                 repo_id: "repo".into(),
                 worktree_id: "tree".into(),

@@ -103,6 +103,38 @@ header. `-662,9` means the old section starts at line 662 and spans 9 lines.
 `+681,39` means the replacement starts at line 681 and spans 39 lines. The text
 after the second `@@` is nearby source context that helps identify the section.
 
+## Difftastic presentation (experimental)
+
+Choose **Settings → Layout → Diff provider → difftastic**, or set
+`layout.diff_provider` to `"difftastic"` in `config.json`. Install
+[Difftastic](https://difftastic.wilfred.me.uk/) separately; `difft` must be on
+the **server's PATH**, including when using a remote server. Git remains the
+default. Changing the setting reloads open DIFF views.
+
+Luvus calls the tool's experimental JSON interface, not `git difftool` or
+its colored terminal output. The adapter was checked against Difftastic 0.72.0.
+It uses structural line alignment and emphasizes changed tokens inside the
+normal Split and Stack views. Search and local review notes remain native.
+A formatting-only change may show no textual changes; the Git file list,
+addition/deletion counts, and `diff get --include-patch` still show the
+canonical Git change. Git `diff.tool`, `diff.external`, and shell commands in
+`difftool.*.cmd` do not select this provider.
+
+Staged, worktree, and untracked comparisons are supported. New and deleted
+files are shown as whole-file additions or deletions. Source snapshots are
+bounded, and comments keep their old/new source line identities rather than
+rendered row numbers. Existing notes outside the semantic view remain stored;
+they are not deleted just because the provider hides their lines.
+
+The header shows **DIFFTASTIC** when active. Missing tools, incompatible JSON,
+invalid positions, changed source snapshots, unsupported inputs, or execution
+limits fall back to Git with **GIT (fallback)** and a reason in the footer.
+Binary and already-truncated patches use the normal Git summary directly.
+Difftastic runs off the application loop, with at most two concurrent runs,
+a ten-second tool deadline, and bounded output. The adapter temporarily stores
+old/new inputs in a private directory and removes them after the run. It does
+not stage files or change your Git configuration.
+
 ## Add local review notes
 
 Press **`n`** first to enter note-selection mode. Click an old or new source
