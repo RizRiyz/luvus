@@ -1265,6 +1265,123 @@ impl<'a> Iterator for WrappedText<'a> {
     }
 }
 
+pub(crate) fn stack_note_rows(
+    view: &DiffView,
+    notes: &[crate::diff::ReviewNote],
+    width: u16,
+) -> Vec<usize> {
+    view.stack_rows
+        .iter()
+        .map(|line| note_screen_rows(view, notes, line, width))
+        .collect()
+}
+
+/// Scroll that keeps `selected` inside a wrapped Stack viewport.
+///
+/// One screen row per source row reproduces the historical jump position, so
+/// an unwrapped `G` still leaves the last row at the bottom. Wrapped source
+/// rows and note cards consume their real height instead.
+pub(crate) fn stack_jump_scroll(
+    view: &DiffView,
+    note_rows: &[usize],
+    viewport: usize,
+    width: u16,
+    marker_style: DiffMarkerStyle,
+) -> usize {
+    let last = view.stack_rows.len().saturating_sub(1);
+    let selected = view.selected.min(last);
+    let scroll = view.scroll.min(last);
+    if viewport == 0 || view.stack_rows.is_empty() {
+        return selected;
+    }
+    if selected < scroll {
+        return selected;
+    }
+    let mut height = |index: usize| -> usize {
+        stack_source_rows(view, index, width, marker_style)
+            .saturating_add(*note_rows.get(index).unwrap_or(&0))
+            .max(1)
+    };
+    let mut y = 0usize;
+    for index in scroll..selected {
+        y = y.saturating_add(height(index));
+        if y >= viewport {
+            return bottom_aligned_scroll(selected, viewport, &mut height);
+        }
+    }
+    if y < viewport {
+        scroll
+    } else {
+        bottom_aligned_scroll(selected, viewport, &mut height)
+    }
+}
+
+fn bottom_aligned_scroll(
+    selected: usize,
+    viewport: usize,
+    height: &mut impl FnMut(usize) -> usize,
+) -> usize {
+    let mut start = selected;
+    let mut used = 0usize;
+    while start > 0 {
+        let previous = height(start - 1);
+        if used.saturating_add(previous) >= viewport {
+            break;
+        }
+        used += previous;
+        start -= 1;
+    }
+    start
+}
+
+fn stack_source_rows(
+    view: &DiffView,
+    index: usize,
+    width: u16,
+    marker_style: DiffMarkerStyle,
+) -> usize {
+    let Some(line) = view.stack_rows.get(index) else {
+        return 1;
+    };
+    if !view.effective_wrap(width) {
+        return 1;
+    }
+    let (bar, symbol) = gutter_markers(line.kind, marker_style);
+    let numbers = usize::from(view.show_line_numbers) * 12;
+    let gutter = bar.chars().count() + symbol.chars().count() + numbers;
+    let text_width = width.saturating_sub(gutter as u16).max(1);
+    wrapped_text(&line.text, text_width).count().max(1)
+}
+
+fn note_screen_rows(
+    view: &DiffView,
+    notes: &[crate::diff::ReviewNote],
+    line: &DiffLine,
+    width: u16,
+) -> usize {
+    let Some((side, number)) = line_anchor(line) else {
+        return 0;
+    };
+    notes
+        .iter()
+        .filter(|note| {
+            note.anchor.diff_key == view.key
+                && note.anchor.side == side
+                && number == note.anchor.end_line
+                && view.note_edit_id.as_deref() != Some(note.id.as_str())
+        })
+        .map(|note| {
+            let card_width = width.saturating_sub(6);
+            if card_width < 20 {
+                return 1;
+            }
+            let body_width = card_width.saturating_sub(4).max(1);
+            let body = note_editor_lines(&note.body, body_width).len().min(6);
+            body.saturating_add(2)
+        })
+        .sum()
+}
+
 fn wrapped_text(text: &str, width: u16) -> WrappedText<'_> {
     WrappedText {
         text,

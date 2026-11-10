@@ -71,6 +71,7 @@ mod borders;
 pub(crate) mod changelog;
 mod cmdinfo;
 mod diff;
+pub(crate) use diff::{stack_jump_scroll, stack_note_rows};
 mod files;
 mod git;
 mod help;

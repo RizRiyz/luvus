@@ -1736,6 +1736,12 @@ impl App {
             Note(isize),
             Close,
         }
+        let note_rows = match self.views.get(&id) {
+            Some(ViewKind::Diff(view)) => {
+                crate::ui::stack_note_rows(view, &self.diff.notes, pane_width)
+            }
+            _ => Vec::new(),
+        };
         let mut deferred = Deferred::None;
         {
             let Some(ViewKind::Diff(view)) = self.views.get_mut(&id) else {
@@ -1998,10 +2004,22 @@ impl App {
                     KeyCode::Esc => deferred = Deferred::Close,
                     _ => return false,
                 }
-                if view.selected < view.scroll {
-                    view.scroll = view.selected;
-                } else if view.selected >= view.scroll.saturating_add(viewport) {
-                    view.scroll = view.selected.saturating_sub(viewport.saturating_sub(1));
+                if view.effective_split(pane_width) {
+                    if view.selected < view.scroll {
+                        view.scroll = view.selected;
+                    } else if view.selected >= view.scroll.saturating_add(viewport) {
+                        view.scroll = view.selected.saturating_sub(viewport.saturating_sub(1));
+                    }
+                } else {
+                    // Stack jumps use rendered height. Unwrapped rows stay one
+                    // screen row, so G still pins the last row to the bottom.
+                    view.scroll = crate::ui::stack_jump_scroll(
+                        view,
+                        &note_rows,
+                        viewport,
+                        pane_width,
+                        marker_style,
+                    );
                 }
                 // Source-row counts underestimate height when rows wrap or notes
                 // occupy screen space. The previous frame records every rendered
@@ -3251,6 +3269,72 @@ mod tests {
         assert_eq!(
             view.scroll, expected,
             "G must not pin the final row to the top"
+        );
+    }
+
+    #[test]
+    fn wrapped_stack_end_jump_shows_the_selected_row() {
+        let _env = crate::persist::test_env("diff-wrapped-end-jump");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 24, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let wide = format!("wide {}", "content ".repeat(80));
+        let diff = Arc::new(FileDiff {
+            key,
+            status: DiffFileStatus::Modified,
+            additions: 4,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            presentation: None,
+            hunks: vec![DiffHunk {
+                id: "h".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@ -1,4 +1,4 @@".into(),
+                lines: (1..=4)
+                    .map(|line| DiffLine {
+                        kind: DiffLineKind::Addition,
+                        old_line: None,
+                        new_line: Some(line),
+                        text: format!("{wide} {line}").into(),
+                    })
+                    .collect(),
+            }],
+        });
+        let loaded = crate::diff::LoadedDiff::prepare(diff, Vec::new());
+        let token = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.request_token,
+            _ => unreachable!(),
+        };
+        app.apply_diff_loaded(id, token, Ok(loaded));
+        if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+            view.preference = crate::diff::DiffLayoutPreference::Stack;
+            view.wrap = true;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let view = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view,
+            _ => unreachable!(),
+        };
+        assert_eq!(view.selected, view.stack_rows.len() - 1);
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == view.selected),
+            "wrapped G left selected row {} off screen (scroll={})",
+            view.selected,
+            view.scroll
         );
     }
 
