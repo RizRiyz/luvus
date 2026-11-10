@@ -1068,16 +1068,7 @@ fn start_input_reader(pending: Vec<Event>, events: Sender<ShellEvent>) -> Result
             }
             #[cfg(not(windows))]
             {
-                for event in pending {
-                    if !send(event) {
-                        return;
-                    }
-                }
-                while let Ok(event) = ratatui::crossterm::event::read() {
-                    if !send(event) {
-                        break;
-                    }
-                }
+                crate::terminal::theme_probe::run_input_loop(pending, send);
             }
         })?;
     Ok(())

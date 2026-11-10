@@ -51,8 +51,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-#[cfg(not(windows))]
-use ratatui::crossterm::event::read as read_event;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
@@ -1751,16 +1749,7 @@ fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
 
     #[cfg(not(windows))]
     {
-        for event in pending {
-            if !send_input_event(&tx, event) {
-                return;
-            }
-        }
-        while let Ok(event) = read_event() {
-            if !send_input_event(&tx, event) {
-                break;
-            }
-        }
+        terminal::theme_probe::run_input_loop(pending, |event| send_input_event(&tx, event));
     }
 }
 
