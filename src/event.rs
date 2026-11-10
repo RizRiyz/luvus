@@ -183,9 +183,10 @@ pub enum AppEvent {
     },
     /// A FILES-dock directory read finished (docs/38): its sorted entries, run
     /// on a worker thread so the tree never blocks a frame on `read_dir`.
+    /// `entries` is `None` when the directory could not be read.
     DirRead {
         path: std::path::PathBuf,
-        entries: Vec<crate::files::Entry>,
+        entries: Option<Vec<crate::files::Entry>>,
     },
     /// A bounded global-finder file-path catalog completed off the app loop.
     SearchFilesIndexed {

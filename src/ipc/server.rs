@@ -306,7 +306,12 @@ impl ClientState {
 
 type Clients = HashMap<u64, ClientState>;
 
+/// Run the session server in the foreground until it is stopped: claim the
+/// session, restore panes, then serve API and client connections.
 pub fn run() -> Result<()> {
+    // Every pane costs a few descriptors; an inherited 256 soft limit stalls
+    // PTY spawns and FILES/git workers near 60 panes.
+    let _ = crate::platform::raise_open_file_limit();
     let (tx, rx) = mpsc::channel::<AppEvent>();
 
     // Every process targeting one selected session serializes startup here. This is

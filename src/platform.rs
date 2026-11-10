@@ -379,6 +379,50 @@ impl ChildTreeGuard {
     }
 }
 
+/// Open-file budget the server asks for. Each pane holds about four
+/// descriptors (PTY master handles and a pipe pair), so the 256 soft limit
+/// macOS gives launchd-started processes runs out near 60 panes, and then PTY
+/// spawns, FILES directory reads and git scans all fail together. Bounded
+/// instead of the hard limit because pane shells inherit it, and some programs
+/// close every possible descriptor before they exec.
+#[cfg(unix)]
+const OPEN_FILES_TARGET: libc::rlim_t = 10_240;
+
+/// The soft limit to request, or `None` when the current one is already enough.
+/// Never lowers a limit the user raised themselves.
+#[cfg(unix)]
+fn open_files_soft_target(soft: libc::rlim_t, hard: libc::rlim_t) -> Option<libc::rlim_t> {
+    let target = OPEN_FILES_TARGET.min(hard);
+    (target > soft).then_some(target)
+}
+
+/// Raise this process's soft open-file limit toward [`OPEN_FILES_TARGET`].
+/// Best effort: an error leaves the inherited limit in place, and callers may
+/// ignore it.
+#[cfg(unix)]
+pub fn raise_open_file_limit() -> std::io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let Some(target) = open_files_soft_target(limit.rlim_cur, limit.rlim_max) else {
+        return Ok(());
+    };
+    limit.rlim_cur = target;
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn raise_open_file_limit() -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Report whether a Unix child has exited without reaping it.
 ///
 /// Keeping an exited process waitable preserves its PID identity until its
@@ -1594,6 +1638,46 @@ pub fn spawn_reaped(command: &mut std::process::Command) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn open_file_target_raises_a_low_soft_limit_within_the_hard_limit() {
+        use super::{open_files_soft_target, OPEN_FILES_TARGET};
+        let unlimited = libc::RLIM_INFINITY;
+        assert_eq!(
+            open_files_soft_target(256, unlimited),
+            Some(OPEN_FILES_TARGET)
+        );
+        assert_eq!(open_files_soft_target(256, 1_024), Some(1_024));
+        assert_eq!(open_files_soft_target(1_024, 1_024), None);
+        assert_eq!(open_files_soft_target(OPEN_FILES_TARGET, unlimited), None);
+        assert_eq!(open_files_soft_target(1_048_576, unlimited), None);
+    }
+
+    /// The raise is best effort: success must reach the bounded target, and a
+    /// refused `setrlimit` must leave the inherited soft limit untouched.
+    #[cfg(unix)]
+    #[test]
+    fn raise_open_file_limit_reaches_the_target_or_keeps_the_inherited_limit() {
+        let current = || {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+                0
+            );
+            limit
+        };
+        let before = current();
+        let result = super::raise_open_file_limit();
+        let after = current();
+        match result {
+            Ok(()) => assert!(after.rlim_cur >= super::OPEN_FILES_TARGET.min(after.rlim_max)),
+            Err(_) => assert_eq!(after.rlim_cur, before.rlim_cur),
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     #[test]
     fn process_start_marker_is_stable_for_the_current_process() {
