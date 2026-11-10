@@ -489,6 +489,7 @@ fn load_untracked(root: &Path, file: &DiffFile) -> Result<FileDiff, String> {
         .map_err(|e| format!("read untracked file: {e}"))?;
     if bytes.contains(&0) {
         return Ok(FileDiff {
+            presentation: None,
             key: file.key.clone(),
             status: file.status,
             additions: 0,
@@ -514,6 +515,7 @@ fn load_untracked(root: &Path, file: &DiffFile) -> Result<FileDiff, String> {
     }
     let retained = lines.len();
     Ok(FileDiff {
+        presentation: None,
         key: file.key.clone(),
         status: file.status,
         additions: retained.min(u32::MAX as usize) as u32,
@@ -540,6 +542,7 @@ fn parse_patch(
         || raw.windows(16).any(|w| w == b"GIT binary patch");
     if binary {
         return Ok(FileDiff {
+            presentation: None,
             key: file.key.clone(),
             status: file.status,
             additions: 0,
@@ -611,6 +614,7 @@ fn parse_patch(
         retained += 1;
     }
     Ok(FileDiff {
+        presentation: None,
         key: file.key.clone(),
         status: file.status,
         additions,
@@ -644,7 +648,7 @@ fn parse_hunk_header(line: &str) -> Result<(u32, u32), String> {
     Ok((old, new))
 }
 
-fn bounded_line(line: &str) -> String {
+pub(super) fn bounded_line(line: &str) -> String {
     // Diff content is untrusted display data. Strip C0/C1 controls and ESC so
     // source files cannot paint over Luvus chrome or inject terminal actions.
     let clean: String = line
@@ -667,7 +671,7 @@ fn run_text(cwd: &Path, args: &[&str], cap: usize) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-fn run_git_bytes(cwd: &Path, args: &[OsString], cap: usize) -> Result<Vec<u8>, String> {
+pub(super) fn run_git_bytes(cwd: &Path, args: &[OsString], cap: usize) -> Result<Vec<u8>, String> {
     let (out, truncated) = run_git_bytes_truncating(cwd, args, cap)?;
     if truncated {
         return Err(format!(

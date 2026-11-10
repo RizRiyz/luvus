@@ -422,18 +422,18 @@ pub fn reconcile(notes: &mut [ReviewNote], diff: &FileDiff) {
             continue;
         }
         let mut candidates = Vec::new();
-        for hunk in &diff.hunks {
-            for line in &hunk.lines {
-                let number = match note.anchor.side {
-                    DiffSide::Old => line.old_line,
-                    DiffSide::New => line.new_line,
-                };
-                let Some(number) = number else { continue };
-                if context_hash(&line.text) == note.anchor.context_sha256 {
-                    candidates.push(number);
-                }
+        for line in diff.source_lines() {
+            let number = match note.anchor.side {
+                DiffSide::Old => line.old_line,
+                DiffSide::New => line.new_line,
+            };
+            let Some(number) = number else { continue };
+            if context_hash(&line.text) == note.anchor.context_sha256 {
+                candidates.push(number);
             }
         }
+        candidates.sort_unstable();
+        candidates.dedup();
         if candidates.contains(&note.anchor.start_line) {
             if matches!(note.state, NoteState::Outdated | NoteState::Orphaned) {
                 note.state = NoteState::Open;
@@ -482,7 +482,7 @@ pub fn anchor_context(
     }
 
     let mut source = BTreeMap::new();
-    for line in diff.hunks.iter().flat_map(|hunk| &hunk.lines) {
+    for line in diff.source_lines() {
         let number = match side {
             DiffSide::Old => line.old_line,
             DiffSide::New => line.new_line,
@@ -504,15 +504,13 @@ pub fn anchor_context(
 fn anchor_exists(note: &ReviewNote, diff: &FileDiff) -> bool {
     let mut start = false;
     let mut end = false;
-    for hunk in &diff.hunks {
-        for line in &hunk.lines {
-            let number = match note.anchor.side {
-                DiffSide::Old => line.old_line,
-                DiffSide::New => line.new_line,
-            };
-            start |= number == Some(note.anchor.start_line);
-            end |= number == Some(note.anchor.end_line);
-        }
+    for line in diff.source_lines() {
+        let number = match note.anchor.side {
+            DiffSide::Old => line.old_line,
+            DiffSide::New => line.new_line,
+        };
+        start |= number == Some(note.anchor.start_line);
+        end |= number == Some(note.anchor.end_line);
     }
     start && end
 }
@@ -542,14 +540,18 @@ mod tests {
     }
 
     fn note(line: u32, context: &str) -> ReviewNote {
+        note_on(&key(), line, context)
+    }
+
+    fn note_on(diff_key: &DiffKey, line: u32, context: &str) -> ReviewNote {
         ReviewNote {
             id: "n".into(),
-            review_id: review_id(&key()),
+            review_id: review_id(diff_key),
             author: "user".into(),
             kind: NoteKind::Issue,
             body: "check this".into(),
             anchor: NoteAnchor {
-                diff_key: key(),
+                diff_key: diff_key.clone(),
                 side: DiffSide::New,
                 start_line: line,
                 end_line: line,
@@ -564,8 +566,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn semantic_presentation_keeps_notes_on_hidden_source_rows_open() {
+        let mut anchor = key();
+        anchor.layer = DiffLayer::Untracked;
+        let diff = FileDiff {
+            key: anchor.clone(),
+            hunks: vec![DiffHunk {
+                id: "h".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@".into(),
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Addition,
+                    old_line: None,
+                    new_line: Some(1),
+                    text: "visible hunk".into(),
+                }],
+            }],
+            ..file_diff(1, "visible hunk")
+        };
+        let mut without_sources = diff.clone();
+        without_sources.presentation = Some(
+            crate::diff::provider::parse(
+                br#"{"status":"unchanged"}"#,
+                "visible hunk\nhidden row",
+                "visible hunk\nhidden row",
+                3,
+            )
+            .unwrap(),
+        );
+        let mut notes = vec![note_on(&anchor, 2, "hidden row")];
+        reconcile(&mut notes, &without_sources);
+        assert_ne!(notes[0].state, NoteState::Open);
+
+        let root =
+            std::env::temp_dir().join(format!("luvus-note-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "visible hunk\nhidden row\n").unwrap();
+        let file = crate::diff::model::DiffFile {
+            key: anchor.clone(),
+            status: DiffFileStatus::Untracked,
+            additions: Some(2),
+            deletions: None,
+            binary: false,
+            unresolved_notes: 0,
+            viewed_fingerprint: None,
+            fingerprint: String::new(),
+        };
+        let mut notes = vec![note_on(&anchor, 2, "hidden row")];
+        crate::diff::provider::reconcile(&root, &file, &mut notes, &diff);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(notes[0].state, NoteState::Open);
+        assert_eq!(notes[0].anchor.start_line, 2);
+        assert_eq!(notes[0].revision, 1);
+    }
+
     fn file_diff(line: u32, text: &str) -> FileDiff {
         FileDiff {
+            presentation: None,
             key: key(),
             status: DiffFileStatus::Modified,
             additions: 1,
