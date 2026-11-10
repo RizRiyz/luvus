@@ -1736,11 +1736,12 @@ impl App {
             Note(isize),
             Close,
         }
-        // Index note cards once, and only when Stack scrolling can use them.
-        // Split, search, and the note editor never read this table.
+        // Index note cards once, and only when this key can scroll Stack.
+        // `s` is included because it may leave Split or Auto for Stack after
+        // the pre-key layout check. Search and the note editor never read it.
         let note_rows = match self.views.get(&id) {
             Some(ViewKind::Diff(view))
-                if !is_split
+                if (!is_split || matches!(key.code, KeyCode::Char('s')))
                     && view.note_draft.is_none()
                     && view.search.is_none()
                     && !view.note_selecting =>
@@ -3514,6 +3515,102 @@ mod tests {
                 .iter()
                 .any(|(pane, row, _, _)| *pane == id && *row == selected),
             "six-digit line numbers left selected row {selected} off screen"
+        );
+    }
+
+    #[test]
+    fn switching_wide_split_to_stack_keeps_the_selected_row_visible() {
+        let _env = crate::persist::test_env("diff-split-to-stack-notes");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 24, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let diff = Arc::new(FileDiff {
+            key: key.clone(),
+            status: DiffFileStatus::Modified,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            presentation: None,
+            hunks: vec![DiffHunk {
+                id: "h".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@ -1,8 +1,8 @@".into(),
+                lines: (1..=8)
+                    .map(|line| DiffLine {
+                        kind: DiffLineKind::Context,
+                        old_line: Some(line),
+                        new_line: Some(line),
+                        text: format!("context {line}").into(),
+                    })
+                    .collect(),
+            }],
+        });
+        let loaded = crate::diff::LoadedDiff::prepare(diff, Vec::new());
+        let token = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.request_token,
+            _ => unreachable!(),
+        };
+        app.apply_diff_loaded(id, token, Ok(loaded));
+        let body = "note line\n".repeat(6);
+        for index in 0..3 {
+            app.diff.notes.push(crate::diff::ReviewNote {
+                id: format!("early-note-{index}"),
+                review_id: "review".into(),
+                author: "user".into(),
+                kind: crate::diff::NoteKind::Issue,
+                body: body.clone(),
+                anchor: crate::diff::notes::NoteAnchor {
+                    diff_key: key.clone(),
+                    side: crate::diff::DiffSide::New,
+                    start_line: 1,
+                    end_line: 1,
+                    context: "context 1".into(),
+                    context_sha256: "hash".into(),
+                },
+                state: crate::diff::NoteState::Open,
+                deliveries: Vec::new(),
+                revision: 1,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            });
+        }
+        if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+            view.preference = crate::diff::DiffLayoutPreference::Split;
+            view.wrap = false;
+            view.scroll = 0;
+            view.selected = view.stack_rows.len() - 1;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let (selected, split) = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => {
+                let width = app
+                    .pane_content_rects
+                    .iter()
+                    .find(|(pane, _)| *pane == id)
+                    .map(|(_, rect)| rect.width)
+                    .unwrap_or(160);
+                (view.selected, view.effective_split(width))
+            }
+            _ => unreachable!(),
+        };
+        assert!(!split, "s from wide Split must land on Stack");
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == selected),
+            "switching to Stack hid selected row {selected}"
         );
     }
 
