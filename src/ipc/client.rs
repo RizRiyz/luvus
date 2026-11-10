@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use anyhow::{anyhow, Result};
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::Backend;
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -403,31 +403,19 @@ where
             // is wrapped in a DEC 2026 synchronized update so it paints atomically.
             Ok(ServerMessage::Frame(frame)) => {
                 sync_begin();
-                let _ = apply_host_cursor(
-                    terminal.backend_mut(),
-                    frame.cursor_style,
-                    &mut last_cursor_style,
-                );
-                let r = paint(
+                let r = paint_host_frame(
                     terminal,
                     &frame_cells(&frame, truecolor),
                     frame.cursor,
                     frame.cursor_visible,
                     true,
                     &mut last_cursor,
-                )
-                .and_then(|()| {
-                    paint_hyperlink_runs(
-                        terminal,
-                        &frame,
-                        frame.cursor,
-                        frame.cursor_visible,
-                        &mut last_cursor,
-                        truecolor,
-                        allow_local_file_links,
-                    )?;
-                    Ok(())
-                });
+                    frame.cursor_style,
+                    &mut last_cursor_style,
+                    |backend| {
+                        write_hyperlink_runs(backend, &frame, truecolor, allow_local_file_links)
+                    },
+                );
                 sync_end();
                 if r.is_err() {
                     crate::logging::event(
@@ -441,18 +429,16 @@ where
             }
             Ok(ServerMessage::FrameDiff(diff)) => {
                 sync_begin();
-                let _ = apply_host_cursor(
-                    terminal.backend_mut(),
-                    diff.cursor_style,
-                    &mut last_cursor_style,
-                );
-                let r = paint(
+                let r = paint_host_frame(
                     terminal,
                     &diff_cells(&diff, truecolor),
                     diff.cursor,
                     diff.cursor_visible,
                     false,
                     &mut last_cursor,
+                    diff.cursor_style,
+                    &mut last_cursor_style,
+                    |_| Ok(()),
                 );
                 sync_end();
                 if r.is_err() {
@@ -992,27 +978,24 @@ fn write_osc8<W: Write>(
     writer.write_all(b"\x1b\\")
 }
 
-/// Overlay sparse OSC 8 runs after the ordinary Ratatui blit. The server sends
-/// a full frame whenever this projection changes, so clearing that frame also
-/// clears links which disappeared without changing their visible label.
-pub(super) fn paint_hyperlink_runs<W>(
-    terminal: &mut Terminal<CrosstermBackend<W>>,
+/// Overlay sparse OSC 8 runs after the ordinary cell blit and before the final
+/// cursor placement. The server sends a full frame whenever this projection
+/// changes, so clearing that frame also clears links which disappeared without
+/// changing their visible label. This must not show the cursor: the following
+/// CUP is the position where a new bar may appear.
+pub(super) fn write_hyperlink_runs<B>(
+    backend: &mut B,
     frame: &FrameData,
-    cursor: Option<(u16, u16)>,
-    cursor_visible: bool,
-    last_cursor: &mut Option<(u16, u16)>,
     truecolor: bool,
     allow_local_file_links: bool,
 ) -> std::io::Result<()>
 where
-    W: Write,
+    B: Backend<Error = std::io::Error> + Write,
 {
-    if frame.width == 0 {
+    if frame.width == 0 || frame.hyperlinks.is_empty() {
         return Ok(());
     }
-    let size = terminal.size()?;
-    let backend = terminal.backend_mut();
-    let mut wrote = false;
+    let size = backend.size()?;
     for run in &frame.hyperlinks {
         write_osc8(backend, Some(&run.uri), allow_local_file_links)?;
         let cells = (run.start..run.end)
@@ -1036,20 +1019,8 @@ where
         let close_result = write_osc8(backend, None, allow_local_file_links);
         draw_result?;
         close_result?;
-        wrote = true;
     }
-    if !wrote {
-        return Ok(());
-    }
-    restore_host_cursor(
-        backend,
-        size.width,
-        size.height,
-        cursor,
-        cursor_visible,
-        last_cursor,
-    )?;
-    Backend::flush(backend)
+    Ok(())
 }
 
 /// Visible in-bounds pane cell. Does not remap a compact/mobile row-0/1 caret
@@ -1129,6 +1100,9 @@ fn restore_host_cursor<B: Backend>(
 /// Hide, write cells, CUP to the pane PTY (hidden still parks), then show/hide.
 /// `backend.draw` walks the hardware cursor onto the last cell (e.g. a
 /// `working` spinner); IME must not observe that cell.
+///
+/// Cursor shape is not applied here. [`paint_host_frame`] writes it after the
+/// final CUP and before the cursor is shown.
 pub(super) fn paint<B>(
     terminal: &mut Terminal<B>,
     cells: &[(u16, u16, Cell)],
@@ -1157,6 +1131,64 @@ where
     )?;
     restore_host_cursor(backend, tw, th, cursor, cursor_visible, last_cursor)?;
     backend.flush()?;
+    Ok(())
+}
+
+/// Hide, draw cells, run `overlay` while the cursor stays hidden, CUP to the
+/// final cell, then write DECSCUSR / OSC 12 only if that cursor will be shown.
+/// A hidden caret only parks its position, so a new bar cannot cover a cell
+/// from the previous frame.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint_host_frame<B, F>(
+    terminal: &mut Terminal<B>,
+    cells: &[(u16, u16, Cell)],
+    cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
+    clear: bool,
+    last_cursor: &mut Option<(u16, u16)>,
+    style: protocol::HostCursorStyle,
+    last_style: &mut Option<protocol::HostCursorStyle>,
+    overlay: F,
+) -> Result<()>
+where
+    B: Backend<Error = std::io::Error> + Write,
+    F: FnOnce(&mut B) -> std::io::Result<()>,
+{
+    let size = terminal.size()?;
+    let (tw, th) = (size.width, size.height);
+    let backend = terminal.backend_mut();
+    backend.hide_cursor()?;
+    if clear {
+        backend.clear()?;
+    }
+    backend.draw(
+        cells
+            .iter()
+            .filter(|(x, y, _)| *x < tw && *y < th)
+            .map(|(x, y, c)| (*x, *y, c)),
+    )?;
+    overlay(backend)?;
+    match ime_position(cursor, tw, th) {
+        Some((x, y)) => {
+            *last_cursor = Some((x, y));
+            backend.set_cursor_position(Position::new(x, y))?;
+            if cursor_visible {
+                apply_host_cursor(backend, style, last_style)?;
+                backend.show_cursor()?;
+            } else {
+                backend.hide_cursor()?;
+            }
+        }
+        None => {
+            if let Some((x, y)) = *last_cursor {
+                if x < tw && y < th {
+                    backend.set_cursor_position(Position::new(x, y))?;
+                }
+            }
+            backend.hide_cursor()?;
+        }
+    }
+    Backend::flush(backend)?;
     Ok(())
 }
 
@@ -1189,6 +1221,177 @@ mod host_cursor_style {
             ..crate::ipc::protocol::HostCursorStyle::default()
         });
         assert_eq!(steady, b"\x1b[2 q");
+    }
+
+    #[test]
+    fn cursor_style_follows_the_final_cup_and_precedes_show() {
+        use std::io::{self, Write};
+
+        use ratatui::backend::Backend;
+        use ratatui::buffer::Cell;
+        use ratatui::layout::{Position, Rect, Size};
+        use ratatui::{Terminal, TerminalOptions, Viewport};
+
+        struct OrderBackend {
+            bytes: Vec<u8>,
+            width: u16,
+            height: u16,
+            cursor: Position,
+            visible: bool,
+        }
+
+        impl Write for OrderBackend {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Backend for OrderBackend {
+            type Error = io::Error;
+
+            fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+            where
+                I: Iterator<Item = (u16, u16, &'a Cell)>,
+            {
+                for (x, y, cell) in content {
+                    write!(self, "\x1b[{};{}H{}", y + 1, x + 1, cell.symbol())?;
+                    self.cursor = Position::new(x, y);
+                }
+                Ok(())
+            }
+
+            fn hide_cursor(&mut self) -> io::Result<()> {
+                self.bytes.extend_from_slice(b"\x1b[?25l");
+                self.visible = false;
+                Ok(())
+            }
+
+            fn show_cursor(&mut self) -> io::Result<()> {
+                self.bytes.extend_from_slice(b"\x1b[?25h");
+                self.visible = true;
+                Ok(())
+            }
+
+            fn get_cursor_position(&mut self) -> io::Result<Position> {
+                Ok(self.cursor)
+            }
+
+            fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+                let position = position.into();
+                self.cursor = position;
+                write!(self, "\x1b[{};{}H", position.y + 1, position.x + 1)
+            }
+
+            fn clear(&mut self) -> io::Result<()> {
+                self.bytes.extend_from_slice(b"\x1b[2J");
+                Ok(())
+            }
+
+            fn clear_region(&mut self, _: ratatui::backend::ClearType) -> io::Result<()> {
+                Ok(())
+            }
+
+            fn size(&self) -> io::Result<Size> {
+                Ok(Size {
+                    width: self.width,
+                    height: self.height,
+                })
+            }
+
+            fn window_size(&mut self) -> io::Result<ratatui::backend::WindowSize> {
+                Ok(ratatui::backend::WindowSize {
+                    columns_rows: Size {
+                        width: self.width,
+                        height: self.height,
+                    },
+                    pixels: Size {
+                        width: 0,
+                        height: 0,
+                    },
+                })
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let style = crate::ipc::protocol::HostCursorStyle {
+            shape: 2,
+            blinking: true,
+            color: Some(0x00ff_ffff),
+            explicit: true,
+        };
+        let mut cell = Cell::default();
+        cell.set_symbol("Z");
+        let cells = [(1, 0, cell)];
+        let backend = OrderBackend {
+            bytes: Vec::new(),
+            width: 8,
+            height: 4,
+            cursor: Position::ORIGIN,
+            visible: true,
+        };
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 8, 4)),
+            },
+        )
+        .unwrap();
+        let mut last_cursor = None;
+        let mut last_style = None;
+        super::paint_host_frame(
+            &mut terminal,
+            &cells,
+            Some((3, 1)),
+            false,
+            false,
+            &mut last_cursor,
+            style,
+            &mut last_style,
+            |backend| {
+                backend.set_cursor_position(Position::new(0, 0))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        let hidden = terminal.backend_mut().bytes.clone();
+        let hidden = String::from_utf8(hidden).unwrap();
+        assert!(hidden.contains("\u{1b}[2;4H"), "{hidden:?}");
+        assert!(!hidden.contains("\u{1b}[5 q"), "{hidden:?}");
+        assert!(!hidden.contains("\u{1b}[?25h"), "{hidden:?}");
+        assert!(last_style.is_none());
+
+        terminal.backend_mut().bytes.clear();
+        super::paint_host_frame(
+            &mut terminal,
+            &cells,
+            Some((3, 1)),
+            true,
+            false,
+            &mut last_cursor,
+            style,
+            &mut last_style,
+            |backend| {
+                backend.set_cursor_position(Position::new(0, 0))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        let shown = String::from_utf8(terminal.backend_mut().bytes.clone()).unwrap();
+        let cup = shown.rfind("\u{1b}[2;4H").expect(&shown);
+        let style_at = shown
+            .find("\u{1b}[5 q\u{1b}]12;#ffffff\u{1b}\\")
+            .expect(&shown);
+        let show_at = shown.find("\u{1b}[?25h").expect(&shown);
+        assert!(cup < style_at, "{shown:?}");
+        assert!(style_at < show_at, "{shown:?}");
+        assert!(!shown[..cup].contains("\u{1b}[5 q"), "{shown:?}");
     }
 }
 

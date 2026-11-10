@@ -1826,27 +1826,20 @@ fn handle_surface_message(
                 }
                 cache_dock_projection(dock, &frame, truecolor, endpoint == Endpoint::Local);
                 super::client::sync_begin();
-                let _ = super::client::apply_host_cursor(
-                    terminal.backend_mut(),
-                    frame.cursor_style,
-                    last_cursor_style,
-                );
-                super::client::paint(
+                let allow_links =
+                    allow_host_file_links(&endpoint, host_terminal_shares_local_filesystem);
+                super::client::paint_host_frame(
                     terminal,
                     &super::client::frame_cells(&frame, truecolor),
                     frame.cursor,
                     frame.cursor_visible,
                     true,
                     last_cursor,
-                )?;
-                super::client::paint_hyperlink_runs(
-                    terminal,
-                    &frame,
-                    frame.cursor,
-                    frame.cursor_visible,
-                    last_cursor,
-                    truecolor,
-                    allow_host_file_links(&endpoint, host_terminal_shares_local_filesystem),
+                    frame.cursor_style,
+                    last_cursor_style,
+                    |backend| {
+                        super::client::write_hyperlink_runs(backend, &frame, truecolor, allow_links)
+                    },
                 )?;
                 super::client::sync_end();
                 *cursor_visible = frame.cursor_visible;
@@ -1902,18 +1895,16 @@ fn handle_surface_message(
                     .owner_session_button
                     .is_some_and(|rect| frame_diff_intersects_rect(&diff, rect));
             super::client::sync_begin();
-            let _ = super::client::apply_host_cursor(
-                terminal.backend_mut(),
-                diff.cursor_style,
-                last_cursor_style,
-            );
-            super::client::paint(
+            super::client::paint_host_frame(
                 terminal,
                 &super::client::diff_cells(&diff, truecolor),
                 diff.cursor,
                 diff.cursor_visible,
                 false,
                 last_cursor,
+                diff.cursor_style,
+                last_cursor_style,
+                |_| Ok(()),
             )?;
             super::client::sync_end();
             *cursor_visible = diff.cursor_visible;
