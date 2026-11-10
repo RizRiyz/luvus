@@ -306,6 +306,8 @@ impl ClientState {
 
 type Clients = HashMap<u64, ClientState>;
 
+/// Run the session server in the foreground until it is stopped: claim the
+/// session, restore panes, then serve API and client connections.
 pub fn run() -> Result<()> {
     // Every pane costs a few descriptors; an inherited 256 soft limit stalls
     // PTY spawns and FILES/git workers near 60 panes.

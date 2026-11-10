@@ -1653,6 +1653,8 @@ mod tests {
         assert_eq!(open_files_soft_target(1_048_576, unlimited), None);
     }
 
+    /// The raise is best effort: success must reach the bounded target, and a
+    /// refused `setrlimit` must leave the inherited soft limit untouched.
     #[cfg(unix)]
     #[test]
     fn raise_open_file_limit_reaches_the_target_or_keeps_the_inherited_limit() {
