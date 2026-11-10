@@ -101,9 +101,11 @@ jobs:
 
   # macOS is a primary platform and ships native Apple-silicon/Intel binaries;
   # run the full test suite there too, not just at release-tag time.
+  # macos-14 no longer receives a runner. macos-latest is the Apple-silicon
+  # pool; the Intel size job still cross-compiles x86_64 on that runner.
   macos:
     name: macos test
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       SQLITE3_LIB_DIR: /usr/lib
     steps:
@@ -127,7 +129,7 @@ jobs:
 
   binary-size:
     name: macos binary size
-    runs-on: macos-14
+    runs-on: macos-latest
     permissions:
       contents: read
     env:
@@ -148,7 +150,7 @@ jobs:
 
   binary-size-intel-macos:
     name: macos Intel binary size
-    runs-on: macos-14
+    runs-on: macos-latest
     permissions:
       contents: read
     env:

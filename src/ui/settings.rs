@@ -697,6 +697,18 @@ fn draw_content(
                             t,
                         ));
                     }
+                    LayoutRow::DiffProvider => {
+                        ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_diff_provider,
+                            picker(app.config.layout.diff_provider.as_str(), t),
+                            t,
+                        ));
+                    }
                     LayoutRow::DiffLiveRefresh => {
                         ctls.push(ctl_row(
                             f,

@@ -11,6 +11,11 @@ use ratatui::crossterm::event::Event;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+mod input;
+#[cfg(unix)]
+pub(crate) use input::run_input_loop;
+
 /// Colors reported by the terminal that is displaying a luvus client.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TerminalColors {
@@ -27,8 +32,26 @@ pub struct ProbeResult {
 }
 
 /// Query only the palette entries used by `Theme::from_terminal`.
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 const PALETTE_QUERIES: [u8; 6] = [1, 2, 3, 4, 6, 8];
+
+/// The single query inventory used for emission, raw splitting, and late replies.
+/// Prefixes end at the OSC parameter separator, independent of color encoding.
+#[cfg(any(unix, test))]
+fn requested_reply_prefixes() -> &'static [String] {
+    static PREFIXES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    PREFIXES.get_or_init(|| {
+        [10, 11]
+            .into_iter()
+            .map(|command| format!("\x1b]{command};"))
+            .chain(
+                PALETTE_QUERIES
+                    .into_iter()
+                    .map(|index| format!("\x1b]4;{index};")),
+            )
+            .collect()
+    })
+}
 /// Unsupported terminals must not add a visible pause to attachment.
 #[cfg(unix)]
 const PROBE_TIMEOUT_MS: u64 = 50;
@@ -53,11 +76,8 @@ pub fn probe() -> ProbeResult {
     }
 
     let mut stdout = std::io::stdout();
-    if write!(stdout, "\x1b]10;?\x07\x1b]11;?\x07").is_err() {
-        return ProbeResult::default();
-    }
-    for index in PALETTE_QUERIES {
-        if write!(stdout, "\x1b]4;{index};?\x07").is_err() {
+    for prefix in requested_reply_prefixes() {
+        if write!(stdout, "{prefix}?\x07").is_err() {
             return ProbeResult::default();
         }
     }
@@ -81,7 +101,7 @@ pub fn probe() -> ProbeResult {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 bytes.extend_from_slice(&chunk[..n]);
-                if complete_color_responses(&bytes) >= 2 + PALETTE_QUERIES.len() {
+                if complete_color_responses(&bytes) >= requested_reply_prefixes().len() {
                     break;
                 }
             }
@@ -139,7 +159,9 @@ pub fn probe() -> ProbeResult {
 
 #[cfg(any(unix, test))]
 fn is_color_response_start(data: &[u8]) -> bool {
-    data.starts_with(b"\x1b]10;") || data.starts_with(b"\x1b]11;") || data.starts_with(b"\x1b]4;")
+    requested_reply_prefixes()
+        .iter()
+        .any(|prefix| data.starts_with(prefix.as_bytes()))
 }
 
 #[cfg(any(unix, test))]
@@ -171,8 +193,9 @@ fn split_responses_and_input(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
                 i += len;
                 continue;
             }
-            // A truncated recognized reply is terminal traffic, not a key.
-            responses.extend_from_slice(rest);
+            // Hand the prefix to the persistent input filter, so a reply split
+            // across the probe deadline is still recognized with its late tail.
+            input.extend_from_slice(rest);
             break;
         }
         input.push(data[i]);
@@ -315,6 +338,13 @@ fn decode_pending_input(data: &[u8]) -> Vec<Event> {
     let mut events = Vec::new();
     let mut i = 0;
     while i < data.len() {
+        // A user Escape immediately before a reply is independent input, not
+        // an Alt modifier applied to the reply's OSC introducer.
+        if data[i] == 0x1b && is_color_response_start(&data[i + 1..]) {
+            events.push(Event::Key(KeyCode::Esc.into()));
+            i += 1;
+            continue;
+        }
         let (event, used) = decode_one(&data[i..]);
         if let Some(event) = event {
             events.push(Event::Key(event));
@@ -462,6 +492,85 @@ fn xterm_modifiers(value: u16) -> KeyModifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn late_color_replies_do_not_become_pane_input() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        const CHILD: &str = "LUVUS_TEST_LATE_COLOR_REPLY";
+        if std::env::var_os(CHILD).is_some() {
+            ratatui::crossterm::terminal::enable_raw_mode().unwrap();
+            let probe = probe();
+            assert!(probe.colors.is_none());
+            print!("PROBE_DONE");
+            std::io::stdout().flush().unwrap();
+            let mut keys = Vec::new();
+            run_input_loop(probe.pending, |event| {
+                let done = matches!(
+                    event,
+                    Event::Key(KeyEvent {
+                        code: KeyCode::Char('!'),
+                        ..
+                    })
+                );
+                keys.push(event);
+                !done
+            });
+            ratatui::crossterm::terminal::disable_raw_mode().unwrap();
+            assert_eq!(keys, vec![Event::Key(KeyCode::Char('!').into())]);
+            return;
+        }
+
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let mut command = portable_pty::CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "terminal::theme_probe::tests::late_color_replies_do_not_become_pane_input",
+            "--nocapture",
+        ]);
+        command.env(CHILD, "1");
+        command.env_remove("LUVUS_ENV");
+        command.env_remove("LUVUS_SOCKET_PATH");
+        command.env_remove("LUVUS_SESSION");
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut chunk = [0; 1024];
+            while let Ok(n) = reader.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                output.extend_from_slice(&chunk[..n]);
+                if output
+                    .windows(b"PROBE_DONE".len())
+                    .any(|s| s == b"PROBE_DONE")
+                {
+                    // Deliberately reply only after the 50ms probe has returned.
+                    writer.write_all(b"\x1b]10;rgb:3c3c/3838/3636\x1b\\\x1b]11;rgb:fbfb/f1f1/c7c7\x07\x1b]4;1;rgb:cccc/2424/1d1d\x1b\\!").unwrap();
+                    writer.flush().unwrap();
+                    output.clear();
+                }
+            }
+            let _ = tx.send(output);
+        });
+        let output = match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = child.kill();
+                panic!("isolated terminal test timed out: {error}");
+            }
+        };
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{}", String::from_utf8_lossy(&output));
+    }
 
     #[test]
     fn parses_st_and_bel_color_replies() {

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { checkBrowserLayout } from "./check-browser-layout.mjs";
+import { browserAddress, killBrowser, prepareBrowserProfile, watchBrowser } from "./browser-process.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const executable = path.resolve(process.env.LUVUS_BIN || path.join(root, "target/debug", process.platform === "win32" ? "luvus.exe" : "luvus"));
@@ -26,7 +27,7 @@ delete env.LUVUS_BIN_PATH;
 // npm's harness prefix must not leak into the interactive test shell (nvm).
 delete env.npm_config_prefix;
 delete env.NPM_CONFIG_PREFIX;
-let bridge, browser, cdp;
+let bridge, browser, browserWatch, cdp;
 const exceptions = [];
 
 try {
@@ -125,12 +126,15 @@ try {
   assert.equal(exceptions.length, 0, `Unexpected browser exceptions: ${exceptions.length}`);
   console.log("real Chromium browser passed: one QR/code pairing across eight tabs, close/reopen tabs, browser restart, separate profile, desktop/mobile device footer, disconnect cancellation, and cross-tab revocation");
 } finally {
-  await closeBrowser().catch(() => browser?.kill("SIGKILL"));
-  if (bridge?.exitCode === null) { bridge.kill("SIGINT"); await exited(bridge).catch(() => bridge.kill("SIGKILL")); }
-  for (const args of [["--session", session, "server", "stop"], ["session", "delete", session]]) {
-    spawnSync(executable, args, { cwd: workspace, env, stdio: "ignore", timeout: 20_000, windowsHide: true });
+  try {
+    await closeBrowser();
+  } finally {
+    if (bridge?.exitCode === null) { bridge.kill("SIGINT"); await exited(bridge).catch(() => bridge.kill("SIGKILL")); }
+    for (const args of [["--session", session, "server", "stop"], ["session", "delete", session]]) {
+      spawnSync(executable, args, { cwd: workspace, env, stdio: "ignore", timeout: 20_000, windowsHide: true });
+    }
+    await rm(home, { recursive: true, force: true });
   }
-  await rm(home, { recursive: true, force: true });
 }
 
 async function checkDeviceFooter(page, pairingOpen) {
@@ -190,29 +194,38 @@ async function checkDeviceFooter(page, pairingOpen) {
 }
 
 async function launchBrowser() {
-  await rm(path.join(profile, "DevToolsActivePort"), { force: true });
-  browser = spawn(browserBin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", ...(process.platform === "linux" ? ["--no-sandbox"] : []), "about:blank"], { stdio: "ignore", windowsHide: true });
-  let address;
-  await until(async () => {
-    try {
-      const [port, endpoint] = (await readFile(path.join(profile, "DevToolsActivePort"), "utf8")).trim().split("\n");
-      address = `ws://127.0.0.1:${port}${endpoint}`;
-      return true;
-    } catch { return false; }
-  });
-  const socket = new WebSocket(address);
-  await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
-  cdp = new Cdp(socket);
-  cdp.events.on("Runtime.exceptionThrown", () => exceptions.push(true));
+  await prepareBrowserProfile(profile);
+  cdp = undefined;
+  browser = spawn(browserBin, ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update", ...(process.platform === "linux" ? ["--no-sandbox"] : []), "about:blank"], { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+  browserWatch = watchBrowser(browser);
+  try {
+    const address = await browserAddress(browserWatch, profile);
+    const socket = new WebSocket(address, { handshakeTimeout: 8_000 });
+    await new Promise((resolve, reject) => { socket.once("open", resolve); socket.once("error", reject); });
+    cdp = new Cdp(socket);
+    cdp.events.on("Runtime.exceptionThrown", () => exceptions.push(true));
+  } catch (error) {
+    const diagnostic = browserWatch.error(`startup failed: ${error.message}`);
+    await killBrowser(browser, browserWatch);
+    throw diagnostic;
+  }
 }
 
 async function closeBrowser() {
-  if (!browser || browser.exitCode !== null) return;
-  const done = exited(browser);
-  await cdp.call("Browser.close").catch(() => {});
-  await done;
-  cdp.socket.close();
-  browser = undefined;
+  if (!browser) return;
+  try {
+    if (!browserWatch.finished && cdp) {
+      const done = exited(browser);
+      await cdp.call("Browser.close").catch(() => {});
+      await done;
+    }
+  } finally {
+    await killBrowser(browser, browserWatch);
+    cdp?.socket.close();
+    browser = undefined;
+    browserWatch = undefined;
+    cdp = undefined;
+  }
 }
 
 async function page(url, browserContextId) {
