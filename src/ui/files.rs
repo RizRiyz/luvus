@@ -252,6 +252,21 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         line_at(f, y, Line::from(spans));
         app.file_tree_rects.push((i, rect));
     }
+    // Same bar the other docks get (docs/29): drawn only when the tree overflows,
+    // and recorded so a click or drag on it scrolls the tree. Drawn after the rows,
+    // whose long names and highlights reach the bar's column.
+    crate::ui::sidebar::draw_scrollbar(
+        f,
+        &mut app.sidebar_bars,
+        crate::app::SidebarBar {
+            list: crate::app::BarDrag::Files,
+            track: Rect::new(area.right().saturating_sub(2), list_top, 1, cap as u16),
+            total: n,
+            cap,
+        },
+        scroll,
+        t,
+    );
 }
 
 fn draw_diff_list(

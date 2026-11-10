@@ -2875,6 +2875,127 @@ mod tests {
             .join("\n")
     }
 
+    /// The FILES dock shares the sidebar scrollbar, so its tree scrolls by click
+    /// and drag on the bar like WORKSPACES and AGENTS do.
+    #[test]
+    fn files_dock_scrollbar_drags_the_tree() {
+        let _env = crate::persist::test_env("files-dock-bar");
+        use crate::app::BarDrag;
+        use ratatui::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        // More files than a 24-row sidebar can show.
+        let root = std::env::temp_dir().join(format!("luvus-ft-bar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..40 {
+            std::fs::write(root.join(format!("f{i:02}.txt")), b"x").unwrap();
+        }
+        // Sorts first and runs past the dock's right edge.
+        let long = format!("a{}.txt", "x".repeat(80));
+        std::fs::write(root.join(&long), b"x").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.workspaces[app.active_ws].cwd = root.clone();
+        app.sidebars.left.docks.push(DockKind::Files);
+        app.ensure_file_tree();
+        app.file_tree
+            .apply_dir(root.clone(), crate::files::read_dir_entries(&root));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut draw = |app: &mut App| {
+            term.draw(|f| crate::ui::render(f, app))
+                .map(|frame| frame.buffer.clone())
+                .unwrap()
+        };
+        let buf = draw(&mut app);
+        let bar = app
+            .sidebar_bars
+            .iter()
+            .find(|b| b.list == BarDrag::Files)
+            .copied()
+            .expect("the overflowing FILES tree drew a scrollbar");
+        let long_row = app
+            .file_tree_rects
+            .iter()
+            .find(|(i, _)| app.file_tree.visible_rows()[*i].name == long)
+            .map(|(_, rect)| rect.y)
+            .expect("the long name is on screen");
+        assert_ne!(
+            buf[(bar.track.x, long_row)].symbol(),
+            "x",
+            "the bar is drawn over a name that reaches its column"
+        );
+
+        // A keyboard-focused tree keeps its cursor in view on every draw; the bar
+        // must still move it, so grabbing the bar hands input back to the pane.
+        app.files_focused = true;
+        app.file_tree.cursor = 0;
+
+        let at = |app: &mut App, kind, row| {
+            app.handle_event(crate::event::AppEvent::Mouse(MouseEvent {
+                kind,
+                column: bar.track.x,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        // Press at the bottom of the track → jump to the end of the tree.
+        at(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            bar.track.bottom() - 1,
+        );
+        draw(&mut app);
+        assert_eq!(
+            app.file_tree.scroll,
+            bar.total - bar.cap,
+            "clicking the bottom of the bar shows the end of the tree"
+        );
+        assert!(!app.files_focused, "grabbing the bar ends keyboard focus");
+        // Drag back to the top → the tree follows instead of opening a file.
+        at(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            bar.track.y,
+        );
+        draw(&mut app);
+        assert_eq!(app.file_tree.scroll, 0, "the drag followed the pointer");
+        at(&mut app, MouseEventKind::Up(MouseButton::Left), bar.track.y);
+        assert!(app.bar_drag.is_none(), "release ends the drag");
+
+        // An open filter prompt is still taking text, so the bar keeps FILES
+        // focused and carries the cursor along instead of letting it pull back.
+        let rows = app.file_tree.visible_rows().to_vec();
+        let mut filter =
+            crate::files::filter::FileFilter::start(root.clone(), app.app_tx.clone(), (0, 0));
+        filter.loading = false;
+        filter.rows = rows;
+        app.file_tree.filter = Some(filter);
+        app.files_focused = true;
+        app.file_tree.cursor = 0;
+        draw(&mut app);
+        let filtered = app
+            .sidebar_bars
+            .iter()
+            .find(|b| b.list == BarDrag::Files)
+            .copied()
+            .expect("the overflowing filter results drew a scrollbar");
+        at(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            filtered.track.bottom() - 1,
+        );
+        draw(&mut app);
+        assert_eq!(
+            app.file_tree.scroll,
+            filtered.total - filtered.cap,
+            "the bar scrolls the filter results"
+        );
+        assert!(app.files_focused, "an open filter keeps keyboard focus");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The dock renders the tree, and a click on a folder row expands it in place.
     #[test]
     fn files_dock_renders_and_a_click_expands() {
