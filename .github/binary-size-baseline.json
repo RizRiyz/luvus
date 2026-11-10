@@ -6,12 +6,12 @@
   },
   "targets": {
     "aarch64-apple-darwin": {
-      "executable_bytes": 12729232,
-      "archive_bytes": 5456766
+      "executable_bytes": 14054864,
+      "archive_bytes": 6039484
     },
     "x86_64-apple-darwin": {
-      "executable_bytes": 13847368,
-      "archive_bytes": 5807987
+      "executable_bytes": 15200544,
+      "archive_bytes": 6402959
     },
     "aarch64-unknown-linux-musl": {
       "executable_bytes": 10345896,

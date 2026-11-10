@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use anyhow::{anyhow, Result};
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::Backend;
 use ratatui::buffer::Cell;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -179,6 +179,7 @@ where
     crate::install_tui_panic_hook();
     let mut input = ClientInput::default();
     let mut selected = crate::session::display_name();
+    let mut host_cursor = AppliedHostCursor::default();
     let allow_local_file_links = local && host_terminal_shares_local_filesystem();
     let result = (|| {
         let mut reader: Box<dyn ClientRead> = Box::new(reader);
@@ -191,6 +192,7 @@ where
                 &mut input,
                 &selected,
                 allow_local_file_links,
+                &mut host_cursor,
             )?;
             input.route.replace(None);
             match exit {
@@ -220,6 +222,7 @@ where
         DisableMouseCapture,
         DisableBracketedPaste
     );
+    let _ = restore_applied_host_cursor(&mut std::io::stdout(), &host_cursor);
     ratatui::restore();
     match result? {
         ClientExit::Done => Ok(()),
@@ -264,6 +267,7 @@ fn run_inner<W>(
     input: &mut ClientInput,
     selected: &str,
     allow_local_file_links: bool,
+    host_cursor: &mut AppliedHostCursor,
 ) -> Result<ClientExit>
 where
     W: Write + Send + 'static,
@@ -402,26 +406,19 @@ where
             // is wrapped in a DEC 2026 synchronized update so it paints atomically.
             Ok(ServerMessage::Frame(frame)) => {
                 sync_begin();
-                let r = paint(
+                let r = paint_host_frame(
                     terminal,
                     &frame_cells(&frame, truecolor),
                     frame.cursor,
                     frame.cursor_visible,
                     true,
                     &mut last_cursor,
-                )
-                .and_then(|()| {
-                    paint_hyperlink_runs(
-                        terminal,
-                        &frame,
-                        frame.cursor,
-                        frame.cursor_visible,
-                        &mut last_cursor,
-                        truecolor,
-                        allow_local_file_links,
-                    )?;
-                    Ok(())
-                });
+                    frame.cursor_style,
+                    host_cursor,
+                    |backend| {
+                        write_hyperlink_runs(backend, &frame, truecolor, allow_local_file_links)
+                    },
+                );
                 sync_end();
                 if r.is_err() {
                     crate::logging::event(
@@ -435,13 +432,16 @@ where
             }
             Ok(ServerMessage::FrameDiff(diff)) => {
                 sync_begin();
-                let r = paint(
+                let r = paint_host_frame(
                     terminal,
                     &diff_cells(&diff, truecolor),
                     diff.cursor,
                     diff.cursor_visible,
                     false,
                     &mut last_cursor,
+                    diff.cursor_style,
+                    host_cursor,
+                    |_| Ok(()),
                 );
                 sync_end();
                 if r.is_err() {
@@ -981,27 +981,24 @@ fn write_osc8<W: Write>(
     writer.write_all(b"\x1b\\")
 }
 
-/// Overlay sparse OSC 8 runs after the ordinary Ratatui blit. The server sends
-/// a full frame whenever this projection changes, so clearing that frame also
-/// clears links which disappeared without changing their visible label.
-pub(super) fn paint_hyperlink_runs<W>(
-    terminal: &mut Terminal<CrosstermBackend<W>>,
+/// Overlay sparse OSC 8 runs after the ordinary cell blit and before the final
+/// cursor placement. The server sends a full frame whenever this projection
+/// changes, so clearing that frame also clears links which disappeared without
+/// changing their visible label. This must not show the cursor: the following
+/// CUP is the position where a new bar may appear.
+pub(super) fn write_hyperlink_runs<B>(
+    backend: &mut B,
     frame: &FrameData,
-    cursor: Option<(u16, u16)>,
-    cursor_visible: bool,
-    last_cursor: &mut Option<(u16, u16)>,
     truecolor: bool,
     allow_local_file_links: bool,
 ) -> std::io::Result<()>
 where
-    W: Write,
+    B: Backend<Error = std::io::Error> + Write,
 {
-    if frame.width == 0 {
+    if frame.width == 0 || frame.hyperlinks.is_empty() {
         return Ok(());
     }
-    let size = terminal.size()?;
-    let backend = terminal.backend_mut();
-    let mut wrote = false;
+    let size = backend.size()?;
     for run in &frame.hyperlinks {
         write_osc8(backend, Some(&run.uri), allow_local_file_links)?;
         let cells = (run.start..run.end)
@@ -1025,26 +1022,82 @@ where
         let close_result = write_osc8(backend, None, allow_local_file_links);
         draw_result?;
         close_result?;
-        wrote = true;
     }
-    if !wrote {
-        return Ok(());
-    }
-    restore_host_cursor(
-        backend,
-        size.width,
-        size.height,
-        cursor,
-        cursor_visible,
-        last_cursor,
-    )?;
-    Backend::flush(backend)
+    Ok(())
 }
 
 /// Visible in-bounds pane cell. Does not remap a compact/mobile row-0/1 caret
 /// onto the status line, and does not invent a prompt row.
 fn ime_position(cursor: Option<(u16, u16)>, tw: u16, th: u16) -> Option<(u16, u16)> {
     cursor.filter(|(x, y)| *x < tw && *y < th)
+}
+
+/// Styles actually written to the host during this client session.
+#[derive(Default)]
+pub(crate) struct AppliedHostCursor {
+    last: Option<protocol::HostCursorStyle>,
+    /// A DECSCUSR other than CSI 0 q was written.
+    shape_changed: bool,
+    /// OSC 12 was written. OSC 112 on exit is not sent unless this is set.
+    color_changed: bool,
+}
+
+pub(crate) fn apply_host_cursor(
+    out: &mut impl std::io::Write,
+    style: protocol::HostCursorStyle,
+    session: &mut AppliedHostCursor,
+) -> std::io::Result<()> {
+    if session.last == Some(style) {
+        return Ok(());
+    }
+    let previous = session.last.replace(style);
+    // CSI 0 q restores the host terminal default. It is not a steady block:
+    // the parser treats 0 as "use the configured cursor" and 2 as the explicit
+    // steady block. Beam and underline stay explicit so the bar can breathe.
+    let shape = if !style.explicit {
+        "\u{1b}[0 q"
+    } else {
+        match (style.shape, style.blinking) {
+            (1, true) => "\u{1b}[3 q",
+            (1, false) => "\u{1b}[4 q",
+            (2, true) => "\u{1b}[5 q",
+            (2, false) => "\u{1b}[6 q",
+            (_, true) => "\u{1b}[1 q",
+            (_, false) => "\u{1b}[2 q",
+        }
+    };
+    write!(out, "{shape}")?;
+    if shape != "\u{1b}[0 q" {
+        session.shape_changed = true;
+    }
+    match style.color {
+        Some(color) => {
+            write!(out, "\u{1b}]12;#{:06x}\u{1b}\\", color & 0x00ff_ffff)?;
+            session.color_changed = true;
+        }
+        None if previous.is_some_and(|previous| previous.color.is_some()) => {
+            write!(out, "\u{1b}]112\u{1b}\\")?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// Give the host terminal its own cursor back before leaving the alternate screen.
+pub(super) fn restore_applied_host_cursor(
+    out: &mut impl std::io::Write,
+    session: &AppliedHostCursor,
+) -> std::io::Result<()> {
+    if session.shape_changed {
+        write!(out, "\u{1b}[0 q")?;
+    }
+    if session.color_changed {
+        write!(out, "\u{1b}]112\u{1b}\\")?;
+    }
+    if session.shape_changed || session.color_changed {
+        out.flush()?;
+    }
+    Ok(())
 }
 
 fn restore_host_cursor<B: Backend>(
@@ -1083,6 +1136,9 @@ fn restore_host_cursor<B: Backend>(
 /// Hide, write cells, CUP to the pane PTY (hidden still parks), then show/hide.
 /// `backend.draw` walks the hardware cursor onto the last cell (e.g. a
 /// `working` spinner); IME must not observe that cell.
+///
+/// Cursor shape is not applied here. [`paint_host_frame`] writes it after the
+/// final CUP and before the cursor is shown.
 pub(super) fn paint<B>(
     terminal: &mut Terminal<B>,
     cells: &[(u16, u16, Cell)],
@@ -1112,6 +1168,316 @@ where
     restore_host_cursor(backend, tw, th, cursor, cursor_visible, last_cursor)?;
     backend.flush()?;
     Ok(())
+}
+
+/// Hide, draw cells, run `overlay` while the cursor stays hidden, CUP to the
+/// final cell, then write DECSCUSR / OSC 12 only if that cursor will be shown.
+/// A hidden caret only parks its position, so a new bar cannot cover a cell
+/// from the previous frame.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint_host_frame<B, F>(
+    terminal: &mut Terminal<B>,
+    cells: &[(u16, u16, Cell)],
+    cursor: Option<(u16, u16)>,
+    cursor_visible: bool,
+    clear: bool,
+    last_cursor: &mut Option<(u16, u16)>,
+    style: protocol::HostCursorStyle,
+    host_cursor: &mut AppliedHostCursor,
+    overlay: F,
+) -> Result<()>
+where
+    B: Backend<Error = std::io::Error> + Write,
+    F: FnOnce(&mut B) -> std::io::Result<()>,
+{
+    let size = terminal.size()?;
+    let (tw, th) = (size.width, size.height);
+    let backend = terminal.backend_mut();
+    backend.hide_cursor()?;
+    if clear {
+        backend.clear()?;
+    }
+    backend.draw(
+        cells
+            .iter()
+            .filter(|(x, y, _)| *x < tw && *y < th)
+            .map(|(x, y, c)| (*x, *y, c)),
+    )?;
+    overlay(backend)?;
+    match ime_position(cursor, tw, th) {
+        Some((x, y)) => {
+            *last_cursor = Some((x, y));
+            backend.set_cursor_position(Position::new(x, y))?;
+            if cursor_visible {
+                apply_host_cursor(backend, style, host_cursor)?;
+                backend.show_cursor()?;
+            } else {
+                backend.hide_cursor()?;
+            }
+        }
+        None => {
+            if let Some((x, y)) = *last_cursor {
+                if x < tw && y < th {
+                    backend.set_cursor_position(Position::new(x, y))?;
+                }
+            }
+            backend.hide_cursor()?;
+        }
+    }
+    Backend::flush(backend)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod host_cursor_style {
+    fn cursor_style_bytes(style: crate::ipc::protocol::HostCursorStyle) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut session = super::AppliedHostCursor::default();
+        super::apply_host_cursor(&mut out, style, &mut session).unwrap();
+        out
+    }
+
+    #[test]
+    fn blinking_bar_uses_decscusr_and_osc12() {
+        let bytes = cursor_style_bytes(crate::ipc::protocol::HostCursorStyle {
+            shape: 2,
+            blinking: true,
+            color: Some(0x00ff_ffff),
+            explicit: true,
+        });
+        assert_eq!(bytes, b"\x1b[5 q\x1b]12;#ffffff\x1b\\");
+    }
+
+    #[test]
+    fn unset_style_is_decscusr_0_and_explicit_block_is_decscusr_2() {
+        let unset = cursor_style_bytes(crate::ipc::protocol::HostCursorStyle::default());
+        assert_eq!(unset, b"\x1b[0 q");
+        let steady = cursor_style_bytes(crate::ipc::protocol::HostCursorStyle {
+            explicit: true,
+            ..crate::ipc::protocol::HostCursorStyle::default()
+        });
+        assert_eq!(steady, b"\x1b[2 q");
+    }
+
+    #[test]
+    fn exit_restores_shape_only_after_a_change_and_color_only_after_osc12() {
+        let mut session = super::AppliedHostCursor::default();
+        let mut out = Vec::new();
+        super::restore_applied_host_cursor(&mut out, &session).unwrap();
+        assert!(out.is_empty());
+
+        super::apply_host_cursor(
+            &mut out,
+            crate::ipc::protocol::HostCursorStyle::default(),
+            &mut session,
+        )
+        .unwrap();
+        out.clear();
+        super::restore_applied_host_cursor(&mut out, &session).unwrap();
+        assert!(out.is_empty());
+
+        let mut session = super::AppliedHostCursor::default();
+        super::apply_host_cursor(
+            &mut Vec::new(),
+            crate::ipc::protocol::HostCursorStyle {
+                shape: 2,
+                blinking: true,
+                color: None,
+                explicit: true,
+            },
+            &mut session,
+        )
+        .unwrap();
+        super::restore_applied_host_cursor(&mut out, &session).unwrap();
+        assert_eq!(out, b"\x1b[0 q");
+
+        out.clear();
+        let mut session = super::AppliedHostCursor::default();
+        super::apply_host_cursor(
+            &mut Vec::new(),
+            crate::ipc::protocol::HostCursorStyle {
+                color: Some(0x00ff_ffff),
+                ..crate::ipc::protocol::HostCursorStyle::default()
+            },
+            &mut session,
+        )
+        .unwrap();
+        super::restore_applied_host_cursor(&mut out, &session).unwrap();
+        assert_eq!(out, b"\x1b]112\x1b\\");
+    }
+
+    #[test]
+    fn cursor_style_follows_the_final_cup_and_precedes_show() {
+        use std::io::{self, Write};
+
+        use ratatui::backend::Backend;
+        use ratatui::buffer::Cell;
+        use ratatui::layout::{Position, Rect, Size};
+        use ratatui::{Terminal, TerminalOptions, Viewport};
+
+        struct OrderBackend {
+            bytes: Vec<u8>,
+            width: u16,
+            height: u16,
+            cursor: Position,
+            visible: bool,
+        }
+
+        impl Write for OrderBackend {
+            fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl Backend for OrderBackend {
+            type Error = io::Error;
+
+            fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+            where
+                I: Iterator<Item = (u16, u16, &'a Cell)>,
+            {
+                for (x, y, cell) in content {
+                    write!(self, "\x1b[{};{}H{}", y + 1, x + 1, cell.symbol())?;
+                    self.cursor = Position::new(x, y);
+                }
+                Ok(())
+            }
+
+            fn hide_cursor(&mut self) -> io::Result<()> {
+                self.bytes.extend_from_slice(b"\x1b[?25l");
+                self.visible = false;
+                Ok(())
+            }
+
+            fn show_cursor(&mut self) -> io::Result<()> {
+                self.bytes.extend_from_slice(b"\x1b[?25h");
+                self.visible = true;
+                Ok(())
+            }
+
+            fn get_cursor_position(&mut self) -> io::Result<Position> {
+                Ok(self.cursor)
+            }
+
+            fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+                let position = position.into();
+                self.cursor = position;
+                write!(self, "\x1b[{};{}H", position.y + 1, position.x + 1)
+            }
+
+            fn clear(&mut self) -> io::Result<()> {
+                self.bytes.extend_from_slice(b"\x1b[2J");
+                Ok(())
+            }
+
+            fn clear_region(&mut self, _: ratatui::backend::ClearType) -> io::Result<()> {
+                Ok(())
+            }
+
+            fn size(&self) -> io::Result<Size> {
+                Ok(Size {
+                    width: self.width,
+                    height: self.height,
+                })
+            }
+
+            fn window_size(&mut self) -> io::Result<ratatui::backend::WindowSize> {
+                Ok(ratatui::backend::WindowSize {
+                    columns_rows: Size {
+                        width: self.width,
+                        height: self.height,
+                    },
+                    pixels: Size {
+                        width: 0,
+                        height: 0,
+                    },
+                })
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let style = crate::ipc::protocol::HostCursorStyle {
+            shape: 2,
+            blinking: true,
+            color: Some(0x00ff_ffff),
+            explicit: true,
+        };
+        let mut cell = Cell::default();
+        cell.set_symbol("Z");
+        let cells = [(1, 0, cell)];
+        let backend = OrderBackend {
+            bytes: Vec::new(),
+            width: 8,
+            height: 4,
+            cursor: Position::ORIGIN,
+            visible: true,
+        };
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 8, 4)),
+            },
+        )
+        .unwrap();
+        let mut last_cursor = None;
+        let mut last_style = super::AppliedHostCursor::default();
+        super::paint_host_frame(
+            &mut terminal,
+            &cells,
+            Some((3, 1)),
+            false,
+            false,
+            &mut last_cursor,
+            style,
+            &mut last_style,
+            |backend| {
+                backend.set_cursor_position(Position::new(0, 0))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        let hidden = terminal.backend_mut().bytes.clone();
+        let hidden = String::from_utf8(hidden).unwrap();
+        assert!(hidden.contains("\u{1b}[2;4H"), "{hidden:?}");
+        assert!(!hidden.contains("\u{1b}[5 q"), "{hidden:?}");
+        assert!(!hidden.contains("\u{1b}[?25h"), "{hidden:?}");
+        assert!(last_style.last.is_none());
+        assert!(!last_style.shape_changed);
+        assert!(!last_style.color_changed);
+
+        terminal.backend_mut().bytes.clear();
+        super::paint_host_frame(
+            &mut terminal,
+            &cells,
+            Some((3, 1)),
+            true,
+            false,
+            &mut last_cursor,
+            style,
+            &mut last_style,
+            |backend| {
+                backend.set_cursor_position(Position::new(0, 0))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        let shown = String::from_utf8(terminal.backend_mut().bytes.clone()).unwrap();
+        let cup = shown.rfind("\u{1b}[2;4H").expect(&shown);
+        let style_at = shown
+            .find("\u{1b}[5 q\u{1b}]12;#ffffff\u{1b}\\")
+            .expect(&shown);
+        let show_at = shown.find("\u{1b}[?25h").expect(&shown);
+        assert!(cup < style_at, "{shown:?}");
+        assert!(style_at < show_at, "{shown:?}");
+        assert!(!shown[..cup].contains("\u{1b}[5 q"), "{shown:?}");
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1317,6 +1683,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let diff = FrameDiff {
             width: 1,
@@ -1330,6 +1697,7 @@ mod tests {
             }],
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         for truecolor in [true, false] {
             let full = frame_cells(&frame, truecolor);
@@ -1365,6 +1733,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let cells = super::frame_cells(&frame, true);
         let syms: Vec<(u16, String)> = cells
@@ -1951,6 +2320,7 @@ mod render_tests {
             hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let f1 = FrameData {
             width: 3,
@@ -1959,6 +2329,7 @@ mod render_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 0)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
 
         let mut term = Terminal::new(TestBackend::new(3, 1)).unwrap();
@@ -1979,6 +2350,7 @@ mod render_tests {
             runs: protocol::diff_runs(&f0, &f1),
             cursor: f1.cursor,
             cursor_visible: f1.cursor_visible,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,
@@ -1992,7 +2364,12 @@ mod render_tests {
 
         // The terminal now shows f1 — the client stays correct without ever
         // re-blitting the whole frame.
-        let got = protocol::frame_from_buffer(term.backend().buffer(), None, false);
+        let got = protocol::frame_from_buffer(
+            term.backend().buffer(),
+            None,
+            false,
+            protocol::HostCursorStyle::default(),
+        );
         assert_eq!(got.cells, f1.cells);
     }
 }
@@ -2094,6 +2471,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let mut last = None;
         paint(
@@ -2120,6 +2498,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let diff = FrameDiff {
             width: 8,
@@ -2127,6 +2506,7 @@ mod paint_tests {
             runs: protocol::diff_runs(&f0, &f1),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,
@@ -2156,6 +2536,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let mut last = None;
         paint(
@@ -2181,6 +2562,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let diff = FrameDiff {
             width: 8,
@@ -2188,6 +2570,7 @@ mod paint_tests {
             runs: protocol::diff_runs(&f0, &f1),
             cursor: Some((1, 4)),
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,
@@ -2218,6 +2601,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,
@@ -2250,6 +2634,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((3, 5)),
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,

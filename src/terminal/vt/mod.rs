@@ -194,11 +194,35 @@ pub struct RenderCell {
 
 pub type LinkedCellVisitor<'a> = dyn FnMut(u16, u16, &str, RenderCell, Option<&str>) + 'a;
 
+/// Child-requested hardware cursor. The focused pane's appearance is what the
+/// display client draws; a block is only the default until the child says otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Underline,
+    Beam,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct CursorAppearance {
+    pub shape: CursorShape,
+    /// `true` asks the host terminal to blink. That is the breathing bar
+    /// pi-autosuggestions requests with DECSCUSR 5.
+    pub blinking: bool,
+    /// OSC 12 color as `0xRRGGBB`. `None` keeps the terminal's own cursor color.
+    pub color: Option<u32>,
+    /// `false` until the child sends DECSCUSR or OSC 50. An unset steady block
+    /// is the host terminal's default, not an explicit DECSCUSR 2.
+    pub explicit: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
     pub x: u16,
     pub y: u16,
     pub visible: bool,
+    pub appearance: CursorAppearance,
 }
 
 /// One owned terminal cell captured at a render boundary. Ordinary cells keep

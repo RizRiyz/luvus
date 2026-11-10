@@ -28,6 +28,7 @@ pub struct RenderTarget<'a> {
     area: Rect,
     cursor: Option<(u16, u16)>,
     cursor_visible: bool,
+    cursor_style: crate::terminal::vt::CursorAppearance,
 }
 
 impl<'a> RenderTarget<'a> {
@@ -38,6 +39,7 @@ impl<'a> RenderTarget<'a> {
             area,
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::terminal::vt::CursorAppearance::default(),
         }
     }
     pub fn area(&self) -> Rect {
@@ -54,15 +56,25 @@ impl<'a> RenderTarget<'a> {
         self.cursor = Some((p.x, p.y));
         self.cursor_visible = true;
     }
-    pub fn set_cursor_anchor(&mut self, x: u16, y: u16, visible: bool) {
+    pub fn set_cursor_anchor(
+        &mut self,
+        x: u16,
+        y: u16,
+        visible: bool,
+        style: crate::terminal::vt::CursorAppearance,
+    ) {
         self.cursor = Some((x, y));
         self.cursor_visible = visible;
+        self.cursor_style = style;
     }
     pub fn cursor(&self) -> Option<(u16, u16)> {
         self.cursor
     }
     pub fn cursor_visible(&self) -> bool {
         self.cursor_visible
+    }
+    pub fn cursor_style(&self) -> crate::terminal::vt::CursorAppearance {
+        self.cursor_style
     }
 }
 
@@ -100,6 +112,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             area,
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::terminal::vt::CursorAppearance::default(),
         };
         render_into(&mut target, app);
         (target.cursor, target.cursor_visible)
@@ -1312,13 +1325,13 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     } else {
         cursor
     };
-    if let Some((x, y, visible)) = cursor {
-        f.set_cursor_anchor(x, y, visible);
+    if let Some((x, y, visible, style)) = cursor {
+        f.set_cursor_anchor(x, y, visible, style);
     }
-    app.last_cursor = cursor.map(|(x, y, _)| (x, y));
+    app.last_cursor = cursor.map(|(x, y, _, _)| (x, y));
     if app.commander_accepts_input() {
         if let Some((x, y)) = commander_cursor {
-            f.set_cursor_anchor(x, y, true);
+            f.set_cursor_anchor(x, y, true, crate::terminal::vt::CursorAppearance::default());
             app.last_cursor = Some((x, y));
         }
     }

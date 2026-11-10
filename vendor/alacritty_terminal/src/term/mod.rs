@@ -1101,6 +1101,15 @@ impl<T> Term<T> {
         }
     }
 
+    /// Cursor style the child actually set.
+    ///
+    /// `None` means DECSCUSR 0 or no request yet, which is distinct from an
+    /// explicit steady block. [`cursor_style`] still fills in the default.
+    #[inline]
+    pub fn requested_cursor_style(&self) -> Option<CursorStyle> {
+        self.cursor_style
+    }
+
     pub fn colors(&self) -> &Colors {
         &self.colors
     }
@@ -2312,10 +2321,11 @@ impl<T: EventListener> Handler for Term<T> {
                 NamedPrivateMode::CursorKeys => self.mode.contains(TermMode::APP_CURSOR).into(),
                 NamedPrivateMode::Origin => self.mode.contains(TermMode::ORIGIN).into(),
                 NamedPrivateMode::LineWrap => self.mode.contains(TermMode::LINE_WRAP).into(),
-                NamedPrivateMode::BlinkingCursor => {
-                    let style = self.cursor_style.get_or_insert(self.config.default_cursor_style);
-                    style.blinking.into()
-                },
+                NamedPrivateMode::BlinkingCursor => self
+                    .cursor_style
+                    .unwrap_or(self.config.default_cursor_style)
+                    .blinking
+                    .into(),
                 NamedPrivateMode::ShowCursor => self.mode.contains(TermMode::SHOW_CURSOR).into(),
                 NamedPrivateMode::ReportMouseClicks => {
                     self.mode.contains(TermMode::MOUSE_REPORT_CLICK).into()

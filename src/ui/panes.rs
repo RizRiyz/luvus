@@ -325,7 +325,7 @@ pub(super) fn draw_panes(
     lone_header: bool,
     app: &mut App,
     t: &Theme,
-) -> Option<(u16, u16, bool)> {
+) -> Option<(u16, u16, bool, crate::terminal::vt::CursorAppearance)> {
     let focus = app.layout().focus;
     let mut cursor = None;
     let mut diff_source_rects = Vec::new();
@@ -444,8 +444,8 @@ pub(super) fn patch_terminal_damage(
         }
     }
 
-    if let Some((x, y, visible)) = cursor {
-        f.set_cursor_anchor(x, y, visible);
+    if let Some((x, y, visible, style)) = cursor {
+        f.set_cursor_anchor(x, y, visible, style);
     }
     hyperlinks.sort_by_key(|link| (link.y, link.start, link.pane.0));
     Ok(())
@@ -459,7 +459,7 @@ fn draw_one_pane(
     bordered: bool,
     context: &mut PaneRenderContext<'_>,
     t: &Theme,
-) -> Option<(u16, u16, bool)> {
+) -> Option<(u16, u16, bool, crate::terminal::vt::CursorAppearance)> {
     let lone_header = context.lone_header;
     let app = context.app;
     // A view leaf (docs/38 FILE-3) renders natively, not from a PTY.
@@ -655,7 +655,7 @@ fn draw_one_pane(
             }
             if focused && copy.is_none() {
                 if let Some((row, col)) = pi_caret {
-                    Some((content.x + col, content.y + row, true))
+                    Some((content.x + col, content.y + row, true, cur.appearance))
                 } else {
                     pane_ime_cursor(content, cur)
                 }
@@ -719,14 +719,22 @@ fn draw_one_pane(
 
 /// In-view PTY cell, mapped into the pane. Hidden still returns a park so the
 /// client can CUP after chrome.
-fn pane_ime_cursor(content: Rect, cur: crate::terminal::vt::Cursor) -> Option<(u16, u16, bool)> {
+fn pane_ime_cursor(
+    content: Rect,
+    cur: crate::terminal::vt::Cursor,
+) -> Option<(u16, u16, bool, crate::terminal::vt::CursorAppearance)> {
     if content.width == 0 || content.height == 0 {
         return None;
     }
     if cur.x >= content.width || cur.y >= content.height {
         return None;
     }
-    Some((content.x + cur.x, content.y + cur.y, cur.visible))
+    Some((
+        content.x + cur.x,
+        content.y + cur.y,
+        cur.visible,
+        cur.appearance,
+    ))
 }
 
 fn draw_pane_search_matches(
@@ -942,7 +950,12 @@ mod tests {
     }
 
     fn cur(x: u16, y: u16, visible: bool) -> crate::terminal::vt::Cursor {
-        crate::terminal::vt::Cursor { x, y, visible }
+        crate::terminal::vt::Cursor {
+            x,
+            y,
+            visible,
+            appearance: crate::terminal::vt::CursorAppearance::default(),
+        }
     }
 
     #[test]
@@ -950,7 +963,12 @@ mod tests {
         let content = Rect::new(2, 3, 20, 12);
         assert_eq!(
             pane_ime_cursor(content, cur(4, 8, false)),
-            Some((6, 11, false))
+            Some((
+                6,
+                11,
+                false,
+                crate::terminal::vt::CursorAppearance::default()
+            ))
         );
     }
 
@@ -959,7 +977,12 @@ mod tests {
         let content = Rect::new(0, 0, 20, 12);
         assert_eq!(
             pane_ime_cursor(content, cur(5, 10, true)),
-            Some((5, 10, true))
+            Some((
+                5,
+                10,
+                true,
+                crate::terminal::vt::CursorAppearance::default()
+            ))
         );
     }
 
@@ -968,7 +991,7 @@ mod tests {
         let content = Rect::new(2, 3, 20, 12);
         assert_eq!(
             pane_ime_cursor(content, cur(4, 0, true)),
-            Some((6, 3, true))
+            Some((6, 3, true, crate::terminal::vt::CursorAppearance::default()))
         );
     }
 
