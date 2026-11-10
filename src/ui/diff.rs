@@ -294,11 +294,9 @@ fn draw_stack(
             break;
         }
         let selected = index == view.selected || line_in_note_selection(view, line);
-        let old = line.old_line.map_or(String::new(), |n| n.to_string());
-        let new = line.new_line.map_or(String::new(), |n| n.to_string());
         let (bar, symbol) = gutter_markers(line.kind, options.marker_style);
         let numbers = if view.show_line_numbers {
-            format!("{old:>5} {new:>5} ")
+            stack_number_text(line)
         } else {
             String::new()
         };
@@ -1265,25 +1263,46 @@ impl<'a> Iterator for WrappedText<'a> {
     }
 }
 
-pub(crate) fn stack_note_rows(
+pub(crate) fn stack_note_index(
     view: &DiffView,
     notes: &[crate::diff::ReviewNote],
     width: u16,
-) -> Vec<usize> {
-    view.stack_rows
-        .iter()
-        .map(|line| note_screen_rows(view, notes, line, width))
-        .collect()
+) -> std::collections::HashMap<(DiffSide, u32), usize> {
+    let mut rows = std::collections::HashMap::new();
+    if notes.is_empty() {
+        return rows;
+    }
+    for note in notes {
+        if note.anchor.diff_key != view.key
+            || view.note_edit_id.as_deref() == Some(note.id.as_str())
+        {
+            continue;
+        }
+        let card_width = width.saturating_sub(6);
+        let height = if card_width < 20 {
+            1
+        } else {
+            let body_width = card_width.saturating_sub(4).max(1);
+            note_editor_lines(&note.body, body_width)
+                .len()
+                .min(6)
+                .saturating_add(2)
+        };
+        *rows
+            .entry((note.anchor.side, note.anchor.end_line))
+            .or_insert(0) += height;
+    }
+    rows
 }
 
-/// Scroll that keeps `selected` inside a wrapped Stack viewport.
+/// Scroll that keeps the selected Stack row, including its wrap and note card,
+/// inside the viewport.
 ///
-/// One screen row per source row reproduces the historical jump position, so
-/// an unwrapped `G` still leaves the last row at the bottom. Wrapped source
-/// rows and note cards consume their real height instead.
+/// A one-line row still uses one screen row, so an unwrapped `G` leaves the
+/// last row at the bottom. Taller rows reserve their full height when it fits.
 pub(crate) fn stack_jump_scroll(
     view: &DiffView,
-    note_rows: &[usize],
+    note_rows: &std::collections::HashMap<(DiffSide, u32), usize>,
     viewport: usize,
     width: u16,
     marker_style: DiffMarkerStyle,
@@ -1298,10 +1317,17 @@ pub(crate) fn stack_jump_scroll(
         return selected;
     }
     let mut height = |index: usize| -> usize {
+        let notes = view
+            .stack_rows
+            .get(index)
+            .and_then(line_anchor)
+            .and_then(|anchor| note_rows.get(&anchor).copied())
+            .unwrap_or(0);
         stack_source_rows(view, index, width, marker_style)
-            .saturating_add(*note_rows.get(index).unwrap_or(&0))
+            .saturating_add(notes)
             .max(1)
     };
+    let selected_height = height(selected);
     let mut y = 0usize;
     for index in scroll..selected {
         y = y.saturating_add(height(index));
@@ -1309,7 +1335,7 @@ pub(crate) fn stack_jump_scroll(
             return bottom_aligned_scroll(selected, viewport, &mut height);
         }
     }
-    if y < viewport {
+    if y.saturating_add(selected_height.min(viewport)) <= viewport {
         scroll
     } else {
         bottom_aligned_scroll(selected, viewport, &mut height)
@@ -1321,11 +1347,15 @@ fn bottom_aligned_scroll(
     viewport: usize,
     height: &mut impl FnMut(usize) -> usize,
 ) -> usize {
+    let selected_height = height(selected);
+    if selected_height >= viewport {
+        return selected;
+    }
     let mut start = selected;
-    let mut used = 0usize;
+    let mut used = selected_height;
     while start > 0 {
         let previous = height(start - 1);
-        if used.saturating_add(previous) >= viewport {
+        if used.saturating_add(previous) > viewport {
             break;
         }
         used += previous;
@@ -1346,40 +1376,29 @@ fn stack_source_rows(
     if !view.effective_wrap(width) {
         return 1;
     }
-    let (bar, symbol) = gutter_markers(line.kind, marker_style);
-    let numbers = usize::from(view.show_line_numbers) * 12;
-    let gutter = bar.chars().count() + symbol.chars().count() + numbers;
+    let gutter = stack_gutter_columns(line, view.show_line_numbers, marker_style);
     let text_width = width.saturating_sub(gutter as u16).max(1);
     wrapped_text(&line.text, text_width).count().max(1)
 }
 
-fn note_screen_rows(
-    view: &DiffView,
-    notes: &[crate::diff::ReviewNote],
+fn stack_number_text(line: &DiffLine) -> String {
+    let old = line.old_line.map_or(String::new(), |n| n.to_string());
+    let new = line.new_line.map_or(String::new(), |n| n.to_string());
+    format!("{old:>5} {new:>5} ")
+}
+
+fn stack_gutter_columns(
     line: &DiffLine,
-    width: u16,
+    show_line_numbers: bool,
+    marker_style: DiffMarkerStyle,
 ) -> usize {
-    let Some((side, number)) = line_anchor(line) else {
-        return 0;
+    let (bar, symbol) = gutter_markers(line.kind, marker_style);
+    let numbers = if show_line_numbers {
+        stack_number_text(line).chars().count()
+    } else {
+        0
     };
-    notes
-        .iter()
-        .filter(|note| {
-            note.anchor.diff_key == view.key
-                && note.anchor.side == side
-                && number == note.anchor.end_line
-                && view.note_edit_id.as_deref() != Some(note.id.as_str())
-        })
-        .map(|note| {
-            let card_width = width.saturating_sub(6);
-            if card_width < 20 {
-                return 1;
-            }
-            let body_width = card_width.saturating_sub(4).max(1);
-            let body = note_editor_lines(&note.body, body_width).len().min(6);
-            body.saturating_add(2)
-        })
-        .sum()
+    bar.chars().count() + numbers + symbol.chars().count()
 }
 
 fn wrapped_text(text: &str, width: u16) -> WrappedText<'_> {

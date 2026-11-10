@@ -1736,11 +1736,18 @@ impl App {
             Note(isize),
             Close,
         }
+        // Index note cards once, and only when Stack scrolling can use them.
+        // Split, search, and the note editor never read this table.
         let note_rows = match self.views.get(&id) {
-            Some(ViewKind::Diff(view)) => {
-                crate::ui::stack_note_rows(view, &self.diff.notes, pane_width)
+            Some(ViewKind::Diff(view))
+                if !is_split
+                    && view.note_draft.is_none()
+                    && view.search.is_none()
+                    && !view.note_selecting =>
+            {
+                crate::ui::stack_note_index(view, &self.diff.notes, pane_width)
             }
-            _ => Vec::new(),
+            _ => std::collections::HashMap::new(),
         };
         let mut deferred = Deferred::None;
         {
@@ -3335,6 +3342,178 @@ mod tests {
             "wrapped G left selected row {} off screen (scroll={})",
             view.selected,
             view.scroll
+        );
+    }
+
+    #[test]
+    fn wrapped_stack_end_jump_keeps_the_selected_note_in_view() {
+        let _env = crate::persist::test_env("diff-wrapped-note-tail");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 24, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let mut lines: Vec<_> = (1..40)
+            .map(|line| DiffLine {
+                kind: DiffLineKind::Context,
+                old_line: Some(line),
+                new_line: Some(line),
+                text: format!("context {line}").into(),
+            })
+            .collect();
+        lines.push(DiffLine {
+            kind: DiffLineKind::Addition,
+            old_line: None,
+            new_line: Some(40),
+            text: format!("tail {}", "wide ".repeat(70)).into(),
+        });
+        let diff = Arc::new(FileDiff {
+            key: key.clone(),
+            status: DiffFileStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            presentation: None,
+            hunks: vec![DiffHunk {
+                id: "h".into(),
+                old_start: 1,
+                new_start: 1,
+                header: "@@ -1,40 +1,40 @@".into(),
+                lines,
+            }],
+        });
+        let loaded = crate::diff::LoadedDiff::prepare(diff, Vec::new());
+        let token = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.request_token,
+            _ => unreachable!(),
+        };
+        app.apply_diff_loaded(id, token, Ok(loaded));
+        app.diff.notes.push(crate::diff::ReviewNote {
+            id: "tail-note".into(),
+            review_id: "review".into(),
+            author: "user".into(),
+            kind: crate::diff::NoteKind::Issue,
+            body: "keep the tail\nand this card".into(),
+            anchor: crate::diff::notes::NoteAnchor {
+                diff_key: key,
+                side: crate::diff::DiffSide::New,
+                start_line: 40,
+                end_line: 40,
+                context: "tail".into(),
+                context_sha256: "hash".into(),
+            },
+            state: crate::diff::NoteState::Open,
+            deliveries: Vec::new(),
+            revision: 1,
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        });
+        if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+            view.preference = crate::diff::DiffLayoutPreference::Stack;
+            view.wrap = true;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let selected = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.selected,
+            _ => unreachable!(),
+        };
+        let source_hits = app
+            .diff_source_rects
+            .iter()
+            .filter(|(pane, row, _, _)| *pane == id && *row == selected)
+            .count();
+        assert!(
+            source_hits > 1,
+            "wrapped tail was clipped ({source_hits} fragments visible)"
+        );
+        let content = app
+            .pane_content_rects
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .unwrap()
+            .1;
+        let note = app
+            .diff_note_rects
+            .iter()
+            .find(|(pane, note_id, _)| *pane == id && note_id == "tail-note")
+            .map(|(_, _, rect)| *rect)
+            .expect("selected note card");
+        assert!(
+            note.height >= 4 && note.bottom() <= content.bottom().saturating_sub(1),
+            "note card {note:?} is clipped by the viewport bottom {}",
+            content.bottom().saturating_sub(1)
+        );
+    }
+
+    #[test]
+    fn wrapped_stack_end_jump_reaches_six_digit_line_numbers() {
+        let _env = crate::persist::test_env("diff-wide-line-numbers");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(160, 24, tx).unwrap();
+        let key = install_snapshot(&mut app);
+        app.open_diff_view(key.clone(), OpenTarget::Tab);
+        let id = app.layout().focus;
+        let diff = Arc::new(FileDiff {
+            key,
+            status: DiffFileStatus::Modified,
+            additions: 0,
+            deletions: 0,
+            binary: false,
+            truncated: false,
+            omitted_lines: 0,
+            presentation: None,
+            hunks: vec![DiffHunk {
+                id: "h".into(),
+                old_start: 100_000,
+                new_start: 100_000,
+                header: "@@ -100000,16 +100000,16 @@".into(),
+                lines: (100_000..100_016)
+                    .map(|line| DiffLine {
+                        kind: DiffLineKind::Context,
+                        old_line: Some(line),
+                        new_line: Some(line),
+                        text: "n".repeat(117).into(),
+                    })
+                    .collect(),
+            }],
+        });
+        let loaded = crate::diff::LoadedDiff::prepare(diff, Vec::new());
+        let token = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.request_token,
+            _ => unreachable!(),
+        };
+        app.apply_diff_loaded(id, token, Ok(loaded));
+        if let Some(ViewKind::Diff(view)) = app.views.get_mut(&id) {
+            view.preference = crate::diff::DiffLayoutPreference::Stack;
+            view.wrap = true;
+            view.show_line_numbers = true;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        app.handle_diff_key(id, KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let selected = match app.views.get(&id) {
+            Some(ViewKind::Diff(view)) => view.selected,
+            _ => unreachable!(),
+        };
+        assert!(
+            app.diff_source_rects
+                .iter()
+                .any(|(pane, row, _, _)| *pane == id && *row == selected),
+            "six-digit line numbers left selected row {selected} off screen"
         );
     }
 
