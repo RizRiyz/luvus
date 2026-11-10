@@ -397,25 +397,31 @@ fn open_files_soft_target(soft: libc::rlim_t, hard: libc::rlim_t) -> Option<libc
 }
 
 /// Raise this process's soft open-file limit toward [`OPEN_FILES_TARGET`].
-/// Best effort: a refused raise leaves the inherited limit in place.
+/// Best effort: an error leaves the inherited limit in place, and callers may
+/// ignore it.
 #[cfg(unix)]
-pub fn raise_open_file_limit() {
+pub fn raise_open_file_limit() -> std::io::Result<()> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
     };
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        return;
+        return Err(std::io::Error::last_os_error());
     }
     let Some(target) = open_files_soft_target(limit.rlim_cur, limit.rlim_max) else {
-        return;
+        return Ok(());
     };
     limit.rlim_cur = target;
-    unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) };
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-pub fn raise_open_file_limit() {}
+pub fn raise_open_file_limit() -> std::io::Result<()> {
+    Ok(())
+}
 
 /// Report whether a Unix child has exited without reaping it.
 ///
@@ -1649,17 +1655,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn raise_open_file_limit_reaches_the_bounded_target() {
-        super::raise_open_file_limit();
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
+    fn raise_open_file_limit_reaches_the_target_or_keeps_the_inherited_limit() {
+        let current = || {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+                0
+            );
+            limit
         };
-        assert_eq!(
-            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
-            0
-        );
-        assert!(limit.rlim_cur >= super::OPEN_FILES_TARGET.min(limit.rlim_max));
+        let before = current();
+        let result = super::raise_open_file_limit();
+        let after = current();
+        match result {
+            Ok(()) => assert!(after.rlim_cur >= super::OPEN_FILES_TARGET.min(after.rlim_max)),
+            Err(_) => assert_eq!(after.rlim_cur, before.rlim_cur),
+        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]

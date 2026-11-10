@@ -351,12 +351,13 @@ pub fn read_dir_entries(path: &Path) -> Vec<Entry> {
 
 /// Read one directory into sorted [`Entry`]s: directories first, then files,
 /// each case-insensitive by name. Runs on a worker thread (never the loop). A
-/// directory that cannot be opened is an error, so the tree can keep a listing
-/// it already shows through a transient failure such as descriptor exhaustion.
+/// directory that cannot be opened or fully listed is an error, so the tree can
+/// keep a listing it already shows through a transient failure such as
+/// descriptor exhaustion instead of applying a partial one.
 pub fn try_read_dir_entries(path: &Path) -> std::io::Result<Vec<Entry>> {
     let mut entries: Vec<Entry> = std::fs::read_dir(path)?
-        .flatten()
         .map(|de| {
+            let de = de?;
             let name = de.file_name().to_string_lossy().into_owned();
             // `file_type` avoids a stat when the OS already knows; fall back
             // to `is_dir` via metadata only if the type is unknown.
@@ -364,9 +365,9 @@ pub fn try_read_dir_entries(path: &Path) -> std::io::Result<Vec<Entry>> {
                 .file_type()
                 .map(|ft| ft.is_dir())
                 .unwrap_or_else(|_| de.path().is_dir());
-            Entry { name, is_dir }
+            Ok(Entry { name, is_dir })
         })
-        .collect();
+        .collect::<std::io::Result<_>>()?;
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
