@@ -1067,16 +1067,20 @@ pub(crate) fn apply_host_cursor(
         return Ok(());
     }
     let previous = last.replace(style);
-    // A steady block with no explicit color is the terminal's own cursor.
-    // DECSCUSR 0 gives that back, including after a child such as Pi asked for
-    // a blinking bar. Beam and underline stay explicit so the bar can breathe.
-    let shape = match (style.shape, style.blinking) {
-        (1, true) => "\u{1b}[3 q",
-        (1, false) => "\u{1b}[4 q",
-        (2, true) => "\u{1b}[5 q",
-        (2, false) => "\u{1b}[6 q",
-        (_, true) => "\u{1b}[1 q",
-        (_, false) => "\u{1b}[0 q",
+    // CSI 0 q restores the host terminal default. It is not a steady block:
+    // the parser treats 0 as "use the configured cursor" and 2 as the explicit
+    // steady block. Beam and underline stay explicit so the bar can breathe.
+    let shape = if !style.explicit {
+        "\u{1b}[0 q"
+    } else {
+        match (style.shape, style.blinking) {
+            (1, true) => "\u{1b}[3 q",
+            (1, false) => "\u{1b}[4 q",
+            (2, true) => "\u{1b}[5 q",
+            (2, false) => "\u{1b}[6 q",
+            (_, true) => "\u{1b}[1 q",
+            (_, false) => "\u{1b}[2 q",
+        }
     };
     write!(out, "{shape}")?;
     match style.color {
@@ -1087,14 +1091,6 @@ pub(crate) fn apply_host_cursor(
         None => {}
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn cursor_style_bytes(style: protocol::HostCursorStyle) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut last = None;
-    apply_host_cursor(&mut out, style, &mut last).unwrap();
-    out
 }
 
 fn restore_host_cursor<B: Backend>(
@@ -1164,18 +1160,40 @@ where
     Ok(())
 }
 
-#[cfg(all(test, unix))]
-mod tests {
+#[cfg(test)]
+mod host_cursor_style {
+    fn cursor_style_bytes(style: crate::ipc::protocol::HostCursorStyle) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut last = None;
+        super::apply_host_cursor(&mut out, style, &mut last).unwrap();
+        out
+    }
+
     #[test]
     fn blinking_bar_uses_decscusr_and_osc12() {
-        let bytes = super::cursor_style_bytes(crate::ipc::protocol::HostCursorStyle {
+        let bytes = cursor_style_bytes(crate::ipc::protocol::HostCursorStyle {
             shape: 2,
             blinking: true,
             color: Some(0x00ff_ffff),
+            explicit: true,
         });
         assert_eq!(bytes, b"\x1b[5 q\x1b]12;#ffffff\x1b\\");
     }
 
+    #[test]
+    fn unset_style_is_decscusr_0_and_explicit_block_is_decscusr_2() {
+        let unset = cursor_style_bytes(crate::ipc::protocol::HostCursorStyle::default());
+        assert_eq!(unset, b"\x1b[0 q");
+        let steady = cursor_style_bytes(crate::ipc::protocol::HostCursorStyle {
+            explicit: true,
+            ..crate::ipc::protocol::HostCursorStyle::default()
+        });
+        assert_eq!(steady, b"\x1b[2 q");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
     #[test]
     fn clipboard_receipt_waits_for_busy_input_writer() {
         use super::{ClientMessage, InputRoute};

@@ -212,6 +212,9 @@ pub struct CursorAppearance {
     pub blinking: bool,
     /// OSC 12 color as `0xRRGGBB`. `None` keeps the terminal's own cursor color.
     pub color: Option<u32>,
+    /// `false` until the child sends DECSCUSR or OSC 50. An unset steady block
+    /// is the host terminal's default, not an explicit DECSCUSR 2.
+    pub explicit: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

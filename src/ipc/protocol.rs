@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 /// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
 /// variant one. Its mismatch reply must use that released position.
 const V0141_PROTOCOL_VERSION: u32 = 17;
@@ -393,13 +393,17 @@ pub struct ShellWorkspace {
 
 /// Hardware cursor appearance for the focused child.
 ///
-/// `shape`: 0 block, 1 underline, 2 beam. `color` is `0xRRGGBB` when the child
-/// set OSC 12; `None` restores the terminal color.
+/// `shape`: 0 block, 1 underline, 2 beam. `explicit` is false until the child
+/// sends DECSCUSR or OSC 50; a steady block without it restores the host
+/// default. `color` is `0xRRGGBB` when the child set OSC 12; `None` restores
+/// the terminal color.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HostCursorStyle {
     pub shape: u8,
     pub blinking: bool,
     pub color: Option<u32>,
+    /// The child chose a style. `false` is CSI 0 q, not a steady block.
+    pub explicit: bool,
 }
 
 impl HostCursorStyle {
@@ -413,6 +417,7 @@ impl HostCursorStyle {
             shape,
             blinking: appearance.blinking,
             color: appearance.color,
+            explicit: appearance.explicit,
         }
     }
 }
@@ -432,7 +437,8 @@ pub struct FrameData {
     #[serde(default)]
     pub cursor_visible: bool,
     /// Focused pane's DECSCUSR / OSC 12 request. The client applies it to the
-    /// one hardware cursor; a block with no color is the terminal default.
+    /// one hardware cursor. Unset (`explicit == false`) is CSI 0 q; an explicit
+    /// steady block is CSI 2 q.
     pub cursor_style: HostCursorStyle,
 }
 

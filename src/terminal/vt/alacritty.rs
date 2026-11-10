@@ -581,6 +581,7 @@ impl VtEngine for AlacrittyEngine {
                 shape,
                 blinking: style.blinking,
                 color,
+                explicit: self.term.requested_cursor_style().is_some(),
             },
         }
     }
@@ -3574,6 +3575,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut engine = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 20));
         engine.advance(b"hi");
+        assert!(!engine.cursor().appearance.explicit);
         engine.advance(b"\x1b[5 q\x1b]12;#ffffff\x1b\\");
         let cursor = engine.cursor();
         assert_eq!(cursor.x, 2);
@@ -3581,5 +3583,22 @@ mod tests {
         assert_eq!(cursor.appearance.shape, super::CursorShape::Beam);
         assert!(cursor.appearance.blinking);
         assert_eq!(cursor.appearance.color, Some(0x00ff_ffff));
+        assert!(cursor.appearance.explicit);
+    }
+
+    #[test]
+    fn explicit_steady_block_is_distinct_from_an_unset_cursor() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 20));
+        let unset = engine.cursor();
+        assert!(!unset.appearance.explicit);
+        assert_eq!(unset.appearance.shape, super::CursorShape::Block);
+        engine.advance(b"\x1b[2 q");
+        let steady = engine.cursor();
+        assert!(steady.appearance.explicit);
+        assert_eq!(steady.appearance.shape, super::CursorShape::Block);
+        assert!(!steady.appearance.blinking);
+        engine.advance(b"\x1b[0 q");
+        assert!(!engine.cursor().appearance.explicit);
     }
 }

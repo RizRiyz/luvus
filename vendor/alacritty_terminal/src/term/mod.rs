@@ -1101,6 +1101,15 @@ impl<T> Term<T> {
         }
     }
 
+    /// Cursor style the child actually set.
+    ///
+    /// `None` means DECSCUSR 0 or no request yet, which is distinct from an
+    /// explicit steady block. [`cursor_style`] still fills in the default.
+    #[inline]
+    pub fn requested_cursor_style(&self) -> Option<CursorStyle> {
+        self.cursor_style
+    }
+
     pub fn colors(&self) -> &Colors {
         &self.colors
     }

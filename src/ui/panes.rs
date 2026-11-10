@@ -655,12 +655,7 @@ fn draw_one_pane(
             }
             if focused && copy.is_none() {
                 if let Some((row, col)) = pi_caret {
-                    Some((
-                        content.x + col,
-                        content.y + row,
-                        true,
-                        crate::terminal::vt::CursorAppearance::default(),
-                    ))
+                    Some((content.x + col, content.y + row, true, cur.appearance))
                 } else {
                     pane_ime_cursor(content, cur)
                 }
