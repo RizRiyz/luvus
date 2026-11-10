@@ -360,11 +360,12 @@ pub fn try_read_dir_entries(path: &Path) -> std::io::Result<Vec<Entry>> {
             let de = de?;
             let name = de.file_name().to_string_lossy().into_owned();
             // `file_type` avoids a stat when the OS already knows; fall back
-            // to `is_dir` via metadata only if the type is unknown.
+            // to metadata only if the type is unknown, and report its error
+            // rather than guessing "file".
             let is_dir = de
                 .file_type()
-                .map(|ft| ft.is_dir())
-                .unwrap_or_else(|_| de.path().is_dir());
+                .or_else(|_| de.path().metadata().map(|md| md.file_type()))?
+                .is_dir();
             Ok(Entry { name, is_dir })
         })
         .collect::<std::io::Result<_>>()?;
