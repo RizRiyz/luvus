@@ -394,6 +394,7 @@ where
     // `last_cursor` parks IME when this frame hid the PTY caret: CUP onto the
     // pane even after `?25l`, so composition does not follow chrome.
     let mut last_cursor = None;
+    let mut last_cursor_style = None;
     let exit = loop {
         let message = protocol::read_message::<_, ServerMessage>(&mut reader);
         match message {
@@ -402,6 +403,11 @@ where
             // is wrapped in a DEC 2026 synchronized update so it paints atomically.
             Ok(ServerMessage::Frame(frame)) => {
                 sync_begin();
+                let _ = apply_host_cursor(
+                    terminal.backend_mut(),
+                    frame.cursor_style,
+                    &mut last_cursor_style,
+                );
                 let r = paint(
                     terminal,
                     &frame_cells(&frame, truecolor),
@@ -435,6 +441,11 @@ where
             }
             Ok(ServerMessage::FrameDiff(diff)) => {
                 sync_begin();
+                let _ = apply_host_cursor(
+                    terminal.backend_mut(),
+                    diff.cursor_style,
+                    &mut last_cursor_style,
+                );
                 let r = paint(
                     terminal,
                     &diff_cells(&diff, truecolor),
@@ -1047,6 +1058,45 @@ fn ime_position(cursor: Option<(u16, u16)>, tw: u16, th: u16) -> Option<(u16, u1
     cursor.filter(|(x, y)| *x < tw && *y < th)
 }
 
+pub(crate) fn apply_host_cursor(
+    out: &mut impl std::io::Write,
+    style: protocol::HostCursorStyle,
+    last: &mut Option<protocol::HostCursorStyle>,
+) -> std::io::Result<()> {
+    if *last == Some(style) {
+        return Ok(());
+    }
+    let previous = last.replace(style);
+    // A steady block with no explicit color is the terminal's own cursor.
+    // DECSCUSR 0 gives that back, including after a child such as Pi asked for
+    // a blinking bar. Beam and underline stay explicit so the bar can breathe.
+    let shape = match (style.shape, style.blinking) {
+        (1, true) => "\u{1b}[3 q",
+        (1, false) => "\u{1b}[4 q",
+        (2, true) => "\u{1b}[5 q",
+        (2, false) => "\u{1b}[6 q",
+        (_, true) => "\u{1b}[1 q",
+        (_, false) => "\u{1b}[0 q",
+    };
+    write!(out, "{shape}")?;
+    match style.color {
+        Some(color) => write!(out, "\u{1b}]12;#{:06x}\u{1b}\\", color & 0x00ff_ffff)?,
+        None if previous.is_some_and(|previous| previous.color.is_some()) => {
+            write!(out, "\u{1b}]112\u{1b}\\")?;
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn cursor_style_bytes(style: protocol::HostCursorStyle) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut last = None;
+    apply_host_cursor(&mut out, style, &mut last).unwrap();
+    out
+}
+
 fn restore_host_cursor<B: Backend>(
     backend: &mut B,
     width: u16,
@@ -1116,6 +1166,16 @@ where
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn blinking_bar_uses_decscusr_and_osc12() {
+        let bytes = super::cursor_style_bytes(crate::ipc::protocol::HostCursorStyle {
+            shape: 2,
+            blinking: true,
+            color: Some(0x00ff_ffff),
+        });
+        assert_eq!(bytes, b"\x1b[5 q\x1b]12;#ffffff\x1b\\");
+    }
+
     #[test]
     fn clipboard_receipt_waits_for_busy_input_writer() {
         use super::{ClientMessage, InputRoute};
@@ -1317,6 +1377,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let diff = FrameDiff {
             width: 1,
@@ -1330,6 +1391,7 @@ mod tests {
             }],
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         for truecolor in [true, false] {
             let full = frame_cells(&frame, truecolor);
@@ -1365,6 +1427,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let cells = super::frame_cells(&frame, true);
         let syms: Vec<(u16, String)> = cells
@@ -1951,6 +2014,7 @@ mod render_tests {
             hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let f1 = FrameData {
             width: 3,
@@ -1959,6 +2023,7 @@ mod render_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 0)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
 
         let mut term = Terminal::new(TestBackend::new(3, 1)).unwrap();
@@ -1979,6 +2044,7 @@ mod render_tests {
             runs: protocol::diff_runs(&f0, &f1),
             cursor: f1.cursor,
             cursor_visible: f1.cursor_visible,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,
@@ -1992,7 +2058,12 @@ mod render_tests {
 
         // The terminal now shows f1 — the client stays correct without ever
         // re-blitting the whole frame.
-        let got = protocol::frame_from_buffer(term.backend().buffer(), None, false);
+        let got = protocol::frame_from_buffer(
+            term.backend().buffer(),
+            None,
+            false,
+            protocol::HostCursorStyle::default(),
+        );
         assert_eq!(got.cells, f1.cells);
     }
 }
@@ -2094,6 +2165,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let mut last = None;
         paint(
@@ -2120,6 +2192,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let diff = FrameDiff {
             width: 8,
@@ -2127,6 +2200,7 @@ mod paint_tests {
             runs: protocol::diff_runs(&f0, &f1),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,
@@ -2156,6 +2230,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let mut last = None;
         paint(
@@ -2181,6 +2256,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         let diff = FrameDiff {
             width: 8,
@@ -2188,6 +2264,7 @@ mod paint_tests {
             runs: protocol::diff_runs(&f0, &f1),
             cursor: Some((1, 4)),
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,
@@ -2218,6 +2295,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 4)),
             cursor_visible: true,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,
@@ -2250,6 +2328,7 @@ mod paint_tests {
             hyperlinks: Vec::new(),
             cursor: Some((3, 5)),
             cursor_visible: false,
+            cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
         };
         paint(
             &mut term,

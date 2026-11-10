@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 /// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
 /// variant one. Its mismatch reply must use that released position.
 const V0141_PROTOCOL_VERSION: u32 = 17;
@@ -391,6 +391,32 @@ pub struct ShellWorkspace {
     pub nested: bool,
 }
 
+/// Hardware cursor appearance for the focused child.
+///
+/// `shape`: 0 block, 1 underline, 2 beam. `color` is `0xRRGGBB` when the child
+/// set OSC 12; `None` restores the terminal color.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostCursorStyle {
+    pub shape: u8,
+    pub blinking: bool,
+    pub color: Option<u32>,
+}
+
+impl HostCursorStyle {
+    pub fn from_appearance(appearance: crate::terminal::vt::CursorAppearance) -> Self {
+        let shape = match appearance.shape {
+            crate::terminal::vt::CursorShape::Block => 0,
+            crate::terminal::vt::CursorShape::Underline => 1,
+            crate::terminal::vt::CursorShape::Beam => 2,
+        };
+        Self {
+            shape,
+            blinking: appearance.blinking,
+            color: appearance.color,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct FrameData {
     pub width: u16,
@@ -405,6 +431,9 @@ pub struct FrameData {
     /// in-view PTY still parks IME (Pi `?25l` after CUP to its input marker).
     #[serde(default)]
     pub cursor_visible: bool,
+    /// Focused pane's DECSCUSR / OSC 12 request. The client applies it to the
+    /// one hardware cursor; a block with no color is the terminal default.
+    pub cursor_style: HostCursorStyle,
 }
 
 /// A sparse update sent instead of a full `FrameData` when the dimensions are
@@ -420,6 +449,7 @@ pub struct FrameDiff {
     pub cursor: Option<(u16, u16)>,
     #[serde(default)]
     pub cursor_visible: bool,
+    pub cursor_style: HostCursorStyle,
 }
 
 /// A maximal run of adjacent changed cells that share `fg`/`bg`/`mods`. `symbols`
@@ -492,6 +522,7 @@ pub fn apply_diff(frame: &mut FrameData, diff: &FrameDiff) {
     frame.height = diff.height;
     frame.cursor = diff.cursor;
     frame.cursor_visible = diff.cursor_visible;
+    frame.cursor_style = diff.cursor_style;
     for run in &diff.runs {
         for (k, sym) in run.symbols.iter().enumerate() {
             if let Some(slot) = frame.cells.get_mut(run.start as usize + k) {
@@ -571,6 +602,7 @@ pub fn frame_from_buffer(
     buf: &Buffer,
     cursor: Option<(u16, u16)>,
     cursor_visible: bool,
+    cursor_style: HostCursorStyle,
 ) -> FrameData {
     let area = buf.area;
     let mut cells = Vec::with_capacity(area.width as usize * area.height as usize);
@@ -595,6 +627,7 @@ pub fn frame_from_buffer(
         hyperlinks: Vec::new(),
         cursor,
         cursor_visible: cursor.is_some() && cursor_visible,
+        cursor_style,
     }
 }
 
@@ -938,6 +971,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: Some((1, 0)),
             cursor_visible: true,
+            cursor_style: HostCursorStyle::default(),
         });
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -1179,7 +1213,7 @@ mod tests {
         );
 
         // Full-frame serialization blanks it.
-        let frame = frame_from_buffer(&buf, None, false);
+        let frame = frame_from_buffer(&buf, None, false, HostCursorStyle::default());
         assert_eq!(frame.cells[0].symbol, "🔴", "emoji at col 0");
         assert_eq!(
             frame.cells[1].symbol, "",
@@ -1189,7 +1223,12 @@ mod tests {
 
         // The per-frame diff path blanks it too, so a modal that repaints via
         // `diff_buffer` (the hot path) is fixed as well.
-        let mut prev = frame_from_buffer(&Buffer::empty(Rect::new(0, 0, 6, 1)), None, false);
+        let mut prev = frame_from_buffer(
+            &Buffer::empty(Rect::new(0, 0, 6, 1)),
+            None,
+            false,
+            HostCursorStyle::default(),
+        );
         let runs = diff_buffer(&mut prev, &buf);
         let changed: Vec<&str> = runs
             .iter()
@@ -1207,7 +1246,12 @@ mod tests {
         use ratatui::layout::Rect;
         let area = Rect::new(0, 0, 4, 2);
         // `prev` starts as the blank buffer.
-        let mut prev = frame_from_buffer(&Buffer::empty(area), None, false);
+        let mut prev = frame_from_buffer(
+            &Buffer::empty(area),
+            None,
+            false,
+            HostCursorStyle::default(),
+        );
         // A buffer with two adjacent changed cells on row 0.
         let mut buf = Buffer::empty(area);
         buf[(1, 0)].set_symbol("a");
@@ -1218,7 +1262,10 @@ mod tests {
         assert_eq!(runs[0].start, 1);
         assert_eq!(runs[0].symbols, vec!["a".to_string(), "b".to_string()]);
         // `prev` was updated in place to equal the buffer.
-        assert_eq!(prev.cells, frame_from_buffer(&buf, None, false).cells);
+        assert_eq!(
+            prev.cells,
+            frame_from_buffer(&buf, None, false, HostCursorStyle::default()).cells
+        );
         // Diffing the same buffer again yields nothing (no spurious frames).
         assert!(diff_buffer(&mut prev, &buf).is_empty());
     }
@@ -1238,6 +1285,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: Some((0, 0)),
             cursor_visible: true,
+            cursor_style: HostCursorStyle::default(),
         };
         let mut new = old.clone();
         new.cells[1] = cell("X"); // one cell changed
@@ -1258,6 +1306,7 @@ mod tests {
                 runs,
                 cursor: new.cursor,
                 cursor_visible: new.cursor_visible,
+                cursor_style: HostCursorStyle::default(),
             },
         );
         assert!(rebuilt == new, "diff reconstructs the new frame");
@@ -1282,6 +1331,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
+            cursor_style: HostCursorStyle::default(),
         };
         let links = [crate::app::RenderedHyperlink {
             pane: crate::ids::PaneId(7),
@@ -1341,6 +1391,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: None,
             cursor_visible: false,
+            cursor_style: HostCursorStyle::default(),
         };
         let mut new = old.clone();
         // "hi" same color at 1..3, then a different-color "X" at 3.
@@ -1375,6 +1426,7 @@ mod tests {
             hyperlinks: Vec::new(),
             cursor: Some((0, 0)),
             cursor_visible: true,
+            cursor_style: HostCursorStyle::default(),
         };
         let mut f2 = f1.clone();
         f2.cells[3] = cell("Z", 9);
@@ -1388,6 +1440,7 @@ mod tests {
             runs: diff_runs(&f1, &f2),
             cursor: f2.cursor,
             cursor_visible: f2.cursor_visible,
+            cursor_style: HostCursorStyle::default(),
         });
         let mut wire = Vec::new();
         write_message(&mut wire, &frame_msg).unwrap();
@@ -1449,6 +1502,7 @@ mod size_probe {
             hyperlinks: Vec::new(),
             cursor: Some((0, 0)),
             cursor_visible: true,
+            cursor_style: HostCursorStyle::default(),
         }
     }
     fn ser(m: &ServerMessage) -> usize {
@@ -1472,6 +1526,7 @@ mod size_probe {
             runs: diff_runs(&f0, &f1),
             cursor: f1.cursor,
             cursor_visible: f1.cursor_visible,
+            cursor_style: HostCursorStyle::default(),
         }));
         // simulate a line of output: 40 chars, same color
         let mut f2 = f0.clone();
@@ -1484,6 +1539,7 @@ mod size_probe {
             runs: diff_runs(&f0, &f2),
             cursor: Some((40, 1)),
             cursor_visible: true,
+            cursor_style: HostCursorStyle::default(),
         }));
         // a full-screen redraw of same-colored text (worst streaming case)
         let mut f3 = f0.clone();
@@ -1496,6 +1552,7 @@ mod size_probe {
             runs: diff_runs(&f0, &f3),
             cursor: Some((0, 0)),
             cursor_visible: true,
+            cursor_style: HostCursorStyle::default(),
         }));
         println!("FULL frame (120x32)      : {full} bytes");
         println!(

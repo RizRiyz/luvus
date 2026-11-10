@@ -8,14 +8,16 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
-use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{
+    Color as VtColor, CursorShape as VtCursorShape, NamedColor, Processor, Rgb,
+};
 
 use ratatui::style::{Color, Modifier};
 
 use super::{
-    AlignedRows, ClaudeComposerEvidence, CodexComposerRegion, Cursor, DamageCell, DamageHyperlink,
-    DamageKind, DamageRow, DamageSnapshot, HistoryMetrics, LinkedCellVisitor, RenderCell,
-    RetainedRowLayout, VtEngine, ALIGNED_WIDE_CELL,
+    AlignedRows, ClaudeComposerEvidence, CodexComposerRegion, Cursor, CursorAppearance,
+    CursorShape, DamageCell, DamageHyperlink, DamageKind, DamageRow, DamageSnapshot,
+    HistoryMetrics, LinkedCellVisitor, RenderCell, RetainedRowLayout, VtEngine, ALIGNED_WIDE_CELL,
 };
 use crate::terminal::appearance::PaneAppearance;
 use crate::terminal::backend::{CaptureMode, CaptureResult};
@@ -558,13 +560,28 @@ impl VtEngine for AlacrittyEngine {
 
     fn cursor(&self) -> Cursor {
         let p = self.term.grid().cursor.point;
+        let style = self.term.cursor_style();
+        let shape = match style.shape {
+            VtCursorShape::Underline => CursorShape::Underline,
+            VtCursorShape::Beam => CursorShape::Beam,
+            VtCursorShape::Hidden => CursorShape::Block,
+            _ => CursorShape::Block,
+        };
+        let color = self.term.colors()[NamedColor::Cursor as usize]
+            .map(|rgb| (u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b));
         Cursor {
             x: p.column.0 as u16,
             y: p.line.0.max(0) as u16,
             // Scrolled into history: the live cursor isn't in view, so hide it
             // rather than draw it over an old line.
             visible: self.term.mode().contains(TermMode::SHOW_CURSOR)
-                && self.term.grid().display_offset() == 0,
+                && self.term.grid().display_offset() == 0
+                && style.shape != VtCursorShape::Hidden,
+            appearance: CursorAppearance {
+                shape,
+                blinking: style.blinking,
+                color,
+            },
         }
     }
 
@@ -3550,5 +3567,19 @@ mod tests {
             Some("hello-osc52")
         );
         assert!(engine.take_pending_clipboard().is_none());
+    }
+
+    #[test]
+    fn decscusr_and_osc12_reach_the_host_cursor_without_moving_it() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 20));
+        engine.advance(b"hi");
+        engine.advance(b"\x1b[5 q\x1b]12;#ffffff\x1b\\");
+        let cursor = engine.cursor();
+        assert_eq!(cursor.x, 2);
+        assert!(cursor.visible);
+        assert_eq!(cursor.appearance.shape, super::CursorShape::Beam);
+        assert!(cursor.appearance.blinking);
+        assert_eq!(cursor.appearance.color, Some(0x00ff_ffff));
     }
 }
