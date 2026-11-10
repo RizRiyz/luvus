@@ -2321,10 +2321,11 @@ impl<T: EventListener> Handler for Term<T> {
                 NamedPrivateMode::CursorKeys => self.mode.contains(TermMode::APP_CURSOR).into(),
                 NamedPrivateMode::Origin => self.mode.contains(TermMode::ORIGIN).into(),
                 NamedPrivateMode::LineWrap => self.mode.contains(TermMode::LINE_WRAP).into(),
-                NamedPrivateMode::BlinkingCursor => {
-                    let style = self.cursor_style.get_or_insert(self.config.default_cursor_style);
-                    style.blinking.into()
-                },
+                NamedPrivateMode::BlinkingCursor => self
+                    .cursor_style
+                    .unwrap_or(self.config.default_cursor_style)
+                    .blinking
+                    .into(),
                 NamedPrivateMode::ShowCursor => self.mode.contains(TermMode::SHOW_CURSOR).into(),
                 NamedPrivateMode::ReportMouseClicks => {
                     self.mode.contains(TermMode::MOUSE_REPORT_CLICK).into()

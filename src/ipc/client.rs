@@ -179,6 +179,7 @@ where
     crate::install_tui_panic_hook();
     let mut input = ClientInput::default();
     let mut selected = crate::session::display_name();
+    let mut host_cursor = AppliedHostCursor::default();
     let allow_local_file_links = local && host_terminal_shares_local_filesystem();
     let result = (|| {
         let mut reader: Box<dyn ClientRead> = Box::new(reader);
@@ -191,6 +192,7 @@ where
                 &mut input,
                 &selected,
                 allow_local_file_links,
+                &mut host_cursor,
             )?;
             input.route.replace(None);
             match exit {
@@ -220,6 +222,7 @@ where
         DisableMouseCapture,
         DisableBracketedPaste
     );
+    let _ = restore_applied_host_cursor(&mut std::io::stdout(), &host_cursor);
     ratatui::restore();
     match result? {
         ClientExit::Done => Ok(()),
@@ -264,6 +267,7 @@ fn run_inner<W>(
     input: &mut ClientInput,
     selected: &str,
     allow_local_file_links: bool,
+    host_cursor: &mut AppliedHostCursor,
 ) -> Result<ClientExit>
 where
     W: Write + Send + 'static,
@@ -394,7 +398,6 @@ where
     // `last_cursor` parks IME when this frame hid the PTY caret: CUP onto the
     // pane even after `?25l`, so composition does not follow chrome.
     let mut last_cursor = None;
-    let mut last_cursor_style = None;
     let exit = loop {
         let message = protocol::read_message::<_, ServerMessage>(&mut reader);
         match message {
@@ -411,7 +414,7 @@ where
                     true,
                     &mut last_cursor,
                     frame.cursor_style,
-                    &mut last_cursor_style,
+                    host_cursor,
                     |backend| {
                         write_hyperlink_runs(backend, &frame, truecolor, allow_local_file_links)
                     },
@@ -437,7 +440,7 @@ where
                     false,
                     &mut last_cursor,
                     diff.cursor_style,
-                    &mut last_cursor_style,
+                    host_cursor,
                     |_| Ok(()),
                 );
                 sync_end();
@@ -1029,15 +1032,25 @@ fn ime_position(cursor: Option<(u16, u16)>, tw: u16, th: u16) -> Option<(u16, u1
     cursor.filter(|(x, y)| *x < tw && *y < th)
 }
 
+/// Styles actually written to the host during this client session.
+#[derive(Default)]
+pub(crate) struct AppliedHostCursor {
+    last: Option<protocol::HostCursorStyle>,
+    /// A DECSCUSR other than CSI 0 q was written.
+    shape_changed: bool,
+    /// OSC 12 was written. OSC 112 on exit is not sent unless this is set.
+    color_changed: bool,
+}
+
 pub(crate) fn apply_host_cursor(
     out: &mut impl std::io::Write,
     style: protocol::HostCursorStyle,
-    last: &mut Option<protocol::HostCursorStyle>,
+    session: &mut AppliedHostCursor,
 ) -> std::io::Result<()> {
-    if *last == Some(style) {
+    if session.last == Some(style) {
         return Ok(());
     }
-    let previous = last.replace(style);
+    let previous = session.last.replace(style);
     // CSI 0 q restores the host terminal default. It is not a steady block:
     // the parser treats 0 as "use the configured cursor" and 2 as the explicit
     // steady block. Beam and underline stay explicit so the bar can breathe.
@@ -1054,12 +1067,35 @@ pub(crate) fn apply_host_cursor(
         }
     };
     write!(out, "{shape}")?;
+    if shape != "\u{1b}[0 q" {
+        session.shape_changed = true;
+    }
     match style.color {
-        Some(color) => write!(out, "\u{1b}]12;#{:06x}\u{1b}\\", color & 0x00ff_ffff)?,
+        Some(color) => {
+            write!(out, "\u{1b}]12;#{:06x}\u{1b}\\", color & 0x00ff_ffff)?;
+            session.color_changed = true;
+        }
         None if previous.is_some_and(|previous| previous.color.is_some()) => {
             write!(out, "\u{1b}]112\u{1b}\\")?;
         }
         None => {}
+    }
+    Ok(())
+}
+
+/// Give the host terminal its own cursor back before leaving the alternate screen.
+pub(super) fn restore_applied_host_cursor(
+    out: &mut impl std::io::Write,
+    session: &AppliedHostCursor,
+) -> std::io::Result<()> {
+    if session.shape_changed {
+        write!(out, "\u{1b}[0 q")?;
+    }
+    if session.color_changed {
+        write!(out, "\u{1b}]112\u{1b}\\")?;
+    }
+    if session.shape_changed || session.color_changed {
+        out.flush()?;
     }
     Ok(())
 }
@@ -1147,7 +1183,7 @@ pub(super) fn paint_host_frame<B, F>(
     clear: bool,
     last_cursor: &mut Option<(u16, u16)>,
     style: protocol::HostCursorStyle,
-    last_style: &mut Option<protocol::HostCursorStyle>,
+    host_cursor: &mut AppliedHostCursor,
     overlay: F,
 ) -> Result<()>
 where
@@ -1173,7 +1209,7 @@ where
             *last_cursor = Some((x, y));
             backend.set_cursor_position(Position::new(x, y))?;
             if cursor_visible {
-                apply_host_cursor(backend, style, last_style)?;
+                apply_host_cursor(backend, style, host_cursor)?;
                 backend.show_cursor()?;
             } else {
                 backend.hide_cursor()?;
@@ -1196,8 +1232,8 @@ where
 mod host_cursor_style {
     fn cursor_style_bytes(style: crate::ipc::protocol::HostCursorStyle) -> Vec<u8> {
         let mut out = Vec::new();
-        let mut last = None;
-        super::apply_host_cursor(&mut out, style, &mut last).unwrap();
+        let mut session = super::AppliedHostCursor::default();
+        super::apply_host_cursor(&mut out, style, &mut session).unwrap();
         out
     }
 
@@ -1221,6 +1257,53 @@ mod host_cursor_style {
             ..crate::ipc::protocol::HostCursorStyle::default()
         });
         assert_eq!(steady, b"\x1b[2 q");
+    }
+
+    #[test]
+    fn exit_restores_shape_only_after_a_change_and_color_only_after_osc12() {
+        let mut session = super::AppliedHostCursor::default();
+        let mut out = Vec::new();
+        super::restore_applied_host_cursor(&mut out, &session).unwrap();
+        assert!(out.is_empty());
+
+        super::apply_host_cursor(
+            &mut out,
+            crate::ipc::protocol::HostCursorStyle::default(),
+            &mut session,
+        )
+        .unwrap();
+        out.clear();
+        super::restore_applied_host_cursor(&mut out, &session).unwrap();
+        assert!(out.is_empty());
+
+        let mut session = super::AppliedHostCursor::default();
+        super::apply_host_cursor(
+            &mut Vec::new(),
+            crate::ipc::protocol::HostCursorStyle {
+                shape: 2,
+                blinking: true,
+                color: None,
+                explicit: true,
+            },
+            &mut session,
+        )
+        .unwrap();
+        super::restore_applied_host_cursor(&mut out, &session).unwrap();
+        assert_eq!(out, b"\x1b[0 q");
+
+        out.clear();
+        let mut session = super::AppliedHostCursor::default();
+        super::apply_host_cursor(
+            &mut Vec::new(),
+            crate::ipc::protocol::HostCursorStyle {
+                color: Some(0x00ff_ffff),
+                ..crate::ipc::protocol::HostCursorStyle::default()
+            },
+            &mut session,
+        )
+        .unwrap();
+        super::restore_applied_host_cursor(&mut out, &session).unwrap();
+        assert_eq!(out, b"\x1b]112\x1b\\");
     }
 
     #[test]
@@ -1344,7 +1427,7 @@ mod host_cursor_style {
         )
         .unwrap();
         let mut last_cursor = None;
-        let mut last_style = None;
+        let mut last_style = super::AppliedHostCursor::default();
         super::paint_host_frame(
             &mut terminal,
             &cells,
@@ -1365,7 +1448,9 @@ mod host_cursor_style {
         assert!(hidden.contains("\u{1b}[2;4H"), "{hidden:?}");
         assert!(!hidden.contains("\u{1b}[5 q"), "{hidden:?}");
         assert!(!hidden.contains("\u{1b}[?25h"), "{hidden:?}");
-        assert!(last_style.is_none());
+        assert!(last_style.last.is_none());
+        assert!(!last_style.shape_changed);
+        assert!(!last_style.color_changed);
 
         terminal.backend_mut().bytes.clear();
         super::paint_host_frame(

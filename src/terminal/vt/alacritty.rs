@@ -3601,4 +3601,16 @@ mod tests {
         engine.advance(b"\x1b[0 q");
         assert!(!engine.cursor().appearance.explicit);
     }
+
+    #[test]
+    fn blinking_cursor_query_does_not_request_a_style() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = AlacrittyEngine::new(20, 5, tx, budget_for_rows(20, 20));
+        engine.advance(b"hi");
+        let before = engine.cursor();
+        engine.advance(b"\x1b[?12$p");
+        let after = engine.cursor();
+        assert!(!after.appearance.explicit);
+        assert_eq!(after.x, before.x);
+    }
 }

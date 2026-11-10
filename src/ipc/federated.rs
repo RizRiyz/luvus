@@ -438,7 +438,8 @@ pub(super) fn run(
     let _logging = crate::logging::init(crate::logging::Role::Client);
     let mut terminal = ratatui::init();
     crate::install_tui_panic_hook();
-    let result = run_inner(reader, writer, profiles, &mut terminal);
+    let mut host_cursor = super::client::AppliedHostCursor::default();
+    let result = run_inner(reader, writer, profiles, &mut terminal, &mut host_cursor);
     let _ = execute!(
         std::io::stdout(),
         crossterm::event::PopKeyboardEnhancementFlags,
@@ -446,6 +447,7 @@ pub(super) fn run(
         DisableMouseCapture,
         DisableBracketedPaste
     );
+    let _ = super::client::restore_applied_host_cursor(&mut std::io::stdout(), &host_cursor);
     ratatui::restore();
     match result? {
         super::client::ClientExit::Done => Ok(()),
@@ -541,6 +543,7 @@ fn run_inner(
     mut writer: crate::ipc::transport::Conn,
     profiles: Vec<MachineProfile>,
     terminal: &mut DefaultTerminal,
+    host_cursor: &mut super::client::AppliedHostCursor,
 ) -> Result<super::client::ClientExit> {
     let truecolor = protocol::truecolor_supported();
     let host_terminal_shares_local_filesystem =
@@ -611,7 +614,6 @@ fn run_inner(
         ..DockState::default()
     };
     let mut last_cursor = None;
-    let mut last_cursor_style = None;
     let mut cursor_visible = false;
     let mut exit = super::client::ClientExit::Done;
     let mut running = true;
@@ -868,7 +870,7 @@ fn run_inner(
                     host_terminal_shares_local_filesystem,
                     &mut dock,
                     &mut last_cursor,
-                    &mut last_cursor_style,
+                    host_cursor,
                     &mut cursor_visible,
                 )? {
                     exit = reason;
@@ -888,7 +890,7 @@ fn run_inner(
                     host_terminal_shares_local_filesystem,
                     &mut dock,
                     &mut last_cursor,
-                    &mut last_cursor_style,
+                    host_cursor,
                     &mut cursor_visible,
                 )? {
                     exit = reason;
@@ -1336,7 +1338,7 @@ fn handle_link_event(
     host_terminal_shares_local_filesystem: bool,
     dock: &mut DockState,
     last_cursor: &mut Option<(u16, u16)>,
-    last_cursor_style: &mut Option<protocol::HostCursorStyle>,
+    last_cursor_style: &mut super::client::AppliedHostCursor,
     cursor_visible: &mut bool,
 ) -> Result<Option<super::client::ClientExit>> {
     match event {
@@ -1485,7 +1487,7 @@ fn handle_surface_message(
     host_terminal_shares_local_filesystem: bool,
     dock: &mut DockState,
     last_cursor: &mut Option<(u16, u16)>,
-    last_cursor_style: &mut Option<protocol::HostCursorStyle>,
+    last_cursor_style: &mut super::client::AppliedHostCursor,
     cursor_visible: &mut bool,
 ) -> Result<Option<super::client::ClientExit>> {
     let (message, prepared) = match message {
