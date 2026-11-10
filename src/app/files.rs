@@ -216,7 +216,7 @@ impl App {
         let tx = self.app_tx.clone();
         std::thread::spawn(move || {
             for path in dirs {
-                let entries = crate::files::read_dir_entries(&path);
+                let entries = crate::files::try_read_dir_entries(&path).ok();
                 let _ = tx.send(AppEvent::DirRead { path, entries });
             }
         });
@@ -497,7 +497,7 @@ impl App {
             self.file_tree.mark_pending(path.clone());
             let tx = self.app_tx.clone();
             std::thread::spawn(move || {
-                let entries = crate::files::read_dir_entries(&path);
+                let entries = crate::files::try_read_dir_entries(&path).ok();
                 let _ = tx.send(AppEvent::DirRead { path, entries });
             });
         }

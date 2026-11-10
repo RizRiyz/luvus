@@ -214,6 +214,18 @@ impl FileTree {
         );
     }
 
+    /// A directory read failed. A folder that is already on screen keeps its
+    /// last listing, so a transient error (descriptor exhaustion, a brief
+    /// permission change) never blanks it between two periodic rescans. A
+    /// first read still settles as empty so the row stops showing "loading".
+    pub fn apply_dir_failed(&mut self, path: PathBuf) {
+        if self.is_loaded(&path) {
+            self.pending.remove(&path);
+            return;
+        }
+        self.apply_dir(path, Vec::new());
+    }
+
     /// Directories that are on screen right now and already read — the root plus
     /// every expanded, loaded directory. A periodic rescan re-reads exactly these
     /// to notice files created or deleted outside luvus, without ever descending
@@ -330,33 +342,37 @@ impl FileTree {
     }
 }
 
-/// Read one directory into sorted [`Entry`]s: directories first, then files,
-/// each case-insensitive by name. Runs on a worker thread (never the loop). An
-/// unreadable directory yields an empty listing rather than an error, so a
-/// permission-denied folder is simply empty instead of breaking the tree.
+/// [`try_read_dir_entries`] for tests: an unreadable directory
+/// yields an empty listing.
+#[cfg(test)]
 pub fn read_dir_entries(path: &Path) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = match std::fs::read_dir(path) {
-        Ok(rd) => rd
-            .flatten()
-            .map(|de| {
-                let name = de.file_name().to_string_lossy().into_owned();
-                // `file_type` avoids a stat when the OS already knows; fall back
-                // to `is_dir` via metadata only if the type is unknown.
-                let is_dir = de
-                    .file_type()
-                    .map(|ft| ft.is_dir())
-                    .unwrap_or_else(|_| de.path().is_dir());
-                Entry { name, is_dir }
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    try_read_dir_entries(path).unwrap_or_default()
+}
+
+/// Read one directory into sorted [`Entry`]s: directories first, then files,
+/// each case-insensitive by name. Runs on a worker thread (never the loop). A
+/// directory that cannot be opened is an error, so the tree can keep a listing
+/// it already shows through a transient failure such as descriptor exhaustion.
+pub fn try_read_dir_entries(path: &Path) -> std::io::Result<Vec<Entry>> {
+    let mut entries: Vec<Entry> = std::fs::read_dir(path)?
+        .flatten()
+        .map(|de| {
+            let name = de.file_name().to_string_lossy().into_owned();
+            // `file_type` avoids a stat when the OS already knows; fall back
+            // to `is_dir` via metadata only if the type is unknown.
+            let is_dir = de
+                .file_type()
+                .map(|ft| ft.is_dir())
+                .unwrap_or_else(|_| de.path().is_dir());
+            Entry { name, is_dir }
+        })
+        .collect();
     entries.sort_by(|a, b| {
         b.is_dir
             .cmp(&a.is_dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    entries
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -368,6 +384,32 @@ mod tests {
             name: name.into(),
             is_dir,
         }
+    }
+
+    #[test]
+    fn a_failed_rescan_keeps_the_last_listing_and_a_failed_first_read_settles() {
+        let root = PathBuf::from("/r");
+        let mut t = FileTree::new(root.clone());
+        t.apply_dir(root.clone(), vec![e("src", true), e("README.md", false)]);
+        t.visible_rows();
+        t.apply_dir_failed(root.clone());
+        let names: Vec<_> = t.visible_rows().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, ["src", "README.md"]);
+
+        let src = root.join("src");
+        t.toggle(&src);
+        t.mark_pending(src.clone());
+        t.apply_dir_failed(src.clone());
+        let rows = t.visible_rows();
+        assert!(rows[0].expanded && !rows[0].loading);
+        assert!(t.needs_load().is_empty());
+    }
+
+    #[test]
+    fn try_read_dir_entries_reports_a_missing_directory() {
+        let missing = std::env::temp_dir().join(format!("luvus-missing-{}", std::process::id()));
+        assert!(try_read_dir_entries(&missing).is_err());
+        assert!(read_dir_entries(&missing).is_empty());
     }
 
     #[test]

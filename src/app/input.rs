@@ -1286,7 +1286,10 @@ impl App {
                 }
             }
             AppEvent::DirRead { path, entries } => {
-                self.file_tree.apply_dir(path.clone(), entries);
+                match entries {
+                    Some(entries) => self.file_tree.apply_dir(path.clone(), entries),
+                    None => self.file_tree.apply_dir_failed(path.clone()),
+                }
                 self.finish_pending_files_api(&path);
                 true
             }
