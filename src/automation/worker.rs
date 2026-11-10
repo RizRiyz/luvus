@@ -6,8 +6,6 @@
 //! sandboxed agent remain unable to reach the owner socket without leaving its
 //! automation task permanently Running.
 
-use std::process::Command;
-
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
@@ -54,12 +52,16 @@ fn launch(task_id: &str, automation_id: &str, run_id: &str) -> Result<std::proce
         ));
     }
 
-    Command::new(descriptor.launch_command)
+    let start_error = |error: std::io::Error| {
+        anyhow!("could not start scheduled agent {}: {error}", descriptor.id)
+    };
+    crate::platform::agent_command(descriptor.launch_command)
+        .map_err(start_error)?
         .args(launch.args)
         .arg(briefing)
         .env("LUVUS_TASK_ID", task_id)
         .status()
-        .map_err(|error| anyhow!("could not start scheduled agent {}: {error}", descriptor.id))
+        .map_err(start_error)
 }
 
 fn run_task_snapshot(
