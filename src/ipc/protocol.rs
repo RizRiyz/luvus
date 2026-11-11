@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 /// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
 /// variant one. Its mismatch reply must use that released position.
 const V0141_PROTOCOL_VERSION: u32 = 17;
@@ -96,6 +96,12 @@ pub enum ClientMessage {
     /// Native clipboard success for the exact copy sent to this attachment.
     ClipboardSucceeded {
         receipt: u64,
+    },
+    /// This display's one-pixel Kitty graphics query. `supported` is true only
+    /// when the host answered OK. Silence and errors stay false, and the server
+    /// then neither places images here nor acknowledges a child's `a=q`.
+    HostGraphics {
+        supported: bool,
     },
 }
 

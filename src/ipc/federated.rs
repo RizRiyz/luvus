@@ -500,6 +500,8 @@ fn negotiate_local(
     (cols, rows): (u16, u16),
     generation: u64,
     probe_terminal_colors: impl FnOnce() -> crate::terminal::theme_probe::ProbeResult,
+    probe_graphics: impl FnOnce() -> (Option<bool>, Vec<ratatui::crossterm::event::Event>),
+    probe_cell_size: impl FnOnce() -> (Option<(u16, u16)>, Vec<ratatui::crossterm::event::Event>),
 ) -> Result<LocalNegotiation> {
     protocol::write_message(
         writer,
@@ -519,7 +521,7 @@ fn negotiate_local(
     // EndpointIdentity after Ready, so read it before sending negotiation data.
     let (events_tx, events_rx) = mpsc::sync_channel(8);
     start_local_reader(reader, events_tx.clone(), generation)?;
-    let probe = if probe_terminal {
+    let mut probe = if probe_terminal {
         probe_terminal_colors()
     } else {
         crate::terminal::theme_probe::ProbeResult {
@@ -530,6 +532,29 @@ fn negotiate_local(
     if probe_terminal {
         protocol::write_message(writer, &ClientMessage::TerminalColors(probe.colors.clone()))?;
     }
+    let graphics_supported = if probe_terminal {
+        let (graphics, extra) = probe_graphics();
+        probe.pending.extend(extra);
+        let supported = graphics == Some(true);
+        super::client::remember_graphics_supported(supported);
+        supported
+    } else {
+        super::client::graphics_supported()
+    };
+    if crate::terminal::kitty_graphics::cell_size_query_required(
+        graphics_supported,
+        super::client::reported_ioctl_cells(),
+    ) {
+        let (cells, extra) = probe_cell_size();
+        probe.pending.extend(extra);
+        super::client::remember_cell_fallback(cells);
+    }
+    protocol::write_message(
+        writer,
+        &ClientMessage::HostGraphics {
+            supported: graphics_supported,
+        },
+    )?;
     protocol::write_message(writer, &super::client::cell_pixels_message())?;
     Ok(LocalNegotiation {
         events_tx,
@@ -560,6 +585,8 @@ fn run_inner(
         (size.width, size.height),
         local_generation,
         crate::terminal::theme_probe::probe,
+        crate::terminal::theme_probe::probe_kitty_graphics,
+        crate::terminal::theme_probe::probe_host_cell_size,
     )?;
 
     let mut machines = profiles
@@ -1063,6 +1090,26 @@ fn start_input_reader(pending: Vec<Event>, events: Sender<ShellEvent>) -> Result
         .name("client-input".to_string())
         .stack_size(256 * 1024)
         .spawn(move || {
+            #[cfg(not(windows))]
+            {
+                let reports = events.clone();
+                crate::terminal::theme_probe::set_host_report_handler(move |report| {
+                    let message = match report {
+                        crate::terminal::theme_probe::HostReport::Graphics(supported) => {
+                            super::client::remember_graphics_supported(supported);
+                            ClientMessage::HostGraphics { supported }
+                        }
+                        crate::terminal::theme_probe::HostReport::CellSize(width, height) => {
+                            super::client::remember_cell_fallback(Some((width, height)));
+                            ClientMessage::CellPixels {
+                                cell_width_px: width,
+                                cell_height_px: height,
+                            }
+                        }
+                    };
+                    let _ = reports.send(ShellEvent::Input(message));
+                });
+            }
             let send = |event| {
                 super::client::event_message(event)
                     .is_none_or(|message| events.send(ShellEvent::Input(message)).is_ok())
@@ -1599,6 +1646,9 @@ fn handle_surface_message(
                         // here would race keyboard input and block switching.
                         control.send(&ClientMessage::TerminalColors(None))?;
                     }
+                    control.send(&ClientMessage::HostGraphics {
+                        supported: super::client::graphics_supported(),
+                    })?;
                     control.send(&super::client::cell_pixels_message())?;
                     control.send(&ClientMessage::ShellDockLayout(layout))?;
                     if let Some(state) = &dock.sidebars {
@@ -5810,12 +5860,18 @@ mod tests {
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut writer = client.clone();
-                let result = negotiate_local(client, &mut writer, (80, 24), 0, || {
-                    crate::terminal::theme_probe::ProbeResult {
+                let result = negotiate_local(
+                    client,
+                    &mut writer,
+                    (80, 24),
+                    0,
+                    || crate::terminal::theme_probe::ProbeResult {
                         colors: None,
                         pending: Vec::new(),
-                    }
-                });
+                    },
+                    || (None, Vec::new()),
+                    || (None, Vec::new()),
+                );
                 let result = result.map(|_| ()).map_err(|error| error.to_string());
                 // Hand the writer back so the connection stays open while the test waits.
                 let _ = done_tx.send((result, writer));

@@ -194,6 +194,7 @@ pub struct AlacrittyEngine {
     damage_line_indices: Vec<u16>,
     damage_rows: Vec<DamageRow>,
     graphics: crate::terminal::kitty_graphics::PaneGraphics,
+    host_draw: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 const MAX_PARTIAL_DAMAGE_ROWS: usize = 8;
@@ -268,6 +269,7 @@ impl AlacrittyEngine {
             damage_line_indices: Vec::new(),
             damage_rows: Vec::new(),
             graphics: crate::terminal::kitty_graphics::PaneGraphics::default(),
+            host_draw: crate::terminal::kitty_graphics::current_host_draw(),
         }
     }
 
@@ -1700,6 +1702,8 @@ impl VtEngine for AlacrittyEngine {
 
 impl AlacrittyEngine {
     fn ingest_child_output(&mut self, bytes: &[u8]) {
+        self.graphics
+            .set_queries_enabled(self.host_draw.load(std::sync::atomic::Ordering::Acquire));
         if self.graphics.parser_idle() && !bytes.contains(&0x1b) && !bytes.contains(&0xF4) {
             self.feed_terminal(bytes);
             return;

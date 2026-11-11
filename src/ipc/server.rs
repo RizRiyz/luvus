@@ -251,6 +251,7 @@ struct ClientState {
     shell_dock_dirty: bool,
     clipboard_receipt: Option<u64>,
     graphics: crate::terminal::kitty_graphics::HostGraphicsCache,
+    graphics_supported: bool,
 }
 
 #[derive(Default)]
@@ -298,6 +299,7 @@ impl ClientState {
             shell_dock_dirty: false,
             clipboard_receipt: None,
             graphics: crate::terminal::kitty_graphics::HostGraphicsCache::default(),
+            graphics_supported: false,
         }
     }
 
@@ -1042,11 +1044,23 @@ fn apply(
             client.cell_width_px = cell_width_px;
             client.cell_height_px = cell_height_px;
             // Passive metadata: only the interactive client's display may define
-            // the geometry shared state uses, and it never forces a repaint.
+            // the geometry shared state uses. A size that arrives after the host
+            // agreed to draw is what lets the next frame place images.
             if *foreground == Some(id) {
                 app.set_client_cell_pixels(cell_width_px, cell_height_px);
             }
-            false
+            client.graphics_supported && cell_width_px > 0 && cell_height_px > 0
+        }
+        AppEvent::ClientHostGraphics { id, supported } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            client.graphics_supported = supported;
+            if *foreground == Some(id) {
+                app.host_draw
+                    .store(supported, std::sync::atomic::Ordering::Release);
+            }
+            supported && client.cell_width_px > 0 && client.cell_height_px > 0
         }
         AppEvent::ClientClipboardSucceeded { id, receipt } => {
             if *foreground != Some(id) {
@@ -1304,8 +1318,14 @@ fn latest_client(clients: &Clients) -> Option<u64> {
 /// split geometry; the palette only matters for the `terminal` theme.
 fn apply_foreground_client(app: &mut App, clients: &Clients, foreground: Option<u64>) {
     let Some(client) = foreground.and_then(|id| clients.get(&id)) else {
+        app.host_draw
+            .store(false, std::sync::atomic::Ordering::Release);
         return;
     };
+    app.host_draw.store(
+        client.graphics_supported,
+        std::sync::atomic::Ordering::Release,
+    );
     app.set_client_cell_pixels(client.cell_width_px, client.cell_height_px);
     if app.config.theme != "terminal" {
         return;
@@ -2023,6 +2043,9 @@ struct RenderClientOutcome {
 }
 
 fn kitty_frame_bytes(app: &App, client: &mut ClientState, replay: bool) -> Vec<u8> {
+    if !client.graphics_supported || client.cell_width_px == 0 || client.cell_height_px == 0 {
+        return Vec::new();
+    }
     if replay {
         client.graphics.request_replay();
     }
@@ -2328,6 +2351,14 @@ pub(super) fn handle_client(
                         cell_width_px,
                         cell_height_px,
                     })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::HostGraphics { supported }) => {
+                if app_tx
+                    .send(AppEvent::ClientHostGraphics { id, supported })
                     .is_err()
                 {
                     break;

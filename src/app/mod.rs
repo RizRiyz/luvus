@@ -3280,6 +3280,9 @@ pub struct App {
     /// host did not report it; auto-split then uses the documented 2:1 fallback.
     pub cell_width_px: u16,
     pub cell_height_px: u16,
+    /// Shared with pane engines. True only while the foreground display has
+    /// answered OK to the one-pixel Kitty graphics query.
+    pub(crate) host_draw: Arc<std::sync::atomic::AtomicBool>,
     // Hit-test geometry from the last render, for mouse clicks.
     pub pane_rects: Vec<(PaneId, Rect)>,
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
@@ -3452,6 +3455,8 @@ impl App {
         let name = ws_name(&cwd);
 
         let config = crate::config::load();
+        let host_draw = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::terminal::kitty_graphics::install_host_draw(host_draw.clone());
         let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
@@ -3800,6 +3805,7 @@ impl App {
             last_pane_area: Rect::ZERO,
             cell_width_px: 0,
             cell_height_px: 0,
+            host_draw,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             rendered_hyperlinks: Vec::new(),
@@ -3876,6 +3882,8 @@ impl App {
 
     fn from_snapshot(mut snap: SessionSnapshot, app_tx: Sender<AppEvent>) -> Option<App> {
         let config = crate::config::load();
+        let host_draw = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        crate::terminal::kitty_graphics::install_host_draw(host_draw.clone());
         // Opting out must also reject content written by an older run. Mark the
         // restored app for an immediate save so the on-disk snapshot is scrubbed
         // while layout and native agent resume metadata remain intact.
@@ -4539,6 +4547,7 @@ impl App {
             last_pane_area: Rect::ZERO,
             cell_width_px: 0,
             cell_height_px: 0,
+            host_draw,
             pane_rects: Vec::new(),
             pane_content_rects: Vec::new(),
             rendered_hyperlinks: Vec::new(),

@@ -5,8 +5,10 @@
 //! are never used to position an image and never reach the host grid: a
 //! placeholder becomes one ordinary space so scrolling cannot change text width.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 const PLACEHOLDER: &[u8] = &[0xF4, 0x8E, 0xBB, 0xAE];
@@ -17,6 +19,26 @@ const MAX_PLACEMENTS: usize = 128;
 const KITTY_CHUNK_BYTES: usize = 3072;
 const HOST_IMAGE_ID_BASE: u32 = 10_000;
 const SCAN_ABOVE_VIEWPORT: i32 = 256;
+
+thread_local! {
+    static HOST_DRAW: RefCell<Arc<AtomicBool>> =
+        RefCell::new(Arc::new(AtomicBool::new(false)));
+}
+
+/// Engines created on this thread share the server's host-draw flag.
+pub(crate) fn install_host_draw(flag: Arc<AtomicBool>) {
+    HOST_DRAW.with(|slot| *slot.borrow_mut() = flag);
+}
+
+pub(crate) fn current_host_draw() -> Arc<AtomicBool> {
+    HOST_DRAW.with(|slot| slot.borrow().clone())
+}
+
+/// `CSI 16 t` measures cell pixels. It is not a graphics capability query and
+/// is sent only after the host has agreed to draw and ioctl has no size.
+pub(crate) fn cell_size_query_required(graphics_ok: bool, ioctl: Option<(u16, u16)>) -> bool {
+    graphics_ok && ioctl.is_none() && !cfg!(windows)
+}
 
 /// Replace a Kitty Unicode placeholder cluster with one width-1 space.
 pub(crate) fn host_cell_symbol(symbol: &str) -> &str {
@@ -415,7 +437,7 @@ pub(crate) struct NewPlacement {
 }
 
 /// Images and placements owned by one pane's terminal.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct PaneGraphics {
     parser: GraphicsParser,
     images: HashMap<u32, ImageRecord>,
@@ -426,6 +448,30 @@ pub(crate) struct PaneGraphics {
     next_local_placement: u32,
     pending: Option<PendingTransfer>,
     gc_needed: bool,
+    /// `0` means the production byte cap. Tests lower it to prove a truncated
+    /// transfer is dropped instead of placed.
+    image_limit: usize,
+    /// Child `a=q` replies OK only while the displaying host has agreed.
+    /// Direct parser tests leave this on; the engine sets it from the host.
+    queries_enabled: bool,
+}
+
+impl Default for PaneGraphics {
+    fn default() -> Self {
+        Self {
+            parser: GraphicsParser::default(),
+            images: HashMap::new(),
+            image_order: Vec::new(),
+            placements: Vec::new(),
+            next_anchor: 0,
+            next_image_id: 0,
+            next_local_placement: 0,
+            pending: None,
+            gc_needed: false,
+            image_limit: 0,
+            queries_enabled: true,
+        }
+    }
 }
 
 impl PaneGraphics {
@@ -599,15 +645,33 @@ impl PaneGraphics {
         self.finish(keys, command.payload)
     }
 
+    pub(crate) fn set_queries_enabled(&mut self, enabled: bool) {
+        self.queries_enabled = enabled;
+    }
+
+    #[cfg(test)]
+    fn set_image_limit(&mut self, limit: usize) {
+        self.image_limit = limit;
+    }
+
+    fn image_limit(&self) -> usize {
+        if self.image_limit == 0 {
+            MAX_IMAGE_BYTES
+        } else {
+            self.image_limit
+        }
+    }
+
     fn continue_transfer(&mut self, command: &ParsedCommand) -> Vec<GraphicsAction> {
         let more = command
             .entries
             .iter()
             .any(|(key, value)| *key == 'm' && value == "1");
+        let limit = self.image_limit();
         let Some(pending) = self.pending.as_mut() else {
             return Vec::new();
         };
-        if pending.data.len().saturating_add(command.payload.len()) > MAX_IMAGE_BYTES {
+        if pending.data.len().saturating_add(command.payload.len()) > limit {
             self.pending = None;
             return vec![GraphicsAction::Reply(error_reply(None, "EBADF"))];
         }
@@ -634,6 +698,18 @@ impl PaneGraphics {
         }
         if keys.medium != 'd' || keys.compression == 'z' {
             return error_action(&keys, "EINVAL").into_iter().collect();
+        }
+        if keys.action == 'f' {
+            let Some(id) = keys.image_id else {
+                return error_action(&keys, "EINVAL").into_iter().collect();
+            };
+            if !self.images.contains_key(&id) || !self.store_image(id, &keys, data) {
+                return error_action(&keys, "EINVAL").into_iter().collect();
+            }
+            return assigned_reply(&keys, Some(id))
+                .map(GraphicsAction::Reply)
+                .into_iter()
+                .collect();
         }
         let image_id = if matches!(keys.action, 't' | 'T') || !data.is_empty() {
             let id = keys.image_id.unwrap_or_else(|| self.allocate_image_id());
@@ -683,6 +759,13 @@ impl PaneGraphics {
     }
 
     fn query_reply(&self, keys: &Keys) -> GraphicsAction {
+        if !self.queries_enabled {
+            let id = keys
+                .image_id
+                .map(|id| format!("i={id}"))
+                .unwrap_or_else(|| "a=q".to_string());
+            return GraphicsAction::Reply(format!("\x1b_G{id};ENOTSUPPORTED\x1b\\").into_bytes());
+        }
         let Some(id) = keys.image_id else {
             return GraphicsAction::None;
         };
@@ -728,7 +811,7 @@ impl PaneGraphics {
     }
 
     fn store_image(&mut self, id: u32, keys: &Keys, data: Vec<u8>) -> bool {
-        if data.is_empty() || data.len() > MAX_IMAGE_BYTES {
+        if data.is_empty() || data.len() > self.image_limit() {
             return false;
         }
         let (width, height) = match keys.format {
@@ -1116,7 +1199,11 @@ fn release_superseded(
 }
 
 fn clip_placement(placement: &ScreenPlacement) -> Option<(Clipped, u32)> {
-    if placement.area_width == 0 || placement.area_height == 0 {
+    if placement.area_width == 0
+        || placement.area_height == 0
+        || placement.cell_width_px == 0
+        || placement.cell_height_px == 0
+    {
         return None;
     }
     let visible = &placement.visible;
@@ -1623,5 +1710,143 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert!(plain.is_empty());
+    }
+
+    #[test]
+    fn child_query_is_refused_until_the_host_agrees() {
+        let mut graphics = PaneGraphics::default();
+        graphics.set_queries_enabled(false);
+        let mut plain = Vec::new();
+        let actions = graphics.push(b"\x1b_Ga=q,i=31,e=T,C=1\x1b\\", &mut plain);
+        match actions.as_slice() {
+            [GraphicsAction::Reply(bytes)] => {
+                let reply = text(bytes);
+                assert!(reply.contains("ENOTSUPPORTED"), "{reply}");
+                assert!(!reply.contains("OK"), "{reply}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(!cell_size_query_required(false, None));
+        assert!(!cell_size_query_required(true, Some((8, 16))));
+        assert_eq!(cell_size_query_required(true, None), !cfg!(windows));
+    }
+
+    #[test]
+    fn host_query_follows_the_display_flag() {
+        use crate::terminal::vt::VtEngine;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let flag = Arc::new(AtomicBool::new(false));
+        install_host_draw(flag.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 5, tx, 64 * 1024);
+        let query = b"\x1b_Ga=q,i=31\x1b\\";
+        engine.advance(query);
+        engine.finish_output_batch();
+        let refused = text(&input_bytes(rx.try_recv().unwrap()));
+        assert!(refused.contains("ENOTSUPPORTED"), "{refused}");
+        flag.store(true, Ordering::Release);
+        engine.advance(query);
+        engine.finish_output_batch();
+        let accepted = text(&input_bytes(rx.try_recv().unwrap()));
+        assert!(accepted.contains("OK"), "{accepted}");
+        flag.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn animation_frame_updates_the_saved_image_for_a_later_client() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 5, tx, 64 * 1024);
+        let first = rgba(1, 1, 1);
+        let second = rgba(1, 1, 2);
+        engine.advance(&transmit(b'a', b'T', 4, &first, false));
+        engine.finish_output_batch();
+        engine.advance(&transmit(b'a', b'f', 4, &second, false));
+        engine.finish_output_batch();
+        let placed = engine.kitty_visible_placements(10, 20);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(&*placed[0].data, second.as_slice());
+
+        let mut cache = HostGraphicsCache::default();
+        let replay = encode_host_frame(
+            &mut cache,
+            &[screen(1, placed[0].clone())],
+            &HashSet::from([1]),
+        );
+        let replay = text(&replay);
+        assert!(replay.contains("a=t"), "{replay}");
+        let mut encoded = Vec::new();
+        base64_encode(&second, &mut encoded);
+        assert!(
+            replay.contains(std::str::from_utf8(&encoded).unwrap()),
+            "{replay}"
+        );
+    }
+
+    #[test]
+    fn interrupted_or_oversized_chunks_are_not_placed() {
+        let mut graphics = PaneGraphics::default();
+        let mut plain = Vec::new();
+        let start = b"\x1b_Ga=T,f=32,s=1,v=1,i=9,m=1;AAAA\x1b\\";
+        assert!(graphics.push(start, &mut plain).is_empty());
+        let interrupted = graphics.push(b"\x1b_Ga=q,i=1\x1b\\", &mut plain);
+        assert!(interrupted
+            .iter()
+            .all(|action| !matches!(action, GraphicsAction::Place(_))));
+        let place = graphics.push(b"\x1b_Ga=p,i=9,c=1,r=1\x1b\\", &mut plain);
+        assert!(
+            matches!(place.as_slice(), [GraphicsAction::Reply(bytes)] if text(bytes).contains("ENOENT")),
+            "{place:?}"
+        );
+
+        graphics.set_image_limit(4);
+        assert!(graphics
+            .push(b"\x1b_Ga=T,f=32,s=1,v=1,i=8,m=1;AAAA\x1b\\", &mut plain)
+            .is_empty());
+        let overflow = graphics.push(b"\x1b_Gm=0;AAAA\x1b\\", &mut plain);
+        assert!(
+            matches!(overflow.as_slice(), [GraphicsAction::Reply(bytes)] if text(bytes).contains("EBADF")),
+            "{overflow:?}"
+        );
+        let place = graphics.push(b"\x1b_Ga=p,i=8,c=1,r=1\x1b\\", &mut plain);
+        assert!(
+            matches!(place.as_slice(), [GraphicsAction::Reply(bytes)] if text(bytes).contains("ENOENT")),
+            "{place:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_cell_size_does_not_place() {
+        let mut placement = screen(1, visible(0, 0, 0));
+        placement.cell_width_px = 0;
+        placement.cell_height_px = 0;
+        let bytes = encode_host_frame(
+            &mut HostGraphicsCache::default(),
+            &[placement],
+            &HashSet::from([1]),
+        );
+        assert!(bytes.is_empty());
+    }
+
+    fn transmit(key: u8, action: u8, id: u32, pixels: &[u8], more: bool) -> Vec<u8> {
+        let mut payload = Vec::new();
+        base64_encode(pixels, &mut payload);
+        let more = if more { ",m=1" } else { "" };
+        let mut command = format!(
+            "\x1b_G{}={},f=32,s=1,v=1,c=1,r=1,i={id},C=1,q=2{more};",
+            key as char, action as char
+        )
+        .into_bytes();
+        command.extend_from_slice(&payload);
+        command.extend_from_slice(b"\x1b\\");
+        command
+    }
+
+    fn input_bytes(action: crate::terminal::pty::InputAction) -> Vec<u8> {
+        match action {
+            crate::terminal::pty::InputAction::Bytes(bytes) => bytes,
+            crate::terminal::pty::InputAction::Submit { .. } => Vec::new(),
+        }
     }
 }
