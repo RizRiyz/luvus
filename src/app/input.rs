@@ -2928,6 +2928,7 @@ impl App {
                     })
                     && self.pane_search.is_none()
                     && self.copy_mode.is_none()
+                    && self.diff_agent_picker.is_none()
                     && self.selection.is_none()
                     && self.mouse_grab.is_none()
                     && self.suppressed_mouse_buttons == 0
@@ -9174,6 +9175,43 @@ mod link_click_tests {
             assert_eq!(search.as_ref().unwrap().query, "needle");
         }
         app.views.remove(&first);
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, second);
+    }
+
+    #[test]
+    fn hover_focus_preserves_the_diff_agent_picker() {
+        let _env = crate::persist::test_env("hover-focus-diff-picker");
+        let (mut app, first, second, at) = split_hover_fixture();
+        app.config.layout.focus_follows_mouse = true;
+        let path = crate::diff::RepoPath::from_path(std::path::Path::new("sample.txt")).unwrap();
+        let view = crate::diff::DiffView::new(
+            std::path::PathBuf::from("/repo"),
+            crate::diff::DiffKey {
+                repo_id: "repo".into(),
+                worktree_id: "tree".into(),
+                layer: crate::diff::DiffLayer::Worktree,
+                old_path: Some(path.clone()),
+                new_path: Some(path),
+            },
+            crate::diff::DiffLayoutPreference::Stack,
+            3,
+            false,
+            false,
+        );
+        app.panes.remove(&first);
+        app.views.insert(first, ViewKind::Diff(Box::new(view)));
+        app.diff_agent_picker = Some(crate::diff::DiffAgentPicker {
+            view: first,
+            choices: Vec::new(),
+            cursor: 0,
+            scope: crate::diff::DiffSendScope::CurrentFile,
+        });
+
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+
+        app.diff_agent_picker = None;
         app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
         assert_eq!(app.layout().focus, second);
     }
