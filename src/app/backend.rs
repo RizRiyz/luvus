@@ -801,7 +801,7 @@ impl App {
         let history_budget = self.config.scrollback_bytes();
         let appearance = self.pane_appearance;
         let host_draw = self.host_draw.clone();
-        let runtime_cells = (self.cell_width_px, self.cell_height_px);
+        let runtime_cells = self.runtime_cells.clone();
         let app_tx = self.app_tx.clone();
         let event_tx = self.app_tx.clone();
         let pending_deletes = self
@@ -811,7 +811,7 @@ impl App {
             .collect::<Vec<_>>();
         std::thread::spawn(move || {
             crate::terminal::kitty_graphics::install_host_draw(host_draw);
-            crate::terminal::kitty_graphics::install_runtime_cells(runtime_cells);
+            crate::terminal::kitty_graphics::install_runtime_source(runtime_cells);
             let canonical = std::fs::canonicalize(&cwd)
                 .map_err(|_| "cwd does not exist or cannot be resolved".to_string())
                 .and_then(|resolved| {
@@ -1767,6 +1767,63 @@ mod tests {
         .unwrap();
         assert_eq!(response["error"]["code"], "invalid_params");
         assert_eq!(response["error"]["dispatch"], "not_started");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_worker_uses_current_geometry_before_app_accept() {
+        let _env = crate::persist::test_env("backend-current-geometry");
+        for old in [(0, 0), (20, 20)] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut app = App::new(80, 24, tx).unwrap();
+            app.set_client_cell_pixels(old.0, old.1);
+            let (reply, _response) = std::sync::mpsc::channel();
+            let payload = format!("{}=", "A".repeat(1067));
+            let script =
+                format!("printf '\\033_Ga=T,f=32,s=20,v=10,i=5,q=2;{payload}\\033\\\\'; sleep 10");
+            app.start_backend_create(ApiRequest {
+                id: "geometry-race".into(),
+                method: "terminal.backend.create".into(),
+                params: json!({"cwd":std::env::current_dir().unwrap(),
+                    "placement":{"kind":"workspace"}, "focus":false,
+                    "command":["/bin/sh", "-c", script]}),
+                reply,
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let event = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap();
+                if matches!(event, AppEvent::BackendCreatePreflight { .. }) {
+                    // Worker captured its source already and is blocked here.
+                    app.set_client_cell_pixels(10, 10);
+                    app.handle_event(event);
+                    break;
+                }
+                app.handle_event(event);
+            }
+            let pane = loop {
+                let event = rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .unwrap();
+                if let AppEvent::BackendCreateReady { result, .. } = event {
+                    break result.unwrap();
+                }
+            };
+            // Do not accept Ready: the PTY is live while absent from app.panes.
+            loop {
+                if pane.engine.lock().unwrap().cursor().x == 2 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "pre-accept PTY used stale geometry"
+                );
+                let _ = rx.recv_timeout(Duration::from_millis(10));
+            }
+            assert_eq!(pane.engine.lock().unwrap().cursor().y, 1);
+            drop(pane);
+        }
     }
 
     #[test]

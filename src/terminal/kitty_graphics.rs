@@ -29,7 +29,7 @@ pub(crate) const GRAPHICS_TEMP_ANCHOR: u64 = 1 << 62;
 thread_local! {
     static HOST_DRAW: RefCell<Arc<AtomicBool>> =
         RefCell::new(Arc::new(AtomicBool::new(false)));
-    static RUNTIME_CELLS: std::cell::Cell<(u16, u16)> = const { std::cell::Cell::new((0, 0)) };
+    static RUNTIME_CELLS: RefCell<Arc<RuntimeCells>> = RefCell::new(Arc::new(RuntimeCells::default()));
 }
 
 /// Engines created on this thread share the server's host-draw flag.
@@ -37,12 +37,42 @@ pub(crate) fn install_host_draw(flag: Arc<AtomicBool>) {
     HOST_DRAW.with(|slot| *slot.borrow_mut() = flag);
 }
 
-pub(crate) fn install_runtime_cells(cells: (u16, u16)) {
-    RUNTIME_CELLS.with(|slot| slot.set(cells));
+/// Foreground runtime geometry is one atomic pair, independent of projection.
+/// Engines share it before PTY startup, including while backend creation waits.
+#[derive(Default)]
+pub(crate) struct RuntimeCells(std::sync::atomic::AtomicU32);
+
+impl RuntimeCells {
+    pub(crate) fn set(&self, width: u16, height: u16) {
+        self.0.store(
+            (u32::from(width) << 16) | u32::from(height),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    pub(crate) fn get(&self) -> (u16, u16) {
+        let pair = self.0.load(std::sync::atomic::Ordering::Acquire);
+        ((pair >> 16) as u16, pair as u16)
+    }
 }
 
+/// Bind construction on this thread to the app's current geometry source.
+pub(crate) fn install_runtime_source(cells: Arc<RuntimeCells>) {
+    RUNTIME_CELLS.with(|slot| *slot.borrow_mut() = cells);
+}
+
+pub(crate) fn runtime_source() -> Arc<RuntimeCells> {
+    RUNTIME_CELLS.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn install_runtime_cells(cells: (u16, u16)) {
+    runtime_source().set(cells.0, cells.1);
+}
+
+#[cfg(test)]
 pub(crate) fn current_runtime_cells() -> (u16, u16) {
-    RUNTIME_CELLS.with(|slot| slot.get())
+    runtime_source().get()
 }
 
 pub(crate) fn current_host_draw() -> Arc<AtomicBool> {
@@ -98,6 +128,10 @@ pub(crate) struct ParsedCommand {
 
 impl ParsedCommand {
     /// Account decoded payload, metadata allocations and even empty commands.
+    pub(crate) fn is_query(&self) -> bool {
+        Keys::from_entries(&self.entries).action == 'q'
+    }
+
     pub(crate) fn held_bytes(&self) -> usize {
         self.payload
             .capacity()
@@ -487,6 +521,7 @@ pub(crate) enum GraphicsAction {
     Reply(Vec<u8>),
     Place(NewPlacement),
     DeleteCursor { free_image: bool },
+    DeleteVisible { free_image: bool },
 }
 
 #[derive(Debug)]
@@ -578,22 +613,28 @@ impl PaneGraphics {
 
     pub(crate) fn cursor_span(
         &self,
-        image_id: u32,
+        placement: &NewPlacement,
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> Option<(u32, u32)> {
         if cell_width_px == 0 || cell_height_px == 0 {
             return None;
         }
-        let image = self.images.get(&image_id)?;
-        let cols = image
-            .width
-            .div_ceil(cell_width_px)
-            .clamp(1, MAX_PLACEMENT_CELLS);
-        let rows = image
-            .height
-            .div_ceil(cell_height_px)
-            .clamp(1, MAX_PLACEMENT_CELLS);
+        let image = self.images.get(&placement.image_id)?;
+        let width = source_extent(image.width, placement.source_x, placement.source_width);
+        let height = source_extent(image.height, placement.source_y, placement.source_height);
+        let cols = if placement.columns != 0 {
+            placement.columns
+        } else {
+            width.div_ceil(cell_width_px).max(1)
+        }
+        .min(MAX_PLACEMENT_CELLS);
+        let rows = if placement.rows != 0 {
+            placement.rows
+        } else {
+            height.div_ceil(cell_height_px).max(1)
+        }
+        .min(MAX_PLACEMENT_CELLS);
         Some((cols, rows))
     }
 
@@ -653,6 +694,25 @@ impl PaneGraphics {
                     .any(|placement| placement.image_id == image_id)
                 {
                     self.remove_image(image_id);
+                }
+            }
+        }
+    }
+
+    /// Delete only placements intersecting the live screen, not scrollback.
+    pub(crate) fn delete_visible(&mut self, visible_ids: &HashSet<(u32, u32)>, free_image: bool) {
+        let mut removed = HashSet::new();
+        self.placements.retain(|p| {
+            let hit = visible_ids.contains(&(p.image_id, p.local_placement_id));
+            if hit {
+                removed.insert(p.image_id);
+            }
+            !hit
+        });
+        if free_image {
+            for id in removed {
+                if !self.placements.iter().any(|p| p.image_id == id) {
+                    self.remove_image(id);
                 }
             }
         }
@@ -744,7 +804,9 @@ impl PaneGraphics {
         if cell_height_px == 0 {
             1
         } else {
-            image.height.div_ceil(cell_height_px).max(1)
+            source_extent(image.height, placement.source_y, placement.source_height)
+                .div_ceil(cell_height_px)
+                .max(1)
         }
     }
 
@@ -798,6 +860,11 @@ impl PaneGraphics {
 
     pub(crate) fn drain(&mut self, input: &[u8]) -> Vec<StreamEvent> {
         self.parser.drain(input)
+    }
+
+    /// Query replies are independent of pending transfers and cursor state.
+    pub(crate) fn immediate_query(&self, command: &ParsedCommand) -> GraphicsAction {
+        self.query_reply(&Keys::from_entries(&command.entries))
     }
 
     pub(crate) fn apply(&mut self, command: ParsedCommand) -> Vec<GraphicsAction> {
@@ -962,6 +1029,15 @@ impl PaneGraphics {
             return vec![self.query_reply(&keys)];
         }
         if keys.action == 'd' {
+            if matches!(keys.delete, None | Some('a' | 'A')) {
+                let mut actions = vec![GraphicsAction::DeleteVisible {
+                    free_image: keys.delete == Some('A'),
+                }];
+                if let Some(reply) = quiet_ok(&keys) {
+                    actions.push(reply);
+                }
+                return actions;
+            }
             if let Some(action) = delete_action(keys.action, keys.delete) {
                 return vec![action];
             }
@@ -1109,6 +1185,9 @@ impl PaneGraphics {
             .is_none()
         {
             self.image_order.push(id);
+        } else {
+            // Retransmission replaces storage, not every old placement's pixels.
+            self.placements.retain(|placement| placement.image_id != id);
         }
         self.enforce_budget();
         true
@@ -1153,18 +1232,32 @@ fn grid_span(
     let cols = if placement.columns > 0 {
         placement.columns
     } else if cell_width_px > 0 {
-        image.width.div_ceil(cell_width_px).max(1)
+        source_extent(image.width, placement.source_x, placement.source_width)
+            .div_ceil(cell_width_px)
+            .max(1)
     } else {
         1
     };
     let rows = if placement.rows > 0 {
         placement.rows
     } else if cell_height_px > 0 {
-        image.height.div_ceil(cell_height_px).max(1)
+        source_extent(image.height, placement.source_y, placement.source_height)
+            .div_ceil(cell_height_px)
+            .max(1)
     } else {
         1
     };
     (cols, rows)
+}
+
+/// Resolve a crop against the remaining pixels, including omitted w/h.
+fn source_extent(full: u32, offset: u32, extent: u32) -> u32 {
+    let remaining = full.saturating_sub(offset);
+    if extent == 0 {
+        remaining
+    } else {
+        extent.min(remaining)
+    }
 }
 
 fn assigned_reply(keys: &Keys, image_id: Option<u32>) -> Option<Vec<u8>> {
@@ -1701,16 +1794,12 @@ fn clip_placement(placement: &ScreenPlacement) -> Option<(Clipped, u32)> {
             visible.y_offset,
         )
     } else {
-        let src_w = if visible.source_width == 0 {
-            visible.image_width
-        } else {
-            visible.source_width
-        };
-        let src_h = if visible.source_height == 0 {
-            visible.image_height
-        } else {
-            visible.source_height
-        };
+        let src_w = source_extent(visible.image_width, visible.source_x, visible.source_width);
+        let src_h = source_extent(
+            visible.image_height,
+            visible.source_y,
+            visible.source_height,
+        );
         let source_x = visible
             .source_x
             .saturating_add(scale_cells(left, src_w, visible.grid_cols));

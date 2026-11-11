@@ -3283,6 +3283,8 @@ pub struct App {
     /// Shared with pane engines. True only while the foreground display has
     /// answered OK to the one-pixel Kitty graphics query.
     pub(crate) host_draw: Arc<std::sync::atomic::AtomicBool>,
+    /// Current foreground cell pair, shared before a worker starts its PTY.
+    pub(crate) runtime_cells: Arc<crate::terminal::kitty_graphics::RuntimeCells>,
     // Hit-test geometry from the last render, for mouse clicks.
     pub pane_rects: Vec<(PaneId, Rect)>,
     /// Each pane's **content** rect (inside the border/title) — maps a mouse
@@ -3457,7 +3459,8 @@ impl App {
         let config = crate::config::load();
         let host_draw = Arc::new(std::sync::atomic::AtomicBool::new(false));
         crate::terminal::kitty_graphics::install_host_draw(host_draw.clone());
-        crate::terminal::kitty_graphics::install_runtime_cells((0, 0));
+        let runtime_cells = Arc::new(crate::terminal::kitty_graphics::RuntimeCells::default());
+        crate::terminal::kitty_graphics::install_runtime_source(runtime_cells.clone());
         let config_baseline = config.clone();
         let files_show_hidden = config.layout.files_show_hidden;
         let agents_active_only = config.agents_active_only;
@@ -3768,6 +3771,7 @@ impl App {
             diff_agent_picker: None,
             diff_menu: None,
             pending_diff_api: Vec::new(),
+            runtime_cells,
             views: HashMap::new(),
             editor_files: HashMap::new(),
             recent_files: VecDeque::new(),
@@ -3885,7 +3889,8 @@ impl App {
         let config = crate::config::load();
         let host_draw = Arc::new(std::sync::atomic::AtomicBool::new(false));
         crate::terminal::kitty_graphics::install_host_draw(host_draw.clone());
-        crate::terminal::kitty_graphics::install_runtime_cells((0, 0));
+        let runtime_cells = Arc::new(crate::terminal::kitty_graphics::RuntimeCells::default());
+        crate::terminal::kitty_graphics::install_runtime_source(runtime_cells.clone());
         // Opting out must also reject content written by an older run. Mark the
         // restored app for an immediate save so the on-disk snapshot is scrubbed
         // while layout and native agent resume metadata remain intact.
@@ -4511,6 +4516,7 @@ impl App {
             diff_agent_picker: None,
             diff_menu: None,
             pending_diff_api: Vec::new(),
+            runtime_cells,
             views,
             editor_files: HashMap::new(),
             recent_files: VecDeque::new(),
@@ -5658,12 +5664,9 @@ impl App {
     pub(crate) fn set_client_cell_pixels(&mut self, width: u16, height: u16) {
         self.cell_width_px = width;
         self.cell_height_px = height;
-        crate::terminal::kitty_graphics::install_runtime_cells((width, height));
-        for pane in self.panes.values() {
-            if let Ok(mut engine) = pane.engine.lock() {
-                engine.set_runtime_cell_pixels(width, height);
-            }
-        }
+        // In-flight workers and running engines share this current pair. No
+        // engine lock or passive rendering projection participates in updates.
+        self.runtime_cells.set(width, height);
     }
 
     fn painted_cell_aspect(&self) -> f32 {

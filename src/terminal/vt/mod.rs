@@ -679,7 +679,8 @@ pub trait VtEngine: Send {
         false
     }
 
-    /// Foreground runtime geometry, never updated by passive projections.
+    /// Test override for the shared foreground runtime geometry.
+    #[cfg(test)]
     fn set_runtime_cell_pixels(&mut self, _width: u16, _height: u16) {}
 
     /// Images this pane still stores, including ones scrolled out of view.

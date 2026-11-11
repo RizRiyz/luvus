@@ -195,8 +195,7 @@ pub struct AlacrittyEngine {
     damage_rows: Vec<DamageRow>,
     graphics: crate::terminal::kitty_graphics::PaneGraphics,
     host_draw: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    cell_width_px: Cell<u16>,
-    cell_height_px: Cell<u16>,
+    runtime_cells: Arc<crate::terminal::kitty_graphics::RuntimeCells>,
     /// Bytes and graphics commands held until CSI ?2026 l, in arrival order.
     sync_hold: Option<Vec<HeldPiece>>,
     sync_held_bytes: usize,
@@ -290,8 +289,7 @@ impl AlacrittyEngine {
             damage_rows: Vec::new(),
             graphics: crate::terminal::kitty_graphics::PaneGraphics::default(),
             host_draw: crate::terminal::kitty_graphics::current_host_draw(),
-            cell_width_px: Cell::new(crate::terminal::kitty_graphics::current_runtime_cells().0),
-            cell_height_px: Cell::new(crate::terminal::kitty_graphics::current_runtime_cells().1),
+            runtime_cells: crate::terminal::kitty_graphics::runtime_source(),
             sync_hold: None,
             sync_held_bytes: 0,
             plain_prefix: Vec::new(),
@@ -1727,9 +1725,9 @@ impl VtEngine for AlacrittyEngine {
         self.host_draw.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    #[cfg(test)]
     fn set_runtime_cell_pixels(&mut self, width: u16, height: u16) {
-        self.cell_width_px.set(width);
-        self.cell_height_px.set(height);
+        self.runtime_cells.set(width, height);
     }
 
     fn retained_kitty_images(&self) -> Vec<(u32, u64)> {
@@ -1806,37 +1804,53 @@ impl AlacrittyEngine {
         }
     }
 
+    /// Recognize sync markers before holding text so nested markers can never
+    /// restart VTE while replaying cursor moves beside graphics commands.
     fn push_plain(&mut self, mut chunk: Vec<u8>) {
         if !self.plain_prefix.is_empty() {
-            let mut merged = std::mem::take(&mut self.plain_prefix);
-            merged.append(&mut chunk);
-            chunk = merged;
+            let mut prefix = std::mem::take(&mut self.plain_prefix);
+            prefix.append(&mut chunk);
+            chunk = prefix;
+        }
+        let mut start = 0;
+        let mut i = 0;
+        while i < chunk.len() {
+            let begin = chunk[i..].starts_with(BSU);
+            let end = chunk[i..].starts_with(ESU);
+            if begin || end {
+                self.push_sync_text(chunk[start..i].to_vec());
+                if begin {
+                    // A nested BSU refreshes the existing VTE 150ms deadline,
+                    // but never feeds held cursor/text into VTE's own buffer.
+                    if self.sync_hold.is_some() {
+                        self.parser.stop_sync(&mut self.term);
+                    }
+                    self.feed_terminal(BSU);
+                    self.sync_hold.get_or_insert_with(Vec::new);
+                } else if self.sync_hold.is_some() {
+                    self.flush_sync(false);
+                }
+                i += BSU.len();
+                start = i;
+            } else {
+                i += 1;
+            }
+        }
+        let tail = &chunk[start..];
+        let keep = trailing_prefix(tail, BSU).max(trailing_prefix(tail, ESU));
+        self.push_sync_text(tail[..tail.len() - keep].to_vec());
+        self.plain_prefix
+            .extend_from_slice(&tail[tail.len() - keep..]);
+    }
+
+    fn push_sync_text(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
         }
         if self.sync_hold.is_some() {
-            self.hold_plain(chunk);
-            return;
-        }
-        if let Some(pos) = find_bytes(&chunk, BSU) {
-            let rest = chunk.split_off(pos);
-            if !chunk.is_empty() {
-                self.feed_terminal(&chunk);
-            }
-            // Arm VTE’s existing synchronized-update timeout without feeding
-            // the held text into its independent byte buffer.
-            self.feed_terminal(BSU);
-            self.sync_hold = Some(Vec::new());
-            self.hold_plain(rest);
-            return;
-        }
-        let keep = trailing_prefix(&chunk, BSU);
-        if keep > 0 {
-            let rest = chunk.len() - keep;
-            if rest > 0 {
-                self.feed_terminal(&chunk[..rest]);
-            }
-            self.plain_prefix = chunk[rest..].to_vec();
-        } else if !chunk.is_empty() {
-            self.feed_terminal(&chunk);
+            self.hold_plain(bytes);
+        } else {
+            self.feed_terminal(&bytes);
         }
     }
 
@@ -1857,6 +1871,14 @@ impl AlacrittyEngine {
     }
 
     fn push_command(&mut self, command: crate::terminal::kitty_graphics::ParsedCommand) {
+        if command.is_query() {
+            // Capability queries do not depend on cursor/grid state and may
+            // be awaited by a child before it sends ESU. Do not interrupt a
+            // pending transfer or reorder queued mutation commands.
+            let action = self.graphics.immediate_query(&command);
+            self.apply_graphics_action(action);
+            return;
+        }
         if self.reserve_sync_piece(command.held_bytes()) {
             self.sync_hold
                 .as_mut()
@@ -1886,77 +1908,21 @@ impl AlacrittyEngine {
             hold.push(HeldPiece::Plain(chunk));
         }
 
-        let closed = hold.iter().any(|piece| match piece {
-            HeldPiece::Plain(bytes) => find_bytes(bytes, ESU).is_some(),
-            HeldPiece::Command(_) => false,
-        });
-        if closed || self.sync_held_bytes >= SYNC_HOLD_LIMIT {
-            self.flush_sync(closed);
+        if self.sync_held_bytes >= SYNC_HOLD_LIMIT {
+            self.flush_sync(false);
         }
     }
 
-    fn flush_sync(&mut self, closed: bool) {
+    /// Commit marker-free held pieces in arrival order on ESU, size limit or
+    /// the existing VTE timeout. No replay can reopen a nested VTE hold.
+    fn flush_sync(&mut self, _closed: bool) {
         let held = self.sync_hold.take().unwrap_or_default();
-        // Only BSU was fed into VTE, so stopping it cannot reorder any text.
         self.parser.stop_sync(&mut self.term);
         self.sync_held_bytes = 0;
-        if !closed {
-            let mut first_plain = true;
-            for piece in held {
-                match piece {
-                    HeldPiece::Command(command) => self.apply_command(command),
-                    HeldPiece::Plain(bytes) => {
-                        let bytes = if first_plain {
-                            first_plain = false;
-                            strip_leading(bytes, BSU)
-                        } else {
-                            bytes
-                        };
-                        if !bytes.is_empty() {
-                            self.feed_terminal(&bytes);
-                        }
-                    }
-                }
-            }
-            return;
-        }
-        let mut pending = Vec::new();
-        let mut seen_end = false;
-        let mut first_plain = true;
         for piece in held {
-            if seen_end {
-                pending.push(piece);
-                continue;
-            }
             match piece {
                 HeldPiece::Command(command) => self.apply_command(command),
-                HeldPiece::Plain(bytes) => {
-                    let mut bytes = if first_plain {
-                        first_plain = false;
-                        strip_leading(bytes, BSU)
-                    } else {
-                        bytes
-                    };
-                    if let Some(pos) = find_bytes(&bytes, ESU) {
-                        let after = bytes.split_off(pos + ESU.len());
-                        bytes.truncate(bytes.len().saturating_sub(ESU.len()));
-                        if !bytes.is_empty() {
-                            self.feed_terminal(&bytes);
-                        }
-                        seen_end = true;
-                        if !after.is_empty() {
-                            pending.push(HeldPiece::Plain(after));
-                        }
-                    } else if !bytes.is_empty() {
-                        self.feed_terminal(&bytes);
-                    }
-                }
-            }
-        }
-        for piece in pending {
-            match piece {
-                HeldPiece::Plain(bytes) => self.push_plain(bytes),
-                HeldPiece::Command(command) => self.push_command(command),
+                HeldPiece::Plain(bytes) => self.feed_terminal(&bytes),
             }
         }
     }
@@ -2024,14 +1990,44 @@ impl AlacrittyEngine {
 
     fn apply_graphics_action(&mut self, action: crate::terminal::kitty_graphics::GraphicsAction) {
         use crate::terminal::kitty_graphics::GraphicsAction;
+        let (runtime_width, runtime_height) = self.runtime_cells.get();
         match action {
             GraphicsAction::None => {}
             GraphicsAction::Reply(bytes) => {
                 let _ = self.response_tx.send(InputAction::Bytes(bytes));
             }
+            GraphicsAction::DeleteVisible { free_image } => {
+                let (cw, ch) = (runtime_width, runtime_height);
+                let grid = self.term.grid();
+                let start = grid
+                    .topmost_line()
+                    .0
+                    .max(-self.graphics.lookback_rows(u32::from(ch)));
+                let mut anchors = Vec::new();
+                for line in start..grid.screen_lines() as i32 {
+                    let anchor = grid[Line(line)].graphics_anchor();
+                    if anchor != 0 {
+                        anchors.push((anchor, line));
+                    }
+                }
+                let ids = self
+                    .graphics
+                    .visible(&anchors, u32::from(cw), u32::from(ch), 0)
+                    .into_iter()
+                    .filter(|p| {
+                        p.viewport_row < grid.screen_lines() as i32
+                            && p.viewport_row
+                                .saturating_add(p.grid_rows.min(i32::MAX as u32) as i32)
+                                > 0
+                            && p.viewport_col < grid.columns() as i32
+                    })
+                    .map(|p| (p.image_id, p.placement_id))
+                    .collect();
+                self.graphics.delete_visible(&ids, free_image);
+            }
             GraphicsAction::DeleteCursor { free_image } => {
                 let point = self.term.grid().cursor.point;
-                let cell_h = u32::from(self.cell_height_px.get());
+                let cell_h = u32::from(runtime_height);
                 let lookback = self.graphics.lookback_rows(cell_h).max(1);
                 let top = self.term.grid().topmost_line().0;
                 let start = point.line.0.saturating_sub(lookback).max(top);
@@ -2046,7 +2042,7 @@ impl AlacrittyEngine {
                     point.line.0,
                     point.column.0 as u16,
                     &anchors,
-                    (u32::from(self.cell_width_px.get()), cell_h),
+                    (u32::from(runtime_width), cell_h),
                     free_image,
                 );
             }
@@ -2054,11 +2050,11 @@ impl AlacrittyEngine {
                 let mut move_cursor = placement.move_cursor;
                 let mut columns = placement.columns;
                 let mut rows = placement.rows;
-                if move_cursor && columns == 0 && rows == 0 {
+                if move_cursor && (columns == 0 || rows == 0) {
                     match self.graphics.cursor_span(
-                        placement.image_id,
-                        u32::from(self.cell_width_px.get()),
-                        u32::from(self.cell_height_px.get()),
+                        &placement,
+                        u32::from(runtime_width),
+                        u32::from(runtime_height),
                     ) {
                         Some((span_cols, span_rows)) => {
                             columns = span_cols;
@@ -2092,26 +2088,23 @@ impl AlacrittyEngine {
 
     fn move_cursor_after_image(&mut self, column: u32, row: u32, columns: u32, rows: u32) {
         let width = self.term.grid().columns().max(1) as u32;
-        let height = self.term.grid().screen_lines().max(1) as u32;
         let (next_column, next_row) =
             crate::terminal::kitty_graphics::cursor_after_image(column, row, width, columns, rows);
-        let origin = self.term.origin_line();
-        let mut bytes = Vec::new();
-        if next_row >= height {
-            let down = (next_row.saturating_sub(row) as usize).min(height as usize);
-            bytes.extend(std::iter::repeat_n(b'\n', down));
-            let _ =
-                std::io::Write::write_fmt(&mut bytes, format_args!("\x1b[{}G", next_column + 1));
-        } else if next_row != row || next_column != column {
-            // Origin mode adds the scroll-region start inside CUP. The row we
-            // computed is already absolute, so subtract that origin once.
-            let cup_row = next_row.saturating_sub(origin);
-            let _ = std::io::Write::write_fmt(
-                &mut bytes,
-                format_args!("\x1b[{};{}H", cup_row + 1, next_column + 1),
-            );
+        // Child spans are validated, but may exceed a screen or scroll region.
+        // Linefeed applies the terminal's actual margin/origin semantics; CUP
+        // would clamp instead of scrolling and CHA can add origin twice.
+        let mut down = next_row.saturating_sub(row) as usize;
+        const NEWLINES: [u8; 64] = [b'\n'; 64];
+        while down > 0 {
+            let count = down.min(NEWLINES.len());
+            self.feed_terminal(&NEWLINES[..count]);
+            down -= count;
         }
-        self.feed_terminal(&bytes);
+        self.feed_terminal(b"\r");
+        if next_column > 0 {
+            let bytes = format!("\x1b[{next_column}C");
+            self.feed_terminal(bytes.as_bytes());
+        }
     }
 
     fn collect_graphics_garbage(&mut self) {
@@ -2160,11 +2153,6 @@ impl AlacrittyEngine {
     }
 }
 
-fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len())
-        .position(|window| window == needle)
-}
-
 fn trailing_prefix(hay: &[u8], needle: &[u8]) -> usize {
     let max = needle.len().saturating_sub(1).min(hay.len());
     for len in (1..=max).rev() {
@@ -2173,13 +2161,6 @@ fn trailing_prefix(hay: &[u8], needle: &[u8]) -> usize {
         }
     }
     0
-}
-
-fn strip_leading(mut bytes: Vec<u8>, prefix: &[u8]) -> Vec<u8> {
-    if bytes.starts_with(prefix) {
-        bytes.drain(..prefix.len());
-    }
-    bytes
 }
 
 fn sgr(fg: Color, bg: Color, m: Modifier) -> String {
@@ -3769,6 +3750,137 @@ mod tests {
         assert!(!capture.text.ends_with('\n'));
         assert_eq!(capture.cursor_offset, Some(capture.text.chars().count()));
         assert_eq!(capture.cursor_padding_cells, 1);
+    }
+
+    #[test]
+    fn kitty_tall_placement_scrolls_its_entire_height_before_text() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, 64 * 1024);
+        e.advance(&kitty_command("c=1,r=10"));
+        e.advance(b"after");
+        let p = e.kitty_visible_placements(10, 10);
+        assert_eq!(p.len(), 1);
+        let text_row = e.cursor().y as i32;
+        assert!(
+            p[0].viewport_row + p[0].grid_rows as i32 <= text_row,
+            "image at {} must end before text at {text_row}",
+            p[0].viewport_row
+        );
+    }
+
+    #[test]
+    fn kitty_scroll_region_and_c1_preserve_cursor_policy() {
+        for origin in [false, true] {
+            let (tx, _rx) = channel();
+            let mut e = AlacrittyEngine::new(20, 6, tx, 64 * 1024);
+            e.advance(b"[2;5r");
+            if origin {
+                e.advance(b"[?6h");
+            } else {
+                e.advance(b"[2;1H");
+            }
+            e.advance(&kitty_command("c=1,r=10"));
+            assert_eq!((e.cursor().x, e.cursor().y), (1, 4));
+            let before = e.cursor();
+            e.advance(&kitty_command("c=1,r=10,C=1"));
+            assert_eq!((e.cursor().x, e.cursor().y), (before.x, before.y));
+        }
+    }
+
+    #[test]
+    fn kitty_nested_bsu_keeps_graphics_and_cursor_order_across_reads() {
+        for split in 0..=BSU.len() {
+            let (tx, _rx) = channel();
+            let mut e = AlacrittyEngine::new(20, 5, tx, 64 * 1024);
+            e.advance(BSU);
+            e.advance(&BSU[..split]);
+            let mut rest = BSU[split..].to_vec();
+            rest.extend_from_slice(b"\x1b[3;4H");
+            e.advance(&rest);
+            e.advance(&kitty_command("c=1,r=1,C=1"));
+            e.advance(&ESU[..split]);
+            let mut tail = ESU[split..].to_vec();
+            tail.push(b'Z');
+            e.advance(&tail);
+            let p = e.kitty_visible_placements(10, 10);
+            assert_eq!(
+                (p[0].viewport_col, p[0].viewport_row),
+                (3, 2),
+                "split {split}"
+            );
+            assert_eq!((e.cursor().x, e.cursor().y), (4, 2));
+            assert!(e.output_deadline().is_none());
+        }
+    }
+
+    #[test]
+    fn kitty_crop_and_sync_query_use_effective_state() {
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 8, tx, 64 * 1024);
+        e.set_runtime_cell_pixels(10, 10);
+        e.advance(BSU);
+        e.advance(b"\x1b_Ga=q,i=3;AAAA\x1b\\");
+        assert!(rx.try_recv().is_ok(), "query replies before ESU/timeout");
+        assert!(e.output_deadline().is_some());
+        e.advance(ESU);
+        // 4000 raw bytes encode to 5336 bytes (two trailing pads).
+        // Build valid payload without depending on a public base64 API.
+        let header = b"\x1b_Ga=T,f=32,s=100,v=10,i=5,x=90,w=10,q=2;";
+        let mut cmd = header.to_vec();
+        cmd.extend(std::iter::repeat_n(b'A', 5334));
+        cmd.extend_from_slice(b"==\x1b\\");
+        e.advance(&cmd);
+        let p = e.kitty_visible_placements(10, 10);
+        assert_eq!((p[0].grid_cols, p[0].grid_rows), (1, 1));
+        assert_eq!((e.cursor().x, e.cursor().y), (1, 1));
+    }
+
+    #[test]
+    fn kitty_visible_delete_preserves_scrollback_and_retransmit_unplaces() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, 64 * 1024);
+        e.advance(&kitty_command("c=1,r=1,C=1"));
+        e.advance(b"\n\n\n\n\n");
+        e.advance(b"\x1b_Ga=p,i=4,c=1,r=1,C=1,q=2;\x1b\\");
+        e.advance(b"\x1b_Ga=d,d=A,q=2;\x1b\\");
+        let p = e.kitty_visible_placements(10, 10);
+        assert_eq!(p.len(), 1);
+        assert!(p[0].viewport_row < 0);
+        assert_eq!(e.graphics.retained_images().len(), 1);
+        e.advance(&kitty_command("c=1,r=1,C=1"));
+        let p = e.kitty_visible_placements(10, 10);
+        assert_eq!(
+            p.len(),
+            1,
+            "a=T replaces placements, then creates one new placement"
+        );
+        assert!(p[0].viewport_row >= 0);
+    }
+
+    #[test]
+    fn kitty_worker_observes_geometry_before_accept_and_each_output_batch() {
+        for old in [(0, 0), (20, 20)] {
+            let cells = crate::terminal::kitty_graphics::current_runtime_cells();
+            let (tx, _rx) = channel();
+            let mut e = AlacrittyEngine::new(20, 8, tx, 64 * 1024);
+            e.set_runtime_cell_pixels(old.0, old.1);
+            // Simulate the worker waiting after creating an engine but before
+            // the app accepts it. It already shares the foreground source.
+            crate::terminal::kitty_graphics::install_runtime_cells((10, 10));
+            let mut payload = Vec::new();
+            // 20x10 RGBA = 800 bytes, represented by 1068 base64 bytes.
+            payload.extend(std::iter::repeat_n(b'A', 1067));
+            payload.push(b'=');
+            let mut cmd = b"\x1b_Ga=T,f=32,s=20,v=10,i=5,q=2;".to_vec();
+            cmd.extend(payload);
+            cmd.extend_from_slice(b"\x1b\\");
+            e.advance(&cmd);
+            assert_eq!((e.cursor().x, e.cursor().y), (2, 1));
+            crate::terminal::kitty_graphics::install_runtime_cells((5, 5));
+            e.advance(&cmd);
+            assert_eq!((e.cursor().x, e.cursor().y), (6, 3));
+            crate::terminal::kitty_graphics::install_runtime_cells(cells);
+        }
     }
 
     #[test]
