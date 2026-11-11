@@ -1004,10 +1004,17 @@ pub(crate) const FILE_NAME_MAX: usize = 120;
 pub struct PaneMenu {
     /// The right-clicked pane the actions target.
     pub pane: PaneId,
-    /// Top-left corner of the popup (the click point, clamped on-screen).
+    /// Click point, or the pane center when `center_on_anchor` is set.
     pub anchor: (u16, u16),
+    /// Keyboard opens center the popup on `anchor`. A pointer menu uses it as
+    /// the top-left, clamped with the rest of the popup.
+    pub center_on_anchor: bool,
     /// Each visible item + its clickable rect, filled in by the renderer.
     pub items: Vec<(PaneMenuItem, Rect)>,
+    /// Keyboard-selected rendered item. Mouse-opened menus start without one.
+    pub selected: Option<usize>,
+    /// Keyboard-selected row in the move-to-tab submenu.
+    pub move_selected: Option<usize>,
     /// Module actions offered here, snapshotted when the menu opened (docs/13 §3.8).
     pub module_actions: Vec<ModuleMenuAction>,
     /// "Move to tab" destinations (target + label), snapshotted at open. The
@@ -7714,7 +7721,10 @@ impl App {
         self.pane_menu = Some(PaneMenu {
             pane,
             anchor: (col, row),
+            center_on_anchor: false,
             items: Vec::new(),
+            selected: None,
+            move_selected: None,
             module_actions: self.module_menu_actions("pane"),
             move_targets,
             move_open: false,
@@ -8110,10 +8120,194 @@ impl App {
         }
     }
 
-    /// Key handling while the pane context menu is open: `Esc` closes it.
+    /// Open the focused pane's context menu from the keyboard.
+    ///
+    /// The popup is centered on that pane when its screen rect is known, and
+    /// the first action starts selected so it can be run without a pointer.
+    pub fn open_focused_pane_menu(&mut self) {
+        let pane = self.layout().focus;
+        let anchor = self
+            .pane_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| {
+                (
+                    rect.x.saturating_add(rect.width / 2),
+                    rect.y.saturating_add(rect.height / 2),
+                )
+            })
+            .unwrap_or((1, 1));
+        self.open_pane_menu(pane, anchor.0, anchor.1);
+        if self.pane_menu.is_some() {
+            let first = self
+                .pane_menu_items()
+                .iter()
+                .position(|item| *item != PaneMenuItem::Divider);
+            if let Some(menu) = self.pane_menu.as_mut() {
+                menu.center_on_anchor = true;
+                menu.selected = first;
+            }
+        }
+    }
+
+    /// The Move to Tab row was drawn and then scrolled out of the popup.
+    fn move_to_tab_row_is_undrawn(&self) -> bool {
+        self.pane_menu.as_ref().is_some_and(|menu| {
+            menu.items
+                .iter()
+                .any(|(item, rect)| *item == PaneMenuItem::MoveToTab && rect.height == 0)
+        })
+    }
+
+    /// Keyboard navigation for the pane menu, matching the AGENTS and FILES menus.
     pub fn handle_pane_menu_key(&mut self, key: KeyEvent) {
-        if key.code == KeyCode::Esc {
-            self.pane_menu = None;
+        if self.pane_menu.is_none() {
+            return;
+        }
+        if self.pane_menu.as_ref().is_some_and(|menu| menu.move_open) {
+            // Keys are applied before the next draw, so this rect can still be
+            // the previous frame's empty row. A keyboard selection on Move to
+            // Tab keeps the submenu; the following frame reveals that parent.
+            // Only a pointer-owned menu drops destinations that are not drawn.
+            let keyboard_selection = self
+                .pane_menu
+                .as_ref()
+                .is_some_and(|menu| menu.selected.is_some());
+            if self.move_to_tab_row_is_undrawn() && !keyboard_selection {
+                if let Some(menu) = self.pane_menu.as_mut() {
+                    menu.move_open = false;
+                    menu.move_selected = None;
+                }
+            } else {
+                self.handle_pane_move_menu_key(key);
+                return;
+            }
+        }
+        let items = self.pane_menu_items();
+        let selectable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (*item != PaneMenuItem::Divider).then_some(index))
+            .collect();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.pane_menu = None,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') => {
+                if selectable.is_empty() {
+                    return;
+                }
+                let current = self
+                    .pane_menu
+                    .as_ref()
+                    .and_then(|menu| menu.selected)
+                    .and_then(|selected| selectable.iter().position(|index| *index == selected));
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|position| position.checked_sub(1).unwrap_or(selectable.len() - 1))
+                        .unwrap_or(selectable.len() - 1)
+                } else {
+                    current.map_or(0, |position| (position + 1) % selectable.len())
+                };
+                if let Some(menu) = self.pane_menu.as_mut() {
+                    menu.selected = Some(selectable[next]);
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+                let item = self.pane_menu.as_ref().and_then(|menu| {
+                    if let Some(index) = menu.selected {
+                        items.get(index).copied()
+                    } else if key.code == KeyCode::Enter {
+                        let (col, row) = self.hover?;
+                        menu.items
+                            .iter()
+                            .find(|(item, rect)| {
+                                *item != PaneMenuItem::Divider
+                                    && col >= rect.x
+                                    && col < rect.right()
+                                    && row >= rect.y
+                                    && row < rect.bottom()
+                            })
+                            .map(|(item, _)| *item)
+                    } else {
+                        None
+                    }
+                });
+                if item == Some(PaneMenuItem::MoveToTab) {
+                    if let Some(menu) = self.pane_menu.as_mut() {
+                        menu.move_open = true;
+                        menu.move_selected = Some(0);
+                    }
+                } else if key.code == KeyCode::Enter {
+                    if let Some(item) = item {
+                        self.pane_menu_action(item);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_pane_move_menu_key(&mut self, key: KeyEvent) {
+        let len = self
+            .pane_menu
+            .as_ref()
+            .map(|menu| menu.move_targets.len())
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.pane_menu = None,
+            KeyCode::Left | KeyCode::Char('h') => {
+                // Select the parent row. A mouse-opened menu has no selection,
+                // and the pointer may still be over Move to Tab; without a
+                // selection the next frame treats that hover as a request to
+                // open the destinations again.
+                let parent = self
+                    .pane_menu_items()
+                    .iter()
+                    .position(|item| *item == PaneMenuItem::MoveToTab);
+                if let Some(menu) = self.pane_menu.as_mut() {
+                    menu.move_open = false;
+                    menu.move_selected = None;
+                    menu.selected = parent;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Up | KeyCode::Char('k') if len > 0 => {
+                let current = self.pane_menu.as_ref().and_then(|menu| menu.move_selected);
+                let next = if matches!(key.code, KeyCode::Up | KeyCode::Char('k')) {
+                    current
+                        .map(|index| index.checked_sub(1).unwrap_or(len - 1))
+                        .unwrap_or(len - 1)
+                } else {
+                    current.map_or(0, |index| (index + 1) % len)
+                };
+                if let Some(menu) = self.pane_menu.as_mut() {
+                    menu.move_selected = Some(next);
+                }
+            }
+            KeyCode::Enter => {
+                let choice = self.pane_menu.as_ref().and_then(|menu| {
+                    if let Some(index) = menu.move_selected {
+                        menu.move_targets.get(index).map(|(target, _)| *target)
+                    } else {
+                        let (col, row) = self.hover?;
+                        menu.tab_rects
+                            .iter()
+                            .find(|(_, rect)| {
+                                col >= rect.x
+                                    && col < rect.right()
+                                    && row >= rect.y
+                                    && row < rect.bottom()
+                            })
+                            .map(|(target, _)| *target)
+                    }
+                });
+                if let Some(target) = choice {
+                    let pane = self.pane_menu.as_ref().map(|menu| menu.pane);
+                    self.pane_menu = None;
+                    if let Some(pane) = pane {
+                        let _ = self.move_pane_to_tab(pane, target);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
