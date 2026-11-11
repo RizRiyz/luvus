@@ -8165,9 +8165,15 @@ impl App {
             return;
         }
         if self.pane_menu.as_ref().is_some_and(|menu| menu.move_open) {
-            // A wheel can leave the submenu armed after its parent row has
-            // scrolled away. Do not act on destinations that are not drawn.
-            if self.move_to_tab_row_is_undrawn() {
+            // Keys are applied before the next draw, so this rect can still be
+            // the previous frame's empty row. A keyboard selection on Move to
+            // Tab keeps the submenu; the following frame reveals that parent.
+            // Only a pointer-owned menu drops destinations that are not drawn.
+            let keyboard_selection = self
+                .pane_menu
+                .as_ref()
+                .is_some_and(|menu| menu.selected.is_some());
+            if self.move_to_tab_row_is_undrawn() && !keyboard_selection {
                 if let Some(menu) = self.pane_menu.as_mut() {
                     menu.move_open = false;
                     menu.move_selected = None;

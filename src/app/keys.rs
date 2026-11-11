@@ -2405,6 +2405,52 @@ mod tests {
     }
 
     #[test]
+    fn queued_down_keeps_the_hidden_move_submenu_while_its_parent_stays_selected() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("pane-menu-queued-submenu");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 16, tx).unwrap();
+        app.run_cmd(Cmd::SplitRight);
+        app.run_cmd(Cmd::NewTab);
+        app.focus_tab(0).unwrap();
+        app.open_pane_menu(app.layout().focus, 2, 2);
+        app.pane_menu.as_mut().unwrap().module_actions = (0..16)
+            .map(|index| crate::app::ModuleMenuAction {
+                module_id: format!("module-{index}"),
+                action_id: format!("action-{index}"),
+                title: format!("Action {index}"),
+            })
+            .collect();
+        assert!(
+            app.pane_menu.as_ref().unwrap().move_targets.len() >= 2,
+            "Down needs another submenu row to land on"
+        );
+        let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        scroll_move_to_tab_offscreen(&mut app, &mut term);
+        let parent = app
+            .pane_menu_items()
+            .iter()
+            .position(|item| *item == crate::app::PaneMenuItem::MoveToTab)
+            .unwrap();
+        let menu = app.pane_menu.as_mut().unwrap();
+        menu.selected = Some(parent);
+        menu.move_open = true;
+        menu.move_selected = Some(0);
+        assert_eq!(move_to_tab_rect(&app).height, 0);
+
+        app.handle_pane_menu_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert_eq!(
+            menu.selected,
+            Some(parent),
+            "Down stays out of the main menu"
+        );
+        assert!(menu.move_open);
+        assert_eq!(menu.move_selected, Some(1), "Down moves inside the submenu");
+    }
+
+    #[test]
     fn pane_menu_same_row_motion_redraws_only_when_selection_is_cleared() {
         use ratatui::{backend::TestBackend, crossterm::event::MouseEventKind, Terminal};
 
