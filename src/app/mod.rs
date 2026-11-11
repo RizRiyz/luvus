@@ -5656,6 +5656,11 @@ impl App {
     pub(crate) fn set_client_cell_pixels(&mut self, width: u16, height: u16) {
         self.cell_width_px = width;
         self.cell_height_px = height;
+        for pane in self.panes.values() {
+            if let Ok(engine) = pane.engine.lock() {
+                let _ = engine.kitty_visible_placements(width, height);
+            }
+        }
     }
 
     fn painted_cell_aspect(&self) -> f32 {

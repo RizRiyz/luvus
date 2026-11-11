@@ -18,7 +18,13 @@ const MAX_STORED_IMAGES: usize = 32;
 const MAX_PLACEMENTS: usize = 128;
 const KITTY_CHUNK_BYTES: usize = 3072;
 const HOST_IMAGE_ID_BASE: u32 = 10_000;
-const SCAN_ABOVE_VIEWPORT: i32 = 256;
+const HOST_IMAGE_ID_LAST: u32 = HOST_IMAGE_ID_BASE + 899_999;
+/// Child `c`/`r` above this is rejected instead of allocating cursor movement.
+const MAX_PLACEMENT_CELLS: u32 = 4_096;
+/// Graphics bytes in one frame stay far under the 64 MiB client frame cap.
+pub(crate) const GRAPHICS_FRAME_BUDGET: usize = 16 * 1024 * 1024;
+/// Grid reflow uses this range for anchors that do not exist yet.
+pub(crate) const GRAPHICS_TEMP_ANCHOR: u64 = 1 << 62;
 
 thread_local! {
     static HOST_DRAW: RefCell<Arc<AtomicBool>> =
@@ -55,6 +61,12 @@ pub(crate) fn host_cell_symbol(symbol: &str) -> &str {
 pub(crate) struct GraphicsParser {
     state: ParseState,
     pending: Vec<u8>,
+    /// Incomplete UTF-8, held so a placeholder split from its combining marks
+    /// is still rewritten as one space.
+    plain_carry: Vec<u8>,
+    /// The previous chunk replaced U+10EEEE. Leading marks belong to that
+    /// placeholder, not to the space that replaced it.
+    swallow_marks: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,18 +100,8 @@ impl GraphicsParser {
 
     pub(crate) fn drain(&mut self, input: &[u8]) -> Vec<StreamEvent> {
         let mut events = Vec::new();
-        let mut plain = Vec::new();
-        let flush = |plain: &mut Vec<u8>, events: &mut Vec<StreamEvent>| {
-            if plain.is_empty() {
-                return;
-            }
-            let mut sanitized = Vec::with_capacity(plain.len());
-            emit_plain(plain, &mut sanitized);
-            plain.clear();
-            if !sanitized.is_empty() {
-                events.push(StreamEvent::Plain(sanitized));
-            }
-        };
+        let mut plain = std::mem::take(&mut self.plain_carry);
+        let mut swallow_marks = self.swallow_marks;
         let mut index = 0;
         while index < input.len() {
             match self.state {
@@ -150,7 +152,7 @@ impl GraphicsParser {
                 }
                 ParseState::KittyEsc => {
                     if input[index] == b'\\' {
-                        flush(&mut plain, &mut events);
+                        flush_plain(&mut plain, &mut events, &mut swallow_marks);
                         if let Some(command) = parse_command(&self.pending) {
                             events.push(StreamEvent::Command(command));
                         }
@@ -180,13 +182,39 @@ impl GraphicsParser {
                 }
             }
         }
-        flush(&mut plain, &mut events);
+        if self.state == ParseState::Ground {
+            let hold = trailing_incomplete_utf8(&plain);
+            if hold > 0 {
+                self.plain_carry = plain.split_off(plain.len() - hold);
+            }
+        }
+        flush_plain(&mut plain, &mut events, &mut swallow_marks);
+        self.swallow_marks = swallow_marks;
         events
     }
 }
 
-fn emit_plain(input: &[u8], out: &mut Vec<u8>) {
-    if !input.contains(&0xF4) {
+fn flush_plain(plain: &mut Vec<u8>, events: &mut Vec<StreamEvent>, swallow: &mut bool) {
+    if plain.is_empty() {
+        return;
+    }
+    let mut sanitized = Vec::with_capacity(plain.len());
+    emit_plain(plain, &mut sanitized, swallow);
+    plain.clear();
+    if !sanitized.is_empty() {
+        events.push(StreamEvent::Plain(sanitized));
+    }
+}
+
+fn trailing_incomplete_utf8(input: &[u8]) -> usize {
+    match std::str::from_utf8(input) {
+        Err(err) if err.error_len().is_none() => input.len() - err.valid_up_to(),
+        _ => 0,
+    }
+}
+
+fn emit_plain(input: &[u8], out: &mut Vec<u8>, swallow: &mut bool) {
+    if !input.contains(&0xF4) && !*swallow {
         out.extend_from_slice(input);
         return;
     }
@@ -194,9 +222,18 @@ fn emit_plain(input: &[u8], out: &mut Vec<u8>) {
     while index < input.len() {
         if input[index..].starts_with(PLACEHOLDER) {
             out.push(b' ');
+            *swallow = true;
             index += PLACEHOLDER.len();
             index = skip_zero_width(input, index);
             continue;
+        }
+        if *swallow {
+            let next = skip_zero_width(input, index);
+            if next != index {
+                index = next;
+                continue;
+            }
+            *swallow = false;
         }
         out.push(input[index]);
         index += 1;
@@ -296,7 +333,7 @@ impl Keys {
             more: false,
             medium: 'd',
             compression: '\0',
-            quiet: 1,
+            quiet: 0,
             columns: 0,
             rows: 0,
             source_x: 0,
@@ -395,7 +432,11 @@ pub(crate) struct VisiblePlacement {
     pub viewport_row: i32,
     pub grid_cols: u32,
     pub grid_rows: u32,
+    /// Carried for the child command. Source cropping uses the cell grid,
+    /// not this native size, so a shrunk image that fits is not cropped.
+    #[allow(dead_code)]
     pub pixel_width: u32,
+    #[allow(dead_code)]
     pub pixel_height: u32,
     pub image_width: u32,
     pub image_height: u32,
@@ -487,6 +528,232 @@ impl PaneGraphics {
         std::mem::take(&mut self.gc_needed)
     }
 
+    pub(crate) fn parser_holds_text(&self) -> bool {
+        !self.parser_idle() || self.parser.swallow_marks || !self.parser.plain_carry.is_empty()
+    }
+
+    pub(crate) fn retained_images(&self) -> Vec<(u32, u64)> {
+        self.image_order
+            .iter()
+            .filter_map(|id| self.images.get(id).map(|image| (*id, image.fingerprint)))
+            .collect()
+    }
+
+    pub(crate) fn lookback_rows(&self, cell_height_px: u32) -> i32 {
+        self.placements
+            .iter()
+            .map(|placement| self.placement_rows(placement, cell_height_px))
+            .max()
+            .unwrap_or(0) as i32
+    }
+
+    pub(crate) fn cursor_span(
+        &self,
+        image_id: u32,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> Option<(u32, u32)> {
+        if cell_width_px == 0 || cell_height_px == 0 {
+            return None;
+        }
+        let image = self.images.get(&image_id)?;
+        let cols = image
+            .width
+            .div_ceil(cell_width_px)
+            .clamp(1, MAX_PLACEMENT_CELLS);
+        let rows = image
+            .height
+            .div_ceil(cell_height_px)
+            .clamp(1, MAX_PLACEMENT_CELLS);
+        Some((cols, rows))
+    }
+
+    pub(crate) fn delete_covering(
+        &mut self,
+        cursor_line: i32,
+        cursor_col: u16,
+        anchors: &[(i32, u64)],
+        cell_height_px: u32,
+        free_image: bool,
+    ) {
+        let heights = self
+            .images
+            .iter()
+            .map(|(id, image)| (*id, image.height))
+            .collect::<HashMap<_, _>>();
+        let mut removed = Vec::new();
+        let mut keep = Vec::with_capacity(self.placements.len());
+        for placement in self.placements.drain(..) {
+            let Some(anchor_line) = anchors
+                .iter()
+                .find_map(|(line, anchor)| (*anchor == placement.anchor).then_some(*line))
+            else {
+                keep.push(placement);
+                continue;
+            };
+            let dy = cursor_line.saturating_sub(anchor_line);
+            let rows = if placement.rows > 0 {
+                placement.rows
+            } else if cell_height_px == 0 {
+                1
+            } else {
+                heights
+                    .get(&placement.image_id)
+                    .copied()
+                    .unwrap_or(1)
+                    .div_ceil(cell_height_px)
+                    .max(1)
+            } as i32;
+            let end = placement
+                .column
+                .saturating_add(placement.columns.max(1) as u16);
+            let hit = dy >= 0 && dy < rows && cursor_col >= placement.column && cursor_col < end;
+            if hit {
+                removed.push(placement.image_id);
+            } else {
+                keep.push(placement);
+            }
+        }
+        self.placements = keep;
+        if free_image {
+            for image_id in removed {
+                if !self
+                    .placements
+                    .iter()
+                    .any(|placement| placement.image_id == image_id)
+                {
+                    self.remove_image(image_id);
+                }
+            }
+        }
+    }
+
+    /// Move placements when a resize merges or wraps their row.
+    ///
+    /// A temporary destination anchor (`>= GRAPHICS_TEMP_ANCHOR`) is replaced
+    /// with a real one. The returned pair is `(temporary, real)`; `real == 0`
+    /// means the temporary row anchor should be cleared.
+    pub(crate) fn reflow_move_prefix(
+        &mut self,
+        anchor: u64,
+        prefix: u32,
+        dest_column: u32,
+        dest_anchor: u64,
+        entire: bool,
+    ) -> Option<(u64, u64)> {
+        let (dest, remap) = self.resolve_dest(dest_anchor);
+        for placement in &mut self.placements {
+            if placement.anchor != anchor {
+                continue;
+            }
+            if entire || u32::from(placement.column) < prefix {
+                placement.column = placement.column.saturating_add(dest_column as u16);
+                placement.anchor = dest;
+            } else {
+                placement.column = placement.column.saturating_sub(prefix as u16);
+            }
+        }
+        remap
+    }
+
+    pub(crate) fn reflow_move_suffix(
+        &mut self,
+        anchor: u64,
+        at: u32,
+        dest_anchor: u64,
+    ) -> Option<(u64, u64)> {
+        let moved = self
+            .placements
+            .iter()
+            .any(|placement| placement.anchor == anchor && u32::from(placement.column) >= at);
+        if !moved {
+            return (dest_anchor >= GRAPHICS_TEMP_ANCHOR).then_some((dest_anchor, 0));
+        }
+        let (dest, remap) = self.resolve_dest(dest_anchor);
+        for placement in &mut self.placements {
+            if placement.anchor == anchor && u32::from(placement.column) >= at {
+                placement.column = placement.column.saturating_sub(at as u16);
+                placement.anchor = dest;
+            }
+        }
+        remap
+    }
+
+    pub(crate) fn reflow_shift(&mut self, anchor: u64, delta: i32) {
+        if anchor == 0 || delta == 0 {
+            return;
+        }
+        for placement in &mut self.placements {
+            if placement.anchor != anchor {
+                continue;
+            }
+            if delta > 0 {
+                placement.column = placement.column.saturating_add(delta as u16);
+            } else {
+                placement.column = placement.column.saturating_sub(delta.unsigned_abs() as u16);
+            }
+        }
+    }
+
+    fn resolve_dest(&mut self, dest_anchor: u64) -> (u64, Option<(u64, u64)>) {
+        if dest_anchor < GRAPHICS_TEMP_ANCHOR {
+            (dest_anchor, None)
+        } else {
+            let real = self.alloc_anchor(0);
+            (real, Some((dest_anchor, real)))
+        }
+    }
+
+    fn placement_rows(&self, placement: &Placement, cell_height_px: u32) -> u32 {
+        if placement.rows > 0 {
+            return placement.rows;
+        }
+        let Some(image) = self.images.get(&placement.image_id) else {
+            return 1;
+        };
+        if cell_height_px == 0 {
+            1
+        } else {
+            image.height.div_ceil(cell_height_px).max(1)
+        }
+    }
+
+    fn allocate_local_placement(&mut self, explicit: u32) -> u32 {
+        if explicit != 0 {
+            self.displace_auto_placement(explicit);
+            return explicit;
+        }
+        self.next_free_placement()
+    }
+
+    fn displace_auto_placement(&mut self, explicit: u32) {
+        let taken = self.placements.iter().any(|placement| {
+            placement.child_placement_id == 0 && placement.local_placement_id == explicit
+        });
+        if !taken {
+            return;
+        }
+        let replacement = self.next_free_placement();
+        for placement in &mut self.placements {
+            if placement.child_placement_id == 0 && placement.local_placement_id == explicit {
+                placement.local_placement_id = replacement;
+            }
+        }
+    }
+
+    fn next_free_placement(&mut self) -> u32 {
+        loop {
+            self.next_local_placement = self.next_local_placement.wrapping_add(1).max(1);
+            let id = self.next_local_placement;
+            let taken = self.placements.iter().any(|placement| {
+                placement.local_placement_id == id || placement.child_placement_id == id
+            });
+            if !taken {
+                return id;
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn push(&mut self, input: &[u8], plain: &mut Vec<u8>) -> Vec<GraphicsAction> {
         let mut actions = Vec::new();
@@ -543,31 +810,6 @@ impl PaneGraphics {
             self.placements.drain(0..overflow);
         }
         self.gc_needed = true;
-    }
-
-    pub(crate) fn delete_at(&mut self, anchor: u64, column: u16, free_image: bool) {
-        let mut removed = Vec::new();
-        self.placements.retain(|placement| {
-            let end = placement
-                .column
-                .saturating_add(placement.columns.max(1) as u16);
-            let hit = placement.anchor == anchor && column >= placement.column && column < end;
-            if hit {
-                removed.push(placement.image_id);
-            }
-            !hit
-        });
-        if free_image {
-            for image_id in removed {
-                if !self
-                    .placements
-                    .iter()
-                    .any(|placement| placement.image_id == image_id)
-                {
-                    self.remove_image(image_id);
-                }
-            }
-        }
     }
 
     pub(crate) fn retain_anchors(&mut self, live: &HashSet<u64>) {
@@ -727,12 +969,10 @@ impl PaneGraphics {
         let Some(image_id) = image_id.filter(|id| self.images.contains_key(id)) else {
             return error_action(&keys, "ENOENT").into_iter().collect();
         };
-        let local_placement_id = if keys.placement_id == 0 {
-            self.next_local_placement = self.next_local_placement.wrapping_add(1).max(1);
-            self.next_local_placement
-        } else {
-            keys.placement_id
-        };
+        if keys.columns > MAX_PLACEMENT_CELLS || keys.rows > MAX_PLACEMENT_CELLS {
+            return error_action(&keys, "EINVAL").into_iter().collect();
+        }
+        let local_placement_id = self.allocate_local_placement(keys.placement_id);
         let placement = NewPlacement {
             image_id,
             child_placement_id: keys.placement_id,
@@ -746,9 +986,7 @@ impl PaneGraphics {
             source_height: keys.source_height,
             x_offset: keys.x_offset,
             y_offset: keys.y_offset,
-            move_cursor: keys.cursor_policy != 1
-                && !keys.unicode_placeholder
-                && (keys.columns > 0 || keys.rows > 0),
+            move_cursor: keys.cursor_policy != 1 && !keys.unicode_placeholder,
         };
         let mut actions = Vec::new();
         if let Some(bytes) = reply {
@@ -817,10 +1055,10 @@ impl PaneGraphics {
         let (width, height) = match keys.format {
             24 | 32 => {
                 let bpp = if keys.format == 24 { 3 } else { 4 };
-                if keys.width == 0
-                    || keys.height == 0
-                    || data.len() != keys.width as usize * keys.height as usize * bpp
-                {
+                let Some(expected) = rgb_byte_len(keys.width, keys.height, bpp) else {
+                    return false;
+                };
+                if keys.width == 0 || keys.height == 0 || data.len() != expected {
                     return false;
                 }
                 (keys.width, keys.height)
@@ -938,6 +1176,13 @@ fn error_action(keys: &Keys, code: &str) -> Option<GraphicsAction> {
     Some(GraphicsAction::Reply(error_reply(keys.image_id, code)))
 }
 
+fn rgb_byte_len(width: u32, height: u32, bytes_per_pixel: usize) -> Option<usize> {
+    usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(bytes_per_pixel)
+}
+
 fn error_reply(image_id: Option<u32>, code: &str) -> Vec<u8> {
     match image_id {
         Some(id) => format!("\x1b_Gi={id};{code}\x1b\\").into_bytes(),
@@ -962,11 +1207,14 @@ fn fingerprint(data: &[u8]) -> u64 {
 }
 
 /// Lines above and inside the viewport that may still own a placement anchor.
-pub(crate) fn anchor_scan_range(topmost: i32, display_offset: i32, screen_rows: i32) -> (i32, i32) {
+pub(crate) fn anchor_scan_range(
+    topmost: i32,
+    display_offset: i32,
+    screen_rows: i32,
+    lookback: i32,
+) -> (i32, i32) {
     let viewport_top = -display_offset;
-    let start = viewport_top
-        .saturating_sub(SCAN_ABOVE_VIEWPORT)
-        .max(topmost);
+    let start = viewport_top.saturating_sub(lookback.max(0)).max(topmost);
     let end = viewport_top.saturating_add(screen_rows);
     (start, end)
 }
@@ -1029,93 +1277,130 @@ pub(crate) struct ScreenPlacement {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct SourceKey {
+pub(crate) struct SourceKey {
+    pub(crate) pane_id: u32,
+    pub(crate) image_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct HostPlacementKey {
     pane_id: u32,
     image_id: u32,
+    placement_id: u32,
 }
 
 /// What this client has already uploaded to its host terminal.
+///
+/// Ids are allocated, never hashed. A dropped frame must discard the staged
+/// copy of this cache so the next attempt uploads the pixels again.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct HostGraphicsCache {
     images: HashMap<u32, ImageSignature>,
     placements: HashMap<(u32, u32), PlacementSignature>,
     sources: HashMap<SourceKey, u32>,
+    host_placements: HashMap<HostPlacementKey, u32>,
+    next_host_image: u32,
+    next_host_placement: u32,
     replay: bool,
+    remainder: bool,
+    /// `0` uses [`GRAPHICS_FRAME_BUDGET`]. Tests lower it to prove a second
+    /// image waits for the next frame.
+    budget_override: usize,
 }
 
 impl HostGraphicsCache {
     pub(crate) fn request_replay(&mut self) {
         self.replay = true;
     }
-}
 
-pub(crate) fn host_image_id(pane_id: u32, image_id: u32, fingerprint: u64) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    pane_id.hash(&mut hasher);
-    image_id.hash(&mut hasher);
-    fingerprint.hash(&mut hasher);
-    HOST_IMAGE_ID_BASE.saturating_add((hasher.finish() as u32) % 900_000)
-}
+    pub(crate) fn remainder(&self) -> bool {
+        self.remainder
+    }
 
-fn host_placement_id(pane_id: u32, image_id: u32, placement_id: u32) -> u32 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    pane_id.hash(&mut hasher);
-    image_id.hash(&mut hasher);
-    placement_id.hash(&mut hasher);
-    1 + (hasher.finish() as u32) % 900_000
+    #[cfg(test)]
+    fn host_id(&self, pane_id: u32, image_id: u32) -> Option<u32> {
+        self.sources.get(&SourceKey { pane_id, image_id }).copied()
+    }
 }
 
 /// Encode the delta that makes the host match `placements`.
 ///
-/// Image ids are derived from the pane and the image bytes, so two panes never
-/// share or delete each other's storage. A scroll-offset change deletes the
-/// previous placement and puts the clipped rectangle again. Panes missing from
-/// `live_panes` lose only their own images.
+/// Host image ids are allocated per pane and image. A pane that closes, or a
+/// pane that drops an image, deletes only that record. `replay` uploads the
+/// pixels again because the host screen was cleared. When several images do
+/// not fit in one frame, `remainder` stays set and the unsent images are left
+/// unmarked so the next frame continues.
 pub(crate) fn encode_host_frame(
     cache: &mut HostGraphicsCache,
     placements: &[ScreenPlacement],
     live_panes: &HashSet<u32>,
+    inspected: &HashSet<u32>,
+    retained: &HashMap<SourceKey, u64>,
 ) -> Vec<u8> {
     let mut out = Vec::new();
+    cache.remainder = false;
+    if cache.replay {
+        // The host no longer has the pixels. Keep the ids, forget the upload.
+        cache.images.clear();
+        cache.placements.clear();
+    }
+    let on_screen = placements
+        .iter()
+        .map(|placement| SourceKey {
+            pane_id: placement.pane_id,
+            image_id: placement.visible.image_id,
+        })
+        .collect::<HashSet<_>>();
     let mut retired = cache
         .sources
         .iter()
-        .filter(|(source, _)| !live_panes.contains(&source.pane_id))
+        .filter(|(source, _)| {
+            if !live_panes.contains(&source.pane_id) {
+                return true;
+            }
+            inspected.contains(&source.pane_id)
+                && !on_screen.contains(source)
+                && !retained.contains_key(source)
+        })
         .map(|(source, host_id)| (*source, *host_id))
         .collect::<Vec<_>>();
     retired.sort_unstable_by_key(|(source, host_id)| (source.pane_id, source.image_id, *host_id));
     for (source, host_id) in retired {
-        encode_delete_image(&mut out, host_id);
-        cache.sources.remove(&source);
-        cache.images.remove(&host_id);
-        cache.placements.retain(|(id, _), _| *id != host_id);
+        forget_source(cache, &mut out, source, host_id);
     }
 
-    let mut desired = Vec::new();
+    let mut planned = Vec::new();
     for placement in placements {
         let Some((clipped, _)) = clip_placement(placement) else {
             continue;
         };
-        let host_id = host_image_id(
-            placement.pane_id,
-            placement.visible.image_id,
-            placement.visible.fingerprint,
-        );
-        let placement_id = host_placement_id(
+        let source = SourceKey {
+            pane_id: placement.pane_id,
+            image_id: placement.visible.image_id,
+        };
+        let signature = ImageSignature {
+            width: placement.visible.image_width,
+            height: placement.visible.image_height,
+            format: placement.visible.format_code,
+            fingerprint: placement.visible.fingerprint,
+        };
+        let host_id = host_image_id_for(cache, &mut out, source, signature);
+        let placement_id = host_placement_id_for(
+            cache,
             placement.pane_id,
             placement.visible.image_id,
             placement.visible.placement_id,
         );
-        desired.push((host_id, placement_id, clipped, placement));
+        planned.push((host_id, placement_id, clipped, placement, signature));
     }
-    let desired_keys = desired
+    let planned_keys = planned
         .iter()
-        .map(|(host_id, placement_id, _, _)| (*host_id, *placement_id))
+        .map(|(host_id, placement_id, _, _, _)| (*host_id, *placement_id))
         .collect::<HashSet<_>>();
     let mut stale = cache
         .placements
         .keys()
-        .filter(|key| !desired_keys.contains(key))
+        .filter(|key| !planned_keys.contains(key))
         .copied()
         .collect::<Vec<_>>();
     stale.sort_unstable();
@@ -1124,40 +1409,70 @@ pub(crate) fn encode_host_frame(
         cache.placements.remove(&(host_id, placement_id));
     }
 
-    for (host_id, placement_id, clipped, placement) in desired {
-        encode_one(cache, &mut out, host_id, placement_id, clipped, placement);
+    for (host_id, placement_id, clipped, placement, signature) in planned {
+        let image_current = cache.images.get(&host_id) == Some(&signature);
+        let estimate = upload_estimate(&placement.visible, image_current);
+        let budget = if cache.budget_override == 0 {
+            GRAPHICS_FRAME_BUDGET
+        } else {
+            cache.budget_override
+        };
+        if !out.is_empty() && out.len().saturating_add(estimate) > budget {
+            cache.remainder = true;
+            break;
+        }
+        encode_one(
+            cache,
+            &mut out,
+            EncodeJob {
+                host_id,
+                placement_id,
+                clipped,
+                placement,
+                signature,
+                image_current,
+            },
+        );
     }
     cache.replay = false;
     out
 }
 
-fn encode_one(
-    cache: &mut HostGraphicsCache,
-    out: &mut Vec<u8>,
+fn upload_estimate(visible: &VisiblePlacement, image_current: bool) -> usize {
+    let place = 192;
+    if image_current {
+        place
+    } else {
+        visible.data.len().saturating_add(2) / 3 * 4 + 256 + place
+    }
+}
+
+struct EncodeJob<'a> {
     host_id: u32,
     placement_id: u32,
     clipped: Clipped,
-    placement: &ScreenPlacement,
-) {
-    let signature = ImageSignature {
-        width: placement.visible.image_width,
-        height: placement.visible.image_height,
-        format: placement.visible.format_code,
-        fingerprint: placement.visible.fingerprint,
-    };
+    placement: &'a ScreenPlacement,
+    signature: ImageSignature,
+    image_current: bool,
+}
+
+fn encode_one(cache: &mut HostGraphicsCache, out: &mut Vec<u8>, job: EncodeJob<'_>) {
+    let EncodeJob {
+        host_id,
+        placement_id,
+        clipped,
+        placement,
+        signature,
+        image_current,
+    } = job;
     let placed = placement_signature(
         clipped,
         placement.visible.z,
         placement.visible.scroll_offset,
     );
-    let image_current = cache.images.get(&host_id) == Some(&signature);
     let known = cache.placements.get(&(host_id, placement_id)).copied();
-    let placement_current = known == Some(placed) && !cache.replay;
-    let source = SourceKey {
-        pane_id: placement.pane_id,
-        image_id: placement.visible.image_id,
-    };
-    if image_current && placement_current && cache.sources.get(&source) == Some(&host_id) {
+    let placement_current = known == Some(placed);
+    if image_current && placement_current {
         return;
     }
     if !image_current {
@@ -1171,7 +1486,6 @@ fn encode_one(
         encode_upload(out, &placement.visible, host_id);
         cache.images.insert(host_id, signature);
     }
-    release_superseded(cache, out, source, host_id);
     if known.is_some() && known != Some(placed) {
         encode_delete_placement(out, host_id, placement_id);
     }
@@ -1181,21 +1495,89 @@ fn encode_one(
     cache.placements.insert((host_id, placement_id), placed);
 }
 
-fn release_superseded(
+fn host_image_id_for(
+    cache: &mut HostGraphicsCache,
+    out: &mut Vec<u8>,
+    source: SourceKey,
+    signature: ImageSignature,
+) -> u32 {
+    let existing = cache.sources.get(&source).copied();
+    if let Some(existing) = existing {
+        let known = cache.images.get(&existing).copied();
+        if known.is_none_or(|known| known == signature) {
+            return existing;
+        }
+        forget_source(cache, out, source, existing);
+    }
+    let id = allocate_host_image(cache);
+    cache.sources.insert(source, id);
+    id
+}
+
+fn host_placement_id_for(
+    cache: &mut HostGraphicsCache,
+    pane_id: u32,
+    image_id: u32,
+    placement_id: u32,
+) -> u32 {
+    let key = HostPlacementKey {
+        pane_id,
+        image_id,
+        placement_id,
+    };
+    if let Some(id) = cache.host_placements.get(&key).copied() {
+        return id;
+    }
+    let id = allocate_host_placement(cache);
+    cache.host_placements.insert(key, id);
+    id
+}
+
+fn allocate_host_image(cache: &mut HostGraphicsCache) -> u32 {
+    loop {
+        cache.next_host_image = cache.next_host_image.saturating_add(1);
+        if !(HOST_IMAGE_ID_BASE..=HOST_IMAGE_ID_LAST).contains(&cache.next_host_image) {
+            cache.next_host_image = HOST_IMAGE_ID_BASE;
+        }
+        let id = cache.next_host_image;
+        let used = cache.images.contains_key(&id)
+            || cache.sources.values().any(|existing| *existing == id);
+        if !used {
+            return id;
+        }
+    }
+}
+
+fn allocate_host_placement(cache: &mut HostGraphicsCache) -> u32 {
+    loop {
+        cache.next_host_placement = cache.next_host_placement.saturating_add(1);
+        if cache.next_host_placement == 0 || cache.next_host_placement > 900_000 {
+            cache.next_host_placement = 1;
+        }
+        let id = cache.next_host_placement;
+        if !cache
+            .host_placements
+            .values()
+            .any(|existing| *existing == id)
+        {
+            return id;
+        }
+    }
+}
+
+fn forget_source(
     cache: &mut HostGraphicsCache,
     out: &mut Vec<u8>,
     source: SourceKey,
     host_id: u32,
 ) {
-    let Some(previous) = cache.sources.insert(source, host_id) else {
-        return;
-    };
-    if previous == host_id || cache.sources.values().any(|id| *id == previous) {
-        return;
-    }
-    encode_delete_image(out, previous);
-    cache.images.remove(&previous);
-    cache.placements.retain(|(id, _), _| *id != previous);
+    encode_delete_image(out, host_id);
+    cache.sources.remove(&source);
+    cache.images.remove(&host_id);
+    cache.placements.retain(|(id, _), _| *id != host_id);
+    cache
+        .host_placements
+        .retain(|key, _| key.pane_id != source.pane_id || key.image_id != source.image_id);
 }
 
 fn clip_placement(placement: &ScreenPlacement) -> Option<(Clipped, u32)> {
@@ -1236,45 +1618,54 @@ fn clip_placement(placement: &ScreenPlacement) -> Option<(Clipped, u32)> {
     if cols == 0 || rows == 0 {
         return None;
     }
-    let cell_w = placement.cell_width_px.max(1);
-    let cell_h = placement.cell_height_px.max(1);
-    let source_width = if visible.source_width == 0 {
-        visible.image_width
+    let fully_inside =
+        left == 0 && top == 0 && cols == visible.grid_cols && rows == visible.grid_rows;
+    let (source_x, source_y, source_width, source_height, x_offset, y_offset) = if fully_inside {
+        // The whole shrunk image is on screen. Keep the child's source
+        // rectangle; do not turn a scaled image into a top-left crop.
+        (
+            visible.source_x,
+            visible.source_y,
+            visible.source_width,
+            visible.source_height,
+            visible.x_offset,
+            visible.y_offset,
+        )
     } else {
-        visible.source_width
+        let src_w = if visible.source_width == 0 {
+            visible.image_width
+        } else {
+            visible.source_width
+        };
+        let src_h = if visible.source_height == 0 {
+            visible.image_height
+        } else {
+            visible.source_height
+        };
+        let source_x = visible
+            .source_x
+            .saturating_add(scale_cells(left, src_w, visible.grid_cols));
+        let source_y = visible
+            .source_y
+            .saturating_add(scale_cells(top, src_h, visible.grid_rows));
+        let source_width = scale_cells(cols, src_w, visible.grid_cols)
+            .max(1)
+            .min(visible.image_width.saturating_sub(source_x));
+        let source_height = scale_cells(rows, src_h, visible.grid_rows)
+            .max(1)
+            .min(visible.image_height.saturating_sub(source_y));
+        if source_width == 0 || source_height == 0 {
+            return None;
+        }
+        (
+            source_x,
+            source_y,
+            source_width,
+            source_height,
+            if left == 0 { visible.x_offset } else { 0 },
+            if top == 0 { visible.y_offset } else { 0 },
+        )
     };
-    let source_height = if visible.source_height == 0 {
-        visible.image_height
-    } else {
-        visible.source_height
-    };
-    let pixel_width = visible
-        .pixel_width
-        .max(visible.grid_cols.saturating_mul(cell_w))
-        .max(1);
-    let pixel_height = visible
-        .pixel_height
-        .max(visible.grid_rows.saturating_mul(cell_h))
-        .max(1);
-    let source_x = visible.source_x.saturating_add(scale_pixels(
-        left.saturating_mul(cell_w),
-        source_width,
-        pixel_width,
-    ));
-    let source_y = visible.source_y.saturating_add(scale_pixels(
-        top.saturating_mul(cell_h),
-        source_height,
-        pixel_height,
-    ));
-    let cropped_width = scale_pixels(cols.saturating_mul(cell_w), source_width, pixel_width)
-        .max(1)
-        .min(visible.image_width.saturating_sub(source_x));
-    let cropped_height = scale_pixels(rows.saturating_mul(cell_h), source_height, pixel_height)
-        .max(1)
-        .min(visible.image_height.saturating_sub(source_y));
-    if cropped_width == 0 || cropped_height == 0 {
-        return None;
-    }
     Some((
         Clipped {
             x: placement.area_x.saturating_add(column as u16),
@@ -1283,10 +1674,10 @@ fn clip_placement(placement: &ScreenPlacement) -> Option<(Clipped, u32)> {
             rows,
             source_x,
             source_y,
-            source_width: cropped_width,
-            source_height: cropped_height,
-            x_offset: if left == 0 { visible.x_offset } else { 0 },
-            y_offset: if top == 0 { visible.y_offset } else { 0 },
+            source_width,
+            source_height,
+            x_offset,
+            y_offset,
         },
         visible.format_code,
     ))
@@ -1309,9 +1700,12 @@ fn placement_signature(clipped: Clipped, z: i32, scroll_offset: u32) -> Placemen
     }
 }
 
-fn scale_pixels(value: u32, source: u32, dest: u32) -> u32 {
-    ((u64::from(value).saturating_mul(u64::from(source)) / u64::from(dest.max(1)))
-        .min(u64::from(u32::MAX))) as u32
+fn scale_cells(part: u32, whole: u32, parts: u32) -> u32 {
+    if parts == 0 {
+        return 0;
+    }
+    ((u64::from(part).saturating_mul(u64::from(whole)) / u64::from(parts)).min(u64::from(u32::MAX)))
+        as u32
 }
 
 fn encode_upload(out: &mut Vec<u8>, visible: &VisiblePlacement, host_id: u32) {
@@ -1551,6 +1945,29 @@ mod tests {
         String::from_utf8_lossy(bytes).into_owned()
     }
 
+    fn retained_of(screens: &[ScreenPlacement]) -> HashMap<SourceKey, u64> {
+        screens
+            .iter()
+            .map(|screen| {
+                (
+                    SourceKey {
+                        pane_id: screen.pane_id,
+                        image_id: screen.visible.image_id,
+                    },
+                    screen.visible.fingerprint,
+                )
+            })
+            .collect()
+    }
+
+    fn frame(
+        cache: &mut HostGraphicsCache,
+        screens: &[ScreenPlacement],
+        live: &HashSet<u32>,
+    ) -> Vec<u8> {
+        encode_host_frame(cache, screens, live, live, &retained_of(screens))
+    }
+
     #[test]
     fn clipped_placement_crops_negative_viewport_and_keeps_positive_cells() {
         let (inside, _) = clip_placement(&screen(1, visible(2, 2, 0))).unwrap();
@@ -1570,14 +1987,14 @@ mod tests {
     fn scroll_offset_change_replaces_placement_without_reuploading() {
         let mut cache = HostGraphicsCache::default();
         let live = HashSet::from([1]);
-        let first = encode_host_frame(&mut cache, &[screen(1, visible(0, 0, 0))], &live);
+        let first = frame(&mut cache, &[screen(1, visible(0, 0, 0))], &live);
         let first = text(&first);
         assert!(first.contains("a=t"), "{first}");
         assert!(first.contains("a=p"), "{first}");
 
-        assert!(encode_host_frame(&mut cache, &[screen(1, visible(0, 0, 0))], &live).is_empty());
+        assert!(frame(&mut cache, &[screen(1, visible(0, 0, 0))], &live).is_empty());
 
-        let moved = encode_host_frame(&mut cache, &[screen(1, visible(0, 4, 3))], &live);
+        let moved = frame(&mut cache, &[screen(1, visible(0, 4, 3))], &live);
         let moved = text(&moved);
         assert!(moved.contains("a=d,d=i"), "{moved}");
         assert!(moved.contains("a=p"), "{moved}");
@@ -1589,19 +2006,19 @@ mod tests {
     fn pane_image_ids_are_isolated_and_close_deletes_only_that_pane() {
         let mut cache = HostGraphicsCache::default();
         let live = HashSet::from([1, 2]);
-        let uploaded = encode_host_frame(
+        let uploaded = frame(
             &mut cache,
             &[screen(1, visible(0, 0, 0)), screen(2, visible(1, 1, 0))],
             &live,
         );
         let uploaded = text(&uploaded);
-        let id_one = host_image_id(1, 7, screen(1, visible(0, 0, 0)).visible.fingerprint);
-        let id_two = host_image_id(2, 7, screen(2, visible(0, 0, 0)).visible.fingerprint);
+        let id_one = cache.host_id(1, 7).unwrap();
+        let id_two = cache.host_id(2, 7).unwrap();
         assert_ne!(id_one, id_two);
         assert!(uploaded.contains(&format!("i={id_one}")));
         assert!(uploaded.contains(&format!("i={id_two}")));
 
-        let closed = encode_host_frame(
+        let closed = frame(
             &mut cache,
             &[screen(2, visible(1, 1, 0))],
             &HashSet::from([2]),
@@ -1630,7 +2047,8 @@ mod tests {
         );
 
         let mut plain = Vec::new();
-        emit_plain("A\u{10EEEE}\u{0305}B".as_bytes(), &mut plain);
+        let mut swallow = false;
+        emit_plain("A\u{10EEEE}\u{0305}B".as_bytes(), &mut plain, &mut swallow);
         assert_eq!(plain, b"A B");
         assert!(!plain.windows(4).any(|bytes| bytes == PLACEHOLDER));
     }
@@ -1769,7 +2187,7 @@ mod tests {
         assert_eq!(&*placed[0].data, second.as_slice());
 
         let mut cache = HostGraphicsCache::default();
-        let replay = encode_host_frame(
+        let replay = frame(
             &mut cache,
             &[screen(1, placed[0].clone())],
             &HashSet::from([1]),
@@ -1821,12 +2239,308 @@ mod tests {
         let mut placement = screen(1, visible(0, 0, 0));
         placement.cell_width_px = 0;
         placement.cell_height_px = 0;
-        let bytes = encode_host_frame(
+        let bytes = frame(
             &mut HostGraphicsCache::default(),
             &[placement],
             &HashSet::from([1]),
         );
         assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn oversized_placement_is_rejected_without_a_huge_cursor_move() {
+        let mut graphics = PaneGraphics::default();
+        let mut plain = Vec::new();
+        let pixels = rgba(1, 1, 3);
+        let mut payload = Vec::new();
+        base64_encode(&pixels, &mut payload);
+        let mut command = b"\x1b_Ga=T,f=32,s=1,v=1,i=4,c=1000000,r=1000000,q=1;".to_vec();
+        command.extend_from_slice(&payload);
+        command.extend_from_slice(b"\x1b\\");
+        let actions = graphics.push(&command, &mut plain);
+        assert!(
+            actions
+                .iter()
+                .all(|action| !matches!(action, GraphicsAction::Place(_))),
+            "{actions:?}"
+        );
+        assert!(
+            actions.iter().any(|action| matches!(action, GraphicsAction::Reply(bytes) if text(bytes).contains("EINVAL"))),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn image_dimensions_do_not_overflow() {
+        let mut graphics = PaneGraphics::default();
+        let mut plain = Vec::new();
+        let actions = graphics.push(
+            b"\x1b_Ga=T,f=32,s=65535,v=65535,i=4,q=1;AAAA\x1b\\",
+            &mut plain,
+        );
+        assert!(
+            actions
+                .iter()
+                .all(|action| !matches!(action, GraphicsAction::Place(_))),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn quiet_defaults_to_a_reply() {
+        let mut graphics = PaneGraphics::default();
+        let mut plain = Vec::new();
+        let mut payload = Vec::new();
+        base64_encode(&rgba(1, 1, 4), &mut payload);
+        let mut command = b"\x1b_Ga=T,f=32,s=1,v=1,i=3,c=1,r=1;".to_vec();
+        command.extend_from_slice(&payload);
+        command.extend_from_slice(b"\x1b\\");
+        let actions = graphics.push(&command, &mut plain);
+        assert!(
+            actions.iter().any(|action| matches!(action, GraphicsAction::Reply(bytes) if text(bytes).contains("OK"))),
+            "{actions:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_and_automatic_placement_ids_do_not_collide() {
+        let mut graphics = PaneGraphics::default();
+        let mut plain = Vec::new();
+        let mut payload = Vec::new();
+        base64_encode(&rgba(1, 1, 5), &mut payload);
+        let mut first = b"\x1b_Ga=T,f=32,s=1,v=1,i=5,p=1,c=1,r=1,q=2;".to_vec();
+        first.extend_from_slice(&payload);
+        first.extend_from_slice(b"\x1b\\");
+        for action in graphics.push(&first, &mut plain) {
+            if let GraphicsAction::Place(placement) = action {
+                graphics.record(1, 0, placement);
+            }
+        }
+        let mut second = b"\x1b_Ga=p,i=5,c=1,r=1,q=2;".to_vec();
+        second.extend_from_slice(b"\x1b\\");
+        for action in graphics.push(&second, &mut plain) {
+            if let GraphicsAction::Place(placement) = action {
+                graphics.record(1, 0, placement);
+            }
+        }
+        let ids: Vec<_> = graphics
+            .placements
+            .iter()
+            .map(|placement| (placement.child_placement_id, placement.local_placement_id))
+            .collect();
+        assert_eq!(ids.len(), 2, "{ids:?}");
+        assert_ne!(ids[0].1, ids[1].1, "{ids:?}");
+    }
+
+    #[test]
+    fn shrunk_image_that_fits_is_not_cropped() {
+        let mut placement = visible(0, 0, 0);
+        placement.image_width = 300;
+        placement.image_height = 300;
+        placement.grid_cols = 2;
+        placement.grid_rows = 2;
+        placement.pixel_width = 300;
+        placement.pixel_height = 300;
+        placement.x_offset = 15;
+        let bytes = text(&frame(
+            &mut HostGraphicsCache::default(),
+            &[screen(1, placement)],
+            &HashSet::from([1]),
+        ));
+        assert!(!bytes.contains(",w="), "{bytes}");
+        assert!(bytes.contains(",X=15"), "{bytes}");
+    }
+
+    #[test]
+    fn dropped_frame_uploads_again_and_replay_sends_pixels() {
+        let mut cache = HostGraphicsCache::default();
+        let live = HashSet::from([1]);
+        let screens = [screen(1, visible(0, 0, 0))];
+        let mut staged = cache.clone();
+        let first = text(&frame(&mut staged, &screens, &live));
+        assert!(first.contains("a=t"), "{first}");
+        let retry = text(&frame(&mut cache, &screens, &live));
+        assert!(retry.contains("a=t"), "{retry}");
+
+        frame(&mut cache, &screens, &live);
+        cache.request_replay();
+        let again = text(&frame(&mut cache, &screens, &live));
+        assert!(again.contains("a=t"), "{again}");
+    }
+
+    #[test]
+    fn evicting_an_image_deletes_its_host_record() {
+        let mut cache = HostGraphicsCache::default();
+        let live = HashSet::from([1]);
+        frame(&mut cache, &[screen(1, visible(0, 0, 0))], &live);
+        assert!(cache.host_id(1, 7).is_some());
+        let gone = text(&encode_host_frame(
+            &mut cache,
+            &[],
+            &live,
+            &live,
+            &HashMap::new(),
+        ));
+        assert!(gone.contains("a=d,d=I"), "{gone}");
+        assert!(cache.host_id(1, 7).is_none());
+    }
+
+    #[test]
+    fn large_images_split_across_frames() {
+        let mut cache = HostGraphicsCache {
+            budget_override: 700,
+            ..HostGraphicsCache::default()
+        };
+        let mut first_image = visible(0, 0, 0);
+        first_image.data = Arc::from(vec![1u8; 120].into_boxed_slice());
+        first_image.fingerprint = fingerprint(&first_image.data);
+        let mut second_image = visible(1, 1, 0);
+        second_image.image_id = 8;
+        second_image.data = Arc::from(vec![2u8; 120].into_boxed_slice());
+        second_image.fingerprint = fingerprint(&second_image.data);
+        let screens = [screen(1, first_image), screen(1, second_image)];
+        let live = HashSet::from([1]);
+        let first = text(&frame(&mut cache, &screens, &live));
+        assert!(cache.remainder(), "{first}");
+        assert_eq!(first.matches("a=t").count(), 1, "{first}");
+        let second = text(&frame(&mut cache, &screens, &live));
+        assert!(second.contains("a=t"), "{second}");
+    }
+
+    #[test]
+    fn placeholder_marks_from_the_next_read_do_not_stick() {
+        let mut parser = GraphicsParser::default();
+        let first = parser.drain("\u{10EEEE}".as_bytes());
+        let second = parser.drain("\u{0301}X".as_bytes());
+        let plain = |events: Vec<StreamEvent>| {
+            events
+                .into_iter()
+                .filter_map(|event| match event {
+                    StreamEvent::Plain(bytes) => Some(bytes),
+                    StreamEvent::Command(_) => None,
+                })
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(plain(first), b" ");
+        assert_eq!(plain(second), b"X");
+    }
+
+    #[test]
+    fn sync_update_places_at_the_cursor_the_update_moves_to() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 6, tx, 64 * 1024);
+        engine.kitty_visible_placements(10, 10);
+        let mut command = b"\x1b[?2026h\x1b[3;4H".to_vec();
+        command.extend_from_slice(&transmit(b'a', b'T', 4, &rgba(1, 1, 6), false));
+        command.extend_from_slice(b"\x1b[?2026l");
+        engine.advance(&command);
+        engine.finish_output_batch();
+        let placed = engine.kitty_visible_placements(10, 10);
+        assert_eq!(placed.len(), 1, "image missing");
+        assert_eq!((placed[0].viewport_col, placed[0].viewport_row), (3, 2));
+    }
+
+    #[test]
+    fn origin_mode_does_not_add_the_scroll_region_twice() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine =
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 10, tx, 64 * 1024);
+        engine.advance(b"\x1b[3;8r\x1b[?6h");
+        let before = engine.cursor();
+        let mut payload = Vec::new();
+        base64_encode(&rgba(1, 1, 7), &mut payload);
+        let mut command = b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,i=4,q=2;".to_vec();
+        command.extend_from_slice(&payload);
+        command.extend_from_slice(b"\x1b\\");
+        engine.advance(&command);
+        let after = engine.cursor();
+        assert_eq!(
+            after.y,
+            before.y + 1,
+            "cursor row jumped by the origin twice"
+        );
+        assert_eq!(after.x, before.x.saturating_add(1));
+    }
+
+    #[test]
+    fn cursor_delete_hits_a_middle_row_of_a_tall_image() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 8, tx, 64 * 1024);
+        let mut payload = Vec::new();
+        base64_encode(&rgba(1, 1, 8), &mut payload);
+        let mut command = b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=3,i=4,C=1,q=2;".to_vec();
+        command.extend_from_slice(&payload);
+        command.extend_from_slice(b"\x1b\\");
+        engine.advance(&command);
+        engine.advance(b"\n\x1b_Ga=d,d=c,q=2;\x1b\\");
+        engine.finish_output_batch();
+        assert!(
+            engine.kitty_visible_placements(10, 10).is_empty(),
+            "cursor delete missed the image"
+        );
+    }
+
+    #[test]
+    fn tall_image_stays_visible_below_a_fixed_lookback() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine =
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 5, tx, 8 * 1024 * 1024);
+        let mut payload = Vec::new();
+        base64_encode(&rgba(1, 1, 9), &mut payload);
+        let mut command = b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=400,i=4,C=1,q=2;".to_vec();
+        command.extend_from_slice(&payload);
+        command.extend_from_slice(b"\x1b\\");
+        engine.advance(&command);
+        engine.advance(&vec![b'\n'; 300]);
+        engine.finish_output_batch();
+        assert_eq!(engine.kitty_visible_placements(10, 20).len(), 1);
+    }
+
+    #[test]
+    fn reflow_keeps_the_image_with_the_wrapped_text() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(8, 6, tx, 64 * 1024);
+        engine.advance(b"01234567WRAP");
+        engine.advance(&transmit(b'a', b'T', 4, &rgba(1, 1, 2), false));
+        engine.finish_output_batch();
+        assert_eq!(engine.kitty_visible_placements(10, 10).len(), 1);
+        engine.resize(30, 6);
+        engine.finish_output_batch();
+        assert_eq!(
+            engine.kitty_visible_placements(10, 10).len(),
+            1,
+            "widen dropped the anchor"
+        );
+        engine.resize(8, 6);
+        engine.finish_output_batch();
+        assert_eq!(
+            engine.kitty_visible_placements(10, 10).len(),
+            1,
+            "narrow dropped the anchor"
+        );
+    }
+
+    #[test]
+    fn omitted_cell_size_moves_the_cursor_from_image_pixels() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 6, tx, 64 * 1024);
+        engine.kitty_visible_placements(10, 10);
+        let pixels = rgba(20, 10, 3);
+        let mut payload = Vec::new();
+        base64_encode(&pixels, &mut payload);
+        let mut command = b"\x1b_Ga=T,f=32,s=20,v=10,i=4,q=2;".to_vec();
+        command.extend_from_slice(&payload);
+        command.extend_from_slice(b"\x1b\\");
+        engine.advance(&command);
+        let cursor = engine.cursor();
+        assert_eq!((cursor.x, cursor.y), (2, 1));
     }
 
     fn transmit(key: u8, action: u8, id: u32, pixels: &[u8], more: bool) -> Vec<u8> {

@@ -252,6 +252,8 @@ struct ClientState {
     clipboard_receipt: Option<u64>,
     graphics: crate::terminal::kitty_graphics::HostGraphicsCache,
     graphics_supported: bool,
+    /// More image bytes were left for a later frame after the last send.
+    graphics_pending: bool,
 }
 
 #[derive(Default)]
@@ -300,6 +302,7 @@ impl ClientState {
             clipboard_receipt: None,
             graphics: crate::terminal::kitty_graphics::HostGraphicsCache::default(),
             graphics_supported: false,
+            graphics_pending: false,
         }
     }
 
@@ -726,10 +729,13 @@ pub fn run() -> Result<()> {
         let any_behind = clients
             .values()
             .any(|client| client.interest != SurfaceInterest::Suspended && client.behind);
+        let graphics_waiting = clients
+            .values()
+            .any(|client| client.interest != SurfaceInterest::Suspended && client.graphics_pending);
         if app.force_redraw {
             render_request.record(RenderCause::ForcedRepair);
         }
-        if any_behind {
+        if any_behind || graphics_waiting {
             render_request.record(RenderCause::ClientResync);
         }
 
@@ -1953,7 +1959,28 @@ fn render_client(
             previous.width != client.render_buf.area.width
                 || previous.height != client.render_buf.area.height
         });
-    let graphics = kitty_frame_bytes(app, client, full);
+    // A hyperlink change replaces the diff with a full frame, which clears the
+    // host screen. Graphics have to be uploaded again, not merely placed.
+    let upgrade_full = !full
+        && client.last_frame.as_ref().is_some_and(|previous| {
+            let current_hyperlinks =
+                protocol::frame_hyperlinks(previous, &client.retained_hyperlinks);
+            if previous.hyperlinks != current_hyperlinks {
+                return true;
+            }
+            if current_hyperlinks.is_empty() {
+                return false;
+            }
+            // `diff_buffer` writes the baseline, so probe a copy.
+            let mut probe = previous.clone();
+            let runs = protocol::diff_buffer(&mut probe, &client.render_buf);
+            protocol::diff_intersects_hyperlinks(&runs, &current_hyperlinks)
+        });
+    let StagedGraphics {
+        bytes: graphics,
+        cache: staged_cache,
+        remainder,
+    } = stage_kitty_frame(app, client, full || upgrade_full);
     let message = if full {
         let mut frame = protocol::frame_from_buffer(
             &client.render_buf,
@@ -2018,6 +2045,8 @@ fn render_client(
             client.prepare_ticket = None;
             client.behind = false;
             client.force_full = false;
+            client.graphics = staged_cache;
+            client.graphics_pending = remainder;
             RenderClientOutcome {
                 enqueued: true,
                 disconnected: false,
@@ -2026,6 +2055,7 @@ fn render_client(
         Err(FrameSendError::Full) => {
             FRAMES_BACKPRESSURED.fetch_add(1, Ordering::Relaxed);
             client.behind = true;
+            client.graphics_pending = false;
             client.retained_ready = false;
             RenderClientOutcome::default()
         }
@@ -2042,21 +2072,45 @@ struct RenderClientOutcome {
     disconnected: bool,
 }
 
-fn kitty_frame_bytes(app: &App, client: &mut ClientState, replay: bool) -> Vec<u8> {
+struct StagedGraphics {
+    bytes: Vec<u8>,
+    cache: crate::terminal::kitty_graphics::HostGraphicsCache,
+    remainder: bool,
+}
+
+fn stage_kitty_frame(app: &App, client: &ClientState, replay: bool) -> StagedGraphics {
+    let mut cache = client.graphics.clone();
     if !client.graphics_supported || client.cell_width_px == 0 || client.cell_height_px == 0 {
-        return Vec::new();
+        return StagedGraphics {
+            bytes: Vec::new(),
+            cache,
+            remainder: false,
+        };
     }
     if replay {
-        client.graphics.request_replay();
+        cache.request_replay();
     }
+    let show = ui::retained_pty_eligible(app);
     let mut live = HashSet::new();
+    let mut inspected = HashSet::new();
     let mut placements = Vec::new();
+    let mut retained = HashMap::new();
     for (id, pane) in &app.panes {
         live.insert(id.0);
         let Ok(engine) = pane.engine.lock() else {
             continue;
         };
-        if !engine.has_kitty_graphics() {
+        inspected.insert(id.0);
+        for (image_id, fingerprint) in engine.retained_kitty_images() {
+            retained.insert(
+                crate::terminal::kitty_graphics::SourceKey {
+                    pane_id: id.0,
+                    image_id,
+                },
+                fingerprint,
+            );
+        }
+        if !show || !engine.has_kitty_graphics() {
             continue;
         }
         let Some(area) = client
@@ -2080,7 +2134,19 @@ fn kitty_frame_bytes(app: &App, client: &mut ClientState, replay: bool) -> Vec<u
             });
         }
     }
-    crate::terminal::kitty_graphics::encode_host_frame(&mut client.graphics, &placements, &live)
+    let bytes = crate::terminal::kitty_graphics::encode_host_frame(
+        &mut cache,
+        &placements,
+        &live,
+        &inspected,
+        &retained,
+    );
+    let remainder = cache.remainder();
+    StagedGraphics {
+        bytes,
+        cache,
+        remainder,
+    }
 }
 
 fn bind_client_listener(

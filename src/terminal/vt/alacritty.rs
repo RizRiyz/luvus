@@ -195,7 +195,26 @@ pub struct AlacrittyEngine {
     damage_rows: Vec<DamageRow>,
     graphics: crate::terminal::kitty_graphics::PaneGraphics,
     host_draw: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cell_width_px: Cell<u16>,
+    cell_height_px: Cell<u16>,
+    /// Bytes and graphics commands held until CSI ?2026 l, in arrival order.
+    sync_hold: Option<Vec<HeldPiece>>,
+    plain_prefix: Vec<u8>,
+    gc_grid: u8,
+    gc_line: i32,
+    gc_live: std::collections::HashSet<u64>,
+    gc_active: bool,
+    gc_cooldown: u8,
 }
+
+enum HeldPiece {
+    Plain(Vec<u8>),
+    Command(crate::terminal::kitty_graphics::ParsedCommand),
+}
+
+const BSU: &[u8] = b"\x1b[?2026h";
+const ESU: &[u8] = b"\x1b[?2026l";
+const SYNC_HOLD_LIMIT: usize = 2 * 1024 * 1024;
 
 const MAX_PARTIAL_DAMAGE_ROWS: usize = 8;
 const MAX_PARTIAL_DAMAGE_CELLS: usize = 2_048;
@@ -270,6 +289,15 @@ impl AlacrittyEngine {
             damage_rows: Vec::new(),
             graphics: crate::terminal::kitty_graphics::PaneGraphics::default(),
             host_draw: crate::terminal::kitty_graphics::current_host_draw(),
+            cell_width_px: Cell::new(0),
+            cell_height_px: Cell::new(0),
+            sync_hold: None,
+            plain_prefix: Vec::new(),
+            gc_grid: 0,
+            gc_line: 0,
+            gc_live: std::collections::HashSet::new(),
+            gc_active: false,
+            gc_cooldown: 0,
         }
     }
 
@@ -560,6 +588,7 @@ impl VtEngine for AlacrittyEngine {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
         });
+        self.apply_graphics_reflow();
         self.apply_history_budget();
     }
 
@@ -1666,20 +1695,33 @@ impl VtEngine for AlacrittyEngine {
         self.graphics.has_placements()
     }
 
+    fn retained_kitty_images(&self) -> Vec<(u32, u64)> {
+        self.graphics.retained_images()
+    }
+
     fn kitty_visible_placements(
         &self,
         cell_width_px: u16,
         cell_height_px: u16,
     ) -> Vec<crate::terminal::kitty_graphics::VisiblePlacement> {
+        self.cell_width_px.set(cell_width_px);
+        self.cell_height_px.set(cell_height_px);
         if !self.graphics.has_placements() {
             return Vec::new();
         }
         let grid = self.term.grid();
         let display_offset = grid.display_offset() as i32;
+        // Recent history stays addressable. A tall image can start further
+        // above the viewport than that, while its lower rows are still visible.
+        let lookback = self
+            .graphics
+            .lookback_rows(u32::from(cell_height_px))
+            .max(256);
         let (start, end) = crate::terminal::kitty_graphics::anchor_scan_range(
             grid.topmost_line().0,
             display_offset,
             grid.screen_lines() as i32,
+            lookback,
         );
         let mut anchors = Vec::new();
         for line in start..end {
@@ -1704,7 +1746,12 @@ impl AlacrittyEngine {
     fn ingest_child_output(&mut self, bytes: &[u8]) {
         self.graphics
             .set_queries_enabled(self.host_draw.load(std::sync::atomic::Ordering::Acquire));
-        if self.graphics.parser_idle() && !bytes.contains(&0x1b) && !bytes.contains(&0xF4) {
+        if self.sync_hold.is_none()
+            && self.plain_prefix.is_empty()
+            && !self.graphics.parser_holds_text()
+            && !bytes.contains(&0x1b)
+            && !bytes.contains(&0xF4)
+        {
             self.feed_terminal(bytes);
             return;
         }
@@ -1712,13 +1759,179 @@ impl AlacrittyEngine {
         for event in events {
             match event {
                 crate::terminal::kitty_graphics::StreamEvent::Plain(plain) => {
-                    self.feed_terminal(&plain);
+                    self.push_plain(plain);
                 }
                 crate::terminal::kitty_graphics::StreamEvent::Command(command) => {
-                    for action in self.graphics.apply(command) {
-                        self.apply_graphics_action(action);
+                    if let Some(hold) = self.sync_hold.as_mut() {
+                        hold.push(HeldPiece::Command(command));
+                    } else {
+                        self.apply_command(command);
                     }
                 }
+            }
+        }
+    }
+
+    fn push_plain(&mut self, mut chunk: Vec<u8>) {
+        if !self.plain_prefix.is_empty() {
+            let mut merged = std::mem::take(&mut self.plain_prefix);
+            merged.append(&mut chunk);
+            chunk = merged;
+        }
+        if self.sync_hold.is_some() {
+            self.hold_plain(chunk);
+            return;
+        }
+        if let Some(pos) = find_bytes(&chunk, BSU) {
+            let rest = chunk.split_off(pos);
+            if !chunk.is_empty() {
+                self.feed_terminal(&chunk);
+            }
+            self.sync_hold = Some(Vec::new());
+            self.hold_plain(rest);
+            return;
+        }
+        let keep = trailing_prefix(&chunk, BSU);
+        if keep > 0 {
+            let rest = chunk.len() - keep;
+            if rest > 0 {
+                self.feed_terminal(&chunk[..rest]);
+            }
+            self.plain_prefix = chunk[rest..].to_vec();
+        } else if !chunk.is_empty() {
+            self.feed_terminal(&chunk);
+        }
+    }
+
+    fn hold_plain(&mut self, chunk: Vec<u8>) {
+        let hold = self.sync_hold.as_mut().expect("sync hold");
+        if let Some(HeldPiece::Plain(existing)) = hold.last_mut() {
+            existing.extend_from_slice(&chunk);
+        } else if !chunk.is_empty() {
+            hold.push(HeldPiece::Plain(chunk));
+        }
+        let bytes = hold.iter().fold(0, |sum, piece| {
+            sum + match piece {
+                HeldPiece::Plain(bytes) => bytes.len(),
+                HeldPiece::Command(_) => 0,
+            }
+        });
+        let closed = hold.iter().any(|piece| match piece {
+            HeldPiece::Plain(bytes) => find_bytes(bytes, ESU).is_some(),
+            HeldPiece::Command(_) => false,
+        });
+        if closed || bytes >= SYNC_HOLD_LIMIT {
+            self.flush_sync(closed);
+        }
+    }
+
+    fn flush_sync(&mut self, closed: bool) {
+        let held = self.sync_hold.take().unwrap_or_default();
+        if !closed {
+            let mut first_plain = true;
+            for piece in held {
+                match piece {
+                    HeldPiece::Command(command) => self.apply_command(command),
+                    HeldPiece::Plain(bytes) => {
+                        let bytes = if first_plain {
+                            first_plain = false;
+                            strip_leading(bytes, BSU)
+                        } else {
+                            bytes
+                        };
+                        if !bytes.is_empty() {
+                            self.feed_terminal(&bytes);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        let mut pending = Vec::new();
+        let mut seen_end = false;
+        let mut first_plain = true;
+        for piece in held {
+            if seen_end {
+                pending.push(piece);
+                continue;
+            }
+            match piece {
+                HeldPiece::Command(command) => self.apply_command(command),
+                HeldPiece::Plain(bytes) => {
+                    let mut bytes = if first_plain {
+                        first_plain = false;
+                        strip_leading(bytes, BSU)
+                    } else {
+                        bytes
+                    };
+                    if let Some(pos) = find_bytes(&bytes, ESU) {
+                        let after = bytes.split_off(pos + ESU.len());
+                        bytes.truncate(bytes.len().saturating_sub(ESU.len()));
+                        if !bytes.is_empty() {
+                            self.feed_terminal(&bytes);
+                        }
+                        seen_end = true;
+                        if !after.is_empty() {
+                            pending.push(HeldPiece::Plain(after));
+                        }
+                    } else if !bytes.is_empty() {
+                        self.feed_terminal(&bytes);
+                    }
+                }
+            }
+        }
+        for piece in pending {
+            match piece {
+                HeldPiece::Plain(bytes) => self.push_plain(bytes),
+                HeldPiece::Command(command) => {
+                    if let Some(hold) = self.sync_hold.as_mut() {
+                        hold.push(HeldPiece::Command(command));
+                    } else {
+                        self.apply_command(command);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_command(&mut self, command: crate::terminal::kitty_graphics::ParsedCommand) {
+        for action in self.graphics.apply(command) {
+            self.apply_graphics_action(action);
+        }
+    }
+
+    fn apply_graphics_reflow(&mut self) {
+        use alacritty_terminal::grid::{GraphicsReflowKind, GRAPHICS_TEMP_ANCHOR};
+        let events = self.term.take_graphics_reflow();
+        let mut remap = Vec::new();
+        for event in events {
+            let mapped = match event.kind {
+                GraphicsReflowKind::MovePrefix { entire } => self.graphics.reflow_move_prefix(
+                    event.anchor,
+                    event.at,
+                    event.dest_column.max(0) as u32,
+                    event.dest_anchor,
+                    entire,
+                ),
+                GraphicsReflowKind::MoveSuffix => {
+                    self.graphics
+                        .reflow_move_suffix(event.anchor, event.at, event.dest_anchor)
+                }
+                GraphicsReflowKind::Shift => {
+                    self.graphics.reflow_shift(event.anchor, event.dest_column);
+                    None
+                }
+            };
+            if let Some((from, to)) = mapped {
+                if from >= GRAPHICS_TEMP_ANCHOR {
+                    remap.push((from, to));
+                }
+            }
+        }
+        for (from, to) in remap {
+            self.term.replace_graphics_anchor(from, to);
+            if to != 0 && self.gc_active {
+                self.gc_live.insert(to);
             }
         }
     }
@@ -1738,22 +1951,51 @@ impl AlacrittyEngine {
             }
             GraphicsAction::DeleteCursor { free_image } => {
                 let point = self.term.grid().cursor.point;
-                let anchor = self.term.grid()[point.line].graphics_anchor();
-                if anchor != 0 {
-                    self.graphics
-                        .delete_at(anchor, point.column.0 as u16, free_image);
+                let cell_h = u32::from(self.cell_height_px.get());
+                let lookback = self.graphics.lookback_rows(cell_h).max(1);
+                let top = self.term.grid().topmost_line().0;
+                let start = point.line.0.saturating_sub(lookback).max(top);
+                let mut anchors = Vec::new();
+                for line in start..=point.line.0 {
+                    let anchor = self.term.grid()[Line(line)].graphics_anchor();
+                    if anchor != 0 {
+                        anchors.push((line, anchor));
+                    }
                 }
+                self.graphics.delete_covering(
+                    point.line.0,
+                    point.column.0 as u16,
+                    &anchors,
+                    cell_h,
+                    free_image,
+                );
             }
             GraphicsAction::Place(placement) => {
-                let move_cursor = placement.move_cursor;
-                let columns = placement.columns;
-                let rows = placement.rows;
+                let mut move_cursor = placement.move_cursor;
+                let mut columns = placement.columns;
+                let mut rows = placement.rows;
+                if move_cursor && columns == 0 && rows == 0 {
+                    match self.graphics.cursor_span(
+                        placement.image_id,
+                        u32::from(self.cell_width_px.get()),
+                        u32::from(self.cell_height_px.get()),
+                    ) {
+                        Some((span_cols, span_rows)) => {
+                            columns = span_cols;
+                            rows = span_rows;
+                        }
+                        None => move_cursor = false,
+                    }
+                }
                 let point = self.term.grid().cursor.point;
                 let column = point.column.0 as u16;
                 let current = self.term.grid()[point.line].graphics_anchor();
                 let anchor = self.graphics.alloc_anchor(current);
                 if current == 0 {
                     self.term.grid_mut()[point.line].set_graphics_anchor(anchor);
+                }
+                if self.gc_active {
+                    self.gc_live.insert(anchor);
                 }
                 self.graphics.record(anchor, column, placement);
                 if move_cursor {
@@ -1773,32 +2015,91 @@ impl AlacrittyEngine {
         let height = self.term.grid().screen_lines().max(1) as u32;
         let (next_column, next_row) =
             crate::terminal::kitty_graphics::cursor_after_image(column, row, width, columns, rows);
+        let origin = self.term.origin_line();
         let mut bytes = Vec::new();
         if next_row >= height {
-            let down = next_row.saturating_sub(row) as usize;
+            let down = (next_row.saturating_sub(row) as usize).min(height as usize);
             bytes.extend(std::iter::repeat_n(b'\n', down));
             let _ =
                 std::io::Write::write_fmt(&mut bytes, format_args!("\x1b[{}G", next_column + 1));
         } else if next_row != row || next_column != column {
+            // Origin mode adds the scroll-region start inside CUP. The row we
+            // computed is already absolute, so subtract that origin once.
+            let cup_row = next_row.saturating_sub(origin);
             let _ = std::io::Write::write_fmt(
                 &mut bytes,
-                format_args!("\x1b[{};{}H", next_row + 1, next_column + 1),
+                format_args!("\x1b[{};{}H", cup_row + 1, next_column + 1),
             );
         }
         self.feed_terminal(&bytes);
     }
 
     fn collect_graphics_garbage(&mut self) {
-        let _ = self.graphics.take_gc();
+        const STEP: i32 = 128;
         if !self.graphics.has_placements() {
+            self.gc_active = false;
+            self.gc_live.clear();
+            self.gc_cooldown = 0;
             return;
         }
-        let mut live = std::collections::HashSet::new();
-        self.term.for_each_graphics_anchor(|anchor| {
-            live.insert(anchor);
-        });
-        self.graphics.retain_anchors(&live);
+        if !self.gc_active {
+            self.gc_cooldown = self.gc_cooldown.saturating_add(1);
+            let due = self.graphics.take_gc() || self.gc_cooldown >= 32;
+            if !due {
+                return;
+            }
+            self.gc_cooldown = 0;
+            self.gc_active = true;
+            self.gc_grid = 0;
+            self.gc_line = self.term.graphics_line_span(0).0;
+            self.gc_live.clear();
+        }
+        for _ in 0..STEP {
+            let (start, end) = self.term.graphics_line_span(self.gc_grid);
+            if self.gc_line < start {
+                self.gc_line = start;
+            }
+            if self.gc_line > end {
+                if self.gc_grid == 0 {
+                    self.gc_grid = 1;
+                    self.gc_line = self.term.graphics_line_span(1).0;
+                    continue;
+                }
+                self.graphics.retain_anchors(&self.gc_live);
+                self.gc_active = false;
+                self.gc_live.clear();
+                return;
+            }
+            if let Some(anchor) = self.term.graphics_anchor_on(self.gc_grid, self.gc_line) {
+                if anchor != 0 {
+                    self.gc_live.insert(anchor);
+                }
+            }
+            self.gc_line += 1;
+        }
     }
+}
+
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn trailing_prefix(hay: &[u8], needle: &[u8]) -> usize {
+    let max = needle.len().saturating_sub(1).min(hay.len());
+    for len in (1..=max).rev() {
+        if hay.ends_with(&needle[..len]) {
+            return len;
+        }
+    }
+    0
+}
+
+fn strip_leading(mut bytes: Vec<u8>, prefix: &[u8]) -> Vec<u8> {
+    if bytes.starts_with(prefix) {
+        bytes.drain(..prefix.len());
+    }
+    bytes
 }
 
 fn sgr(fg: Color, bg: Color, m: Modifier) -> String {

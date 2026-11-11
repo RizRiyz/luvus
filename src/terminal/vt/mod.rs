@@ -663,6 +663,11 @@ pub trait VtEngine: Send {
     ) -> Vec<crate::terminal::kitty_graphics::VisiblePlacement> {
         Vec::new()
     }
+
+    /// Images this pane still stores, including ones scrolled out of view.
+    fn retained_kitty_images(&self) -> Vec<(u32, u64)> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
