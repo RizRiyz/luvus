@@ -486,6 +486,8 @@ impl App {
                     self.general_rows().get(i),
                     Some(GeneralRow::FileOpen)
                         | Some(GeneralRow::FileClick)
+                        | Some(GeneralRow::ShiftEnter)
+                        | Some(GeneralRow::CommanderWorking)
                         | Some(GeneralRow::SoundStyle)
                 ),
                 // Number/enum module settings likewise only move via `‹ ›`.
@@ -2395,6 +2397,68 @@ mod tests {
             config::FILE_CLICK_TAB,
             "the arrow is what steps the value"
         );
+    }
+
+    /// The modified-Enter and Commander sliders follow the same rule as the
+    /// file choosers: a click on the row body selects them, only the arrows
+    /// step the value. Both were missing from the slider list.
+    #[test]
+    fn clicking_legacy_slider_row_bodies_selects_without_changing_them() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-slider-body-click-legacy");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::General;
+            ui.cursor = 0;
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        for row in [GeneralRow::ShiftEnter, GeneralRow::CommanderWorking] {
+            let i = app
+                .general_rows()
+                .iter()
+                .position(|r| *r == row)
+                .unwrap_or_else(|| panic!("{row:?} is on the General tab"));
+            let rect = app
+                .settings_ctl_rects
+                .iter()
+                .find(|(index, _)| *index == i)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("{row:?} has a control rect"));
+            let before = (
+                app.config.layout.shift_enter.clone(),
+                app.config.commander_working_policy,
+            );
+
+            app.handle_settings_click(rect.x + 2, rect.y);
+
+            assert_eq!(
+                app.settings.as_ref().unwrap().cursor,
+                i,
+                "{row:?} body click moves the cursor to it"
+            );
+            assert_eq!(
+                (
+                    app.config.layout.shift_enter.clone(),
+                    app.config.commander_working_policy
+                ),
+                before,
+                "{row:?} body click does not step the value"
+            );
+            let loaded = crate::config::load();
+            assert_eq!(
+                loaded.layout.shift_enter, before.0,
+                "{row:?} body click does not persist a change"
+            );
+            assert_eq!(
+                loaded.commander_working_policy, before.1,
+                "{row:?} body click does not persist a change"
+            );
+        }
     }
 
     /// The General tab's modified-Enter fallback chooser cycles through the
