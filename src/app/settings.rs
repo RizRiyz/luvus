@@ -474,6 +474,7 @@ impl App {
                     Some(LayoutRow::SidebarWidth)
                         | Some(LayoutRow::RightWidth)
                         | Some(LayoutRow::MobileWidth)
+                        | Some(LayoutRow::Scrollback)
                         | Some(LayoutRow::DiffContext)
                         | Some(LayoutRow::Dock(_))
                         | Some(LayoutRow::Bar(_))
@@ -2397,6 +2398,44 @@ mod tests {
             config::FILE_CLICK_TAB,
             "the arrow is what steps the value"
         );
+    }
+
+    /// The scrollback slider is drawn with `‹ ›` arrows like the width sliders,
+    /// so a click on its row body must only select it. It was missing from the
+    /// Layout slider list, so the click stepped the budget and persisted it.
+    #[test]
+    fn clicking_the_scrollback_row_body_selects_without_changing_it() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-scrollback-body-click");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::Layout;
+            ui.cursor = 0;
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let i = app
+            .layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::Scrollback))
+            .expect("the Layout tab has a scrollback row");
+        let rect = app
+            .settings_ctl_rects
+            .iter()
+            .find(|(index, _)| *index == i)
+            .map(|(_, rect)| *rect)
+            .expect("the scrollback row has a control rect");
+        let before = app.config.layout.scrollback_bytes;
+
+        app.handle_settings_click(rect.x + 2, rect.y);
+
+        assert_eq!(app.settings.as_ref().unwrap().cursor, i);
+        assert_eq!(app.config.layout.scrollback_bytes, before);
+        assert_eq!(crate::config::load().layout.scrollback_bytes, before);
     }
 
     /// The modified-Enter and Commander sliders follow the same rule as the
