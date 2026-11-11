@@ -78,7 +78,7 @@ source lines remain inside the pane at every responsive width.
 | `P` / `N` | previous or next note |
 | `-` / `+` | decrease or increase Git context |
 | `r` | refresh this file |
-| `m` | mark the current version viewed |
+| `m` | toggle the current version viewed / unviewed; if changed since review, mark the new version viewed |
 | `f` | cycle All, Unviewed, Changed, and Notes filters |
 | `q` / `Esc` | close the native view |
 
@@ -102,6 +102,10 @@ A row such as `@@ -662,9 +681,39 @@ pub fn snapshot(...)` is a Git hunk
 header. `-662,9` means the old section starts at line 662 and spans 9 lines.
 `+681,39` means the replacement starts at line 681 and spans 39 lines. The text
 after the second `@@` is nearby source context that helps identify the section.
+
+Press **`m`** again to undo an accidental viewed mark. The change is saved
+locally and survives restarting Luvus. If the file has changed since it was
+viewed, `m` marks the new version viewed; another press clears that mark.
 
 ## Difftastic presentation (experimental)
 

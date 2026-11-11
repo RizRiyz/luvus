@@ -183,7 +183,7 @@ pub(super) fn draw_diff_view(
         super::local_search_footer(search)
     } else {
         format!(
-            " [j/k] move  [q] close  [s] layout  [m] viewed  [/] search  [n] note  [a] send  ·  {viewed}/{total} viewed · {note_count} notes"
+            " [j/k] move  [q] close  [s] layout  [m] toggle viewed  [/] search  [n] note  [a] send  ·  {viewed}/{total} viewed · {note_count} notes"
         )
     };
     if truncated {
