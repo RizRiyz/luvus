@@ -152,7 +152,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             let len = min(row.len(), num_wrapped);
 
             // Insert leading spacer when there's not enough room for reflowing wide char.
+            let mut split_at = len;
             let mut cells = if row[Column(len - 1)].flags().contains(Flags::WIDE_CHAR) {
+                split_at -= 1;
                 num_wrapped -= 1;
 
                 let mut cells = row.front_split_off(len - 1);
@@ -168,7 +170,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
             // Add removed cells to previous row and reflow content.
             last_row.append(&mut cells);
-            self.note_graphics_prefix(last_row, &mut row, len, last_len);
+            self.note_graphics_prefix(last_row, &mut row, split_at, last_len);
 
             let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
 
@@ -320,12 +322,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 };
 
                 // Insert spacer if a wide char would be wrapped into the last column.
+                let mut split_at = columns;
                 if row.len() >= columns
                     && row[Column(columns - 1)].flags().contains(Flags::WIDE_CHAR)
                 {
                     let mut spacer = T::default();
                     spacer.flags_mut().insert(Flags::LEADING_WIDE_CHAR_SPACER);
 
+                    split_at -= 1;
                     let wide_char = mem::replace(&mut row[Column(columns - 1)], spacer);
                     wrapped.insert(0, wide_char);
                 }
@@ -367,7 +371,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     if source_anchor != 0 {
                         pending_suffix = Some((
                             source_anchor,
-                            u32::try_from(columns).unwrap_or(u32::MAX),
+                            u32::try_from(split_at).unwrap_or(u32::MAX),
                         ));
                     }
                     buffered = Some(wrapped);
@@ -399,7 +403,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                         row.set_graphics_anchor(dest_anchor);
                         self.graphics_reflow.push(super::GraphicsReflow {
                             anchor: source_anchor,
-                            at: u32::try_from(columns).unwrap_or(u32::MAX),
+                            at: u32::try_from(split_at).unwrap_or(u32::MAX),
                             dest_column: 0,
                             dest_anchor,
                             kind: super::GraphicsReflowKind::MoveSuffix,

@@ -602,13 +602,20 @@ impl PaneGraphics {
         cursor_line: i32,
         cursor_col: u16,
         anchors: &[(i32, u64)],
-        cell_height_px: u32,
+        cell_pixels: (u32, u32),
         free_image: bool,
     ) {
-        let heights = self
-            .images
+        let spans = self
+            .placements
             .iter()
-            .map(|(id, image)| (*id, image.height))
+            .filter_map(|p| {
+                self.images.get(&p.image_id).map(|image| {
+                    (
+                        (p.image_id, p.local_placement_id),
+                        grid_span(p, image, cell_pixels.0, cell_pixels.1),
+                    )
+                })
+            })
             .collect::<HashMap<_, _>>();
         let mut removed = Vec::new();
         let mut keep = Vec::with_capacity(self.placements.len());
@@ -621,22 +628,16 @@ impl PaneGraphics {
                 continue;
             };
             let dy = cursor_line.saturating_sub(anchor_line);
-            let rows = if placement.rows > 0 {
-                placement.rows
-            } else if cell_height_px == 0 {
-                1
-            } else {
-                heights
-                    .get(&placement.image_id)
-                    .copied()
-                    .unwrap_or(1)
-                    .div_ceil(cell_height_px)
-                    .max(1)
-            } as i32;
-            let end = placement
-                .column
-                .saturating_add(placement.columns.max(1) as u16);
-            let hit = dy >= 0 && dy < rows && cursor_col >= placement.column && cursor_col < end;
+            let (cols, rows) = spans
+                .get(&(placement.image_id, placement.local_placement_id))
+                .copied()
+                .unwrap_or((1, 1));
+            let rows = rows.min(i32::MAX as u32) as i32;
+            let end = u32::from(placement.column).saturating_add(cols);
+            let hit = dy >= 0
+                && dy < rows
+                && cursor_col >= placement.column
+                && u32::from(cursor_col) < end;
             if hit {
                 removed.push(placement.image_id);
             } else {
@@ -2656,6 +2657,21 @@ mod tests {
             1,
             "narrow dropped the anchor"
         );
+    }
+
+    #[test]
+    fn cursor_delete_resolves_omitted_columns_from_runtime_pixels() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut e = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 6, tx, 64 * 1024);
+        e.set_runtime_cell_pixels(10, 10);
+        let mut payload = Vec::new();
+        base64_encode(&rgba(30, 10, 3), &mut payload);
+        let mut command = b"\x1b_Ga=T,f=32,s=30,v=10,i=4,C=1,q=2;".to_vec();
+        command.extend(payload);
+        command.extend_from_slice(b"\x1b\\\x1b[2G\x1b_Ga=d,d=c,q=2;\x1b\\");
+        e.advance(&command);
+        assert!(e.kitty_visible_placements(10, 10).is_empty());
     }
 
     #[test]

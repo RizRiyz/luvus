@@ -586,6 +586,24 @@ impl VtEngine for AlacrittyEngine {
         self.history_maintenance_pending || self.gc_active
     }
 
+    fn output_deadline(&self) -> Option<std::time::Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    fn expire_output(&mut self, now: std::time::Instant) -> bool {
+        if self.output_deadline().is_none_or(|at| now < at) {
+            return false;
+        }
+        // Use VTE's existing 150ms synchronized-update clock. Our hold keeps
+        // commands ordered beside text; it does not own a second timer.
+        self.gc_active = false;
+        self.gc_live.clear();
+        self.flush_sync(false);
+        self.history_maintenance_pending = true;
+        self.output_generation = self.output_generation.wrapping_add(1);
+        true
+    }
+
     fn output_generation(&self) -> u64 {
         self.output_generation
     }
@@ -1803,6 +1821,9 @@ impl AlacrittyEngine {
             if !chunk.is_empty() {
                 self.feed_terminal(&chunk);
             }
+            // Arm VTE’s existing synchronized-update timeout without feeding
+            // the held text into its independent byte buffer.
+            self.feed_terminal(BSU);
             self.sync_hold = Some(Vec::new());
             self.hold_plain(rest);
             return;
@@ -1876,6 +1897,8 @@ impl AlacrittyEngine {
 
     fn flush_sync(&mut self, closed: bool) {
         let held = self.sync_hold.take().unwrap_or_default();
+        // Only BSU was fed into VTE, so stopping it cannot reorder any text.
+        self.parser.stop_sync(&mut self.term);
         self.sync_held_bytes = 0;
         if !closed {
             let mut first_plain = true;
@@ -1947,8 +1970,21 @@ impl AlacrittyEngine {
     fn apply_graphics_reflow(&mut self) {
         use alacritty_terminal::grid::{GraphicsReflowKind, GRAPHICS_TEMP_ANCHOR};
         let events = self.term.take_graphics_reflow();
-        let mut remap = Vec::new();
-        for event in events {
+        let mut remap = std::collections::HashMap::new();
+        for mut event in events {
+            // Later split events can refer to the destination of an earlier
+            // split. Apply them to its real identity, not the retired temporary.
+            // A zero mapping means an empty row, not a real anchor zero: keep
+            // its temporary identity so a later destination can allocate it.
+            let resolve = |anchor| {
+                remap
+                    .get(&anchor)
+                    .copied()
+                    .filter(|id| *id != 0)
+                    .unwrap_or(anchor)
+            };
+            event.anchor = resolve(event.anchor);
+            event.dest_anchor = resolve(event.dest_anchor);
             let mapped = match event.kind {
                 GraphicsReflowKind::MovePrefix { entire } => self.graphics.reflow_move_prefix(
                     event.anchor,
@@ -1968,7 +2004,7 @@ impl AlacrittyEngine {
             };
             if let Some((from, to)) = mapped {
                 if from >= GRAPHICS_TEMP_ANCHOR {
-                    remap.push((from, to));
+                    remap.insert(from, to);
                 }
             }
         }
@@ -2010,7 +2046,7 @@ impl AlacrittyEngine {
                     point.line.0,
                     point.column.0 as u16,
                     &anchors,
-                    cell_h,
+                    (u32::from(self.cell_width_px.get()), cell_h),
                     free_image,
                 );
             }
@@ -3733,6 +3769,68 @@ mod tests {
         assert!(!capture.text.ends_with('\n'));
         assert_eq!(capture.cursor_offset, Some(capture.text.chars().count()));
         assert_eq!(capture.cursor_padding_cells, 1);
+    }
+
+    #[test]
+    fn kitty_reflow_resolves_dependent_temporary_anchors() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(24, 8, tx, 64 * 1024);
+        e.advance(b"abcdefghijklmnopqrst");
+        e.advance(&kitty_command("c=1,r=1,C=1"));
+        e.advance(b"uvwx");
+        e.resize(8, 8);
+        let placed = e.kitty_visible_placements(10, 10);
+        assert_eq!(placed.len(), 1);
+        assert_eq!((placed[0].viewport_col, placed[0].viewport_row), (4, 0));
+        assert!(e.visible_rows()[0].starts_with("qrstuvwx"));
+    }
+
+    #[test]
+    fn kitty_wide_reflow_tracks_actual_source_cell_boundary() {
+        // Q wraps onto the next source row, exercising the buffered-suffix
+        // path as well as the newly allocated row path.
+        for tail in ["", "Q"] {
+            let (tx, _rx) = channel();
+            let mut e = AlacrittyEngine::new(12, 8, tx, 64 * 1024);
+            e.advance(b"abcdefg");
+            e.advance(&kitty_command("c=1,r=1,C=1"));
+            e.advance(format!("界xyz{tail}").as_bytes());
+            e.resize(8, 8);
+            let placed = e.kitty_visible_placements(10, 10);
+            assert_eq!(placed[0].viewport_col, 0, "tail {tail}");
+            assert!(e.visible_rows().iter().any(|row| row.starts_with("界xyz")));
+            e.resize(12, 8);
+            let placed = e.kitty_visible_placements(10, 10);
+            assert_eq!(placed[0].viewport_col, 7, "tail {tail}");
+        }
+    }
+
+    #[test]
+    fn kitty_grow_wide_boundary_keeps_unmoved_anchor_column() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(8, 8, tx, 64 * 1024);
+        e.advance(b"abcdefghX");
+        e.advance(&kitty_command("c=1,r=1,C=1"));
+        e.advance("界yz".as_bytes());
+        e.resize(10, 8);
+        let placed = e.kitty_visible_placements(10, 10);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(placed[0].viewport_col, 0);
+    }
+
+    #[test]
+    fn kitty_unfinished_sync_uses_vte_deadline_without_more_output() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, 64 * 1024);
+        assert!(e.output_deadline().is_none());
+        e.advance(b"\x1b[?2026h\x1b[3;4Hprompt");
+        assert!(!e.screen_rows().join("").contains("prompt"));
+        let deadline = e.output_deadline().expect("VTE sync timeout is armed");
+        assert!(!e.expire_output(deadline - std::time::Duration::from_millis(1)));
+        assert!(e.expire_output(deadline));
+        assert!(e.screen_rows().join("").contains("prompt"));
+        assert!(e.output_deadline().is_none());
+        assert!(!e.expire_output(deadline));
     }
 
     fn kitty_command(extra: &str) -> Vec<u8> {

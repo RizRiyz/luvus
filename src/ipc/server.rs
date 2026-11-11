@@ -482,6 +482,7 @@ pub fn run() -> Result<()> {
         // Otherwise sleep until the next real deadline, or block on the
         // channel when nothing is due (PTY/API/client/signal wake the loop).
         let now = Instant::now();
+        schedule_client_frame_debt(&clients, &mut render_request);
         let rearm_interval = pty_rearm_interval(
             app.has_history_maintenance(),
             crate::ipc::api::active_terminal_streams(),
@@ -730,17 +731,9 @@ pub fn run() -> Result<()> {
         // A forced redraw (resize / focus-regained / external damage) must render
         // even if nothing else changed this tick — and so must a client that is
         // waiting on its full-frame resync (see `needs_render`).
-        let any_behind = clients
-            .values()
-            .any(|client| client.interest != SurfaceInterest::Suspended && client.behind);
-        let graphics_waiting = clients
-            .values()
-            .any(|client| client.interest != SurfaceInterest::Suspended && client.graphics_pending);
+        schedule_client_frame_debt(&clients, &mut render_request);
         if app.force_redraw {
             render_request.record(RenderCause::ForcedRepair);
-        }
-        if any_behind || graphics_waiting {
-            render_request.record(RenderCause::ClientResync);
         }
 
         let projection_causes = RenderCause::UserInterface.bit()
@@ -1320,6 +1313,16 @@ fn has_render_clients(clients: &Clients) -> bool {
     clients
         .values()
         .any(|client| client.interest != SurfaceInterest::Suspended)
+}
+
+/// Re-arm at loop entry, before choosing an idle wait. Frame cadence still
+/// bounds retries while the one-frame queue is full.
+fn schedule_client_frame_debt(clients: &Clients, request: &mut RenderRequest) {
+    if clients.values().any(|client| {
+        client.interest != SurfaceInterest::Suspended && (client.graphics_pending || client.behind)
+    }) {
+        request.record(RenderCause::ClientResync);
+    }
 }
 
 fn latest_client(clients: &Clients) -> Option<u64> {
@@ -3040,6 +3043,31 @@ mod tests {
             ServerMessage::Frame(frame) => (frame.width, frame.height),
             ServerMessage::FrameDiff(frame) => (frame.width, frame.height),
             _ => panic!("expected rendered frame"),
+        }
+    }
+
+    #[test]
+    fn graphics_and_backpressure_debt_schedule_a_cadenced_idle_wake() {
+        let (client, _rx) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        for behind in [false, true] {
+            let client = clients.get_mut(&7).unwrap();
+            client.graphics_pending = !behind;
+            client.behind = behind;
+            let mut request = super::RenderRequest::default();
+            super::schedule_client_frame_debt(&clients, &mut request);
+            assert!(request.needs_render());
+            assert!(super::frame_wait(Duration::ZERO) >= super::FRAME_INTERVAL);
+            assert!(!super::frame_cadence_ready(Duration::ZERO));
+            // Clearing a render must not let the next loop entry sleep forever.
+            request.clear();
+            super::schedule_client_frame_debt(&clients, &mut request);
+            assert!(request.needs_render());
+            clients.get_mut(&7).unwrap().interest = SurfaceInterest::Suspended;
+            request.clear();
+            super::schedule_client_frame_debt(&clients, &mut request);
+            assert!(!request.needs_render());
+            clients.get_mut(&7).unwrap().interest = SurfaceInterest::Active;
         }
     }
 

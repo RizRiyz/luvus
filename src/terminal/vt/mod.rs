@@ -384,6 +384,16 @@ pub trait VtEngine: Send {
         false
     }
 
+    /// One-shot parser deadline; no idle polling when absent.
+    fn output_deadline(&self) -> Option<std::time::Instant> {
+        None
+    }
+
+    /// Commit timed-out synchronized output. True means screen content changed.
+    fn expire_output(&mut self, _now: std::time::Instant) -> bool {
+        false
+    }
+
     /// Monotonic generation of successfully parsed terminal output.
     fn output_generation(&self) -> u64;
 
