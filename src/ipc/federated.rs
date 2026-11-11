@@ -1840,7 +1840,13 @@ fn handle_surface_message(
                     frame.cursor_style,
                     last_cursor_style,
                     |backend| {
-                        super::client::write_hyperlink_runs(backend, &frame, truecolor, allow_links)
+                        super::client::write_hyperlink_runs(
+                            backend,
+                            &frame,
+                            truecolor,
+                            allow_links,
+                        )?;
+                        super::client::write_host_graphics(backend, &frame.graphics)
                     },
                 )?;
                 super::client::sync_end();
@@ -1906,7 +1912,7 @@ fn handle_surface_message(
                 last_cursor,
                 diff.cursor_style,
                 last_cursor_style,
-                |_| Ok(()),
+                |backend| super::client::write_host_graphics(backend, &diff.graphics),
             )?;
             super::client::sync_end();
             *cursor_visible = diff.cursor_visible;
@@ -5879,6 +5885,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         assert!(frame_diff_intersects_rect(&diff(205, 4), dock));
         assert!(frame_diff_intersects_rect(&diff(195, 10), dock));

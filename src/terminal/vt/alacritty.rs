@@ -193,6 +193,7 @@ pub struct AlacrittyEngine {
     history_maintenance_full_scan: bool,
     damage_line_indices: Vec<u16>,
     damage_rows: Vec<DamageRow>,
+    graphics: crate::terminal::kitty_graphics::PaneGraphics,
 }
 
 const MAX_PARTIAL_DAMAGE_ROWS: usize = 8;
@@ -266,6 +267,7 @@ impl AlacrittyEngine {
             history_maintenance_full_scan: false,
             damage_line_indices: Vec::new(),
             damage_rows: Vec::new(),
+            graphics: crate::terminal::kitty_graphics::PaneGraphics::default(),
         }
     }
 
@@ -518,7 +520,7 @@ impl VtEngine for AlacrittyEngine {
         self.history_maintenance_cursors = [0; 2];
         self.history_maintenance_pending = true;
         self.history_metrics_cache.set(None);
-        self.parser.advance(&mut self.term, bytes);
+        self.ingest_child_output(bytes);
         self.output_generation = self.output_generation.wrapping_add(1);
     }
 
@@ -538,6 +540,7 @@ impl VtEngine for AlacrittyEngine {
         );
         if !self.history_maintenance_pending {
             self.history_maintenance_full_scan = false;
+            self.collect_graphics_garbage();
         }
         self.history_maintenance_pending
     }
@@ -1655,6 +1658,142 @@ impl VtEngine for AlacrittyEngine {
             out.push_str("\x1b[0m");
         }
         out
+    }
+
+    fn has_kitty_graphics(&self) -> bool {
+        self.graphics.has_placements()
+    }
+
+    fn kitty_visible_placements(
+        &self,
+        cell_width_px: u16,
+        cell_height_px: u16,
+    ) -> Vec<crate::terminal::kitty_graphics::VisiblePlacement> {
+        if !self.graphics.has_placements() {
+            return Vec::new();
+        }
+        let grid = self.term.grid();
+        let display_offset = grid.display_offset() as i32;
+        let (start, end) = crate::terminal::kitty_graphics::anchor_scan_range(
+            grid.topmost_line().0,
+            display_offset,
+            grid.screen_lines() as i32,
+        );
+        let mut anchors = Vec::new();
+        for line in start..end {
+            let anchor = grid[Line(line)].graphics_anchor();
+            if anchor != 0 {
+                anchors.push((
+                    anchor,
+                    crate::terminal::kitty_graphics::viewport_line(line, display_offset),
+                ));
+            }
+        }
+        self.graphics.visible(
+            &anchors,
+            u32::from(cell_width_px),
+            u32::from(cell_height_px),
+            grid.display_offset() as u32,
+        )
+    }
+}
+
+impl AlacrittyEngine {
+    fn ingest_child_output(&mut self, bytes: &[u8]) {
+        if self.graphics.parser_idle() && !bytes.contains(&0x1b) && !bytes.contains(&0xF4) {
+            self.feed_terminal(bytes);
+            return;
+        }
+        let events = self.graphics.drain(bytes);
+        for event in events {
+            match event {
+                crate::terminal::kitty_graphics::StreamEvent::Plain(plain) => {
+                    self.feed_terminal(&plain);
+                }
+                crate::terminal::kitty_graphics::StreamEvent::Command(command) => {
+                    for action in self.graphics.apply(command) {
+                        self.apply_graphics_action(action);
+                    }
+                }
+            }
+        }
+    }
+
+    fn feed_terminal(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.parser.advance(&mut self.term, bytes);
+        }
+    }
+
+    fn apply_graphics_action(&mut self, action: crate::terminal::kitty_graphics::GraphicsAction) {
+        use crate::terminal::kitty_graphics::GraphicsAction;
+        match action {
+            GraphicsAction::None => {}
+            GraphicsAction::Reply(bytes) => {
+                let _ = self.response_tx.send(InputAction::Bytes(bytes));
+            }
+            GraphicsAction::DeleteCursor { free_image } => {
+                let point = self.term.grid().cursor.point;
+                let anchor = self.term.grid()[point.line].graphics_anchor();
+                if anchor != 0 {
+                    self.graphics
+                        .delete_at(anchor, point.column.0 as u16, free_image);
+                }
+            }
+            GraphicsAction::Place(placement) => {
+                let move_cursor = placement.move_cursor;
+                let columns = placement.columns;
+                let rows = placement.rows;
+                let point = self.term.grid().cursor.point;
+                let column = point.column.0 as u16;
+                let current = self.term.grid()[point.line].graphics_anchor();
+                let anchor = self.graphics.alloc_anchor(current);
+                if current == 0 {
+                    self.term.grid_mut()[point.line].set_graphics_anchor(anchor);
+                }
+                self.graphics.record(anchor, column, placement);
+                if move_cursor {
+                    self.move_cursor_after_image(
+                        column as u32,
+                        point.line.0.max(0) as u32,
+                        columns,
+                        rows,
+                    );
+                }
+            }
+        }
+    }
+
+    fn move_cursor_after_image(&mut self, column: u32, row: u32, columns: u32, rows: u32) {
+        let width = self.term.grid().columns().max(1) as u32;
+        let height = self.term.grid().screen_lines().max(1) as u32;
+        let (next_column, next_row) =
+            crate::terminal::kitty_graphics::cursor_after_image(column, row, width, columns, rows);
+        let mut bytes = Vec::new();
+        if next_row >= height {
+            let down = next_row.saturating_sub(row) as usize;
+            bytes.extend(std::iter::repeat_n(b'\n', down));
+            let _ =
+                std::io::Write::write_fmt(&mut bytes, format_args!("\x1b[{}G", next_column + 1));
+        } else if next_row != row || next_column != column {
+            let _ = std::io::Write::write_fmt(
+                &mut bytes,
+                format_args!("\x1b[{};{}H", next_row + 1, next_column + 1),
+            );
+        }
+        self.feed_terminal(&bytes);
+    }
+
+    fn collect_graphics_garbage(&mut self) {
+        let _ = self.graphics.take_gc();
+        if !self.graphics.has_placements() {
+            return;
+        }
+        let mut live = std::collections::HashSet::new();
+        self.term.for_each_graphics_anchor(|anchor| {
+            live.insert(anchor);
+        });
+        self.graphics.retain_anchors(&live);
     }
 }
 

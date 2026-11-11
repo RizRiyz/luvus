@@ -3,7 +3,7 @@
 //! Input arrives from clients; the JSON API also runs here. See docs/03, docs/08.
 
 use crate::ipc::transport::{self, Conn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -250,6 +250,7 @@ struct ClientState {
     last_shell_workspaces: Vec<protocol::ShellWorkspace>,
     shell_dock_dirty: bool,
     clipboard_receipt: Option<u64>,
+    graphics: crate::terminal::kitty_graphics::HostGraphicsCache,
 }
 
 #[derive(Default)]
@@ -296,6 +297,7 @@ impl ClientState {
             last_shell_workspaces: Vec::new(),
             shell_dock_dirty: false,
             clipboard_receipt: None,
+            graphics: crate::terminal::kitty_graphics::HostGraphicsCache::default(),
         }
     }
 
@@ -1931,6 +1933,7 @@ fn render_client(
             previous.width != client.render_buf.area.width
                 || previous.height != client.render_buf.area.height
         });
+    let graphics = kitty_frame_bytes(app, client, full);
     let message = if full {
         let mut frame = protocol::frame_from_buffer(
             &client.render_buf,
@@ -1939,10 +1942,12 @@ fn render_client(
             protocol::HostCursorStyle::from_appearance(cursor_style),
         );
         frame.hyperlinks = protocol::frame_hyperlinks(&frame, &client.retained_hyperlinks);
-        client.last_frame = Some(frame);
-        Some(ServerMessage::Frame(
-            client.last_frame.as_ref().expect("frame stored").clone(),
-        ))
+        frame.graphics = graphics;
+        client.last_frame = Some(frame.clone());
+        if let Some(stored) = client.last_frame.as_mut() {
+            stored.graphics.clear();
+        }
+        Some(ServerMessage::Frame(frame))
     } else {
         let previous = client.last_frame.as_mut().expect("frame baseline exists");
         let cursor_style = protocol::HostCursorStyle::from_appearance(cursor_style);
@@ -1958,8 +1963,10 @@ fn render_client(
         previous.cursor_visible = cursor_visible;
         previous.cursor_style = cursor_style;
         if hyperlinks_changed || linked_cells_changed {
-            Some(ServerMessage::Frame(previous.clone()))
-        } else if runs.is_empty() && !cursor_moved {
+            let mut frame = previous.clone();
+            frame.graphics = graphics;
+            Some(ServerMessage::Frame(frame))
+        } else if runs.is_empty() && !cursor_moved && graphics.is_empty() {
             None
         } else {
             Some(ServerMessage::FrameDiff(protocol::FrameDiff {
@@ -1969,6 +1976,7 @@ fn render_client(
                 cursor,
                 cursor_visible,
                 cursor_style,
+                graphics,
             }))
         }
     };
@@ -2012,6 +2020,44 @@ fn render_client(
 struct RenderClientOutcome {
     enqueued: bool,
     disconnected: bool,
+}
+
+fn kitty_frame_bytes(app: &App, client: &mut ClientState, replay: bool) -> Vec<u8> {
+    if replay {
+        client.graphics.request_replay();
+    }
+    let mut live = HashSet::new();
+    let mut placements = Vec::new();
+    for (id, pane) in &app.panes {
+        live.insert(id.0);
+        let Ok(engine) = pane.engine.lock() else {
+            continue;
+        };
+        if !engine.has_kitty_graphics() {
+            continue;
+        }
+        let Some(area) = client
+            .retained_pane_content
+            .iter()
+            .find_map(|(pane_id, rect)| (*pane_id == *id).then_some(*rect))
+        else {
+            continue;
+        };
+        for visible in engine.kitty_visible_placements(client.cell_width_px, client.cell_height_px)
+        {
+            placements.push(crate::terminal::kitty_graphics::ScreenPlacement {
+                pane_id: id.0,
+                area_x: area.x,
+                area_y: area.y,
+                area_width: area.width,
+                area_height: area.height,
+                cell_width_px: u32::from(client.cell_width_px),
+                cell_height_px: u32::from(client.cell_height_px),
+                visible,
+            });
+        }
+    }
+    crate::terminal::kitty_graphics::encode_host_frame(&mut client.graphics, &placements, &live)
 }
 
 fn bind_client_listener(
@@ -3840,6 +3886,7 @@ mod tests {
                 cursor: None,
                 cursor_visible: false,
                 cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+                graphics: Vec::new(),
             })
         };
 
@@ -3917,6 +3964,7 @@ mod tests {
                 cursor: None,
                 cursor_visible: false,
                 cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+                graphics: Vec::new(),
             }))
             .is_ok());
         assert!(client.send_control(ServerMessage::Detach).is_ok());

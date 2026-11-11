@@ -126,6 +126,11 @@ pub struct Row<T> {
 
     /// Logical column count. This differs from `inner.len()` while compacted.
     columns: u32,
+
+    /// Luvus-owned identity for graphics anchored to this row. Zero means the
+    /// row has no placement. Reset clears it; scrolling keeps it with the row
+    /// so images follow text without Unicode placeholders. Not serialized.
+    graphics_anchor: u64,
 }
 
 // Keep Alacritty's established `{ inner, occ }` wire shape. The compact form
@@ -195,6 +200,7 @@ impl<T: Default> Row<T> {
             inner: RowStorage::Dense(inner),
             occ: 0,
             columns: u32::try_from(columns).expect("terminal row width exceeds u32"),
+            graphics_anchor: 0,
         }
     }
 
@@ -206,6 +212,7 @@ impl<T: Default> Row<T> {
             inner: RowStorage::Uniform(fill),
             occ: 0,
             columns: u32::try_from(columns).expect("terminal row width exceeds u32"),
+            graphics_anchor: 0,
         }
     }
 
@@ -293,6 +300,7 @@ impl<T: Default> Row<T> {
                 dense.resize(reusable_prefix, fill);
             }
             self.occ = 0;
+            self.graphics_anchor = 0;
             return;
         }
 
@@ -310,6 +318,7 @@ impl<T: Default> Row<T> {
         dense.resize(reusable_prefix, fill);
         self.inner = RowStorage::Dense(dense);
         self.occ = 0;
+        self.graphics_anchor = 0;
     }
 }
 
@@ -322,7 +331,24 @@ impl<T> Row<T> {
             inner: RowStorage::Dense(vec),
             occ: u32::try_from(occ.min(columns)).expect("terminal row occupancy exceeds u32"),
             columns: u32::try_from(columns).expect("terminal row width exceeds u32"),
+            graphics_anchor: 0,
         }
+    }
+
+    /// Identity of a Kitty graphics placement anchored to this row.
+    ///
+    /// Zero means the row has no placement. The value survives scrolling
+    /// because the row storage moves with the text, and [`Self::reset`]
+    /// clears it when the row is reused.
+    #[inline]
+    pub fn graphics_anchor(&self) -> u64 {
+        self.graphics_anchor
+    }
+
+    /// Attach a graphics placement to this row. `0` clears the anchor.
+    #[inline]
+    pub fn set_graphics_anchor(&mut self, anchor: u64) {
+        self.graphics_anchor = anchor;
     }
 
     #[inline]

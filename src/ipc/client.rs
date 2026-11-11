@@ -416,7 +416,8 @@ where
                     frame.cursor_style,
                     host_cursor,
                     |backend| {
-                        write_hyperlink_runs(backend, &frame, truecolor, allow_local_file_links)
+                        write_hyperlink_runs(backend, &frame, truecolor, allow_local_file_links)?;
+                        write_host_graphics(backend, &frame.graphics)
                     },
                 );
                 sync_end();
@@ -441,7 +442,7 @@ where
                     &mut last_cursor,
                     diff.cursor_style,
                     host_cursor,
-                    |_| Ok(()),
+                    |backend| write_host_graphics(backend, &diff.graphics),
                 );
                 sync_end();
                 if r.is_err() {
@@ -1040,6 +1041,16 @@ pub(crate) struct AppliedHostCursor {
     shape_changed: bool,
     /// OSC 12 was written. OSC 112 on exit is not sent unless this is set.
     color_changed: bool,
+}
+
+pub(crate) fn write_host_graphics(
+    out: &mut impl std::io::Write,
+    graphics: &[u8],
+) -> std::io::Result<()> {
+    if graphics.is_empty() {
+        return Ok(());
+    }
+    out.write_all(graphics)
 }
 
 pub(crate) fn apply_host_cursor(
@@ -1684,6 +1695,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let diff = FrameDiff {
             width: 1,
@@ -1698,6 +1710,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         for truecolor in [true, false] {
             let full = frame_cells(&frame, truecolor);
@@ -1734,6 +1747,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let cells = super::frame_cells(&frame, true);
         let syms: Vec<(u16, String)> = cells
@@ -2321,6 +2335,7 @@ mod render_tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let f1 = FrameData {
             width: 3,
@@ -2330,6 +2345,7 @@ mod render_tests {
             cursor: Some((1, 0)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
 
         let mut term = Terminal::new(TestBackend::new(3, 1)).unwrap();
@@ -2351,6 +2367,7 @@ mod render_tests {
             cursor: f1.cursor,
             cursor_visible: f1.cursor_visible,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,
@@ -2472,6 +2489,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let mut last = None;
         paint(
@@ -2499,6 +2517,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let diff = FrameDiff {
             width: 8,
@@ -2507,6 +2526,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,
@@ -2537,6 +2557,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let mut last = None;
         paint(
@@ -2563,6 +2584,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let diff = FrameDiff {
             width: 8,
@@ -2571,6 +2593,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,
@@ -2602,6 +2625,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,
@@ -2635,6 +2659,7 @@ mod paint_tests {
             cursor: Some((3, 5)),
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,

@@ -648,6 +648,21 @@ pub trait VtEngine: Send {
     /// Dump the visible screen as ANSI so it can be replayed into a fresh
     /// engine on restore (session persistence). Trailing blanks are trimmed.
     fn snapshot_ansi(&self) -> String;
+
+    /// Whether this pane currently holds Kitty image placements.
+    fn has_kitty_graphics(&self) -> bool {
+        false
+    }
+
+    /// Placements visible in the current viewport, clipped later by the pane
+    /// rectangle. `cell_*_px` sizes rows and columns when the child omitted them.
+    fn kitty_visible_placements(
+        &self,
+        _cell_width_px: u16,
+        _cell_height_px: u16,
+    ) -> Vec<crate::terminal::kitty_graphics::VisiblePlacement> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

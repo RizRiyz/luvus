@@ -712,6 +712,26 @@ impl<T> Term<T> {
         &mut self.grid
     }
 
+    /// Visit graphics anchors still attached to either screen buffer.
+    ///
+    /// Placements whose rows were reset or dropped from history disappear
+    /// here, while anchors on the inactive alternate or primary grid remain.
+    pub fn for_each_graphics_anchor(&self, mut visit: impl FnMut(u64)) {
+        Self::visit_grid_anchors(&self.grid, &mut visit);
+        Self::visit_grid_anchors(&self.inactive_grid, &mut visit);
+    }
+
+    fn visit_grid_anchors(grid: &Grid<Cell>, visit: &mut impl FnMut(u64)) {
+        let start = grid.topmost_line().0;
+        let end = grid.bottommost_line().0;
+        for line in start..=end {
+            let anchor = grid[Line(line)].graphics_anchor();
+            if anchor != 0 {
+                visit(anchor);
+            }
+        }
+    }
+
     /// Release inactive cached rows in both the primary and alternate grids.
     pub fn compact_history(&mut self) {
         self.grid.compact_history();
