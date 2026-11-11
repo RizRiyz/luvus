@@ -29,11 +29,20 @@ pub(crate) const GRAPHICS_TEMP_ANCHOR: u64 = 1 << 62;
 thread_local! {
     static HOST_DRAW: RefCell<Arc<AtomicBool>> =
         RefCell::new(Arc::new(AtomicBool::new(false)));
+    static RUNTIME_CELLS: std::cell::Cell<(u16, u16)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 /// Engines created on this thread share the server's host-draw flag.
 pub(crate) fn install_host_draw(flag: Arc<AtomicBool>) {
     HOST_DRAW.with(|slot| *slot.borrow_mut() = flag);
+}
+
+pub(crate) fn install_runtime_cells(cells: (u16, u16)) {
+    RUNTIME_CELLS.with(|slot| slot.set(cells));
+}
+
+pub(crate) fn current_runtime_cells() -> (u16, u16) {
+    RUNTIME_CELLS.with(|slot| slot.get())
 }
 
 pub(crate) fn current_host_draw() -> Arc<AtomicBool> {
@@ -85,6 +94,26 @@ enum ParseState {
 pub(crate) struct ParsedCommand {
     entries: Vec<(char, String)>,
     payload: Vec<u8>,
+}
+
+impl ParsedCommand {
+    /// Account decoded payload, metadata allocations and even empty commands.
+    pub(crate) fn held_bytes(&self) -> usize {
+        self.payload
+            .capacity()
+            .saturating_add(
+                self.entries
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(char, String)>()),
+            )
+            .saturating_add(
+                self.entries
+                    .iter()
+                    .map(|(_, value)| value.capacity())
+                    .sum::<usize>(),
+            )
+            .saturating_add(std::mem::size_of::<Self>())
+    }
 }
 
 #[derive(Debug)]
@@ -941,17 +970,10 @@ impl PaneGraphics {
         if keys.medium != 'd' || keys.compression == 'z' {
             return error_action(&keys, "EINVAL").into_iter().collect();
         }
-        if keys.action == 'f' {
-            let Some(id) = keys.image_id else {
-                return error_action(&keys, "EINVAL").into_iter().collect();
-            };
-            if !self.images.contains_key(&id) || !self.store_image(id, &keys, data) {
-                return error_action(&keys, "EINVAL").into_iter().collect();
-            }
-            return assigned_reply(&keys, Some(id))
-                .map(GraphicsAction::Reply)
-                .into_iter()
-                .collect();
+        // Animation frames have separate compositing/selection semantics. Until
+        // those are supported, never acknowledge a frame by replacing the base.
+        if matches!(keys.action, 'f' | 'a' | 'c') {
+            return error_action(&keys, "ENOTSUPPORTED").into_iter().collect();
         }
         let image_id = if matches!(keys.action, 't' | 'T') || !data.is_empty() {
             let id = keys.image_id.unwrap_or_else(|| self.allocate_image_id());
@@ -1306,6 +1328,8 @@ pub(crate) struct HostGraphicsCache {
     /// `0` uses [`GRAPHICS_FRAME_BUDGET`]. Tests lower it to prove a second
     /// image waits for the next frame.
     budget_override: usize,
+    /// Zero uses the full protocol range; tests exercise exhaustion with two ids.
+    placement_id_limit: u32,
 }
 
 impl HostGraphicsCache {
@@ -1369,6 +1393,38 @@ pub(crate) fn encode_host_frame(
         forget_source(cache, &mut out, source, host_id);
     }
 
+    let desired_placements = placements
+        .iter()
+        .filter(|p| clip_placement(p).is_some())
+        .map(|p| HostPlacementKey {
+            pane_id: p.pane_id,
+            image_id: p.visible.image_id,
+            placement_id: p.visible.placement_id,
+        })
+        .collect::<HashSet<_>>();
+    // Delete before reusing an id. Otherwise a stale delete can erase the new
+    // placement allocated the same id in this frame.
+    let retired = cache
+        .host_placements
+        .iter()
+        .filter(|(key, _)| !desired_placements.contains(key))
+        .map(|(key, id)| (*key, *id))
+        .collect::<Vec<_>>();
+    for (key, id) in retired {
+        if let Some(host) = cache
+            .sources
+            .get(&SourceKey {
+                pane_id: key.pane_id,
+                image_id: key.image_id,
+            })
+            .copied()
+        {
+            if cache.placements.remove(&(host, id)).is_some() {
+                encode_delete_placement(&mut out, host, id);
+            }
+        }
+        cache.host_placements.remove(&key);
+    }
     let mut planned = Vec::new();
     for placement in placements {
         let Some((clipped, _)) = clip_placement(placement) else {
@@ -1385,12 +1441,15 @@ pub(crate) fn encode_host_frame(
             fingerprint: placement.visible.fingerprint,
         };
         let host_id = host_image_id_for(cache, &mut out, source, signature);
-        let placement_id = host_placement_id_for(
+        let Some(placement_id) = host_placement_id_for(
             cache,
             placement.pane_id,
             placement.visible.image_id,
             placement.visible.placement_id,
-        );
+        ) else {
+            // Exhaustion is bounded; never spin on the server event loop.
+            continue;
+        };
         planned.push((host_id, placement_id, clipped, placement, signature));
     }
     let planned_keys = planned
@@ -1519,18 +1578,18 @@ fn host_placement_id_for(
     pane_id: u32,
     image_id: u32,
     placement_id: u32,
-) -> u32 {
+) -> Option<u32> {
     let key = HostPlacementKey {
         pane_id,
         image_id,
         placement_id,
     };
     if let Some(id) = cache.host_placements.get(&key).copied() {
-        return id;
+        return Some(id);
     }
-    let id = allocate_host_placement(cache);
+    let id = allocate_host_placement(cache)?;
     cache.host_placements.insert(key, id);
-    id
+    Some(id)
 }
 
 fn allocate_host_image(cache: &mut HostGraphicsCache) -> u32 {
@@ -1548,10 +1607,18 @@ fn allocate_host_image(cache: &mut HostGraphicsCache) -> u32 {
     }
 }
 
-fn allocate_host_placement(cache: &mut HostGraphicsCache) -> u32 {
-    loop {
+fn allocate_host_placement(cache: &mut HostGraphicsCache) -> Option<u32> {
+    let limit = if cache.placement_id_limit == 0 {
+        900_000
+    } else {
+        cache.placement_id_limit
+    };
+    if cache.host_placements.len() >= limit as usize {
+        return None;
+    }
+    for _ in 0..limit {
         cache.next_host_placement = cache.next_host_placement.saturating_add(1);
-        if cache.next_host_placement == 0 || cache.next_host_placement > 900_000 {
+        if cache.next_host_placement == 0 || cache.next_host_placement > limit {
             cache.next_host_placement = 1;
         }
         let id = cache.next_host_placement;
@@ -1560,9 +1627,10 @@ fn allocate_host_placement(cache: &mut HostGraphicsCache) -> u32 {
             .values()
             .any(|existing| *existing == id)
         {
-            return id;
+            return Some(id);
         }
     }
+    None
 }
 
 fn forget_source(
@@ -2172,19 +2240,25 @@ mod tests {
     }
 
     #[test]
-    fn animation_frame_updates_the_saved_image_for_a_later_client() {
+    fn unsupported_animation_preserves_base_image_for_a_later_client() {
         use crate::terminal::vt::VtEngine;
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 5, tx, 64 * 1024);
         let first = rgba(1, 1, 1);
         let second = rgba(1, 1, 2);
         engine.advance(&transmit(b'a', b'T', 4, &first, false));
         engine.finish_output_batch();
-        engine.advance(&transmit(b'a', b'f', 4, &second, false));
+        let frame_command = transmit(b'a', b'f', 4, &second, false);
+        let frame_command = String::from_utf8(frame_command)
+            .unwrap()
+            .replace("q=2", "q=0");
+        engine.advance(frame_command.as_bytes());
+        let reply = text(&input_bytes(rx.try_recv().unwrap()));
+        assert!(reply.contains("ENOTSUPPORTED"), "{reply}");
         engine.finish_output_batch();
         let placed = engine.kitty_visible_placements(10, 20);
         assert_eq!(placed.len(), 1);
-        assert_eq!(&*placed[0].data, second.as_slice());
+        assert_eq!(&*placed[0].data, first.as_slice());
 
         let mut cache = HostGraphicsCache::default();
         let replay = frame(
@@ -2195,7 +2269,7 @@ mod tests {
         let replay = text(&replay);
         assert!(replay.contains("a=t"), "{replay}");
         let mut encoded = Vec::new();
-        base64_encode(&second, &mut encoded);
+        base64_encode(&first, &mut encoded);
         assert!(
             replay.contains(std::str::from_utf8(&encoded).unwrap()),
             "{replay}"
@@ -2408,6 +2482,64 @@ mod tests {
     }
 
     #[test]
+    fn host_placement_ids_are_retired_and_exhaustion_is_bounded() {
+        let mut cache = HostGraphicsCache {
+            placement_id_limit: 2,
+            ..Default::default()
+        };
+        let live = HashSet::from([1]);
+        for id in 1..100 {
+            let mut image = visible(0, 0, 0);
+            image.placement_id = id;
+            frame(&mut cache, &[screen(1, image)], &live);
+            assert_eq!(cache.host_placements.len(), 1);
+        }
+        let mut images = vec![screen(1, visible(0, 0, 0)); 3];
+        for (i, p) in images.iter_mut().enumerate() {
+            p.visible.placement_id = i as u32 + 100;
+        }
+        frame(&mut cache, &images, &live);
+        assert_eq!(cache.host_placements.len(), 2);
+        assert_eq!(allocate_host_placement(&mut cache), None);
+    }
+
+    #[test]
+    fn placeholder_utf8_and_marks_split_at_every_byte() {
+        let text = "A\u{10EEEE}\u{0301}B".as_bytes();
+        for split in 1..text.len() {
+            let mut parser = GraphicsParser::default();
+            let mut plain = Vec::new();
+            for bytes in [&text[..split], &text[split..]] {
+                for event in parser.drain(bytes) {
+                    if let StreamEvent::Plain(bytes) = event {
+                        plain.extend(bytes);
+                    }
+                }
+            }
+            assert_eq!(plain, b"A B", "split {split}");
+        }
+    }
+
+    #[test]
+    fn passive_projection_does_not_change_runtime_cell_size() {
+        use crate::terminal::vt::VtEngine;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 6, tx, 64 * 1024);
+        // Foreground has 10px cells, passive display has 1px cells.
+        engine.set_runtime_cell_pixels(10, 10);
+        engine.kitty_visible_placements(10, 10);
+        engine.kitty_visible_placements(1, 1);
+        let pixels = rgba(20, 10, 3);
+        let mut payload = Vec::new();
+        base64_encode(&pixels, &mut payload);
+        let mut command = b"\x1b_Ga=T,f=32,s=20,v=10,i=4,q=2;".to_vec();
+        command.extend_from_slice(&payload);
+        command.extend_from_slice(b"\x1b\\");
+        engine.advance(&command);
+        assert_eq!((engine.cursor().x, engine.cursor().y), (2, 1));
+    }
+
+    #[test]
     fn placeholder_marks_from_the_next_read_do_not_stick() {
         let mut parser = GraphicsParser::default();
         let first = parser.drain("\u{10EEEE}".as_bytes());
@@ -2531,7 +2663,7 @@ mod tests {
         use crate::terminal::vt::VtEngine;
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut engine = crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 6, tx, 64 * 1024);
-        engine.kitty_visible_placements(10, 10);
+        engine.set_runtime_cell_pixels(10, 10);
         let pixels = rgba(20, 10, 3);
         let mut payload = Vec::new();
         base64_encode(&pixels, &mut payload);

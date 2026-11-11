@@ -664,6 +664,14 @@ pub trait VtEngine: Send {
         Vec::new()
     }
 
+    #[cfg(test)]
+    fn host_graphics_ready(&self) -> bool {
+        false
+    }
+
+    /// Foreground runtime geometry, never updated by passive projections.
+    fn set_runtime_cell_pixels(&mut self, _width: u16, _height: u16) {}
+
     /// Images this pane still stores, including ones scrolled out of view.
     fn retained_kitty_images(&self) -> Vec<(u32, u64)> {
         Vec::new()

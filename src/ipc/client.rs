@@ -346,11 +346,7 @@ where
         Vec::new()
     };
     if !input.started {
-        let (graphics, extra) = if probe_terminal {
-            crate::terminal::theme_probe::probe_kitty_graphics()
-        } else {
-            (None, Vec::new())
-        };
+        let (graphics, extra) = crate::terminal::theme_probe::probe_kitty_graphics();
         input.graphics_supported = graphics == Some(true);
         remember_graphics_supported(input.graphics_supported);
         pending.extend(extra);
@@ -748,13 +744,6 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
                 crate::terminal::theme_probe::HostReport::Graphics(supported) => {
                     remember_graphics_supported(supported);
                     ClientMessage::HostGraphics { supported }
-                }
-                crate::terminal::theme_probe::HostReport::CellSize(width, height) => {
-                    remember_cell_fallback(Some((width, height)));
-                    ClientMessage::CellPixels {
-                        cell_width_px: width,
-                        cell_height_px: height,
-                    }
                 }
             };
             reports.send_if_generation(reports.generation(), message);

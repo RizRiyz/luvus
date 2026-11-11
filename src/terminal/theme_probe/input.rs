@@ -123,9 +123,15 @@ impl ColorReplyFilter {
             for byte in bytes {
                 match kind {
                     ReportKind::CellSize => {
+                        if !byte.is_ascii_digit() && !matches!(*byte, b';' | b't') {
+                            self.clear();
+                            return self.push_current(event, now);
+                        }
                         self.bytes.push(*byte);
                         if *byte == b't' {
-                            super::note_cell_size_reply(&self.bytes);
+                            // Only the initial bounded raw query can establish
+                            // geometry. Crossterm discards complete late CSI t
+                            // reports; event reconstruction is not a raw path.
                             self.clear();
                             return DecodedEvents::None;
                         }
@@ -659,6 +665,10 @@ mod tests {
         assert!(filter_bytes(partial).is_empty());
         let cell = b"\x1b[6;20;10t!";
         assert_eq!(filter_bytes(cell), super::super::decode_pending_input(b"!"));
+        assert_eq!(
+            filter_bytes(b"\x1b[6;20;x!"),
+            super::super::decode_pending_input(b"x!")
+        );
         let partial_cell = b"\x1b[6;20;10";
         assert!(filter_bytes(partial_cell).is_empty());
     }

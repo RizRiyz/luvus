@@ -157,29 +157,35 @@ pub fn probe() -> ProbeResult {
     ProbeResult::default()
 }
 
+#[cfg(unix)]
 const GRAPHICS_QUERY: &[u8] = b"\x1b_Gi=1917,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\";
+#[cfg(unix)]
 const CELL_SIZE_QUERY: &[u8] = b"\x1b[16t";
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostReport {
     Graphics(bool),
-    CellSize(u16, u16),
 }
 
+#[cfg(unix)]
 type HostReportHandler = Box<dyn Fn(HostReport) + Send>;
 
+#[cfg(unix)]
 fn host_report_slot() -> &'static std::sync::Mutex<Option<HostReportHandler>> {
     static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<HostReportHandler>>> =
         std::sync::OnceLock::new();
     SLOT.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+#[cfg(unix)]
 pub(crate) fn set_host_report_handler(handler: impl Fn(HostReport) + Send + 'static) {
     *host_report_slot()
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = Some(Box::new(handler));
 }
 
+#[cfg(unix)]
 fn notify_host_report(report: HostReport) {
     let handler = host_report_slot()
         .lock()
@@ -195,6 +201,7 @@ fn notify_host_report(report: HostReport) {
 
 /// The one-pixel query is `i=1917`. Other Kitty replies are still swallowed so
 /// they cannot become keys, but only this id changes host support.
+#[cfg(any(unix, test))]
 pub(crate) fn parse_probe_graphics(data: &[u8]) -> Option<bool> {
     let marker = b"\x1b_Gi=1917;";
     let start = data
@@ -216,6 +223,7 @@ pub(crate) fn parse_probe_graphics(data: &[u8]) -> Option<bool> {
 }
 
 /// `CSI 6 ; height ; width t`. Zero and implausible sizes are not a cell size.
+#[cfg(any(unix, test))]
 pub(crate) fn parse_cell_size_report(data: &[u8]) -> Option<(u16, u16)> {
     let marker = b"\x1b[6;";
     let start = data
@@ -233,15 +241,10 @@ pub(crate) fn parse_cell_size_report(data: &[u8]) -> Option<(u16, u16)> {
     Some((width, height))
 }
 
+#[cfg(unix)]
 pub(crate) fn note_graphics_reply(bytes: &[u8]) {
     if let Some(supported) = parse_probe_graphics(bytes) {
         notify_host_report(HostReport::Graphics(supported));
-    }
-}
-
-pub(crate) fn note_cell_size_reply(bytes: &[u8]) {
-    if let Some((width, height)) = parse_cell_size_report(bytes) {
-        notify_host_report(HostReport::CellSize(width, height));
     }
 }
 

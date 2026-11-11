@@ -532,15 +532,10 @@ fn negotiate_local(
     if probe_terminal {
         protocol::write_message(writer, &ClientMessage::TerminalColors(probe.colors.clone()))?;
     }
-    let graphics_supported = if probe_terminal {
-        let (graphics, extra) = probe_graphics();
-        probe.pending.extend(extra);
-        let supported = graphics == Some(true);
-        super::client::remember_graphics_supported(supported);
-        supported
-    } else {
-        super::client::graphics_supported()
-    };
+    let (graphics, extra) = probe_graphics();
+    probe.pending.extend(extra);
+    let graphics_supported = graphics == Some(true);
+    super::client::remember_graphics_supported(graphics_supported);
     if crate::terminal::kitty_graphics::cell_size_query_required(
         graphics_supported,
         super::client::reported_ioctl_cells(),
@@ -1098,13 +1093,6 @@ fn start_input_reader(pending: Vec<Event>, events: Sender<ShellEvent>) -> Result
                         crate::terminal::theme_probe::HostReport::Graphics(supported) => {
                             super::client::remember_graphics_supported(supported);
                             ClientMessage::HostGraphics { supported }
-                        }
-                        crate::terminal::theme_probe::HostReport::CellSize(width, height) => {
-                            super::client::remember_cell_fallback(Some((width, height)));
-                            ClientMessage::CellPixels {
-                                cell_width_px: width,
-                                cell_height_px: height,
-                            }
                         }
                     };
                     let _ = reports.send(ShellEvent::Input(message));
@@ -5858,6 +5846,8 @@ mod tests {
 
             let client = crate::ipc::transport::connect(&sock).unwrap();
             let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let graphics_probed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let graphics_probe_flag = graphics_probed.clone();
             std::thread::spawn(move || {
                 let mut writer = client.clone();
                 let result = negotiate_local(
@@ -5869,7 +5859,10 @@ mod tests {
                         colors: None,
                         pending: Vec::new(),
                     },
-                    || (None, Vec::new()),
+                    || {
+                        graphics_probe_flag.store(true, std::sync::atomic::Ordering::Release);
+                        (None, Vec::new())
+                    },
                     || (None, Vec::new()),
                 );
                 let result = result.map(|_| ()).map_err(|error| error.to_string());
@@ -5895,6 +5888,10 @@ mod tests {
                 .recv_timeout(Duration::from_secs(10))
                 .expect("client negotiation must finish");
             assert_eq!(result, Ok(()));
+            assert!(
+                graphics_probed.load(std::sync::atomic::Ordering::Acquire),
+                "graphics is independent of palette probe"
+            );
             let _ = std::fs::remove_file(&sock);
             let _ = std::fs::remove_dir(&dir);
         }

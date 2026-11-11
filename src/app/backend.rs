@@ -800,6 +800,8 @@ impl App {
         let shell = crate::platform::resolve_shell(&self.config.shell);
         let history_budget = self.config.scrollback_bytes();
         let appearance = self.pane_appearance;
+        let host_draw = self.host_draw.clone();
+        let runtime_cells = (self.cell_width_px, self.cell_height_px);
         let app_tx = self.app_tx.clone();
         let event_tx = self.app_tx.clone();
         let pending_deletes = self
@@ -808,6 +810,8 @@ impl App {
             .cloned()
             .collect::<Vec<_>>();
         std::thread::spawn(move || {
+            crate::terminal::kitty_graphics::install_host_draw(host_draw);
+            crate::terminal::kitty_graphics::install_runtime_cells(runtime_cells);
             let canonical = std::fs::canonicalize(&cwd)
                 .map_err(|_| "cwd does not exist or cannot be resolved".to_string())
                 .and_then(|resolved| {
@@ -1770,6 +1774,9 @@ mod tests {
         let _env = crate::persist::test_env("backend-create-restore-default");
         let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
+        app.host_draw
+            .store(true, std::sync::atomic::Ordering::Release);
+        app.set_client_cell_pixels(10, 20);
         let (reply, response) = std::sync::mpsc::channel();
         app.start_backend_create(ApiRequest {
             id: "create-restore-default".into(),
@@ -1807,6 +1814,20 @@ mod tests {
                 .unwrap(),
         );
         assert!(!app.backend_non_restorable.contains(&pane));
+        // The creation worker has its own thread-local defaults. Its engine
+        // must use the app Arc, not a permanently-false worker-local flag.
+        assert!(app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .host_graphics_ready());
+        app.host_draw
+            .store(false, std::sync::atomic::Ordering::Release);
+        assert!(!app.panes[&pane]
+            .engine
+            .lock()
+            .unwrap()
+            .host_graphics_ready());
         let inventory = app.backend_inventory(&json!({})).unwrap();
         let pane_id = pane.0.to_string();
         let terminal = inventory["terminals"]

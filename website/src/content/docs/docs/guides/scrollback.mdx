@@ -82,6 +82,26 @@ terminal app has claimed paging input (for example a full-screen TUI or an
 application-cursor pager), Luvus forwards those keys unchanged. `Shift+↑`,
 `Shift+PageUp`, and prefix scroll shortcuts remain explicit Luvus controls.
 
+## Kitty images in terminal panes
+
+On Unix, thin clients probe the host terminal before displaying Kitty graphics.
+Images use direct placements clipped to the pane, not Unicode placeholder cells.
+They follow retained rows when scrolling and are hidden while a Luvus overlay
+covers the pane. Passive clients use their own display geometry without moving
+the child application's cursor.
+
+Cell pixels come from the host's ioctl first. If unavailable, a client whose
+host explicitly accepts graphics asks once with `CSI 16 t` during attachment.
+If that bounded query returns no valid size, graphics stay disabled: Luvus does
+not guess, poll, repeat the query, or acknowledge child graphics queries as
+supported. Late cell-size replies do not restore graphics through the current
+Crossterm input path. Reattach to try again. Windows and the `--local` text
+renderer do not currently advertise Kitty drawing support.
+
+Animation-frame transmission, selection, and composition (`a=f`, `a=a`, `a=c`)
+are not implemented. Luvus rejects those commands instead of overwriting a
+stored base image or acknowledging an animation that it cannot display.
+
 ## Copying
 
 Drag across a pane to select. Release requests a copy; the *Copied to Clipboard*

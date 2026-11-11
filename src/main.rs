@@ -1590,7 +1590,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     let host_draw = app.host_draw.clone();
     let (graphics, extra) = terminal::theme_probe::probe_kitty_graphics();
     let graphics_supported = graphics == Some(true);
-    host_draw.store(graphics_supported, std::sync::atomic::Ordering::Release);
+    // --local has no host placement encoder. Probing is still explicit, but
+    // never advertise child drawing support from a text-only render path.
+    host_draw.store(false, std::sync::atomic::Ordering::Release);
     pending.extend(extra);
     if terminal::kitty_graphics::cell_size_query_required(
         graphics_supported,
@@ -1604,9 +1606,8 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     }
     #[cfg(not(windows))]
     terminal::theme_probe::set_host_report_handler(move |report| {
-        if let terminal::theme_probe::HostReport::Graphics(supported) = report {
-            host_draw.store(supported, std::sync::atomic::Ordering::Release);
-        }
+        let terminal::theme_probe::HostReport::Graphics(_) = report;
+        host_draw.store(false, std::sync::atomic::Ordering::Release);
     });
     // Match the client path: query colors before enabling input protocols, so
     // any interleaved bytes are ordinary keys that can be replayed losslessly.

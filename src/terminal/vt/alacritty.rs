@@ -199,6 +199,7 @@ pub struct AlacrittyEngine {
     cell_height_px: Cell<u16>,
     /// Bytes and graphics commands held until CSI ?2026 l, in arrival order.
     sync_hold: Option<Vec<HeldPiece>>,
+    sync_held_bytes: usize,
     plain_prefix: Vec<u8>,
     gc_grid: u8,
     gc_line: i32,
@@ -289,9 +290,10 @@ impl AlacrittyEngine {
             damage_rows: Vec::new(),
             graphics: crate::terminal::kitty_graphics::PaneGraphics::default(),
             host_draw: crate::terminal::kitty_graphics::current_host_draw(),
-            cell_width_px: Cell::new(0),
-            cell_height_px: Cell::new(0),
+            cell_width_px: Cell::new(crate::terminal::kitty_graphics::current_runtime_cells().0),
+            cell_height_px: Cell::new(crate::terminal::kitty_graphics::current_runtime_cells().1),
             sync_hold: None,
+            sync_held_bytes: 0,
             plain_prefix: Vec::new(),
             gc_grid: 0,
             gc_line: 0,
@@ -302,6 +304,8 @@ impl AlacrittyEngine {
     }
 
     fn apply_history_budget(&mut self) {
+        self.gc_active = false;
+        self.gc_live.clear();
         self.history_maintenance_full_scan = true;
         self.history_maintenance_cursors = [0; 2];
         self.history_maintenance_pending = true;
@@ -561,7 +565,10 @@ impl VtEngine for AlacrittyEngine {
 
     fn finish_output_batch_step(&mut self) -> bool {
         if !self.history_maintenance_pending {
-            return false;
+            if self.gc_active {
+                self.collect_graphics_garbage();
+            }
+            return self.gc_active;
         }
         self.history_metrics_cache.set(None);
         self.history_maintenance_pending = self.term.finish_output_batch_step(
@@ -572,11 +579,11 @@ impl VtEngine for AlacrittyEngine {
             self.history_maintenance_full_scan = false;
             self.collect_graphics_garbage();
         }
-        self.history_maintenance_pending
+        self.history_maintenance_pending || self.gc_active
     }
 
     fn history_maintenance_pending(&self) -> bool {
-        self.history_maintenance_pending
+        self.history_maintenance_pending || self.gc_active
     }
 
     fn output_generation(&self) -> u64 {
@@ -584,6 +591,8 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn resize(&mut self, cols: u16, rows: u16) {
+        self.gc_active = false;
+        self.gc_live.clear();
         self.term.resize(Dims {
             cols: cols.max(1) as usize,
             rows: rows.max(1) as usize,
@@ -1695,6 +1704,16 @@ impl VtEngine for AlacrittyEngine {
         self.graphics.has_placements()
     }
 
+    #[cfg(test)]
+    fn host_graphics_ready(&self) -> bool {
+        self.host_draw.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn set_runtime_cell_pixels(&mut self, width: u16, height: u16) {
+        self.cell_width_px.set(width);
+        self.cell_height_px.set(height);
+    }
+
     fn retained_kitty_images(&self) -> Vec<(u32, u64)> {
         self.graphics.retained_images()
     }
@@ -1704,8 +1723,6 @@ impl VtEngine for AlacrittyEngine {
         cell_width_px: u16,
         cell_height_px: u16,
     ) -> Vec<crate::terminal::kitty_graphics::VisiblePlacement> {
-        self.cell_width_px.set(cell_width_px);
-        self.cell_height_px.set(cell_height_px);
         if !self.graphics.has_placements() {
             return Vec::new();
         }
@@ -1744,6 +1761,9 @@ impl VtEngine for AlacrittyEngine {
 
 impl AlacrittyEngine {
     fn ingest_child_output(&mut self, bytes: &[u8]) {
+        // Output may move/reset rows. Never commit a mixed-generation scan.
+        self.gc_active = false;
+        self.gc_live.clear();
         self.graphics
             .set_queries_enabled(self.host_draw.load(std::sync::atomic::Ordering::Acquire));
         if self.sync_hold.is_none()
@@ -1762,11 +1782,7 @@ impl AlacrittyEngine {
                     self.push_plain(plain);
                 }
                 crate::terminal::kitty_graphics::StreamEvent::Command(command) => {
-                    if let Some(hold) = self.sync_hold.as_mut() {
-                        hold.push(HeldPiece::Command(command));
-                    } else {
-                        self.apply_command(command);
-                    }
+                    self.push_command(command)
                 }
             }
         }
@@ -1803,30 +1819,64 @@ impl AlacrittyEngine {
         }
     }
 
+    fn reserve_sync_piece(&mut self, bytes: usize) -> bool {
+        // Vec growth can retain spare capacity for pieces/plain data. Charge
+        // headroom too, so the accounting bounds allocation, not just lengths.
+        let cost = bytes
+            .saturating_add(std::mem::size_of::<HeldPiece>())
+            .saturating_mul(2);
+        if self.sync_hold.is_some() && self.sync_held_bytes.saturating_add(cost) > SYNC_HOLD_LIMIT {
+            self.flush_sync(false);
+        }
+        if self.sync_hold.is_none() {
+            return false;
+        }
+        self.sync_held_bytes = self.sync_held_bytes.saturating_add(cost);
+        true
+    }
+
+    fn push_command(&mut self, command: crate::terminal::kitty_graphics::ParsedCommand) {
+        if self.reserve_sync_piece(command.held_bytes()) {
+            self.sync_hold
+                .as_mut()
+                .expect("bounded hold")
+                .push(HeldPiece::Command(command));
+        } else {
+            self.apply_command(command);
+        }
+    }
+
     fn hold_plain(&mut self, chunk: Vec<u8>) {
+        if chunk.capacity() > SYNC_HOLD_LIMIT / 2 {
+            for bytes in chunk.chunks(64 * 1024) {
+                self.push_plain(bytes.to_vec());
+            }
+            return;
+        }
+        if !self.reserve_sync_piece(chunk.capacity()) {
+            // The previous hold was committed before this piece; preserve order.
+            self.push_plain(chunk);
+            return;
+        }
         let hold = self.sync_hold.as_mut().expect("sync hold");
         if let Some(HeldPiece::Plain(existing)) = hold.last_mut() {
             existing.extend_from_slice(&chunk);
         } else if !chunk.is_empty() {
             hold.push(HeldPiece::Plain(chunk));
         }
-        let bytes = hold.iter().fold(0, |sum, piece| {
-            sum + match piece {
-                HeldPiece::Plain(bytes) => bytes.len(),
-                HeldPiece::Command(_) => 0,
-            }
-        });
+
         let closed = hold.iter().any(|piece| match piece {
             HeldPiece::Plain(bytes) => find_bytes(bytes, ESU).is_some(),
             HeldPiece::Command(_) => false,
         });
-        if closed || bytes >= SYNC_HOLD_LIMIT {
+        if closed || self.sync_held_bytes >= SYNC_HOLD_LIMIT {
             self.flush_sync(closed);
         }
     }
 
     fn flush_sync(&mut self, closed: bool) {
         let held = self.sync_hold.take().unwrap_or_default();
+        self.sync_held_bytes = 0;
         if !closed {
             let mut first_plain = true;
             for piece in held {
@@ -1883,13 +1933,7 @@ impl AlacrittyEngine {
         for piece in pending {
             match piece {
                 HeldPiece::Plain(bytes) => self.push_plain(bytes),
-                HeldPiece::Command(command) => {
-                    if let Some(hold) = self.sync_hold.as_mut() {
-                        hold.push(HeldPiece::Command(command));
-                    } else {
-                        self.apply_command(command);
-                    }
-                }
+                HeldPiece::Command(command) => self.push_command(command),
             }
         }
     }
@@ -3689,6 +3733,85 @@ mod tests {
         assert!(!capture.text.ends_with('\n'));
         assert_eq!(capture.cursor_offset, Some(capture.text.chars().count()));
         assert_eq!(capture.cursor_padding_cells, 1);
+    }
+
+    fn kitty_command(extra: &str) -> Vec<u8> {
+        format!("\x1b_Ga=T,f=32,s=1,v=1,i=4,q=2,{extra};AAAAAA==\x1b\\").into_bytes()
+    }
+
+    #[test]
+    fn kitty_sync_hold_bounds_payload_and_zero_payload_commands() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, 64 * 1024);
+        e.advance(b"\x1b[?2026h\x1b[3;4H");
+        for _ in 0..20_000 {
+            e.advance(b"\x1b_Ga=d,q=2;\x1b\\");
+            assert!(e.sync_held_bytes <= SYNC_HOLD_LIMIT);
+        }
+        e.advance(&kitty_command("c=1,r=1,C=1"));
+        // The bounded hold must have committed in arrival order even without ESU.
+        assert!(e.sync_hold.is_none());
+        let placements = e.kitty_visible_placements(10, 10);
+        assert_eq!(
+            (placements[0].viewport_col, placements[0].viewport_row),
+            (3, 2)
+        );
+    }
+
+    #[test]
+    fn kitty_sync_hold_counts_payload_metadata_and_preserves_order() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, 64 * 1024);
+        e.advance(b"\x1b[?2026h\x1b[3;4H");
+        let mut command = b"\x1b_Ga=T,f=32,s=1,v=1,i=4,q=2,C=1;".to_vec();
+        command.extend(std::iter::repeat_n(b'A', SYNC_HOLD_LIMIT * 2));
+        command.extend_from_slice(b"\x1b\\");
+        e.advance(&command);
+        assert!(
+            e.sync_hold.is_none(),
+            "oversized decoded payload flushes before append"
+        );
+        e.advance(b"X");
+        assert_eq!((e.cursor().x, e.cursor().y), (4, 2));
+        e.advance(b"\x1b[?2026h");
+        let mut metadata = b"\x1b_Ga=d,q=2,Z=".to_vec();
+        metadata.extend(std::iter::repeat_n(b'1', SYNC_HOLD_LIMIT));
+        metadata.extend_from_slice(b";\x1b\\");
+        e.advance(&metadata);
+        assert!(e.sync_hold.is_none(), "metadata is not free");
+        assert_eq!(e.sync_held_bytes, 0);
+    }
+
+    #[test]
+    fn kitty_gc_never_commits_a_scan_across_scroll() {
+        let (tx, _rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 5, tx, 8 * 1024 * 1024);
+        e.advance(&vec![b'\n'; 400]);
+        // Put an anchor just past the first bounded scan step in retained history.
+        let anchor_line = e.term.grid().topmost_line().0 + 130;
+        let mut placements = e.graphics.drain(&kitty_command("c=1,r=400,C=1"));
+        for event in placements.drain(..) {
+            if let crate::terminal::kitty_graphics::StreamEvent::Command(command) = event {
+                for action in e.graphics.apply(command) {
+                    if let crate::terminal::kitty_graphics::GraphicsAction::Place(placement) =
+                        action
+                    {
+                        let anchor = e.graphics.alloc_anchor(0);
+                        e.term.grid_mut()[Line(anchor_line)].set_graphics_anchor(anchor);
+                        e.graphics.record(anchor, 0, placement);
+                    }
+                }
+            }
+        }
+        e.collect_graphics_garbage();
+        e.advance(&[b'\n'; 10]);
+        for _ in 0..10 {
+            e.collect_graphics_garbage();
+        }
+        assert!(
+            e.graphics.has_placements(),
+            "moving rows invalidates the old scan"
+        );
     }
 
     /// Pi alt-screen `doRender`: 2026 + row writes + CUP to fake caret + hide.
