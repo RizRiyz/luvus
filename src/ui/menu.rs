@@ -16,6 +16,34 @@ struct MenuRow {
     destructive: bool,
 }
 
+fn popup_dimensions(area: Rect, rows: &[MenuRow], mobile: bool) -> (u16, u16, u16) {
+    let label_w = rows
+        .iter()
+        .map(|row| super::display_width(&row.text))
+        .max()
+        .unwrap_or(6) as u16;
+    let row_height = if mobile { 2 } else { 1 };
+    let width = if mobile {
+        area.width.max(1)
+    } else {
+        (label_w + 3).clamp(12, area.width.max(1))
+    };
+    let height = ((rows.len() as u16).saturating_mul(row_height) + 2).min(area.height.max(1));
+    (width, height, row_height)
+}
+
+/// Place a popup of `width` by `height` so its center is `center`, then move
+/// the whole rectangle back inside `area`. Clamping only the center would
+/// leave the box hanging off the edge.
+fn top_left_for_center(area: Rect, center: (u16, u16), width: u16, height: u16) -> (u16, u16) {
+    let x = center.0.saturating_sub(width / 2);
+    let y = center.1.saturating_sub(height / 2);
+    (
+        x.min(area.right().saturating_sub(width)).max(area.x),
+        y.min(area.bottom().saturating_sub(height)).max(area.y),
+    )
+}
+
 fn row_is_hovered(row: Rect, hover: Option<(u16, u16)>) -> bool {
     hover.is_some_and(|(column, pointer_row)| {
         column >= row.x
@@ -62,18 +90,7 @@ fn render_popup(
     } = ctx;
     let (ax, ay) = anchor;
     // Size the box to the widest label (+ a leading pad + the border).
-    let label_w = rows
-        .iter()
-        .map(|r| super::display_width(&r.text))
-        .max()
-        .unwrap_or(6) as u16;
-    let row_height = if mobile { 2 } else { 1 };
-    let w = if mobile {
-        area.width.max(1)
-    } else {
-        (label_w + 3).clamp(12, area.width.max(1))
-    };
-    let h = ((rows.len() as u16).saturating_mul(row_height) + 2).min(area.height.max(1));
+    let (w, h, row_height) = popup_dimensions(area, rows, mobile);
     let x = if mobile {
         area.x
     } else {
@@ -410,7 +427,8 @@ pub(super) fn draw_pane_menu(
     let Some(menu) = app.pane_menu.as_ref() else {
         return;
     };
-    let anchor = menu.anchor;
+    let mut anchor = menu.anchor;
+    let center_on_anchor = menu.center_on_anchor;
     let selected = menu.selected;
     let move_selected = menu.move_selected;
     let extras = menu.module_actions.clone();
@@ -428,6 +446,10 @@ pub(super) fn draw_pane_menu(
             destructive: matches!(it, PaneMenuItem::Close),
         })
         .collect();
+    if center_on_anchor && !app.compact {
+        let (width, height, _) = popup_dimensions(area, &rows, false);
+        anchor = top_left_for_center(area, anchor, width, height);
+    }
     let rects = render_popup(
         f,
         area,
@@ -473,6 +495,16 @@ pub(super) fn draw_pane_menu(
                     menu.move_open = false;
                 }
             }
+        }
+    }
+
+    // The parent row scrolled out of the popup, so there is nowhere to hang
+    // the submenu. Drop it instead of leaving keyboard actions on undrawn tabs.
+    // A keyboard selection on this row is revealed before these rects exist.
+    if move_rect.is_none() {
+        if let Some(menu) = app.pane_menu.as_mut() {
+            menu.move_open = false;
+            menu.move_selected = None;
         }
     }
 

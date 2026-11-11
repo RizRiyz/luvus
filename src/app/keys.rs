@@ -2188,6 +2188,222 @@ mod tests {
         assert!(menu.move_selected.is_none());
     }
 
+    fn visible_pane_popup(app: &App) -> ratatui::layout::Rect {
+        let rects: Vec<ratatui::layout::Rect> = app
+            .pane_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|(_, rect)| *rect)
+            .filter(|rect| rect.height > 0)
+            .collect();
+        assert!(!rects.is_empty(), "the pane menu drew no rows");
+        let top = rects[0];
+        let bottom = *rects.last().unwrap();
+        ratatui::layout::Rect::new(
+            top.x.saturating_sub(1),
+            top.y.saturating_sub(1),
+            top.width.saturating_add(2),
+            bottom.bottom().saturating_sub(top.y).saturating_add(2),
+        )
+    }
+
+    fn rect_center(rect: ratatui::layout::Rect) -> (u16, u16) {
+        (
+            rect.x.saturating_add(rect.width / 2),
+            rect.y.saturating_add(rect.height / 2),
+        )
+    }
+
+    #[test]
+    fn keyboard_pane_menu_is_centered_on_its_pane() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("pane-menu-center");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let pane = app.layout().focus;
+        let pane_rect = app
+            .pane_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .expect("focused pane geometry")
+            .1;
+
+        app.run_cmd(Cmd::PaneMenu);
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let popup = visible_pane_popup(&app);
+        assert_eq!(
+            rect_center(popup),
+            rect_center(pane_rect),
+            "the keyboard menu is centered on the pane, not hung from its center"
+        );
+        assert!(popup.right() <= 120 && popup.bottom() <= 40);
+
+        app.pane_menu = None;
+        let click = (pane_rect.x.saturating_add(1), pane_rect.y.saturating_add(1));
+        app.open_pane_menu(pane, click.0, click.1);
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let popup = visible_pane_popup(&app);
+        assert_eq!(
+            (popup.x, popup.y),
+            click,
+            "a right-click menu still starts at the click"
+        );
+
+        app.pane_menu = None;
+        app.pane_rects = vec![(pane, ratatui::layout::Rect::new(0, 0, 6, 4))];
+        app.open_focused_pane_menu();
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let popup = visible_pane_popup(&app);
+        assert_eq!((popup.x, popup.y), (0, 0));
+        assert!(popup.right() <= 120 && popup.bottom() <= 40);
+        assert_ne!(
+            (popup.x, popup.y),
+            (3, 2),
+            "an edge menu is clamped as a whole, not by its top-left"
+        );
+    }
+
+    fn open_scrollable_pane_menu(app: &mut App) -> crate::ids::PaneId {
+        app.run_cmd(Cmd::SplitRight);
+        let pane = app.layout().focus;
+        app.open_pane_menu(pane, 2, 2);
+        app.pane_menu.as_mut().unwrap().module_actions = (0..16)
+            .map(|index| crate::app::ModuleMenuAction {
+                module_id: format!("module-{index}"),
+                action_id: format!("action-{index}"),
+                title: format!("Action {index}"),
+            })
+            .collect();
+        pane
+    }
+
+    fn move_to_tab_rect(app: &App) -> ratatui::layout::Rect {
+        app.pane_menu
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .find(|(item, _)| *item == crate::app::PaneMenuItem::MoveToTab)
+            .expect("Move to Tab row")
+            .1
+    }
+
+    fn scroll_move_to_tab_offscreen(
+        app: &mut App,
+        term: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+    ) {
+        use ratatui::crossterm::event::MouseEventKind;
+
+        for _ in 0..40 {
+            term.draw(|frame| crate::ui::render(frame, app)).unwrap();
+            if move_to_tab_rect(app).height == 0 {
+                return;
+            }
+            let row = app
+                .pane_menu
+                .as_ref()
+                .unwrap()
+                .items
+                .iter()
+                .find(|(_, rect)| rect.height > 0)
+                .expect("a visible menu row")
+                .1;
+            app.handle_event(AppEvent::Mouse(ratatui::crossterm::event::MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: row.x.saturating_add(1),
+                row: row.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        panic!("Move to Tab stayed on screen");
+    }
+
+    #[test]
+    fn undrawn_move_to_tab_parent_does_not_move_on_enter() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("pane-menu-hidden-parent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 16, tx).unwrap();
+        let pane = open_scrollable_pane_menu(&mut app);
+        let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        scroll_move_to_tab_offscreen(&mut app, &mut term);
+        assert!(app.pane_menu.as_ref().unwrap().selected.is_none());
+        assert_eq!(move_to_tab_rect(&app).height, 0);
+
+        let menu = app.pane_menu.as_mut().unwrap();
+        menu.move_open = true;
+        menu.move_selected = Some(0);
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert!(
+            !menu.move_open && menu.move_selected.is_none() && menu.tab_rects.is_empty(),
+            "a hidden parent closes the submenu"
+        );
+
+        let menu = app.pane_menu.as_mut().unwrap();
+        menu.move_open = true;
+        menu.move_selected = Some(0);
+        app.hover = None;
+        let tabs = app.ws().tabs.len();
+        let active = app.ws().active_tab;
+        app.handle_pane_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.ws().tabs.len(),
+            tabs,
+            "Enter does not use an undrawn tab"
+        );
+        assert_eq!(app.ws().active_tab, active);
+        assert!(app.layout().leaves().contains(&pane));
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert!(!menu.move_open);
+        assert!(menu.move_selected.is_none());
+    }
+
+    #[test]
+    fn keyboard_selection_reveals_move_to_tab_before_drawing_submenu() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("pane-menu-reveal-parent");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 16, tx).unwrap();
+        open_scrollable_pane_menu(&mut app);
+        let mut term = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        scroll_move_to_tab_offscreen(&mut app, &mut term);
+        let parent = app
+            .pane_menu_items()
+            .iter()
+            .position(|item| *item == crate::app::PaneMenuItem::MoveToTab)
+            .unwrap();
+        let menu = app.pane_menu.as_mut().unwrap();
+        menu.selected = Some(parent);
+        menu.move_open = true;
+        menu.move_selected = Some(0);
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        assert!(
+            move_to_tab_rect(&app).height > 0,
+            "selection brings the parent back"
+        );
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert!(menu.move_open);
+        assert_eq!(menu.move_selected, Some(0));
+        assert!(
+            menu.tab_rects.iter().any(|(_, rect)| rect.height > 0),
+            "the submenu is drawn only after its parent is visible"
+        );
+    }
+
     #[test]
     fn pane_menu_same_row_motion_redraws_only_when_selection_is_cleared() {
         use ratatui::{backend::TestBackend, crossterm::event::MouseEventKind, Terminal};

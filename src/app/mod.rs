@@ -1004,8 +1004,11 @@ pub(crate) const FILE_NAME_MAX: usize = 120;
 pub struct PaneMenu {
     /// The right-clicked pane the actions target.
     pub pane: PaneId,
-    /// Top-left corner of the popup (the click point, clamped on-screen).
+    /// Click point, or the pane center when `center_on_anchor` is set.
     pub anchor: (u16, u16),
+    /// Keyboard opens center the popup on `anchor`. A pointer menu uses it as
+    /// the top-left, clamped with the rest of the popup.
+    pub center_on_anchor: bool,
     /// Each visible item + its clickable rect, filled in by the renderer.
     pub items: Vec<(PaneMenuItem, Rect)>,
     /// Keyboard-selected rendered item. Mouse-opened menus start without one.
@@ -7718,6 +7721,7 @@ impl App {
         self.pane_menu = Some(PaneMenu {
             pane,
             anchor: (col, row),
+            center_on_anchor: false,
             items: Vec::new(),
             selected: None,
             move_selected: None,
@@ -8118,7 +8122,7 @@ impl App {
 
     /// Open the focused pane's context menu from the keyboard.
     ///
-    /// The popup is anchored in that pane when its screen rect is known, and
+    /// The popup is centered on that pane when its screen rect is known, and
     /// the first action starts selected so it can be run without a pointer.
     pub fn open_focused_pane_menu(&mut self) {
         let pane = self.layout().focus;
@@ -8140,9 +8144,19 @@ impl App {
                 .iter()
                 .position(|item| *item != PaneMenuItem::Divider);
             if let Some(menu) = self.pane_menu.as_mut() {
+                menu.center_on_anchor = true;
                 menu.selected = first;
             }
         }
+    }
+
+    /// The Move to Tab row was drawn and then scrolled out of the popup.
+    fn move_to_tab_row_is_undrawn(&self) -> bool {
+        self.pane_menu.as_ref().is_some_and(|menu| {
+            menu.items
+                .iter()
+                .any(|(item, rect)| *item == PaneMenuItem::MoveToTab && rect.height == 0)
+        })
     }
 
     /// Keyboard navigation for the pane menu, matching the AGENTS and FILES menus.
@@ -8151,8 +8165,17 @@ impl App {
             return;
         }
         if self.pane_menu.as_ref().is_some_and(|menu| menu.move_open) {
-            self.handle_pane_move_menu_key(key);
-            return;
+            // A wheel can leave the submenu armed after its parent row has
+            // scrolled away. Do not act on destinations that are not drawn.
+            if self.move_to_tab_row_is_undrawn() {
+                if let Some(menu) = self.pane_menu.as_mut() {
+                    menu.move_open = false;
+                    menu.move_selected = None;
+                }
+            } else {
+                self.handle_pane_move_menu_key(key);
+                return;
+            }
         }
         let items = self.pane_menu_items();
         let selectable: Vec<usize> = items
