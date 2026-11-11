@@ -2920,7 +2920,11 @@ impl App {
                             ViewKind::Preview(view) => &view.search,
                             ViewKind::Diff(view) => &view.search,
                         };
+                        // A DIFF note owns text input the same way a search box
+                        // does: a focus change would send the next characters —
+                        // and the Enter that saves the note — to another pane.
                         search.as_ref().is_some_and(|search| search.editing)
+                            || matches!(view, ViewKind::Diff(view) if view.note_draft.is_some())
                     })
                     && self.pane_search.is_none()
                     && self.copy_mode.is_none()
@@ -9169,6 +9173,46 @@ mod link_click_tests {
             };
             assert_eq!(search.as_ref().unwrap().query, "needle");
         }
+        app.views.remove(&first);
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, second);
+    }
+
+    #[test]
+    fn hover_focus_preserves_a_diff_note_draft() {
+        let _env = crate::persist::test_env("hover-focus-diff-note");
+        let (mut app, first, second, at) = split_hover_fixture();
+        app.config.layout.focus_follows_mouse = true;
+        let path = crate::diff::RepoPath::from_path(std::path::Path::new("sample.txt")).unwrap();
+        let mut view = crate::diff::DiffView::new(
+            std::path::PathBuf::from("/repo"),
+            crate::diff::DiffKey {
+                repo_id: "repo".into(),
+                worktree_id: "tree".into(),
+                layer: crate::diff::DiffLayer::Worktree,
+                old_path: Some(path.clone()),
+                new_path: Some(path),
+            },
+            crate::diff::DiffLayoutPreference::Stack,
+            3,
+            false,
+            false,
+        );
+        view.note_draft = Some(String::new());
+        app.panes.remove(&first);
+        app.views.insert(first, ViewKind::Diff(Box::new(view)));
+
+        app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
+        assert_eq!(app.layout().focus, first);
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        let ViewKind::Diff(view) = app.views.get(&first).unwrap() else {
+            panic!("the DIFF view stays attached");
+        };
+        assert_eq!(view.note_draft.as_deref(), Some("x"));
+
         app.views.remove(&first);
         app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
         assert_eq!(app.layout().focus, second);
