@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 
 use crate::app::{App, SwitcherRow, SwitcherScope, SwitcherTarget};
 use crate::ui::theme::Theme;
@@ -16,7 +16,7 @@ pub(crate) fn render_navigator(f: &mut RenderTarget, area: Rect, app: &mut App, 
     // The navigator is a replacement surface, not a translucent overlay. A
     // styled Block changes colors but deliberately preserves cell symbols,
     // which would leave terminal/Git text visible through every unused cell.
-    f.render_widget(Clear, area);
+    f.clear_overlay(area);
     f.render_widget(Block::new().style(Style::new().bg(t.base)), area);
     app.switcher_rects.clear();
     app.switcher_scope_rects.clear();

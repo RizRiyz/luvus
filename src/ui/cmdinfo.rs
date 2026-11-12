@@ -11,7 +11,7 @@
 use super::help::{centered_rect, dim_backdrop, hline};
 use super::*;
 use crate::app::CmdInspect;
-use ratatui::widgets::{Borders, Clear};
+use ratatui::widgets::Borders;
 
 pub(super) fn draw(f: &mut RenderTarget, area: Rect, c: &CmdInspect, t: &Theme) {
     dim_backdrop(f, area, t);
@@ -21,7 +21,7 @@ pub(super) fn draw(f: &mut RenderTarget, area: Rect, c: &CmdInspect, t: &Theme) 
         .clamp(9, area.height.saturating_sub(2))
         .min(area.height);
     let modal = centered_rect(area, w, h);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))

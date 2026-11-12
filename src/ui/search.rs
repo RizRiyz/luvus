@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
 use crate::search::{SearchMatch, SearchScope};
@@ -31,6 +31,7 @@ fn highlighted_label<'a>(result: &'a SearchMatch, base: Style, accent: Style) ->
 }
 
 pub(super) fn draw_search(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
+    f.cover_graphics(area);
     {
         let buf = f.buffer_mut();
         for y in area.y..area.bottom() {
@@ -50,7 +51,7 @@ pub(super) fn draw_search(f: &mut RenderTarget, area: Rect, app: &mut App, t: &T
         width,
         height,
     );
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.accent).bg(t.base))

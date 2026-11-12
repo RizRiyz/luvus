@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::{
     BarHit, BarLayout, BarRegion, BarSegment, BarSegmentKind, BarState, BarTone, OverflowHit,
@@ -199,7 +199,7 @@ pub fn draw_overflow(f: &mut RenderTarget, area: Rect, state: &mut BarState, t: 
         BarRegion::BottomRight => area.bottom().saturating_sub(height + 1),
     };
     let modal = Rect::new(x, y, width, height);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))

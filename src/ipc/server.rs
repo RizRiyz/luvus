@@ -3,7 +3,7 @@
 //! Input arrives from clients; the JSON API also runs here. See docs/03, docs/08.
 
 use crate::ipc::transport::{self, Conn};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -236,6 +236,7 @@ struct ClientState {
     behind: bool,
     force_full: bool,
     retained_pane_content: Vec<(crate::ids::PaneId, Rect)>,
+    graphics_occlusion: crate::terminal::kitty_graphics::Occlusion,
     retained_hyperlinks: Vec<crate::app::RenderedHyperlink>,
     retained_ready: bool,
     last_activity: u64,
@@ -250,6 +251,10 @@ struct ClientState {
     last_shell_workspaces: Vec<protocol::ShellWorkspace>,
     shell_dock_dirty: bool,
     clipboard_receipt: Option<u64>,
+    graphics: crate::terminal::kitty_graphics::HostGraphicsCache,
+    graphics_supported: bool,
+    /// More image bytes were left for a later frame after the last send.
+    graphics_pending: bool,
 }
 
 #[derive(Default)]
@@ -282,6 +287,7 @@ impl ClientState {
             behind: false,
             force_full: true,
             retained_pane_content: Vec::new(),
+            graphics_occlusion: crate::terminal::kitty_graphics::Occlusion::default(),
             retained_hyperlinks: Vec::new(),
             retained_ready: false,
             last_activity,
@@ -296,7 +302,14 @@ impl ClientState {
             last_shell_workspaces: Vec::new(),
             shell_dock_dirty: false,
             clipboard_receipt: None,
+            graphics: crate::terminal::kitty_graphics::HostGraphicsCache::default(),
+            graphics_supported: false,
+            graphics_pending: false,
         }
+    }
+
+    fn graphics_usable(&self) -> bool {
+        self.graphics_supported && self.cell_width_px > 0 && self.cell_height_px > 0
     }
 
     fn send_control(&self, msg: ServerMessage) -> Result<(), ()> {
@@ -471,6 +484,7 @@ pub fn run() -> Result<()> {
         // Otherwise sleep until the next real deadline, or block on the
         // channel when nothing is due (PTY/API/client/signal wake the loop).
         let now = Instant::now();
+        schedule_client_frame_debt(&clients, &mut render_request);
         let rearm_interval = pty_rearm_interval(
             app.has_history_maintenance(),
             crate::ipc::api::active_terminal_streams(),
@@ -719,14 +733,9 @@ pub fn run() -> Result<()> {
         // A forced redraw (resize / focus-regained / external damage) must render
         // even if nothing else changed this tick — and so must a client that is
         // waiting on its full-frame resync (see `needs_render`).
-        let any_behind = clients
-            .values()
-            .any(|client| client.interest != SurfaceInterest::Suspended && client.behind);
+        schedule_client_frame_debt(&clients, &mut render_request);
         if app.force_redraw {
             render_request.record(RenderCause::ForcedRepair);
-        }
-        if any_behind {
-            render_request.record(RenderCause::ClientResync);
         }
 
         let projection_causes = RenderCause::UserInterface.bit()
@@ -1040,11 +1049,27 @@ fn apply(
             client.cell_width_px = cell_width_px;
             client.cell_height_px = cell_height_px;
             // Passive metadata: only the interactive client's display may define
-            // the geometry shared state uses, and it never forces a repaint.
+            // the geometry shared state uses. A size that arrives after the host
+            // agreed to draw is what lets the next frame place images.
             if *foreground == Some(id) {
                 app.set_client_cell_pixels(cell_width_px, cell_height_px);
+                app.host_draw
+                    .store(client.graphics_usable(), Ordering::Release);
             }
-            false
+            client.graphics_usable()
+        }
+        AppEvent::ClientHostGraphics { id, supported } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            client.graphics_supported = supported;
+            if *foreground == Some(id) {
+                app.host_draw.store(
+                    client.graphics_usable(),
+                    std::sync::atomic::Ordering::Release,
+                );
+            }
+            supported && client.cell_width_px > 0 && client.cell_height_px > 0
         }
         AppEvent::ClientClipboardSucceeded { id, receipt } => {
             if *foreground != Some(id) {
@@ -1111,6 +1136,8 @@ fn apply(
                 client.cell_height_px = cell_height_px;
                 if *foreground == Some(id) {
                     app.set_client_cell_pixels(cell_width_px, cell_height_px);
+                    app.host_draw
+                        .store(client.graphics_usable(), Ordering::Release);
                 }
                 // Resize/focus repair is local to this terminal. Its next frame
                 // must be complete, but other clients keep their diff baselines.
@@ -1290,6 +1317,16 @@ fn has_render_clients(clients: &Clients) -> bool {
         .any(|client| client.interest != SurfaceInterest::Suspended)
 }
 
+/// Re-arm at loop entry, before choosing an idle wait. Frame cadence still
+/// bounds retries while the one-frame queue is full.
+fn schedule_client_frame_debt(clients: &Clients, request: &mut RenderRequest) {
+    if clients.values().any(|client| {
+        client.interest != SurfaceInterest::Suspended && (client.graphics_pending || client.behind)
+    }) {
+        request.record(RenderCause::ClientResync);
+    }
+}
+
 fn latest_client(clients: &Clients) -> Option<u64> {
     clients
         .iter()
@@ -1302,8 +1339,14 @@ fn latest_client(clients: &Clients) -> Option<u64> {
 /// split geometry; the palette only matters for the `terminal` theme.
 fn apply_foreground_client(app: &mut App, clients: &Clients, foreground: Option<u64>) {
     let Some(client) = foreground.and_then(|id| clients.get(&id)) else {
+        app.host_draw
+            .store(false, std::sync::atomic::Ordering::Release);
         return;
     };
+    app.host_draw.store(
+        client.graphics_usable(),
+        std::sync::atomic::Ordering::Release,
+    );
     app.set_client_cell_pixels(client.cell_width_px, client.cell_height_px);
     if app.config.theme != "terminal" {
         return;
@@ -1789,6 +1832,7 @@ fn render_client(
                     ),
                 )
             };
+            client.graphics_occlusion = target.graphics_occlusion();
             (
                 target.cursor(),
                 target.cursor_visible(),
@@ -1931,6 +1975,31 @@ fn render_client(
             previous.width != client.render_buf.area.width
                 || previous.height != client.render_buf.area.height
         });
+    // A hyperlink change replaces the diff with a full frame, which clears the
+    // host screen. Graphics have to be uploaded again, not merely placed.
+    let upgrade_full = !full
+        && client.last_frame.as_ref().is_some_and(|previous| {
+            let current_hyperlinks =
+                protocol::frame_hyperlinks(previous, &client.retained_hyperlinks);
+            if previous.hyperlinks != current_hyperlinks {
+                return true;
+            }
+            if current_hyperlinks.is_empty() {
+                return false;
+            }
+            // `diff_buffer` writes the baseline, so probe a copy.
+            let mut probe = previous.clone();
+            let runs = protocol::diff_buffer(&mut probe, &client.render_buf);
+            protocol::diff_intersects_hyperlinks(&runs, &current_hyperlinks)
+        });
+    if client.graphics_supported && !client.graphics_usable() && (full || upgrade_full) {
+        client.graphics.request_replay();
+    }
+    let StagedGraphics {
+        bytes: graphics,
+        cache: staged_cache,
+        remainder,
+    } = stage_kitty_frame(app, client, full || upgrade_full);
     let message = if full {
         let mut frame = protocol::frame_from_buffer(
             &client.render_buf,
@@ -1939,10 +2008,12 @@ fn render_client(
             protocol::HostCursorStyle::from_appearance(cursor_style),
         );
         frame.hyperlinks = protocol::frame_hyperlinks(&frame, &client.retained_hyperlinks);
-        client.last_frame = Some(frame);
-        Some(ServerMessage::Frame(
-            client.last_frame.as_ref().expect("frame stored").clone(),
-        ))
+        frame.graphics = graphics;
+        client.last_frame = Some(frame.clone());
+        if let Some(stored) = client.last_frame.as_mut() {
+            stored.graphics.clear();
+        }
+        Some(ServerMessage::Frame(frame))
     } else {
         let previous = client.last_frame.as_mut().expect("frame baseline exists");
         let cursor_style = protocol::HostCursorStyle::from_appearance(cursor_style);
@@ -1958,8 +2029,10 @@ fn render_client(
         previous.cursor_visible = cursor_visible;
         previous.cursor_style = cursor_style;
         if hyperlinks_changed || linked_cells_changed {
-            Some(ServerMessage::Frame(previous.clone()))
-        } else if runs.is_empty() && !cursor_moved {
+            let mut frame = previous.clone();
+            frame.graphics = graphics;
+            Some(ServerMessage::Frame(frame))
+        } else if runs.is_empty() && !cursor_moved && graphics.is_empty() {
             None
         } else {
             Some(ServerMessage::FrameDiff(protocol::FrameDiff {
@@ -1969,6 +2042,7 @@ fn render_client(
                 cursor,
                 cursor_visible,
                 cursor_style,
+                graphics,
             }))
         }
     };
@@ -1990,6 +2064,8 @@ fn render_client(
             client.prepare_ticket = None;
             client.behind = false;
             client.force_full = false;
+            client.graphics = staged_cache;
+            client.graphics_pending = remainder;
             RenderClientOutcome {
                 enqueued: true,
                 disconnected: false,
@@ -1998,6 +2074,7 @@ fn render_client(
         Err(FrameSendError::Full) => {
             FRAMES_BACKPRESSURED.fetch_add(1, Ordering::Relaxed);
             client.behind = true;
+            client.graphics_pending = false;
             client.retained_ready = false;
             RenderClientOutcome::default()
         }
@@ -2012,6 +2089,89 @@ fn render_client(
 struct RenderClientOutcome {
     enqueued: bool,
     disconnected: bool,
+}
+
+struct StagedGraphics {
+    bytes: Vec<u8>,
+    cache: crate::terminal::kitty_graphics::HostGraphicsCache,
+    remainder: bool,
+}
+
+fn stage_kitty_frame(app: &App, client: &ClientState, replay: bool) -> StagedGraphics {
+    let mut cache = client.graphics.clone();
+    if !client.graphics_usable() {
+        if client.graphics_supported && replay {
+            cache.request_replay();
+        }
+        return StagedGraphics {
+            bytes: Vec::new(),
+            cache,
+            remainder: false,
+        };
+    }
+    if replay {
+        cache.request_replay();
+    }
+    let mut live = HashSet::new();
+    let mut inspected = HashSet::new();
+    let mut placements = Vec::new();
+    let mut retained = HashMap::new();
+    for (id, pane) in &app.panes {
+        live.insert(id.0);
+        let Ok(engine) = pane.engine.lock() else {
+            continue;
+        };
+        inspected.insert(id.0);
+        for (image_id, fingerprint) in engine.retained_kitty_images() {
+            retained.insert(
+                crate::terminal::kitty_graphics::SourceKey {
+                    pane_id: id.0,
+                    image_id,
+                },
+                fingerprint,
+            );
+        }
+        if !engine.has_kitty_graphics() {
+            continue;
+        }
+        let Some(area) = client
+            .retained_pane_content
+            .iter()
+            .find_map(|(pane_id, rect)| (*pane_id == *id).then_some(*rect))
+        else {
+            continue;
+        };
+        for visible in engine.kitty_visible_placements(client.cell_width_px, client.cell_height_px)
+        {
+            placements.push(crate::terminal::kitty_graphics::ScreenPlacement {
+                pane_id: id.0,
+                area_x: area.x,
+                area_y: area.y,
+                area_width: area.width,
+                area_height: area.height,
+                cell_width_px: u32::from(client.cell_width_px),
+                cell_height_px: u32::from(client.cell_height_px),
+                visible,
+            });
+        }
+    }
+    // Stable ordering makes the global piece/upload budgets independent of the
+    // App hash-map iteration order (including retries and passive clients).
+    placements.sort_unstable_by_key(|p| (p.pane_id, p.visible.image_id, p.visible.placement_id));
+    let bytes = crate::terminal::kitty_graphics::encode_occluded_host_frame(
+        &mut cache,
+        &placements,
+        &live,
+        &inspected,
+        &retained,
+        &client.graphics_occlusion,
+    );
+    let remainder = cache.remainder();
+    StagedGraphics {
+        bytes,
+        cache,
+        remainder,
+    }
 }
 
 fn bind_client_listener(
@@ -2282,6 +2442,14 @@ pub(super) fn handle_client(
                         cell_width_px,
                         cell_height_px,
                     })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::HostGraphics { supported }) => {
+                if app_tx
+                    .send(AppEvent::ClientHostGraphics { id, supported })
                     .is_err()
                 {
                     break;
@@ -2885,6 +3053,453 @@ mod tests {
     }
 
     #[test]
+    fn graphics_and_backpressure_debt_schedule_a_cadenced_idle_wake() {
+        let (client, _rx) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        for behind in [false, true] {
+            let client = clients.get_mut(&7).unwrap();
+            client.graphics_pending = !behind;
+            client.behind = behind;
+            let mut request = super::RenderRequest::default();
+            super::schedule_client_frame_debt(&clients, &mut request);
+            assert!(request.needs_render());
+            assert!(super::frame_wait(Duration::ZERO) >= super::FRAME_INTERVAL);
+            assert!(!super::frame_cadence_ready(Duration::ZERO));
+            // Clearing a render must not let the next loop entry sleep forever.
+            request.clear();
+            super::schedule_client_frame_debt(&clients, &mut request);
+            assert!(request.needs_render());
+            clients.get_mut(&7).unwrap().interest = SurfaceInterest::Suspended;
+            request.clear();
+            super::schedule_client_frame_debt(&clients, &mut request);
+            assert!(!request.needs_render());
+            clients.get_mut(&7).unwrap().interest = SurfaceInterest::Active;
+        }
+    }
+
+    #[test]
+    fn kitty_renderer_occlusion_is_local_restores_and_survives_replay() {
+        use crate::ui;
+        use ratatui::layout::Rect;
+        let _env = crate::persist::test_env("kitty-renderer-occlusion");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(180, 50, tx).unwrap();
+        app.server_mode = true;
+        app.dispatch("pane.split", &serde_json::json!({"direction":"right"}))
+            .unwrap();
+        let pane = app.layout().focus;
+        let mut clients = HashMap::new();
+        let mut receivers = Vec::new();
+        for (id, cols, rows) in [(1, 180, 50), (2, 90, 30)] {
+            let (mut client, rx) = display_client(cols, rows, id);
+            client.graphics_supported = true;
+            client.cell_width_px = 10;
+            client.cell_height_px = 10;
+            clients.insert(id, client);
+            receivers.push(rx);
+        }
+        let mut foreground = Some(1);
+        let mut size = (180, 50);
+        let mut scratch = RenderScratch::default();
+        let render = |app: &mut App,
+                      clients: &mut HashMap<u64, ClientState>,
+                      foreground: &mut Option<u64>,
+                      size: &mut (u16, u16),
+                      scratch: &mut RenderScratch| {
+            for c in clients.values() {
+                c.sender.frame_pending.store(false, Ordering::Release);
+            }
+            render_clients(app, clients, foreground, size, false, false, scratch);
+        };
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        for p in app.panes.values() {
+            let payload = "AAAA".repeat(10000);
+            let command =
+                format!("\x1b[H\x1b_Ga=T,f=24,s=100,v=100,i=8,c=70,r=40,C=1,q=2;{payload}\x1b\\");
+            p.engine.lock().unwrap().advance(command.as_bytes());
+        }
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        let baseline = clients[&1].graphics.placement_rects();
+        let area = clients[&1]
+            .retained_pane_content
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .unwrap()
+            .1;
+        app.open_pane_menu(pane, area.x + 12, area.y + 8);
+        app.pane_menu.as_mut().unwrap().move_open = true;
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        let active_hit_geometry = app.pane_content_rects.clone();
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert!(!menu.tab_rects.is_empty(), "real submenu was drawn");
+        let cover: Vec<_> = menu
+            .items
+            .iter()
+            .map(|(_, r)| *r)
+            .chain(menu.tab_rects.iter().map(|(_, r)| *r))
+            .filter(|r| !r.is_empty())
+            .collect();
+        assert!(clients[&1].graphics.placement_rects().len() > baseline.len());
+        for (_, rect) in clients[&1].graphics.placement_rects() {
+            assert!(
+                cover.iter().all(|r| !r.intersects(rect)),
+                "image overlaps real menu row"
+            );
+        }
+        // Passive renderer must use its own freshly drawn geometry and preserve
+        // interactive targets and runtime cells, even when the menu clamps left.
+        for client in clients.values() {
+            for (_, rect) in client.graphics.placement_rects() {
+                assert!(
+                    !client.graphics_occlusion.touches(rect),
+                    "fragment covers an actual opaque surface"
+                );
+            }
+        }
+        let untouched: Vec<_> = clients[&1]
+            .graphics
+            .placement_rects()
+            .into_iter()
+            .filter(|(id, _)| *id != pane.0)
+            .collect();
+        let expected_untouched: Vec<_> = baseline
+            .iter()
+            .copied()
+            .filter(|(id, _)| *id != pane.0)
+            .collect();
+        assert_eq!(untouched, expected_untouched);
+        let runtime = app.runtime_cells.get();
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 90, 30));
+        let mut target = ui::RenderTarget::new(&mut buf, Rect::new(0, 0, 90, 30));
+        let projection = ui::render_projection(&mut target, &mut app);
+        assert_eq!(app.pane_content_rects, active_hit_geometry);
+        assert_eq!(app.runtime_cells.get(), runtime);
+        assert_eq!(projection.pane_content, clients[&2].retained_pane_content);
+        let local_occlusion = target.graphics_occlusion();
+        for (_, rect) in clients[&2].graphics.placement_rects() {
+            assert!(
+                !local_occlusion.touches(rect),
+                "passive fragments use passive geometry"
+            );
+        }
+        // Stage without committing simulates the one-frame gate rejecting it.
+        let before = clients[&2].graphics.clone();
+        let replay = super::stage_kitty_frame(&app, &clients[&2], true);
+        let retry = super::stage_kitty_frame(&app, &clients[&2], true);
+        assert_eq!(replay.bytes, retry.bytes);
+        assert_eq!(
+            before.placement_rects(),
+            clients[&2].graphics.placement_rects()
+        );
+        // Exercise the actual one-frame send gate: geometry may render, but
+        // a rejected enqueue cannot commit the fragment cache.
+        let before_gate = clients[&1].graphics.placement_rects();
+        app.pane_menu.as_mut().unwrap().anchor = (area.x + 5, area.y + 5);
+        clients[&1]
+            .sender
+            .frame_pending
+            .store(true, Ordering::Release);
+        let outcome = super::render_client(
+            &mut app,
+            clients.get_mut(&1).unwrap(),
+            true,
+            false,
+            false,
+            &HashMap::new(),
+        );
+        assert!(!outcome.enqueued);
+        assert_eq!(clients[&1].graphics.placement_rects(), before_gate);
+        clients[&1]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+        let outcome = super::render_client(
+            &mut app,
+            clients.get_mut(&1).unwrap(),
+            true,
+            false,
+            false,
+            &HashMap::new(),
+        );
+        assert!(outcome.enqueued);
+        receivers[0].recv().unwrap();
+        for (_, rect) in clients[&1].graphics.placement_rects() {
+            assert!(!clients[&1].graphics_occlusion.touches(rect));
+        }
+        // Moving and then closing the menu retires pieces, not retained pixels.
+        app.pane_menu.as_mut().unwrap().anchor = (area.x + 3, area.y + 3);
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        app.pane_menu = None;
+        // A direct render refreshes only presentation geometry before staging.
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 180, 50));
+        let mut target = ui::RenderTarget::new(&mut buf, Rect::new(0, 0, 180, 50));
+        ui::render_into(&mut target, &mut app);
+        let client = clients.get_mut(&1).unwrap();
+        client.graphics_occlusion = target.graphics_occlusion();
+        let restored = super::stage_kitty_frame(&app, client, false);
+        assert!(!String::from_utf8_lossy(&restored.bytes).contains("a=t,"));
+        let mut rects = restored.cache.placement_rects();
+        rects.sort_by_key(|(id, r)| (*id, r.x, r.y));
+        let mut expected = baseline;
+        expected.sort_by_key(|(id, r)| (*id, r.x, r.y));
+        assert_eq!(rects, expected);
+        // Full-screen dimmed overlays remain fail-closed.
+        app.help_open = true;
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        assert!(clients
+            .values()
+            .all(|c| c.graphics.placement_rects().is_empty()));
+        app.help_open = false;
+        app.open_settings();
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        assert!(clients
+            .values()
+            .all(|c| c.graphics.placement_rects().is_empty()));
+        app.settings = None;
+        app.toast = Some(("Copied".into(), std::time::Instant::now()));
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        assert!(!clients[&1].graphics.placement_rects().is_empty());
+        for c in clients.values() {
+            assert!(c
+                .graphics
+                .placement_rects()
+                .iter()
+                .all(|(_, rect)| !c.graphics_occlusion.touches(*rect)));
+        }
+    }
+
+    /// Supporting evidence only, not a timing-sensitive CI assertion. Same
+    /// debug binary, viewport, source pixels, warmup, and iteration count.
+    #[test]
+    #[ignore = "bounded 1/15-pane render scaling measurement"]
+    fn kitty_occlusion_render_scale() {
+        use std::time::Instant;
+        let _env = crate::persist::test_env("kitty-occlusion-scale");
+        for count in [1, 15] {
+            let (tx, _rx) = mpsc::channel();
+            let mut app = App::new(240, 80, tx).unwrap();
+            app.server_mode = true;
+            for _ in 1..count {
+                app.dispatch("pane.split", &serde_json::json!({})).unwrap();
+            }
+            let pane = app.layout().focus;
+            fn balanced(ids: &[crate::ids::PaneId], depth: usize) -> crate::layout::LayoutTree {
+                if ids.len() == 1 {
+                    return crate::layout::LayoutTree::Leaf(ids[0].0);
+                }
+                let mid = ids.len() / 2;
+                crate::layout::LayoutTree::Split {
+                    axis: (depth % 2) as u8,
+                    ratio: mid as f32 / ids.len() as f32,
+                    a: Box::new(balanced(&ids[..mid], depth + 1)),
+                    b: Box::new(balanced(&ids[mid..], depth + 1)),
+                }
+            }
+            let ids = app.layout().leaves();
+            let ws = &mut app.workspaces[app.active_ws];
+            ws.tabs[ws.active_tab]
+                .layout
+                .apply_tree(&balanced(&ids, 0), pane)
+                .unwrap();
+            let (mut client, rx) = display_client(240, 80, 1);
+            client.graphics_supported = true;
+            client.cell_width_px = 10;
+            client.cell_height_px = 10;
+            // Warm layout first; replace noisy shell engines with synthetic
+            // populated engines of the exact rendered dimensions.
+            super::render_client(&mut app, &mut client, true, false, false, &HashMap::new());
+            while rx.try_recv().is_ok() {}
+            for (id, rect) in &client.retained_pane_content {
+                let (tx, _rx) = mpsc::channel();
+                let engine = create_engine(
+                    VtEngineKind::Alacritty,
+                    rect.width,
+                    rect.height,
+                    tx,
+                    64 * 1024,
+                    PaneAppearance::default(),
+                );
+                let command = format!(
+                    "\x1b[H\x1b_Ga=T,f=24,s=100,v=100,i=8,c={},r={},C=1,q=2;{}\x1b\\",
+                    rect.width,
+                    rect.height,
+                    "AAAA".repeat(10000)
+                );
+                engine.lock().unwrap().advance(command.as_bytes());
+                app.panes.get_mut(id).unwrap().engine = engine;
+            }
+            assert_eq!(client.retained_pane_content.len(), count);
+            let anchor = client
+                .retained_pane_content
+                .iter()
+                .find(|(id, _)| *id == pane)
+                .unwrap()
+                .1;
+            for overlay in [false, true] {
+                if overlay {
+                    app.open_pane_menu(pane, anchor.x + 4, anchor.y + 3);
+                }
+                for _ in 0..10 {
+                    client.sender.frame_pending.store(false, Ordering::Release);
+                    super::render_client(
+                        &mut app,
+                        &mut client,
+                        true,
+                        false,
+                        false,
+                        &HashMap::new(),
+                    );
+                    while rx.try_recv().is_ok() {}
+                }
+                let start = Instant::now();
+                for _ in 0..100 {
+                    client.sender.frame_pending.store(false, Ordering::Release);
+                    super::render_client(
+                        &mut app,
+                        &mut client,
+                        true,
+                        false,
+                        false,
+                        &HashMap::new(),
+                    );
+                    while rx.try_recv().is_ok() {}
+                }
+                let render_us = start.elapsed().as_micros() / 100;
+                let start = Instant::now();
+                for _ in 0..100 {
+                    std::hint::black_box(super::stage_kitty_frame(&app, &client, false));
+                }
+                eprintln!("kitty-scale panes={count} menu={overlay} full-render-us={render_us} stage-us={} fragments={}", start.elapsed().as_micros()/100, client.graphics.placement_rects().len());
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_missing_geometry_fails_closed_even_after_host_agrees() {
+        let _env = crate::persist::test_env("kitty-no-geometry");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let (client, _frames) = display_client(80, 24, 1);
+        let mut clients = HashMap::from([(7, client)]);
+        let mut foreground = Some(7);
+        let mut size = (80, 24);
+        let mut activity = 2;
+        apply(
+            AppEvent::ClientHostGraphics {
+                id: 7,
+                supported: true,
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        );
+        assert!(!app.host_draw.load(Ordering::Acquire));
+        let query = b"\x1b_Ga=q,i=9;AAAA\x1b\\";
+        let (reply_tx, replies) = mpsc::channel();
+        let mut engine =
+            crate::terminal::vt::alacritty::AlacrittyEngine::new(20, 5, reply_tx, 64 * 1024);
+        use crate::terminal::vt::VtEngine;
+        engine.advance(query);
+        let crate::terminal::pty::InputAction::Bytes(bytes) = replies.try_recv().unwrap() else {
+            panic!("query reply")
+        };
+        assert!(String::from_utf8_lossy(&bytes).contains("ENOTSUPPORTED"));
+        assert!(super::stage_kitty_frame(&app, &clients[&7], true)
+            .bytes
+            .is_empty());
+        // A passive display's usable geometry must not enable this foreground.
+        let (mut passive, _rx) = display_client(80, 24, 0);
+        passive.graphics_supported = true;
+        passive.cell_width_px = 5;
+        passive.cell_height_px = 5;
+        clients.insert(8, passive);
+        assert!(!app.host_draw.load(Ordering::Acquire));
+        apply(
+            AppEvent::ClientCellPixels {
+                id: 7,
+                cell_width_px: 10,
+                cell_height_px: 20,
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        );
+        assert!(app.host_draw.load(Ordering::Acquire));
+        engine.advance(query);
+        let crate::terminal::pty::InputAction::Bytes(bytes) = replies.try_recv().unwrap() else {
+            panic!("query reply")
+        };
+        assert!(String::from_utf8_lossy(&bytes).contains("OK"));
+    }
+
+    #[test]
     fn prepared_frame_echoes_latest_ticket_without_taking_input_ownership() {
         let _env = crate::persist::test_env("prepared-frame-ticket");
         let (app_tx, _app_rx) = mpsc::channel();
@@ -2933,6 +3548,26 @@ mod tests {
         );
         assert_eq!(foreground, None, "candidate geometry cannot claim input");
         let mut scratch = RenderScratch::default();
+        // The modal replay ticket must survive a full one-pending-frame gate.
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(true, Ordering::Release);
+        render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            false,
+            false,
+            &mut scratch,
+        );
+        assert_eq!(clients[&7].prepare_ticket, Some(11));
+        assert!(rx.try_recv().is_err());
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
         assert!(render_clients(
             &mut app,
             &mut clients,
@@ -3840,6 +4475,7 @@ mod tests {
                 cursor: None,
                 cursor_visible: false,
                 cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+                graphics: Vec::new(),
             })
         };
 
@@ -3917,6 +4553,7 @@ mod tests {
                 cursor: None,
                 cursor_visible: false,
                 cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+                graphics: Vec::new(),
             }))
             .is_ok());
         assert!(client.send_control(ServerMessage::Detach).is_ok());

@@ -5,7 +5,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, SwitcherRow};
 use crate::ui::theme::Theme;
@@ -18,6 +18,7 @@ pub(super) fn draw_switcher(f: &mut RenderTarget, area: Rect, app: &mut App, t: 
     app.switcher_rects.clear();
     app.switcher_scope_rects.clear();
     // Dim the whole screen.
+    f.cover_graphics(area);
     {
         let buf = f.buffer_mut();
         for y in area.y..area.bottom() {
@@ -32,7 +33,7 @@ pub(super) fn draw_switcher(f: &mut RenderTarget, area: Rect, app: &mut App, t: 
     let h = area.height.saturating_sub(2);
     let mx = area.x + (area.width.saturating_sub(w)) / 2;
     let modal = Rect::new(mx, area.y + 1, w, h);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.accent).bg(t.base))

@@ -256,6 +256,7 @@ struct ClientInput {
     route: InputRoute,
     started: bool,
     colors: Option<crate::terminal::theme_probe::TerminalColors>,
+    graphics_supported: bool,
     #[cfg(windows)]
     windows_input_mode: Option<crate::terminal::host_input::WindowsInputModeGuard>,
 }
@@ -326,7 +327,7 @@ where
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected handshake negotiation")),
     };
-    let pending = if probe_terminal && !input.started {
+    let mut pending = if probe_terminal && !input.started {
         let probe = crate::terminal::theme_probe::probe();
         input.colors = probe.colors;
         protocol::write_message(
@@ -344,6 +345,26 @@ where
         }
         Vec::new()
     };
+    if !input.started {
+        let (graphics, extra) = crate::terminal::theme_probe::probe_kitty_graphics();
+        input.graphics_supported = graphics == Some(true);
+        remember_graphics_supported(input.graphics_supported);
+        pending.extend(extra);
+        if crate::terminal::kitty_graphics::cell_size_query_required(
+            input.graphics_supported,
+            reported_ioctl_cells(),
+        ) {
+            let (cells, extra) = crate::terminal::theme_probe::probe_host_cell_size();
+            pending.extend(extra);
+            remember_cell_fallback(cells);
+        }
+    }
+    protocol::write_message(
+        &mut writer,
+        &ClientMessage::HostGraphics {
+            supported: input.graphics_supported,
+        },
+    )?;
     crate::logging::event(
         crate::logging::EventKind::ClientHandshake,
         &[
@@ -416,7 +437,8 @@ where
                     frame.cursor_style,
                     host_cursor,
                     |backend| {
-                        write_hyperlink_runs(backend, &frame, truecolor, allow_local_file_links)
+                        write_hyperlink_runs(backend, &frame, truecolor, allow_local_file_links)?;
+                        write_host_graphics(backend, &frame.graphics)
                     },
                 );
                 sync_end();
@@ -441,7 +463,7 @@ where
                     &mut last_cursor,
                     diff.cursor_style,
                     host_cursor,
-                    |_| Ok(()),
+                    |backend| write_host_graphics(backend, &diff.graphics),
                 );
                 sync_end();
                 if r.is_err() {
@@ -716,6 +738,16 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
 
     #[cfg(not(windows))]
     {
+        let reports = route.clone();
+        crate::terminal::theme_probe::set_host_report_handler(move |report| {
+            let message = match report {
+                crate::terminal::theme_probe::HostReport::Graphics(supported) => {
+                    remember_graphics_supported(supported);
+                    ClientMessage::HostGraphics { supported }
+                }
+            };
+            reports.send_if_generation(reports.generation(), message);
+        });
         crate::terminal::theme_probe::run_input_loop(pending, |event| route.send(event));
     }
 }
@@ -728,8 +760,52 @@ fn hello_message(cols: u16, rows: u16) -> ClientMessage {
     }
 }
 
+fn graphics_support_slot() -> &'static std::sync::Mutex<bool> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<bool>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(false))
+}
+
+pub(crate) fn remember_graphics_supported(supported: bool) {
+    *graphics_support_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = supported;
+}
+
+pub(crate) fn graphics_supported() -> bool {
+    *graphics_support_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+fn cell_fallback_slot() -> &'static std::sync::Mutex<Option<(u16, u16)>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<(u16, u16)>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub(super) fn remember_cell_fallback(size: Option<(u16, u16)>) {
+    *cell_fallback_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = size;
+}
+
+pub(crate) fn reported_ioctl_cells() -> Option<(u16, u16)> {
+    let (width, height) = protocol::local_cell_pixels();
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+fn resolved_cell_pixels() -> (u16, u16) {
+    if let Some(size) = reported_ioctl_cells() {
+        return size;
+    }
+    cell_fallback_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or((0, 0))
+}
+
 pub(super) fn cell_pixels_message() -> ClientMessage {
-    let (cell_width_px, cell_height_px) = protocol::local_cell_pixels();
+    let (cell_width_px, cell_height_px) = resolved_cell_pixels();
     ClientMessage::CellPixels {
         cell_width_px,
         cell_height_px,
@@ -737,7 +813,7 @@ pub(super) fn cell_pixels_message() -> ClientMessage {
 }
 
 pub(super) fn resize_message(cols: u16, rows: u16) -> ClientMessage {
-    let (cell_width_px, cell_height_px) = protocol::local_cell_pixels();
+    let (cell_width_px, cell_height_px) = resolved_cell_pixels();
     ClientMessage::Resize {
         cols,
         rows,
@@ -1040,6 +1116,16 @@ pub(crate) struct AppliedHostCursor {
     shape_changed: bool,
     /// OSC 12 was written. OSC 112 on exit is not sent unless this is set.
     color_changed: bool,
+}
+
+pub(crate) fn write_host_graphics(
+    out: &mut impl std::io::Write,
+    graphics: &[u8],
+) -> std::io::Result<()> {
+    if graphics.is_empty() {
+        return Ok(());
+    }
+    out.write_all(graphics)
 }
 
 pub(crate) fn apply_host_cursor(
@@ -1684,6 +1770,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let diff = FrameDiff {
             width: 1,
@@ -1698,6 +1785,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         for truecolor in [true, false] {
             let full = frame_cells(&frame, truecolor);
@@ -1734,6 +1822,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let cells = super::frame_cells(&frame, true);
         let syms: Vec<(u16, String)> = cells
@@ -2321,6 +2410,7 @@ mod render_tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let f1 = FrameData {
             width: 3,
@@ -2330,6 +2420,7 @@ mod render_tests {
             cursor: Some((1, 0)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
 
         let mut term = Terminal::new(TestBackend::new(3, 1)).unwrap();
@@ -2351,6 +2442,7 @@ mod render_tests {
             cursor: f1.cursor,
             cursor_visible: f1.cursor_visible,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,
@@ -2472,6 +2564,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let mut last = None;
         paint(
@@ -2499,6 +2592,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let diff = FrameDiff {
             width: 8,
@@ -2507,6 +2601,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,
@@ -2537,6 +2632,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let mut last = None;
         paint(
@@ -2563,6 +2659,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let diff = FrameDiff {
             width: 8,
@@ -2571,6 +2668,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,
@@ -2602,6 +2700,7 @@ mod paint_tests {
             cursor: Some((1, 4)),
             cursor_visible: true,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,
@@ -2635,6 +2734,7 @@ mod paint_tests {
             cursor: Some((3, 5)),
             cursor_visible: false,
             cursor_style: crate::ipc::protocol::HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         paint(
             &mut term,

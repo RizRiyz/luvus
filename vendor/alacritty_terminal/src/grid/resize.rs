@@ -152,7 +152,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             let len = min(row.len(), num_wrapped);
 
             // Insert leading spacer when there's not enough room for reflowing wide char.
+            let mut split_at = len;
             let mut cells = if row[Column(len - 1)].flags().contains(Flags::WIDE_CHAR) {
+                split_at -= 1;
                 num_wrapped -= 1;
 
                 let mut cells = row.front_split_off(len - 1);
@@ -168,6 +170,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
             // Add removed cells to previous row and reflow content.
             last_row.append(&mut cells);
+            self.note_graphics_prefix(last_row, &mut row, split_at, last_len);
 
             let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
 
@@ -258,6 +261,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         let mut new_raw = Vec::with_capacity(self.raw.len());
         let mut buffered: Option<Vec<T>> = None;
+        let mut pending_suffix: Option<(u64, u32)> = None;
 
         let mut rows = self.raw.take_all();
         for (i, mut row) in rows.drain(..).enumerate().rev() {
@@ -270,6 +274,32 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     self.cursor.point.column += buffered.len();
                 }
 
+                let shift = i32::try_from(buffered.len()).unwrap_or(i32::MAX);
+                if row.graphics_anchor() != 0 && shift != 0 {
+                    self.graphics_reflow.push(super::GraphicsReflow {
+                        anchor: row.graphics_anchor(),
+                        at: 0,
+                        dest_column: shift,
+                        dest_anchor: row.graphics_anchor(),
+                        kind: super::GraphicsReflowKind::Shift,
+                    });
+                }
+                if let Some((anchor, at)) = pending_suffix.take() {
+                    let dest_anchor = if row.graphics_anchor() == 0 {
+                        let temp = self.alloc_temp_anchor();
+                        row.set_graphics_anchor(temp);
+                        temp
+                    } else {
+                        row.graphics_anchor()
+                    };
+                    self.graphics_reflow.push(super::GraphicsReflow {
+                        anchor,
+                        at,
+                        dest_column: 0,
+                        dest_anchor,
+                        kind: super::GraphicsReflowKind::MoveSuffix,
+                    });
+                }
                 row.append_front(buffered);
             }
 
@@ -292,12 +322,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 };
 
                 // Insert spacer if a wide char would be wrapped into the last column.
+                let mut split_at = columns;
                 if row.len() >= columns
                     && row[Column(columns - 1)].flags().contains(Flags::WIDE_CHAR)
                 {
                     let mut spacer = T::default();
                     spacer.flags_mut().insert(Flags::LEADING_WIDE_CHAR_SPACER);
 
+                    split_at -= 1;
                     let wide_char = mem::replace(&mut row[Column(columns - 1)], spacer);
                     wrapped.insert(0, wide_char);
                 }
@@ -316,6 +348,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     }
                 }
 
+                let source_anchor = row.graphics_anchor();
                 new_raw.push(row);
 
                 // Set line as wrapped if cells got removed.
@@ -335,6 +368,12 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     }
 
                     // Add removed cells to start of next row.
+                    if source_anchor != 0 {
+                        pending_suffix = Some((
+                            source_anchor,
+                            u32::try_from(split_at).unwrap_or(u32::MAX),
+                        ));
+                    }
                     buffered = Some(wrapped);
                     break;
                 } else {
@@ -359,6 +398,17 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                         wrapped.resize_with(columns, T::default);
                     }
                     row = Row::from_vec(wrapped, occ);
+                    if source_anchor != 0 {
+                        let dest_anchor = self.alloc_temp_anchor();
+                        row.set_graphics_anchor(dest_anchor);
+                        self.graphics_reflow.push(super::GraphicsReflow {
+                            anchor: source_anchor,
+                            at: u32::try_from(split_at).unwrap_or(u32::MAX),
+                            dest_column: 0,
+                            dest_anchor,
+                            kind: super::GraphicsReflowKind::MoveSuffix,
+                        });
+                    }
 
                     if i < self.display_offset {
                         // Since we added a new line, rotate up the viewport.
@@ -390,5 +440,43 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Clamp the saved cursor to the grid.
         self.saved_cursor.point.column = min(self.saved_cursor.point.column, Column(columns - 1));
+    }
+
+    fn note_graphics_prefix(
+        &mut self,
+        last_row: &mut Row<T>,
+        row: &mut Row<T>,
+        len: usize,
+        last_len: usize,
+    ) {
+        let anchor = row.graphics_anchor();
+        if anchor == 0 || len == 0 {
+            return;
+        }
+        let entire = row.is_clear();
+        let dest_anchor = if last_row.graphics_anchor() == 0 {
+            if entire {
+                last_row.set_graphics_anchor(anchor);
+                row.set_graphics_anchor(0);
+                anchor
+            } else {
+                let temp = self.alloc_temp_anchor();
+                last_row.set_graphics_anchor(temp);
+                temp
+            }
+        } else {
+            let dest = last_row.graphics_anchor();
+            if entire {
+                row.set_graphics_anchor(0);
+            }
+            dest
+        };
+        self.graphics_reflow.push(super::GraphicsReflow {
+            anchor,
+            at: u32::try_from(len).unwrap_or(u32::MAX),
+            dest_column: i32::try_from(last_len).unwrap_or(i32::MAX),
+            dest_anchor,
+            kind: super::GraphicsReflowKind::MovePrefix { entire },
+        });
     }
 }

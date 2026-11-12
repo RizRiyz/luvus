@@ -147,6 +147,12 @@ impl App {
         clients_attached: bool,
     ) -> Option<Instant> {
         let mut deadline = None;
+        #[cfg(windows)]
+        for pane in self.panes.values() {
+            if let Some(at) = pane.output_deadline() {
+                Self::sooner_deadline(&mut deadline, at);
+            }
+        }
         if self.config_persistence.dirty && !self.config_persistence.inflight {
             Self::sooner_deadline(
                 &mut deadline,
@@ -446,6 +452,13 @@ impl App {
         self.runtime_clients_attached = clients_attached;
         let exited = self.tick_pty_exits(now);
         let repaired_location = self.repair_active_location() || exited;
+        #[cfg(windows)]
+        let repaired_location = self
+            .panes
+            .values()
+            .fold(repaired_location, |changed, pane| {
+                pane.expire_output(now) || changed
+            });
         self.schedule_config_save(now);
         self.schedule_automation_save(now);
         // No node open (docs/43 §3.3 — the session was closed). Closing the last
