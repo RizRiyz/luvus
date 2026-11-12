@@ -151,7 +151,7 @@ fn span(
     ))
 }
 
-fn crop_piece(p: &ScreenPlacement, rect: Rect) -> Option<Clipped> {
+pub(super) fn crop_piece(p: &ScreenPlacement, rect: Rect) -> Option<Clipped> {
     let v = &p.visible;
     let left = (i64::from(rect.x) - i64::from(p.area_x) - i64::from(v.viewport_col)) as u32;
     let top = (i64::from(rect.y) - i64::from(p.area_y) - i64::from(v.viewport_row)) as u32;

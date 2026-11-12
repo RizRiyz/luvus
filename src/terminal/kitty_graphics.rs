@@ -17,8 +17,8 @@ const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STORED_IMAGES: usize = 32;
 const MAX_PLACEMENTS: usize = 128;
 const KITTY_CHUNK_BYTES: usize = 3072;
-const HOST_IMAGE_ID_BASE: u32 = 10_000;
-const HOST_IMAGE_ID_LAST: u32 = HOST_IMAGE_ID_BASE + 899_999;
+pub(crate) const HOST_IMAGE_ID_BASE: u32 = 10_000;
+pub(crate) const HOST_IMAGE_ID_LAST: u32 = HOST_IMAGE_ID_BASE + 899_999;
 /// Child `c`/`r` above this is rejected instead of allocating cursor movement.
 const MAX_PLACEMENT_CELLS: u32 = 4_096;
 /// Graphics bytes in one frame stay far under the 64 MiB client frame cap.
@@ -441,6 +441,10 @@ impl Keys {
             }
         }
         keys
+    }
+
+    fn supported_transfer(&self) -> bool {
+        self.medium == 'd' && self.compression == '\0' && matches!(self.format, 24 | 32 | 100)
     }
 
     fn continuation(entries: &[(char, String)]) -> bool {
@@ -1044,7 +1048,7 @@ impl PaneGraphics {
             self.delete(&keys);
             return quiet_ok(&keys).into_iter().collect();
         }
-        if keys.medium != 'd' || keys.compression == 'z' {
+        if !keys.supported_transfer() {
             return error_action(&keys, "EINVAL").into_iter().collect();
         }
         // Animation frames have separate compositing/selection semantics. Until
@@ -1095,8 +1099,13 @@ impl PaneGraphics {
         actions
     }
 
+    /// Report pane capabilities, not host-only media/codec support. Queries
+    /// never store pixels and honor q=1 success/q=2 all-response suppression.
     fn query_reply(&self, keys: &Keys) -> GraphicsAction {
-        if !self.queries_enabled {
+        if !self.queries_enabled || !keys.supported_transfer() {
+            if keys.quiet >= 2 {
+                return GraphicsAction::None;
+            }
             let id = keys
                 .image_id
                 .map(|id| format!("i={id}"))
@@ -1106,6 +1115,9 @@ impl PaneGraphics {
         let Some(id) = keys.image_id else {
             return GraphicsAction::None;
         };
+        if keys.quiet != 0 {
+            return GraphicsAction::None;
+        }
         let mut body = format!("i={id}");
         if keys.feature == Some('T') {
             body.push_str(",e=T");
@@ -1790,6 +1802,8 @@ fn forget_source(
         .retain(|key, _| key.pane_id != source.pane_id || key.image_id != source.image_id);
 }
 
+/// Clip destination cells to the pane and map every cut through the same
+/// absolute offset-aware source edges used for overlay fragments.
 fn clip_placement(placement: &ScreenPlacement) -> Option<(Clipped, u32)> {
     if placement.area_width == 0
         || placement.area_height == 0
@@ -1842,34 +1856,20 @@ fn clip_placement(placement: &ScreenPlacement) -> Option<(Clipped, u32)> {
             visible.y_offset,
         )
     } else {
-        let src_w = source_extent(visible.image_width, visible.source_x, visible.source_width);
-        let src_h = source_extent(
-            visible.image_height,
-            visible.source_y,
-            visible.source_height,
+        let rect = ratatui::layout::Rect::new(
+            placement.area_x.saturating_add(column as u16),
+            placement.area_y.saturating_add(row as u16),
+            cols as u16,
+            rows as u16,
         );
-        let source_x = visible
-            .source_x
-            .saturating_add(scale_cells(left, src_w, visible.grid_cols));
-        let source_y = visible
-            .source_y
-            .saturating_add(scale_cells(top, src_h, visible.grid_rows));
-        let source_width = scale_cells(cols, src_w, visible.grid_cols)
-            .max(1)
-            .min(visible.image_width.saturating_sub(source_x));
-        let source_height = scale_cells(rows, src_h, visible.grid_rows)
-            .max(1)
-            .min(visible.image_height.saturating_sub(source_y));
-        if source_width == 0 || source_height == 0 {
-            return None;
-        }
+        let cropped = occlusion::crop_piece(placement, rect)?;
         (
-            source_x,
-            source_y,
-            source_width,
-            source_height,
-            if left == 0 { visible.x_offset } else { 0 },
-            if top == 0 { visible.y_offset } else { 0 },
+            cropped.source_x,
+            cropped.source_y,
+            cropped.source_width,
+            cropped.source_height,
+            cropped.x_offset,
+            cropped.y_offset,
         )
     };
     Some((
@@ -1904,14 +1904,6 @@ fn placement_signature(clipped: Clipped, z: i32, scroll_offset: u32) -> Placemen
         z,
         scroll_offset,
     }
-}
-
-fn scale_cells(part: u32, whole: u32, parts: u32) -> u32 {
-    if parts == 0 {
-        return 0;
-    }
-    ((u64::from(part).saturating_mul(u64::from(whole)) / u64::from(parts)).min(u64::from(u32::MAX)))
-        as u32
 }
 
 fn encode_upload(out: &mut Vec<u8>, visible: &VisiblePlacement, host_id: u32) {
@@ -2457,6 +2449,112 @@ mod tests {
         for row in engine.screen_rows() {
             assert!(!row.contains('\u{10EEEE}'));
         }
+    }
+
+    #[test]
+    fn query_reports_only_supported_transfer_and_honors_quiet_without_mutation() {
+        let mut graphics = PaneGraphics::default();
+        let mut plain = Vec::new();
+        for mode in [
+            "", ",t=d", ",t=f", ",t=s", ",t=t", ",t=x", ",o=z", ",o=x", ",f=8",
+        ] {
+            for quiet in 0..=2 {
+                let supported = matches!(mode, "" | ",t=d");
+                let query = format!("\x1b_Ga=q,i=37,q={quiet}{mode};AAAA\x1b\\");
+                let actions = graphics.push(query.as_bytes(), &mut plain);
+                let replies: Vec<_> = actions
+                    .iter()
+                    .filter_map(|a| match a {
+                        GraphicsAction::Reply(bytes) => Some(text(bytes)),
+                        _ => None,
+                    })
+                    .collect();
+                let expected = if supported { quiet == 0 } else { quiet < 2 };
+                assert_eq!(replies.len(), usize::from(expected), "{mode} q={quiet}");
+                if expected {
+                    assert!(replies[0].contains(if supported { ";OK" } else { ";ENOTSUPPORTED" }));
+                }
+                assert!(graphics.images.is_empty());
+                assert!(graphics.placements.is_empty());
+            }
+        }
+        let actions = graphics.push(b"\x1b_Ga=q;AAAA\x1b\\", &mut plain);
+        assert!(actions
+            .iter()
+            .all(|a| !matches!(a, GraphicsAction::Reply(_))));
+    }
+
+    #[test]
+    fn pane_clip_and_overlay_share_offset_aware_source_boundaries() {
+        use ratatui::layout::Rect;
+        for (col, row) in [(-1, -1), (0, 0), (2, 2)] {
+            for (offset_x, offset_y) in [(0, 5), (5, 0), (5, 5)] {
+                for (source_x, source_y, width, height) in [(0, 0, 100, 100), (10, 20, 70, 60)] {
+                    for cells in [5, 10, 20] {
+                        let mut p = screen(1, visible(col, row, 0));
+                        p.area_width = 30;
+                        p.area_height = 30;
+                        p.visible.image_width = 100;
+                        p.visible.image_height = 100;
+                        p.visible.source_x = source_x;
+                        p.visible.source_y = source_y;
+                        p.visible.source_width = width;
+                        p.visible.source_height = height;
+                        p.visible.grid_cols = cells;
+                        p.visible.grid_rows = cells;
+                        p.visible.x_offset = offset_x;
+                        p.visible.y_offset = offset_y;
+                        let whole = clip_placement(&p).unwrap().0;
+                        let rect =
+                            Rect::new(whole.x, whole.y, whole.cols as u16, whole.rows as u16);
+                        let crop = occlusion::crop_piece(&p, rect).unwrap();
+                        assert_eq!(
+                            (
+                                whole.source_x,
+                                whole.source_y,
+                                whole.source_width,
+                                whole.source_height
+                            ),
+                            (
+                                crop.source_x,
+                                crop.source_y,
+                                crop.source_width,
+                                crop.source_height
+                            )
+                        );
+                        let mut cover = Occlusion::default();
+                        cover.cover(Rect::new(rect.x, rect.y + rect.height / 2, rect.width, 1));
+                        let input = [p.clone()];
+                        let pieces = occlusion::frame_pieces(&input, &cover);
+                        let top = pieces
+                            .iter()
+                            .find(|(_, piece, _)| piece.y == rect.y)
+                            .unwrap()
+                            .1;
+                        assert_eq!(
+                            (top.source_x, top.source_y),
+                            (whole.source_x, whole.source_y)
+                        );
+                        let boundary = top.source_y + top.source_height;
+                        let lower = occlusion::crop_piece(
+                            &p,
+                            Rect::new(rect.x, top.y + top.rows as u16, rect.width, 1),
+                        )
+                        .unwrap();
+                        assert_eq!(boundary, lower.source_y);
+                        let no_cover = occlusion::frame_pieces(&input, &Occlusion::default());
+                        assert_eq!(no_cover[0].1.source_y, whole.source_y);
+                    }
+                }
+            }
+        }
+        let mut p = screen(1, visible(0, -1, 0));
+        p.visible.image_width = 100;
+        p.visible.image_height = 100;
+        p.visible.grid_cols = 10;
+        p.visible.grid_rows = 10;
+        p.visible.y_offset = 5;
+        assert_eq!(clip_placement(&p).unwrap().0.source_y, 5);
     }
 
     #[test]

@@ -246,7 +246,14 @@ enum MachinePopup {
     },
 }
 
+mod graphics;
+#[cfg(all(test, unix))]
+mod graphics_tests;
+
 struct DockState {
+    host_placements: graphics::HostPlacements,
+    overlay_viewport: Option<(u16, u16)>,
+    restore_ticket: Option<u64>,
     local_session: String,
     scroll: usize,
     rect: Option<ShellDockRect>,
@@ -313,6 +320,9 @@ struct DockState {
 impl Default for DockState {
     fn default() -> Self {
         Self {
+            host_placements: graphics::HostPlacements::default(),
+            overlay_viewport: None,
+            restore_ticket: None,
             local_session: crate::session::display_name(),
             scroll: 0,
             rect: None,
@@ -1486,10 +1496,10 @@ fn replace_candidate_with_local(candidate: &mut Option<SurfaceCandidate>) {
     });
 }
 
-fn prepare_local_failover(
+fn prepare_local_failover<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write>(
     candidate: &mut Option<SurfaceCandidate>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
-    terminal: &DefaultTerminal,
+    terminal: &ratatui::Terminal<B>,
 ) -> Result<()> {
     replace_candidate_with_local(candidate);
     send_local(
@@ -1510,14 +1520,14 @@ fn prepare_local_failover(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_surface_message(
+fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write>(
     endpoint: Endpoint,
     message: ServerMessage,
     active: &mut Endpoint,
     candidate: &mut Option<SurfaceCandidate>,
     machines: &mut HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut ratatui::Terminal<B>,
     truecolor: bool,
     host_terminal_shares_local_filesystem: bool,
     dock: &mut DockState,
@@ -1527,6 +1537,9 @@ fn handle_surface_message(
 ) -> Result<Option<super::client::ClientExit>> {
     let (message, prepared) = match message {
         ServerMessage::PreparedFrame { ticket, frame } => {
+            if dock.overlay_open() && dock.restore_ticket == Some(ticket) {
+                return Ok(None);
+            }
             let size = terminal.size()?;
             let boot_id = match &endpoint {
                 Endpoint::Local => None,
@@ -1865,6 +1878,10 @@ fn handle_surface_message(
                         candidate_shell_rect(&endpoint, reported, dock.rect, dock.owner_style);
                 }
                 cache_dock_projection(dock, &frame, truecolor, endpoint == Endpoint::Local);
+                // A full frame clears the host screen. Previous endpoint IDs
+                // must never survive into the newly selected ownership scope.
+                dock.host_placements.hide(terminal.backend_mut())?;
+                dock.host_placements.reset();
                 super::client::sync_begin();
                 let allow_links =
                     allow_host_file_links(&endpoint, host_terminal_shares_local_filesystem);
@@ -1887,6 +1904,10 @@ fn handle_surface_message(
                         super::client::write_host_graphics(backend, &frame.graphics)
                     },
                 )?;
+                dock.host_placements.observe(&frame.graphics);
+                if dock.overlay_open() && !is_candidate {
+                    dock.host_placements.hide(terminal.backend_mut())?;
+                }
                 super::client::sync_end();
                 *cursor_visible = frame.cursor_visible;
                 dock.machine_form_backdrop_pending = false;
@@ -1926,7 +1947,10 @@ fn handle_surface_message(
         }
         ServerMessage::FrameDiff(diff)
             if endpoint == *active
-                && (!dock.overlay_open() || dock.machine_form_backdrop_pending) =>
+                && (!dock.overlay_open() || dock.machine_form_backdrop_pending)
+                && candidate
+                    .as_ref()
+                    .is_none_or(|candidate| candidate.endpoint != endpoint) =>
         {
             apply_pending_shell_rect(dock);
             let dock_changed = dock.rect.is_some_and(|rect| {
@@ -1952,6 +1976,10 @@ fn handle_surface_message(
                 last_cursor_style,
                 |backend| super::client::write_host_graphics(backend, &diff.graphics),
             )?;
+            dock.host_placements.observe(&diff.graphics);
+            if dock.overlay_open() {
+                dock.host_placements.hide(terminal.backend_mut())?;
+            }
             super::client::sync_end();
             *cursor_visible = diff.cursor_visible;
             dock.machine_form_backdrop_pending = false;
@@ -2107,6 +2135,9 @@ fn handle_dock_input(
     terminal: &mut DefaultTerminal,
     events: &Sender<ShellEvent>,
 ) -> Result<bool> {
+    if let ClientMessage::Resize { cols, rows, .. } = message {
+        dock.overlay_viewport = Some((*cols, *rows));
+    }
     if dock.sidebars.is_some() && !dock.overlay_open() {
         if let ClientMessage::Mouse(mouse) = message {
             if dock.width_drag.is_some()
@@ -3877,21 +3908,33 @@ fn close_selector(
     dock.machine_form_backdrop_pending = false;
     dock.machine_popup = None;
     dock.dirty = true;
-    // Frames received beneath the client-owned selector were intentionally not
-    // painted. Re-entering Active through Prepared invalidates the server-side
-    // baseline and guarantees one complete frame before later diffs.
-    let restored = (|| {
-        send_interest(active, SurfaceInterest::Prepared, machines, local_writer)?;
-        if let Ok((cols, rows)) = crossterm::terminal::size() {
-            send_surface(
-                active,
-                &super::client::resize_message(cols, rows),
-                machines,
-                local_writer,
-            )?;
-        }
-        send_interest(active, SurfaceInterest::Active, machines, local_writer)
-    })();
+    // Ignore queued old frames and diffs until the selected endpoint supplies
+    // a fresh ticketed complete surface. The existing server one-frame gate
+    // retries this request under backpressure; no pixel/frame clone is replayed.
+    // Preserve an already prepared user switch instead of switching back.
+    let restored = if candidate
+        .as_ref()
+        .is_none_or(|pending| dock.restore_ticket == Some(pending.ticket))
+    {
+        request_switch_at_size(
+            active.clone(),
+            candidate,
+            machines,
+            dock.local_workspaces.len(),
+            dock.sidebars.as_ref(),
+            local_writer,
+            match dock.overlay_viewport {
+                Some(size) => size,
+                None => crossterm::terminal::size()?,
+            },
+        )
+    } else {
+        Ok(())
+    };
+    dock.restore_ticket = candidate
+        .as_ref()
+        .filter(|pending| pending.endpoint == *active)
+        .map(|pending| pending.ticket);
     if let Err(error) = restored {
         if matches!(active, Endpoint::Local) {
             return Err(error);
@@ -4014,6 +4057,30 @@ fn request_switch(
     sidebars: Option<&protocol::ShellSidebars>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
 ) -> Result<()> {
+    request_switch_at_size(
+        endpoint,
+        candidate,
+        machines,
+        local_workspace_count,
+        sidebars,
+        local_writer,
+        crossterm::terminal::size()?,
+    )
+}
+
+/// Prepare an exact viewport using the existing ticket fence. Client-owned
+/// modals pass their last rendered/current resize geometry rather than replaying
+/// an obsolete cached frame or accepting an untagged queued server frame.
+#[allow(clippy::too_many_arguments)]
+fn request_switch_at_size(
+    endpoint: Endpoint,
+    candidate: &mut Option<SurfaceCandidate>,
+    machines: &HashMap<String, MachineRuntime>,
+    local_workspace_count: usize,
+    sidebars: Option<&protocol::ShellSidebars>,
+    local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
+    (cols, rows): (u16, u16),
+) -> Result<()> {
     if let Some(previous) = candidate.take() {
         let _ = send_interest(
             &previous.endpoint,
@@ -4035,9 +4102,7 @@ fn request_switch(
                 local_writer,
                 &ClientMessage::SurfaceInterest(SurfaceInterest::Prepared),
             )?;
-            if let Ok((cols, rows)) = crossterm::terminal::size() {
-                send_local(local_writer, &super::client::resize_message(cols, rows))?;
-            }
+            send_local(local_writer, &super::client::resize_message(cols, rows))?;
             *candidate = Some(SurfaceCandidate {
                 ticket: next_connection_generation(),
                 endpoint,
@@ -4072,9 +4137,7 @@ fn request_switch(
                 local_workspace_count,
             )))?;
             control.send(&ClientMessage::SurfaceInterest(SurfaceInterest::Prepared))?;
-            if let Ok((cols, rows)) = crossterm::terminal::size() {
-                control.send(&super::client::resize_message(cols, rows))?;
-            }
+            control.send(&super::client::resize_message(cols, rows))?;
             *candidate = Some(SurfaceCandidate {
                 ticket: next_connection_generation(),
                 endpoint,
@@ -4087,7 +4150,6 @@ fn request_switch(
         }
     }
     if let Some(candidate) = candidate.as_ref() {
-        let (cols, rows) = crossterm::terminal::size()?;
         send_surface(
             &candidate.endpoint,
             &ClientMessage::PrepareSurface {
@@ -4174,14 +4236,19 @@ fn stop_link(endpoint: &mut SessionRuntime) {
     }
 }
 
-fn paint_dock(
-    terminal: &mut DefaultTerminal,
+fn paint_dock<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write>(
+    terminal: &mut ratatui::Terminal<B>,
     dock: &mut DockState,
     machines: &HashMap<String, MachineRuntime>,
     active: &Endpoint,
     cursor: &mut Option<(u16, u16)>,
     cursor_visible: bool,
 ) -> Result<()> {
+    if dock.overlay_open() {
+        let size = terminal.size()?;
+        dock.overlay_viewport = Some((size.width, size.height));
+        dock.host_placements.hide(terminal.backend_mut())?;
+    }
     paint_dock_content(terminal, dock, machines, active, cursor, cursor_visible)?;
     paint_owner_session_button(terminal, dock, active, cursor, cursor_visible)
 }
@@ -4190,8 +4257,8 @@ fn paint_dock(
 /// endpoint heading or workspace, the scrollbar, and any open machine form.
 /// Workspace rows reuse the server's native row renderer; endpoint headings
 /// are painted here and recorded in `dock.hits` for mouse handling.
-fn paint_dock_content(
-    terminal: &mut DefaultTerminal,
+fn paint_dock_content<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write>(
+    terminal: &mut ratatui::Terminal<B>,
     dock: &mut DockState,
     machines: &HashMap<String, MachineRuntime>,
     active: &Endpoint,
@@ -4521,8 +4588,10 @@ fn paint_dock_content(
     }
 }
 
-fn paint_owner_session_button(
-    terminal: &mut DefaultTerminal,
+fn paint_owner_session_button<
+    B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write,
+>(
+    terminal: &mut ratatui::Terminal<B>,
     dock: &DockState,
     active: &Endpoint,
     cursor: &mut Option<(u16, u16)>,
@@ -4661,8 +4730,8 @@ fn resized_workspace_width(drag: protocol::ShellResize, column: u16) -> u16 {
     )
 }
 
-fn paint_machine_popup(
-    terminal: &mut DefaultTerminal,
+fn paint_machine_popup<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write>(
+    terminal: &mut ratatui::Terminal<B>,
     dock: &mut DockState,
     machines: &HashMap<String, MachineRuntime>,
     cursor: &mut Option<(u16, u16)>,
@@ -4894,8 +4963,8 @@ fn machine_form_label_x(label: &str, label_width: u16) -> u16 {
     2u16.saturating_add(label_width.saturating_sub(display_columns(label)))
 }
 
-fn paint_machine_form(
-    terminal: &mut DefaultTerminal,
+fn paint_machine_form<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write>(
+    terminal: &mut ratatui::Terminal<B>,
     dock: &mut DockState,
     machines: &HashMap<String, MachineRuntime>,
     cursor: &mut Option<(u16, u16)>,
@@ -5542,8 +5611,8 @@ fn write_endpoint_text(
     }
 }
 
-fn paint_selector(
-    terminal: &mut DefaultTerminal,
+fn paint_selector<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write>(
+    terminal: &mut ratatui::Terminal<B>,
     dock: &mut DockState,
     machines: &HashMap<String, MachineRuntime>,
     active: &Endpoint,

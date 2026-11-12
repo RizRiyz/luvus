@@ -3548,6 +3548,26 @@ mod tests {
         );
         assert_eq!(foreground, None, "candidate geometry cannot claim input");
         let mut scratch = RenderScratch::default();
+        // The modal replay ticket must survive a full one-pending-frame gate.
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(true, Ordering::Release);
+        render_clients(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut interactive_size,
+            false,
+            false,
+            &mut scratch,
+        );
+        assert_eq!(clients[&7].prepare_ticket, Some(11));
+        assert!(rx.try_recv().is_err());
+        clients[&7]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
         assert!(render_clients(
             &mut app,
             &mut clients,
