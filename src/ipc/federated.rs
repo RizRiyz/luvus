@@ -247,6 +247,8 @@ enum MachinePopup {
 }
 
 mod graphics;
+mod modal_restore;
+use modal_restore::ModalRestore;
 #[cfg(all(test, unix))]
 mod graphics_tests;
 #[cfg(all(test, unix))]
@@ -256,10 +258,7 @@ mod test_support;
 
 struct DockState {
     host_placements: graphics::HostPlacements,
-    overlay_viewport: Option<(u16, u16)>,
-    restore_ticket: Option<u64>,
-    /// Restore input on failure, but fence old visuals until a new ticket succeeds.
-    restore_blocked: bool,
+    modal_restore: ModalRestore,
     local_session: String,
     scroll: usize,
     rect: Option<ShellDockRect>,
@@ -327,9 +326,7 @@ impl Default for DockState {
     fn default() -> Self {
         Self {
             host_placements: graphics::HostPlacements::default(),
-            overlay_viewport: None,
-            restore_ticket: None,
-            restore_blocked: false,
+            modal_restore: ModalRestore::default(),
             local_session: crate::session::display_name(),
             scroll: 0,
             rect: None,
@@ -1341,9 +1338,8 @@ fn cancel_preparation(
         .take()
         .map(|pending| pending.endpoint)
         .unwrap_or_else(|| active.clone());
-    dock.restore_ticket = None;
+    dock.modal_restore.cancel(target == *active);
     if target == *active {
-        dock.restore_blocked = true;
         send(active, SurfaceInterest::Active)?;
     } else {
         // A normal switch never demotes the old active endpoint.
@@ -1564,7 +1560,7 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
 ) -> Result<Option<super::client::ClientExit>> {
     let (message, prepared) = match message {
         ServerMessage::PreparedFrame { ticket, frame } => {
-            if dock.overlay_open() && dock.restore_ticket == Some(ticket) {
+            if dock.overlay_open() && dock.modal_restore.ticket_is(ticket) {
                 return Ok(None);
             }
             let size = terminal.size()?;
@@ -1586,9 +1582,9 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
                     && endpoint == *active
                     && pending.ticket == ticket
                     && pending.boot_id == boot_id
-                    && dock.restore_ticket == Some(ticket)
+                    && dock.modal_restore.ticket_is(ticket)
             }) && (frame.width, frame.height) != (size.width, size.height)
-                && dock.overlay_viewport != Some((size.width, size.height))
+                && dock.modal_restore.viewport() != Some((size.width, size.height))
             {
                 request_modal_restore(
                     dock,
@@ -1909,7 +1905,7 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
                 candidate.endpoint == endpoint && candidate.welcomed && candidate.ready && prepared
             });
             if (endpoint == *active
-                && !dock.restore_blocked
+                && !dock.modal_restore.blocked()
                 && (!dock.overlay_open() || dock.machine_form_backdrop_pending)
                 && candidate
                     .as_ref()
@@ -1976,8 +1972,7 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
                         );
                     }
                     commit_candidate(endpoint, active, candidate, machines, local_writer)?;
-                    dock.restore_ticket = None;
-                    dock.restore_blocked = false;
+                    dock.modal_restore.complete();
                     dock.sidebar_sync = None;
                     dock.pending_rect = None;
                     dock.selector_open = false;
@@ -1999,7 +1994,7 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
         }
         ServerMessage::FrameDiff(diff)
             if endpoint == *active
-                && !dock.restore_blocked
+                && !dock.modal_restore.blocked()
                 && (!dock.overlay_open() || dock.machine_form_backdrop_pending)
                 && candidate
                     .as_ref()
@@ -2196,16 +2191,11 @@ fn handle_dock_input<B: ratatui::backend::Backend<Error = std::io::Error> + std:
     } = message
     {
         let size = (*cols, *rows);
-        let changed = dock.overlay_viewport != Some(size);
-        dock.overlay_viewport = Some(size);
+        let changed = dock.modal_restore.note_viewport(size);
         if !dock.overlay_open()
-            && ((dock.restore_blocked
-                && candidate
-                    .as_ref()
-                    .is_none_or(|pending| pending.endpoint == *active))
-                || candidate.as_ref().is_some_and(|pending| {
-                    pending.endpoint == *active && dock.restore_ticket == Some(pending.ticket)
-                }))
+            && dock
+                .modal_restore
+                .handles_resize(candidate.as_ref(), active)
         {
             // Cell geometry is independent of the ticket's row/column size:
             // a queued Resize may carry new font/scale pixels even after a
@@ -2220,7 +2210,7 @@ fn handle_dock_input<B: ratatui::backend::Backend<Error = std::io::Error> + std:
                 return Ok(true);
             }
             // PrepareSurface carries size; never append an ordinary Resize.
-            if changed || dock.restore_blocked {
+            if changed || dock.modal_restore.blocked() {
                 request_modal_restore(dock, active, candidate, machines, local_writer, size)?;
             }
             return Ok(true);
@@ -4000,11 +3990,8 @@ fn close_selector(
     // a fresh ticketed complete surface. The existing server one-frame gate
     // retries this request under backpressure; no pixel/frame clone is replayed.
     // Preserve an already prepared user switch instead of switching back.
-    if candidate
-        .as_ref()
-        .is_none_or(|pending| dock.restore_ticket == Some(pending.ticket))
-    {
-        let size = match dock.overlay_viewport {
+    if dock.modal_restore.can_start(candidate.as_ref()) {
+        let size = match dock.modal_restore.viewport() {
             Some(size) => size,
             None => crossterm::terminal::size()?,
         };
@@ -4091,9 +4078,7 @@ fn modal_restore_with_send(
         boot_id: previous.as_ref().map_or(boot_id, |pending| pending.boot_id),
         deadline: previous.map_or_else(|| Instant::now() + SURFACE_PREPARE_TIMEOUT, |p| p.deadline),
     });
-    dock.restore_ticket = Some(ticket);
-    dock.restore_blocked = false;
-    dock.overlay_viewport = Some((cols, rows));
+    dock.modal_restore.begin(ticket, (cols, rows));
     let sent = send(&ClientMessage::PrepareSurface { ticket, cols, rows });
     if sent.is_err() {
         dock.warning = Some("surface restoration failed".into());
@@ -4192,9 +4177,7 @@ fn request_user_switch(
         }
     }
     dock.warning = None;
-    if candidate.as_ref().is_some_and(|pending| {
-        pending.endpoint == *active && dock.restore_ticket == Some(pending.ticket)
-    }) {
+    if dock.modal_restore.owns(candidate.as_ref(), active) {
         cancel_preparation(candidate, active, dock, |endpoint, interest| {
             send_interest(endpoint, interest, machines, local_writer)
         })?;
@@ -4407,7 +4390,7 @@ fn paint_dock<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Wr
 ) -> Result<()> {
     if dock.overlay_open() {
         let size = terminal.size()?;
-        dock.overlay_viewport = Some((size.width, size.height));
+        dock.modal_restore.note_viewport((size.width, size.height));
         dock.host_placements.hide(terminal.backend_mut())?;
     }
     paint_dock_content(terminal, dock, machines, active, cursor, cursor_visible)?;

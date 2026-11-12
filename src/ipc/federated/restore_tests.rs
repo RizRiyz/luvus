@@ -129,7 +129,7 @@ fn restore_resize_replaces_enqueued_ticket_and_timeout_restores_only_active_inpu
     )
     .unwrap();
     assert!(h.candidate.is_none());
-    assert!(!h.dock.restore_blocked);
+    assert!(!h.dock.modal_restore.blocked());
     assert_eq!(h.active, Endpoint::Local);
     assert_eq!(h.cursor, Some((3, 4)));
     assert!(matches!(
@@ -148,7 +148,7 @@ fn restore_resize_replaces_enqueued_ticket_and_timeout_restores_only_active_inpu
         ClientMessage::SurfaceInterest(SurfaceInterest::Active)
     ));
     assert!(h.candidate.is_none());
-    assert!(h.dock.restore_blocked);
+    assert!(h.dock.modal_restore.blocked());
     let before = h.terminal.backend_mut().bytes.clone();
     for message in [
         ServerMessage::Frame(frame(50, 18)),
@@ -189,7 +189,7 @@ fn restore_resize_replaces_enqueued_ticket_and_timeout_restores_only_active_inpu
         },
     )
     .unwrap();
-    assert!(!h.dock.restore_blocked);
+    assert!(!h.dock.modal_restore.blocked());
     assert!(h.candidate.is_none());
     assert!(matches!(
         h.wire(),
@@ -248,12 +248,12 @@ fn preparation_failure_rolls_back_input_without_activating_switch_destination() 
     })
     .unwrap();
     assert_eq!(sent, vec![(active.clone(), SurfaceInterest::Active)]);
-    assert!(dock.restore_blocked);
+    assert!(dock.modal_restore.blocked());
     let remote = Endpoint::Remote {
         machine_id: "requested".into(),
         session: "review".into(),
     };
-    dock.restore_blocked = false;
+    dock.modal_restore.complete();
     candidate = make(remote.clone());
     sent.clear();
     cancel_preparation(&mut candidate, &active, &mut dock, |e, i| {
@@ -262,7 +262,7 @@ fn preparation_failure_rolls_back_input_without_activating_switch_destination() 
     })
     .unwrap();
     assert_eq!(sent, vec![(remote, SurfaceInterest::Suspended)]);
-    assert!(!dock.restore_blocked);
+    assert!(!dock.modal_restore.blocked());
     assert_eq!(active, Endpoint::Local);
     candidate = make(active.clone());
     assert!(
@@ -272,7 +272,7 @@ fn preparation_failure_rolls_back_input_without_activating_switch_destination() 
         .is_err()
     );
     assert!(candidate.is_none());
-    assert!(dock.restore_blocked);
+    assert!(dock.modal_restore.blocked());
     // A transient control-queue failure may reject PrepareSurface but accept
     // Active rollback; keep input and the visual fence, with no destination switch.
     let mut calls = Vec::new();
@@ -322,7 +322,7 @@ fn preparation_failure_rolls_back_input_without_activating_switch_destination() 
     );
     assert_eq!(calls, vec!["pixels", "active"]);
     assert!(candidate.is_none());
-    assert!(dock.restore_blocked);
+    assert!(dock.modal_restore.blocked());
     candidate = make(active.clone());
     assert!(
         forward_restore_pixels(&mut dock, &active, &mut candidate, (12, 24), |_| Err(
@@ -331,7 +331,7 @@ fn preparation_failure_rolls_back_input_without_activating_switch_destination() 
         .is_err()
     );
     assert!(candidate.is_none());
-    assert!(dock.restore_blocked);
+    assert!(dock.modal_restore.blocked());
     assert!(
         modal_restore_with_send(&mut dock, &active, &mut candidate, None, (80, 24), |_| Err(
             anyhow!("closed transport")
@@ -339,5 +339,5 @@ fn preparation_failure_rolls_back_input_without_activating_switch_destination() 
         .is_err()
     );
     assert!(candidate.is_none());
-    assert!(dock.restore_blocked);
+    assert!(dock.modal_restore.blocked());
 }
