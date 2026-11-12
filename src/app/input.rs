@@ -9326,15 +9326,35 @@ mod link_click_tests {
             .pane_location(other)
             .expect("the second view is in a tab");
         app.focus_location(workspace, tab, other);
-        app.diff_agent_picker = Some(agent_picker(pane));
+        assert_eq!(app.layout().focus, other, "the non-owner view holds focus");
+        let mut picker = agent_picker(pane);
+        picker.choices = vec![
+            crate::diff::DiffAgentChoice {
+                pane,
+                label: "first".into(),
+            },
+            crate::diff::DiffAgentChoice {
+                pane: other,
+                label: "second".into(),
+            },
+        ];
+        app.diff_agent_picker = Some(picker);
 
+        // A key the picker consumes itself: without owner scoping this moves its
+        // cursor, so a surviving cursor proves the key went to the view instead.
         app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
-            KeyCode::Esc,
+            KeyCode::Char('j'),
             KeyModifiers::NONE,
         )));
-        assert!(
-            app.diff_agent_picker.is_some(),
-            "another view's keys must not clear it"
+        let picker = app
+            .diff_agent_picker
+            .as_ref()
+            .expect("another view's keys must not take the picker");
+        assert_eq!(picker.cursor, 0, "another view's keys must not move it");
+        assert_eq!(
+            app.layout().focus,
+            other,
+            "the key stays with the focused view"
         );
 
         let at = app
@@ -9351,7 +9371,7 @@ mod link_click_tests {
         assert_eq!(
             app.layout().focus,
             pane,
-            "hover still moves focus to a view that does not own the picker"
+            "hover leaves a view that does not own the picker"
         );
     }
 
