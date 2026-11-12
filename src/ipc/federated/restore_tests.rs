@@ -83,6 +83,39 @@ fn restore_resize_replaces_enqueued_ticket_and_timeout_restores_only_active_inpu
     );
     let (events, _rx) = mpsc::sync_channel(8);
     let mut pending = None;
+    // The queued Resize now matches the viewport already re-ticketed by the
+    // old PreparedFrame, but still carries a new font/scale pixel pair.
+    for pixels in [(12, 24), (15, 30)] {
+        assert!(handle_dock_input(
+            &ClientMessage::Resize {
+                cols: 70,
+                rows: 22,
+                cell_width_px: pixels.0,
+                cell_height_px: pixels.1
+            },
+            &mut dock,
+            &active,
+            &mut candidate,
+            &mut pending,
+            &mut machines,
+            &writer,
+            &mut terminal,
+            &events
+        )
+        .unwrap());
+        assert!(
+            matches!(protocol::read_message::<_,ClientMessage>(&mut peer).unwrap(), ClientMessage::CellPixels { cell_width_px,cell_height_px } if (cell_width_px,cell_height_px)==pixels)
+        );
+        assert_eq!(candidate.as_ref().unwrap().ticket, refreshed);
+        assert_eq!(candidate.as_ref().unwrap().deadline, deadline);
+        assert_eq!(
+            terminal.backend_mut().bytes,
+            before,
+            "pixel metadata cannot paint old frames"
+        );
+    }
+    // The very next wire command is the following resize's CellPixels (below),
+    // proving the two same-size updates emitted no extra ticket or Resize.
     // Subsequent resize events each consume routing and issue exactly one new
     // PrepareSurface (not an ordinary Resize after a ticket).
     let mut old = vec![(ticket, 80, 24), (refreshed, 70, 22)];
@@ -283,6 +316,13 @@ fn restore_resize_replaces_enqueued_ticket_and_timeout_restores_only_active_inpu
     )
     .unwrap());
     assert_eq!(candidate.as_ref().unwrap().ticket, retry);
+    assert!(matches!(
+        protocol::read_message::<_, ClientMessage>(&mut peer).unwrap(),
+        ClientMessage::CellPixels {
+            cell_width_px: 10,
+            cell_height_px: 10
+        }
+    ));
     handle_surface_message(
         Endpoint::Local,
         ServerMessage::PreparedFrame {
@@ -418,6 +458,38 @@ fn preparation_failure_rolls_back_input_without_activating_switch_destination() 
     )
     .is_ok());
     assert_eq!(calls, vec!["prepare", "active"]);
+    assert!(candidate.is_none());
+    candidate = make(active.clone());
+    calls.clear();
+    assert!(
+        !forward_restore_pixels(&mut dock, &active, &mut candidate, (12, 24), |message| {
+            match message {
+                ClientMessage::CellPixels {
+                    cell_width_px: 12,
+                    cell_height_px: 24,
+                } => {
+                    calls.push("pixels");
+                    Err(anyhow!("queue full"))
+                }
+                ClientMessage::SurfaceInterest(SurfaceInterest::Active) => {
+                    calls.push("active");
+                    Ok(())
+                }
+                _ => panic!("pixel failure must not prepare or resize"),
+            }
+        })
+        .unwrap()
+    );
+    assert_eq!(calls, vec!["pixels", "active"]);
+    assert!(candidate.is_none());
+    assert!(dock.restore_blocked);
+    candidate = make(active.clone());
+    assert!(
+        forward_restore_pixels(&mut dock, &active, &mut candidate, (12, 24), |_| Err(
+            anyhow!("closed transport")
+        ))
+        .is_err()
+    );
     assert!(candidate.is_none());
     assert!(dock.restore_blocked);
     assert!(

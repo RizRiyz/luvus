@@ -2205,25 +2205,20 @@ fn handle_dock_input<B: ratatui::backend::Backend<Error = std::io::Error> + std:
                     pending.endpoint == *active && dock.restore_ticket == Some(pending.ticket)
                 }))
         {
-            // PrepareSurface carries size; do not follow it with ordinary Resize.
+            // Cell geometry is independent of the ticket's row/column size:
+            // a queued Resize may carry new font/scale pixels even after a
+            // prepared-frame mismatch already refreshed the viewport ticket.
+            if !forward_restore_pixels(
+                dock,
+                active,
+                candidate,
+                (*cell_width_px, *cell_height_px),
+                |message| send_surface(active, message, machines, local_writer),
+            )? {
+                return Ok(true);
+            }
+            // PrepareSurface carries size; never append an ordinary Resize.
             if changed || dock.restore_blocked {
-                if send_surface(
-                    active,
-                    &ClientMessage::CellPixels {
-                        cell_width_px: *cell_width_px,
-                        cell_height_px: *cell_height_px,
-                    },
-                    machines,
-                    local_writer,
-                )
-                .is_err()
-                {
-                    dock.warning = Some("surface restoration failed".into());
-                    cancel_preparation(candidate, active, dock, |endpoint, interest| {
-                        send_interest(endpoint, interest, machines, local_writer)
-                    })?;
-                    return Ok(true);
-                }
                 request_modal_restore(dock, active, candidate, machines, local_writer, size)?;
             }
             return Ok(true);
@@ -4014,6 +4009,31 @@ fn close_selector(
         request_modal_restore(dock, active, candidate, machines, local_writer, size)?;
     }
     Ok(())
+}
+
+/// Forward every restoring Resize's pixel pair, even when its cell counts
+/// already match. Queue failure uses the same input rollback and visual fence
+/// as failed preparation; it must not trigger a ticket or ordinary Resize.
+fn forward_restore_pixels(
+    dock: &mut DockState,
+    active: &Endpoint,
+    candidate: &mut Option<SurfaceCandidate>,
+    (cell_width_px, cell_height_px): (u16, u16),
+    mut send: impl FnMut(&ClientMessage) -> Result<()>,
+) -> Result<bool> {
+    if send(&ClientMessage::CellPixels {
+        cell_width_px,
+        cell_height_px,
+    })
+    .is_err()
+    {
+        dock.warning = Some("surface restoration failed".into());
+        cancel_preparation(candidate, active, dock, |_, interest| {
+            send(&ClientMessage::SurfaceInterest(interest))
+        })?;
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// A modal restore is not a user endpoint switch. Refresh only its ticket and
