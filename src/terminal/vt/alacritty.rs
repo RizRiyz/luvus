@@ -3753,6 +3753,53 @@ mod tests {
     }
 
     #[test]
+    fn kitty_png_validation_keeps_rejected_images_and_cursor_out_of_grid() {
+        fn command(data: &[u8]) -> Vec<u8> {
+            const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = b"\x1b_Ga=T,f=100,s=1,v=1,i=37;".to_vec();
+            for bytes in data.chunks(3) {
+                let n = (u32::from(bytes[0]) << 16)
+                    | (u32::from(*bytes.get(1).unwrap_or(&0)) << 8)
+                    | u32::from(*bytes.get(2).unwrap_or(&0));
+                out.extend([
+                    B64[(n >> 18) as usize],
+                    B64[((n >> 12) & 63) as usize],
+                    if bytes.len() > 1 {
+                        B64[((n >> 6) & 63) as usize]
+                    } else {
+                        b'='
+                    },
+                    if bytes.len() > 2 {
+                        B64[(n & 63) as usize]
+                    } else {
+                        b'='
+                    },
+                ]);
+            }
+            out.extend_from_slice(b"\x1b\\");
+            out
+        }
+        let (tx, rx) = channel();
+        let mut e = AlacrittyEngine::new(20, 10, tx, 64 * 1024);
+        e.set_runtime_cell_pixels(1, 1);
+        let mut bad = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        bad.extend(u32::MAX.to_be_bytes());
+        bad.extend(u32::MAX.to_be_bytes());
+        e.advance(&command(&bad));
+        assert_eq!((e.cursor().x, e.cursor().y), (0, 0));
+        assert!(e.kitty_visible_placements(1, 1).is_empty());
+        assert!(
+            matches!(rx.try_recv().unwrap(),InputAction::Bytes(bytes) if String::from_utf8_lossy(&bytes).contains("i=37;EINVAL"))
+        );
+        let png = crate::clipboard_image::encode_rgba_png(3, 2, |_, _| [1, 2, 3, 255]).unwrap();
+        e.advance(&command(&png));
+        assert_eq!((e.cursor().x, e.cursor().y), (3, 2));
+        let visible = e.kitty_visible_placements(1, 1);
+        assert_eq!(visible.len(), 1);
+        assert_eq!((visible[0].grid_cols, visible[0].grid_rows), (3, 2));
+    }
+
+    #[test]
     fn kitty_tall_placement_scrolls_its_entire_height_before_text() {
         let (tx, _rx) = channel();
         let mut e = AlacrittyEngine::new(20, 5, tx, 64 * 1024);

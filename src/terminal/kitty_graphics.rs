@@ -19,8 +19,11 @@ const MAX_PLACEMENTS: usize = 128;
 const KITTY_CHUNK_BYTES: usize = 3072;
 pub(crate) const HOST_IMAGE_ID_BASE: u32 = 10_000;
 pub(crate) const HOST_IMAGE_ID_LAST: u32 = HOST_IMAGE_ID_BASE + 899_999;
-/// Child `c`/`r` above this is rejected instead of allocating cursor movement.
+/// Explicit cell spans and natural image dimensions share this ceiling, so
+/// even 1px cells cannot produce an unbounded cursor move or anchor lookback.
 const MAX_PLACEMENT_CELLS: u32 = 4_096;
+/// Bound the decoded surface as well as compressed/transmitted storage.
+const MAX_DECODED_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 /// Graphics bytes in one frame stay far under the 64 MiB client frame cap.
 pub(crate) const GRAPHICS_FRAME_BUDGET: usize = 16 * 1024 * 1024;
 /// Grid reflow uses this range for anchors that do not exist yet.
@@ -608,11 +611,13 @@ impl PaneGraphics {
     }
 
     pub(crate) fn lookback_rows(&self, cell_height_px: u32) -> i32 {
-        self.placements
+        let rows = self
+            .placements
             .iter()
             .map(|placement| self.placement_rows(placement, cell_height_px))
             .max()
-            .unwrap_or(0) as i32
+            .unwrap_or(0);
+        i32::try_from(rows).unwrap_or(i32::MAX)
     }
 
     pub(crate) fn cursor_span(
@@ -627,18 +632,8 @@ impl PaneGraphics {
         let image = self.images.get(&placement.image_id)?;
         let width = source_extent(image.width, placement.source_x, placement.source_width);
         let height = source_extent(image.height, placement.source_y, placement.source_height);
-        let cols = if placement.columns != 0 {
-            placement.columns
-        } else {
-            width.div_ceil(cell_width_px).max(1)
-        }
-        .min(MAX_PLACEMENT_CELLS);
-        let rows = if placement.rows != 0 {
-            placement.rows
-        } else {
-            height.div_ceil(cell_height_px).max(1)
-        }
-        .min(MAX_PLACEMENT_CELLS);
+        let cols = placement_axis_span(placement.columns, width, cell_width_px);
+        let rows = placement_axis_span(placement.rows, height, cell_height_px);
         Some((cols, rows))
     }
 
@@ -799,19 +794,10 @@ impl PaneGraphics {
     }
 
     fn placement_rows(&self, placement: &Placement, cell_height_px: u32) -> u32 {
-        if placement.rows > 0 {
-            return placement.rows;
-        }
         let Some(image) = self.images.get(&placement.image_id) else {
             return 1;
         };
-        if cell_height_px == 0 {
-            1
-        } else {
-            source_extent(image.height, placement.source_y, placement.source_height)
-                .div_ceil(cell_height_px)
-                .max(1)
-        }
+        grid_span(placement, image, 0, cell_height_px).1
     }
 
     fn allocate_local_placement(&mut self, explicit: u32) -> u32 {
@@ -979,6 +965,9 @@ impl PaneGraphics {
         self.pending = None;
         let keys = Keys::from_entries(&command.entries);
         if keys.more && keys.medium == 'd' && keys.action != 'q' && keys.action != 'd' {
+            if command.payload.len() > self.image_limit() {
+                return error_action(&keys, "EBADF").into_iter().collect();
+            }
             self.pending = Some(PendingTransfer {
                 keys,
                 data: command.payload,
@@ -1015,8 +1004,11 @@ impl PaneGraphics {
             return Vec::new();
         };
         if pending.data.len().saturating_add(command.payload.len()) > limit {
-            self.pending = None;
-            return vec![GraphicsAction::Reply(error_reply(None, "EBADF"))];
+            let keys = self.pending.take().map(|pending| pending.keys);
+            return keys
+                .and_then(|keys| error_action(&keys, "EBADF"))
+                .into_iter()
+                .collect();
         }
         pending.data.extend_from_slice(&command.payload);
         if more {
@@ -1176,11 +1168,13 @@ impl PaneGraphics {
             }
             100 => match png_size(&data) {
                 Some(size) => size,
-                None if keys.width > 0 && keys.height > 0 => (keys.width, keys.height),
                 None => return false,
             },
             _ => return false,
         };
+        if !bounded_image_size(width, height) {
+            return false;
+        }
         let fingerprint = fingerprint(&data);
         if self
             .images
@@ -1241,25 +1235,30 @@ fn grid_span(
     cell_width_px: u32,
     cell_height_px: u32,
 ) -> (u32, u32) {
-    let cols = if placement.columns > 0 {
-        placement.columns
-    } else if cell_width_px > 0 {
-        source_extent(image.width, placement.source_x, placement.source_width)
-            .div_ceil(cell_width_px)
-            .max(1)
+    (
+        placement_axis_span(
+            placement.columns,
+            source_extent(image.width, placement.source_x, placement.source_width),
+            cell_width_px,
+        ),
+        placement_axis_span(
+            placement.rows,
+            source_extent(image.height, placement.source_y, placement.source_height),
+            cell_height_px,
+        ),
+    )
+}
+
+/// One span calculation for rendering, cursor movement and anchor lookback.
+/// Accepted images and explicit spans are bounded before reaching this helper.
+fn placement_axis_span(explicit: u32, source: u32, cell_pixels: u32) -> u32 {
+    if explicit > 0 {
+        explicit
+    } else if cell_pixels > 0 {
+        source.div_ceil(cell_pixels).max(1)
     } else {
         1
-    };
-    let rows = if placement.rows > 0 {
-        placement.rows
-    } else if cell_height_px > 0 {
-        source_extent(image.height, placement.source_y, placement.source_height)
-            .div_ceil(cell_height_px)
-            .max(1)
-    } else {
-        1
-    };
-    (cols, rows)
+    }
 }
 
 /// Resolve a crop against the remaining pixels, including omitted w/h.
@@ -1318,13 +1317,15 @@ fn error_reply(image_id: Option<u32>, code: &str) -> Vec<u8> {
     }
 }
 
-fn png_size(data: &[u8]) -> Option<(u32, u32)> {
-    if data.len() < 24 || &data[..8] != b"\x89PNG\r\n\x1a\n" || &data[12..16] != b"IHDR" {
-        return None;
-    }
-    let width = u32::from_be_bytes(data[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(data[20..24].try_into().ok()?);
-    (width > 0 && height > 0).then_some((width, height))
+mod png;
+use png::png_size;
+
+fn bounded_image_size(width: u32, height: u32) -> bool {
+    width > 0
+        && height > 0
+        && width <= MAX_PLACEMENT_CELLS
+        && height <= MAX_PLACEMENT_CELLS
+        && rgb_byte_len(width, height, 4).is_some_and(|bytes| bytes <= MAX_DECODED_IMAGE_BYTES)
 }
 
 fn fingerprint(data: &[u8]) -> u64 {
@@ -2089,6 +2090,9 @@ pub(crate) fn cursor_delete(command_entries_action: char, delete: Option<char>) 
 pub(crate) fn delete_action(keys_action: char, delete: Option<char>) -> Option<GraphicsAction> {
     cursor_delete(keys_action, delete).map(|free_image| GraphicsAction::DeleteCursor { free_image })
 }
+
+#[cfg(test)]
+mod bounds_tests;
 
 #[cfg(test)]
 mod tests {

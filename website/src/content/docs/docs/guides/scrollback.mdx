@@ -99,6 +99,16 @@ images. File/shared-memory transfers and compressed image data are unsupported;
 child queries for those modes return an error rather than advertising host-only
 capabilities.
 
+Each image is limited to 8 MiB of transmitted data, dimensions of at most
+4096 × 4096 pixels, and an 8 MiB RGBA surface budget. PNGs additionally require
+a complete, checksum-valid static PNG container with bounded scanline storage;
+Luvus does not decompress image data itself. Truncated or malformed containers
+are rejected even when `s`/`v` supply dimensions. APNG is unsupported. The same
+4096-cell per-axis ceiling applies to explicit placement spans; natural spans
+use the selected source crop and actual cell pixels consistently for rendering,
+cursor movement, and retained-row lookback. Images exceeding these bounds must
+be resized before transmission, even if a smaller placement was requested.
+
 Cell pixels come from the host's ioctl first. If unavailable, a client whose
 host explicitly accepts graphics asks once with `CSI 16 t` during attachment.
 If that bounded query returns no valid size, graphics stay disabled: Luvus does
