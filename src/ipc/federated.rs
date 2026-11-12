@@ -251,6 +251,8 @@ mod graphics;
 mod graphics_tests;
 #[cfg(all(test, unix))]
 mod restore_tests;
+#[cfg(all(test, unix))]
+mod test_support;
 
 struct DockState {
     host_placements: graphics::HostPlacements,
