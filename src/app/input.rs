@@ -2928,7 +2928,10 @@ impl App {
                     })
                     && self.pane_search.is_none()
                     && self.copy_mode.is_none()
-                    && self.diff_agent_picker.is_none()
+                    && !self
+                        .diff_agent_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.view == self.layout().focus)
                     && self.selection.is_none()
                     && self.mouse_grab.is_none()
                     && self.suppressed_mouse_buttons == 0
@@ -5035,7 +5038,12 @@ impl App {
                     C::FileView(focus)
                 }
             }
-            Some(ViewKind::Diff(_)) if self.diff_agent_picker.is_some() => {
+            Some(ViewKind::Diff(_))
+                if self
+                    .diff_agent_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.view == focus) =>
+            {
                 C::DiffAgentPicker(focus)
             }
             Some(ViewKind::Diff(view)) => {
@@ -9214,6 +9222,137 @@ mod link_click_tests {
         app.diff_agent_picker = None;
         app.handle_event(mouse(MouseEventKind::Moved, at, KeyModifiers::NONE));
         assert_eq!(app.layout().focus, second);
+    }
+
+    fn sample_diff_view() -> crate::diff::DiffView {
+        let path = crate::diff::RepoPath::from_path(std::path::Path::new("sample.txt")).unwrap();
+        crate::diff::DiffView::new(
+            std::path::PathBuf::from("/repo"),
+            crate::diff::DiffKey {
+                repo_id: "repo".into(),
+                worktree_id: "tree".into(),
+                layer: crate::diff::DiffLayer::Worktree,
+                old_path: Some(path.clone()),
+                new_path: Some(path),
+            },
+            crate::diff::DiffLayoutPreference::Stack,
+            3,
+            false,
+            false,
+        )
+    }
+
+    fn attach_diff_view(app: &mut App, id: crate::ids::PaneId) {
+        app.panes.remove(&id);
+        app.views
+            .insert(id, ViewKind::Diff(Box::new(sample_diff_view())));
+    }
+
+    fn agent_picker(view: crate::ids::PaneId) -> crate::diff::DiffAgentPicker {
+        crate::diff::DiffAgentPicker {
+            view,
+            choices: Vec::new(),
+            cursor: 0,
+            scope: crate::diff::DiffSendScope::CurrentFile,
+        }
+    }
+
+    #[test]
+    fn closing_a_diff_view_clears_its_agent_picker() {
+        let _env = crate::persist::test_env("hover-focus-picker-close");
+        let Fixture {
+            mut app,
+            mut term,
+            pane,
+            ..
+        } = fixture();
+        app.config.layout.focus_follows_mouse = true;
+        let second = app
+            .split_pane(pane, crate::layout::Axis::Col, false)
+            .expect("second pane");
+        let third = app
+            .split_pane(second, crate::layout::Axis::Col, false)
+            .expect("third pane");
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        attach_diff_view(&mut app, pane);
+        app.diff_agent_picker = Some(agent_picker(pane));
+
+        app.close_pane(pane);
+        assert!(
+            app.diff_agent_picker.is_none(),
+            "the picker does not outlive its view"
+        );
+
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let focus = app.layout().focus;
+        let target = [second, third]
+            .into_iter()
+            .find(|id| *id != focus)
+            .expect("a pane that is not focused");
+        let at = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == target)
+            .map(|(_, rect)| *rect)
+            .expect("the remaining pane is on screen");
+        app.handle_event(mouse(
+            MouseEventKind::Moved,
+            (at.x, at.y),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.layout().focus, target, "hover focus works again");
+    }
+
+    #[test]
+    fn diff_agent_picker_ignores_keys_from_another_view() {
+        let _env = crate::persist::test_env("hover-focus-picker-owner");
+        let Fixture {
+            mut app,
+            mut term,
+            pane,
+            ..
+        } = fixture();
+        app.config.layout.focus_follows_mouse = true;
+        let other = app
+            .split_pane(pane, crate::layout::Axis::Col, false)
+            .expect("second view");
+        term.draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        attach_diff_view(&mut app, pane);
+        attach_diff_view(&mut app, other);
+        let (workspace, tab) = app
+            .pane_location(other)
+            .expect("the second view is in a tab");
+        app.focus_location(workspace, tab, other);
+        app.diff_agent_picker = Some(agent_picker(pane));
+
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(
+            app.diff_agent_picker.is_some(),
+            "another view's keys must not clear it"
+        );
+
+        let at = app
+            .pane_content_rects
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, rect)| *rect)
+            .expect("the owning view is on screen");
+        app.handle_event(mouse(
+            MouseEventKind::Moved,
+            (at.x, at.y),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            app.layout().focus,
+            pane,
+            "hover still moves focus to a view that does not own the picker"
+        );
     }
 
     #[test]

@@ -9730,6 +9730,13 @@ impl App {
         if self.copy_mode.is_some_and(|copy| copy.pane == id) {
             self.copy_mode = None; // the pane is gone; there is no viewport to restore
         }
+        if self
+            .diff_agent_picker
+            .as_ref()
+            .is_some_and(|picker| picker.view == id)
+        {
+            self.diff_agent_picker = None; // the picker cannot outlive its DIFF view
+        }
         crate::logging::event(
             crate::logging::EventKind::PaneClose,
             &[crate::logging::Field::PaneId(u64::from(id.0))],

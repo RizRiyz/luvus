@@ -1691,7 +1691,11 @@ impl App {
     }
 
     pub fn handle_diff_key(&mut self, id: PaneId, key: KeyEvent) -> bool {
-        if self.diff_agent_picker.is_some() {
+        if self
+            .diff_agent_picker
+            .as_ref()
+            .is_some_and(|picker| picker.view == id)
+        {
             return self.handle_diff_agent_picker_key(key);
         }
         let current_anchor = self
