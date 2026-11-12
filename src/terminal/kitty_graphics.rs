@@ -1339,6 +1339,9 @@ pub(crate) fn viewport_line(grid_line: i32, display_offset: i32) -> i32 {
     grid_line.saturating_add(display_offset)
 }
 
+mod occlusion;
+pub(crate) use occlusion::Occlusion;
+
 // ── host placement encoding ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1403,6 +1406,7 @@ struct HostPlacementKey {
     pane_id: u32,
     image_id: u32,
     placement_id: u32,
+    piece: Option<ratatui::layout::Rect>,
 }
 
 /// What this client has already uploaded to its host terminal.
@@ -1436,6 +1440,24 @@ impl HostGraphicsCache {
     }
 
     #[cfg(test)]
+    pub(crate) fn placement_rects(&self) -> Vec<(u32, ratatui::layout::Rect)> {
+        self.host_placements
+            .iter()
+            .filter_map(|(key, id)| {
+                let host = self.sources.get(&SourceKey {
+                    pane_id: key.pane_id,
+                    image_id: key.image_id,
+                })?;
+                let p = self.placements.get(&(*host, *id))?;
+                Some((
+                    key.pane_id,
+                    ratatui::layout::Rect::new(p.x, p.y, p.cols as u16, p.rows as u16),
+                ))
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
     fn host_id(&self, pane_id: u32, image_id: u32) -> Option<u32> {
         self.sources.get(&SourceKey { pane_id, image_id }).copied()
     }
@@ -1448,12 +1470,31 @@ impl HostGraphicsCache {
 /// pixels again because the host screen was cleared. When several images do
 /// not fit in one frame, `remainder` stays set and the unsent images are left
 /// unmarked so the next frame continues.
+#[cfg(test)]
 pub(crate) fn encode_host_frame(
     cache: &mut HostGraphicsCache,
     placements: &[ScreenPlacement],
     live_panes: &HashSet<u32>,
     inspected: &HashSet<u32>,
     retained: &HashMap<SourceKey, u64>,
+) -> Vec<u8> {
+    encode_occluded_host_frame(
+        cache,
+        placements,
+        live_panes,
+        inspected,
+        retained,
+        &Occlusion::default(),
+    )
+}
+
+pub(crate) fn encode_occluded_host_frame(
+    cache: &mut HostGraphicsCache,
+    placements: &[ScreenPlacement],
+    live_panes: &HashSet<u32>,
+    inspected: &HashSet<u32>,
+    retained: &HashMap<SourceKey, u64>,
+    occlusion: &Occlusion,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     cache.remainder = false;
@@ -1487,14 +1528,10 @@ pub(crate) fn encode_host_frame(
         forget_source(cache, &mut out, source, host_id);
     }
 
-    let desired_placements = placements
+    let pieces = occlusion::frame_pieces(placements, occlusion);
+    let desired_placements = pieces
         .iter()
-        .filter(|p| clip_placement(p).is_some())
-        .map(|p| HostPlacementKey {
-            pane_id: p.pane_id,
-            image_id: p.visible.image_id,
-            placement_id: p.visible.placement_id,
-        })
+        .map(|(key, _, _)| *key)
         .collect::<HashSet<_>>();
     // Delete before reusing an id. Otherwise a stale delete can erase the new
     // placement allocated the same id in this frame.
@@ -1520,10 +1557,7 @@ pub(crate) fn encode_host_frame(
         cache.host_placements.remove(&key);
     }
     let mut planned = Vec::new();
-    for placement in placements {
-        let Some((clipped, _)) = clip_placement(placement) else {
-            continue;
-        };
+    for (key, clipped, placement) in pieces {
         let source = SourceKey {
             pane_id: placement.pane_id,
             image_id: placement.visible.image_id,
@@ -1535,12 +1569,7 @@ pub(crate) fn encode_host_frame(
             fingerprint: placement.visible.fingerprint,
         };
         let host_id = host_image_id_for(cache, &mut out, source, signature);
-        let Some(placement_id) = host_placement_id_for(
-            cache,
-            placement.pane_id,
-            placement.visible.image_id,
-            placement.visible.placement_id,
-        ) else {
+        let Some(placement_id) = host_placement_id_for(cache, key) else {
             // Exhaustion is bounded; never spin on the server event loop.
             continue;
         };
@@ -1562,8 +1591,37 @@ pub(crate) fn encode_host_frame(
         cache.placements.remove(&(host_id, placement_id));
     }
 
+    // Remove changed geometry before the upload budget can stop delivery. An
+    // old fragment must never remain over a newly moved menu on a partial frame.
+    for (host, id, clipped, placement, _) in &planned {
+        let desired = placement_signature(
+            *clipped,
+            placement.visible.z,
+            placement.visible.scroll_offset,
+        );
+        if cache
+            .placements
+            .get(&(*host, *id))
+            .is_some_and(|old| *old != desired)
+        {
+            encode_delete_placement(&mut out, *host, *id);
+            cache.placements.remove(&(*host, *id));
+        }
+    }
     for (host_id, placement_id, clipped, placement, signature) in planned {
         let image_current = cache.images.get(&host_id) == Some(&signature);
+        if image_current
+            && cache.placements.get(&(host_id, placement_id))
+                == Some(&placement_signature(
+                    clipped,
+                    placement.visible.z,
+                    placement.visible.scroll_offset,
+                ))
+        {
+            // Unchanged fragments spend no command budget. Otherwise a nearly
+            // full frame could repeatedly stop before its remaining pieces.
+            continue;
+        }
         let estimate = upload_estimate(&placement.visible, image_current);
         let budget = if cache.budget_override == 0 {
             GRAPHICS_FRAME_BUDGET
@@ -1667,17 +1725,7 @@ fn host_image_id_for(
     id
 }
 
-fn host_placement_id_for(
-    cache: &mut HostGraphicsCache,
-    pane_id: u32,
-    image_id: u32,
-    placement_id: u32,
-) -> Option<u32> {
-    let key = HostPlacementKey {
-        pane_id,
-        image_id,
-        placement_id,
-    };
+fn host_placement_id_for(cache: &mut HostGraphicsCache, key: HostPlacementKey) -> Option<u32> {
     if let Some(id) = cache.host_placements.get(&key).copied() {
         return Some(id);
     }
@@ -2053,6 +2101,146 @@ pub(crate) fn delete_action(keys_action: char, delete: Option<char>) -> Option<G
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn occlusion_center_crops_offsets_and_restores_without_upload() {
+        use ratatui::layout::Rect;
+        let mut p = screen(1, visible(0, 0, 0));
+        p.visible.grid_cols = 10;
+        p.visible.grid_rows = 10;
+        p.visible.image_width = 100;
+        p.visible.image_height = 100;
+        p.visible.x_offset = 5;
+        p.visible.y_offset = 5;
+        let mut occlusion = Occlusion::default();
+        occlusion.cover(Rect::new(5, 4, 2, 2));
+        let input = [p.clone()];
+        let pieces = occlusion::frame_pieces(&input, &occlusion);
+        // Compare source boundaries (95 displayed pixels after leading offset).
+        assert_eq!(pieces.len(), 4);
+        let top = pieces.iter().find(|(_, c, _)| c.y == 1).unwrap().1;
+        assert_eq!((top.source_y, top.source_height, top.y_offset), (0, 26, 5));
+        let right = pieces.iter().find(|(_, c, _)| c.x == 7).unwrap().1;
+        assert_eq!(
+            (right.source_x, right.source_width, right.x_offset),
+            (47, 53, 0)
+        );
+        let screens = [p];
+        let live = HashSet::from([1]);
+        let retained = retained_of(&screens);
+        let mut cache = HostGraphicsCache::default();
+        let first =
+            encode_occluded_host_frame(&mut cache, &screens, &live, &live, &retained, &occlusion);
+        assert_eq!(text(&first).matches("a=t,").count(), 1);
+        assert_eq!(cache.placements.len(), 4);
+        let ids = cache.host_placements.clone();
+        assert!(encode_occluded_host_frame(
+            &mut cache, &screens, &live, &live, &retained, &occlusion
+        )
+        .is_empty());
+        assert_eq!(cache.host_placements, ids);
+        let restore = encode_host_frame(&mut cache, &screens, &live, &live, &retained);
+        assert!(!text(&restore).contains("a=t,"));
+        assert_eq!(cache.placements.len(), 1);
+        assert_eq!(text(&restore).matches("a=d,d=i").count(), 4);
+    }
+
+    #[test]
+    fn occlusion_leaves_another_image_in_the_same_pane_unchanged() {
+        use ratatui::layout::Rect;
+        let a = screen(1, visible(0, 0, 0));
+        let mut b = screen(1, visible(8, 0, 0));
+        b.visible.image_id = 9;
+        let input = [a, b];
+        let live = HashSet::from([1]);
+        let retained = retained_of(&input);
+        let mut cache = HostGraphicsCache::default();
+        encode_host_frame(&mut cache, &input, &live, &live, &retained);
+        let key = HostPlacementKey {
+            pane_id: 1,
+            image_id: 9,
+            placement_id: 3,
+            piece: None,
+        };
+        let id = cache.host_placements[&key];
+        let host = cache.host_id(1, 9).unwrap();
+        let signature = cache.placements[&(host, id)];
+        let mut occlusion = Occlusion::default();
+        occlusion.cover(Rect::new(3, 2, 1, 1));
+        let changed =
+            encode_occluded_host_frame(&mut cache, &input, &live, &live, &retained, &occlusion);
+        assert_eq!(cache.host_placements[&key], id);
+        assert_eq!(cache.placements[&(host, id)], signature);
+        assert!(!text(&changed).contains(&format!("i={host},p={id},")));
+        assert!(!text(&changed).contains("a=t,"));
+    }
+
+    #[test]
+    fn occlusion_upscaled_pixel_still_leaves_visible_pieces() {
+        let mut p = screen(1, visible(0, 0, 0));
+        p.visible.image_width = 1;
+        p.visible.image_height = 1;
+        let input = [p];
+        let mut occlusion = Occlusion::default();
+        occlusion.cover(ratatui::layout::Rect::new(3, 2, 1, 1));
+        let pieces = occlusion::frame_pieces(&input, &occlusion);
+        assert_eq!(pieces.len(), 4);
+        assert!(pieces.iter().all(|(_, c, _)| c.source_x == 0
+            && c.source_y == 0
+            && c.source_width == 1
+            && c.source_height == 1));
+    }
+
+    #[test]
+    fn occlusion_budget_preserves_untouched_pane_and_replay_backpressure() {
+        use ratatui::layout::Rect;
+        let mut screens = Vec::new();
+        for i in 0..15 {
+            let mut p = screen(i + 1, visible(0, 0, 0));
+            p.area_x = (i * 5) as u16;
+            screens.push(p);
+        }
+        let mut occlusion = Occlusion::default();
+        for p in &screens[..14] {
+            occlusion.cover(Rect::new(p.area_x + 1, 2, 1, 1));
+        }
+        let pieces = occlusion::frame_pieces(&screens, &occlusion);
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].0.pane_id, 15);
+        let mut occlusion = Occlusion::default();
+        occlusion.cover(Rect::new(1, 2, 1, 1));
+        let live = (1..=15).collect();
+        let retained = retained_of(&screens);
+        let mut cache = HostGraphicsCache {
+            budget_override: 300,
+            ..Default::default()
+        };
+        let original = cache.clone();
+        let mut dropped = cache.clone();
+        let attempted =
+            encode_occluded_host_frame(&mut dropped, &screens, &live, &live, &retained, &occlusion);
+        assert_eq!(
+            encode_occluded_host_frame(&mut cache, &screens, &live, &live, &retained, &occlusion),
+            attempted
+        );
+        for _ in 0..80 {
+            if !cache.remainder() {
+                break;
+            }
+            encode_occluded_host_frame(&mut cache, &screens, &live, &live, &retained, &occlusion);
+        }
+        assert!(!cache.remainder());
+        let expected = cache.placements.clone();
+        cache.request_replay();
+        for _ in 0..80 {
+            encode_occluded_host_frame(&mut cache, &screens, &live, &live, &retained, &occlusion);
+            if !cache.remainder() {
+                break;
+            }
+        }
+        assert_eq!(cache.placements, expected);
+        assert!(original.placements.is_empty());
+    }
 
     fn rgba(width: u32, height: u32, byte: u8) -> Vec<u8> {
         vec![byte; width as usize * height as usize * 4]

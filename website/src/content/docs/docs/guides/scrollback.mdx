@@ -86,9 +86,13 @@ application-cursor pager), Luvus forwards those keys unchanged. `Shift+↑`,
 
 On Unix, thin clients probe the host terminal before displaying Kitty graphics.
 Images use direct placements clipped to the pane, not Unicode placeholder cells.
-They follow retained rows when scrolling and are hidden while a Luvus overlay
-covers the pane. Passive clients use their own display geometry without moving
-the child application's cursor.
+They follow retained rows when scrolling. Menus, submenus, and toasts hide only
+the part of an image they cover; closing them restores the image without
+retransmitting retained pixels. Dimmed full-screen dialogs hide images behind
+their backdrop. Cropping adds at most 32 extra placement rectangles per client
+frame; if this budget is exceeded, intersecting images are hidden whole while
+untouched images remain visible. Passive clients use their own display and
+overlay geometry without moving the child application's cursor.
 
 Cell pixels come from the host's ioctl first. If unavailable, a client whose
 host explicitly accepts graphics asks once with `CSI 16 t` during attachment.

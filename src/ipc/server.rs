@@ -236,6 +236,7 @@ struct ClientState {
     behind: bool,
     force_full: bool,
     retained_pane_content: Vec<(crate::ids::PaneId, Rect)>,
+    graphics_occlusion: crate::terminal::kitty_graphics::Occlusion,
     retained_hyperlinks: Vec<crate::app::RenderedHyperlink>,
     retained_ready: bool,
     last_activity: u64,
@@ -286,6 +287,7 @@ impl ClientState {
             behind: false,
             force_full: true,
             retained_pane_content: Vec::new(),
+            graphics_occlusion: crate::terminal::kitty_graphics::Occlusion::default(),
             retained_hyperlinks: Vec::new(),
             retained_ready: false,
             last_activity,
@@ -1830,6 +1832,7 @@ fn render_client(
                     ),
                 )
             };
+            client.graphics_occlusion = target.graphics_occlusion();
             (
                 target.cursor(),
                 target.cursor_visible(),
@@ -2109,7 +2112,6 @@ fn stage_kitty_frame(app: &App, client: &ClientState, replay: bool) -> StagedGra
     if replay {
         cache.request_replay();
     }
-    let show = ui::retained_pty_eligible(app);
     let mut live = HashSet::new();
     let mut inspected = HashSet::new();
     let mut placements = Vec::new();
@@ -2129,7 +2131,7 @@ fn stage_kitty_frame(app: &App, client: &ClientState, replay: bool) -> StagedGra
                 fingerprint,
             );
         }
-        if !show || !engine.has_kitty_graphics() {
+        if !engine.has_kitty_graphics() {
             continue;
         }
         let Some(area) = client
@@ -2153,12 +2155,16 @@ fn stage_kitty_frame(app: &App, client: &ClientState, replay: bool) -> StagedGra
             });
         }
     }
-    let bytes = crate::terminal::kitty_graphics::encode_host_frame(
+    // Stable ordering makes the global piece/upload budgets independent of the
+    // App hash-map iteration order (including retries and passive clients).
+    placements.sort_unstable_by_key(|p| (p.pane_id, p.visible.image_id, p.visible.placement_id));
+    let bytes = crate::terminal::kitty_graphics::encode_occluded_host_frame(
         &mut cache,
         &placements,
         &live,
         &inspected,
         &retained,
+        &client.graphics_occlusion,
     );
     let remainder = cache.remainder();
     StagedGraphics {
@@ -3068,6 +3074,366 @@ mod tests {
             super::schedule_client_frame_debt(&clients, &mut request);
             assert!(!request.needs_render());
             clients.get_mut(&7).unwrap().interest = SurfaceInterest::Active;
+        }
+    }
+
+    #[test]
+    fn kitty_renderer_occlusion_is_local_restores_and_survives_replay() {
+        use crate::ui;
+        use ratatui::layout::Rect;
+        let _env = crate::persist::test_env("kitty-renderer-occlusion");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(180, 50, tx).unwrap();
+        app.server_mode = true;
+        app.dispatch("pane.split", &serde_json::json!({"direction":"right"}))
+            .unwrap();
+        let pane = app.layout().focus;
+        let mut clients = HashMap::new();
+        let mut receivers = Vec::new();
+        for (id, cols, rows) in [(1, 180, 50), (2, 90, 30)] {
+            let (mut client, rx) = display_client(cols, rows, id);
+            client.graphics_supported = true;
+            client.cell_width_px = 10;
+            client.cell_height_px = 10;
+            clients.insert(id, client);
+            receivers.push(rx);
+        }
+        let mut foreground = Some(1);
+        let mut size = (180, 50);
+        let mut scratch = RenderScratch::default();
+        let render = |app: &mut App,
+                      clients: &mut HashMap<u64, ClientState>,
+                      foreground: &mut Option<u64>,
+                      size: &mut (u16, u16),
+                      scratch: &mut RenderScratch| {
+            for c in clients.values() {
+                c.sender.frame_pending.store(false, Ordering::Release);
+            }
+            render_clients(app, clients, foreground, size, false, false, scratch);
+        };
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        for p in app.panes.values() {
+            let payload = "AAAA".repeat(10000);
+            let command =
+                format!("\x1b[H\x1b_Ga=T,f=24,s=100,v=100,i=8,c=70,r=40,C=1,q=2;{payload}\x1b\\");
+            p.engine.lock().unwrap().advance(command.as_bytes());
+        }
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        let baseline = clients[&1].graphics.placement_rects();
+        let area = clients[&1]
+            .retained_pane_content
+            .iter()
+            .find(|(id, _)| *id == pane)
+            .unwrap()
+            .1;
+        app.open_pane_menu(pane, area.x + 12, area.y + 8);
+        app.pane_menu.as_mut().unwrap().move_open = true;
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        let active_hit_geometry = app.pane_content_rects.clone();
+        let menu = app.pane_menu.as_ref().unwrap();
+        assert!(!menu.tab_rects.is_empty(), "real submenu was drawn");
+        let cover: Vec<_> = menu
+            .items
+            .iter()
+            .map(|(_, r)| *r)
+            .chain(menu.tab_rects.iter().map(|(_, r)| *r))
+            .filter(|r| !r.is_empty())
+            .collect();
+        assert!(clients[&1].graphics.placement_rects().len() > baseline.len());
+        for (_, rect) in clients[&1].graphics.placement_rects() {
+            assert!(
+                cover.iter().all(|r| !r.intersects(rect)),
+                "image overlaps real menu row"
+            );
+        }
+        // Passive renderer must use its own freshly drawn geometry and preserve
+        // interactive targets and runtime cells, even when the menu clamps left.
+        for client in clients.values() {
+            for (_, rect) in client.graphics.placement_rects() {
+                assert!(
+                    !client.graphics_occlusion.touches(rect),
+                    "fragment covers an actual opaque surface"
+                );
+            }
+        }
+        let untouched: Vec<_> = clients[&1]
+            .graphics
+            .placement_rects()
+            .into_iter()
+            .filter(|(id, _)| *id != pane.0)
+            .collect();
+        let expected_untouched: Vec<_> = baseline
+            .iter()
+            .copied()
+            .filter(|(id, _)| *id != pane.0)
+            .collect();
+        assert_eq!(untouched, expected_untouched);
+        let runtime = app.runtime_cells.get();
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 90, 30));
+        let mut target = ui::RenderTarget::new(&mut buf, Rect::new(0, 0, 90, 30));
+        let projection = ui::render_projection(&mut target, &mut app);
+        assert_eq!(app.pane_content_rects, active_hit_geometry);
+        assert_eq!(app.runtime_cells.get(), runtime);
+        assert_eq!(projection.pane_content, clients[&2].retained_pane_content);
+        let local_occlusion = target.graphics_occlusion();
+        for (_, rect) in clients[&2].graphics.placement_rects() {
+            assert!(
+                !local_occlusion.touches(rect),
+                "passive fragments use passive geometry"
+            );
+        }
+        // Stage without committing simulates the one-frame gate rejecting it.
+        let before = clients[&2].graphics.clone();
+        let replay = super::stage_kitty_frame(&app, &clients[&2], true);
+        let retry = super::stage_kitty_frame(&app, &clients[&2], true);
+        assert_eq!(replay.bytes, retry.bytes);
+        assert_eq!(
+            before.placement_rects(),
+            clients[&2].graphics.placement_rects()
+        );
+        // Exercise the actual one-frame send gate: geometry may render, but
+        // a rejected enqueue cannot commit the fragment cache.
+        let before_gate = clients[&1].graphics.placement_rects();
+        app.pane_menu.as_mut().unwrap().anchor = (area.x + 5, area.y + 5);
+        clients[&1]
+            .sender
+            .frame_pending
+            .store(true, Ordering::Release);
+        let outcome = super::render_client(
+            &mut app,
+            clients.get_mut(&1).unwrap(),
+            true,
+            false,
+            false,
+            &HashMap::new(),
+        );
+        assert!(!outcome.enqueued);
+        assert_eq!(clients[&1].graphics.placement_rects(), before_gate);
+        clients[&1]
+            .sender
+            .frame_pending
+            .store(false, Ordering::Release);
+        let outcome = super::render_client(
+            &mut app,
+            clients.get_mut(&1).unwrap(),
+            true,
+            false,
+            false,
+            &HashMap::new(),
+        );
+        assert!(outcome.enqueued);
+        receivers[0].recv().unwrap();
+        for (_, rect) in clients[&1].graphics.placement_rects() {
+            assert!(!clients[&1].graphics_occlusion.touches(rect));
+        }
+        // Moving and then closing the menu retires pieces, not retained pixels.
+        app.pane_menu.as_mut().unwrap().anchor = (area.x + 3, area.y + 3);
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        app.pane_menu = None;
+        // A direct render refreshes only presentation geometry before staging.
+        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 180, 50));
+        let mut target = ui::RenderTarget::new(&mut buf, Rect::new(0, 0, 180, 50));
+        ui::render_into(&mut target, &mut app);
+        let client = clients.get_mut(&1).unwrap();
+        client.graphics_occlusion = target.graphics_occlusion();
+        let restored = super::stage_kitty_frame(&app, client, false);
+        assert!(!String::from_utf8_lossy(&restored.bytes).contains("a=t,"));
+        let mut rects = restored.cache.placement_rects();
+        rects.sort_by_key(|(id, r)| (*id, r.x, r.y));
+        let mut expected = baseline;
+        expected.sort_by_key(|(id, r)| (*id, r.x, r.y));
+        assert_eq!(rects, expected);
+        // Full-screen dimmed overlays remain fail-closed.
+        app.help_open = true;
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        assert!(clients
+            .values()
+            .all(|c| c.graphics.placement_rects().is_empty()));
+        app.help_open = false;
+        app.open_settings();
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        assert!(clients
+            .values()
+            .all(|c| c.graphics.placement_rects().is_empty()));
+        app.settings = None;
+        app.toast = Some(("Copied".into(), std::time::Instant::now()));
+        render(
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut scratch,
+        );
+        for rx in &receivers {
+            rx.recv().unwrap();
+        }
+        assert!(!clients[&1].graphics.placement_rects().is_empty());
+        for c in clients.values() {
+            assert!(c
+                .graphics
+                .placement_rects()
+                .iter()
+                .all(|(_, rect)| !c.graphics_occlusion.touches(*rect)));
+        }
+    }
+
+    /// Supporting evidence only, not a timing-sensitive CI assertion. Same
+    /// debug binary, viewport, source pixels, warmup, and iteration count.
+    #[test]
+    #[ignore = "bounded 1/15-pane render scaling measurement"]
+    fn kitty_occlusion_render_scale() {
+        use std::time::Instant;
+        let _env = crate::persist::test_env("kitty-occlusion-scale");
+        for count in [1, 15] {
+            let (tx, _rx) = mpsc::channel();
+            let mut app = App::new(240, 80, tx).unwrap();
+            app.server_mode = true;
+            for _ in 1..count {
+                app.dispatch("pane.split", &serde_json::json!({})).unwrap();
+            }
+            let pane = app.layout().focus;
+            fn balanced(ids: &[crate::ids::PaneId], depth: usize) -> crate::layout::LayoutTree {
+                if ids.len() == 1 {
+                    return crate::layout::LayoutTree::Leaf(ids[0].0);
+                }
+                let mid = ids.len() / 2;
+                crate::layout::LayoutTree::Split {
+                    axis: (depth % 2) as u8,
+                    ratio: mid as f32 / ids.len() as f32,
+                    a: Box::new(balanced(&ids[..mid], depth + 1)),
+                    b: Box::new(balanced(&ids[mid..], depth + 1)),
+                }
+            }
+            let ids = app.layout().leaves();
+            let ws = &mut app.workspaces[app.active_ws];
+            ws.tabs[ws.active_tab]
+                .layout
+                .apply_tree(&balanced(&ids, 0), pane)
+                .unwrap();
+            let (mut client, rx) = display_client(240, 80, 1);
+            client.graphics_supported = true;
+            client.cell_width_px = 10;
+            client.cell_height_px = 10;
+            // Warm layout first; replace noisy shell engines with synthetic
+            // populated engines of the exact rendered dimensions.
+            super::render_client(&mut app, &mut client, true, false, false, &HashMap::new());
+            while rx.try_recv().is_ok() {}
+            for (id, rect) in &client.retained_pane_content {
+                let (tx, _rx) = mpsc::channel();
+                let engine = create_engine(
+                    VtEngineKind::Alacritty,
+                    rect.width,
+                    rect.height,
+                    tx,
+                    64 * 1024,
+                    PaneAppearance::default(),
+                );
+                let command = format!(
+                    "\x1b[H\x1b_Ga=T,f=24,s=100,v=100,i=8,c={},r={},C=1,q=2;{}\x1b\\",
+                    rect.width,
+                    rect.height,
+                    "AAAA".repeat(10000)
+                );
+                engine.lock().unwrap().advance(command.as_bytes());
+                app.panes.get_mut(id).unwrap().engine = engine;
+            }
+            assert_eq!(client.retained_pane_content.len(), count);
+            let anchor = client
+                .retained_pane_content
+                .iter()
+                .find(|(id, _)| *id == pane)
+                .unwrap()
+                .1;
+            for overlay in [false, true] {
+                if overlay {
+                    app.open_pane_menu(pane, anchor.x + 4, anchor.y + 3);
+                }
+                for _ in 0..10 {
+                    client.sender.frame_pending.store(false, Ordering::Release);
+                    super::render_client(
+                        &mut app,
+                        &mut client,
+                        true,
+                        false,
+                        false,
+                        &HashMap::new(),
+                    );
+                    while rx.try_recv().is_ok() {}
+                }
+                let start = Instant::now();
+                for _ in 0..100 {
+                    client.sender.frame_pending.store(false, Ordering::Release);
+                    super::render_client(
+                        &mut app,
+                        &mut client,
+                        true,
+                        false,
+                        false,
+                        &HashMap::new(),
+                    );
+                    while rx.try_recv().is_ok() {}
+                }
+                let render_us = start.elapsed().as_micros() / 100;
+                let start = Instant::now();
+                for _ in 0..100 {
+                    std::hint::black_box(super::stage_kitty_frame(&app, &client, false));
+                }
+                eprintln!("kitty-scale panes={count} menu={overlay} full-render-us={render_us} stage-us={} fragments={}", start.elapsed().as_micros()/100, client.graphics.placement_rects().len());
+            }
         }
     }
 

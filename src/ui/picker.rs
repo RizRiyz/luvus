@@ -5,7 +5,7 @@ use super::*;
 use crate::app::{FolderPicker, PickerHit, Row};
 use crate::i18n::Catalog;
 use ratatui::crossterm::event::KeyCode;
-use ratatui::widgets::{Borders, Clear};
+use ratatui::widgets::Borders;
 
 /// Draw the picker over a dimmed backdrop; returns the clickable row rects
 /// (row index → rect) the input layer uses for mouse selection.
@@ -21,7 +21,7 @@ pub(super) fn draw_picker(
     dim_backdrop(f, area, t);
 
     let modal = workspace_picker_modal_rect(area, mobile);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
@@ -278,7 +278,7 @@ pub(super) fn draw_worktree_prompt(
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
     let modal = centered_rect(area, w, 6);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
@@ -359,7 +359,7 @@ pub(super) fn draw_worktree_open(
         .clamp(7, 20)
         .min(area.height);
     let modal = centered_rect(area, w, h);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
@@ -522,7 +522,7 @@ fn draw_rename(
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(36, 64).min(area.width);
     let modal = centered_rect(area, w, 6);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
@@ -568,7 +568,7 @@ pub(super) fn draw_rename_titled(
     dim_backdrop(f, area, t);
     let w = area.width.saturating_sub(6).clamp(36, 70).min(area.width);
     let modal = centered_rect(area, w, 7);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
@@ -679,6 +679,7 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
 
 /// Dim the whole frame toward `crust` so the dialog reads as focused.
 fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
+    f.cover_graphics(area);
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
