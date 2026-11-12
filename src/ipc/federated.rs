@@ -249,11 +249,15 @@ enum MachinePopup {
 mod graphics;
 #[cfg(all(test, unix))]
 mod graphics_tests;
+#[cfg(all(test, unix))]
+mod restore_tests;
 
 struct DockState {
     host_placements: graphics::HostPlacements,
     overlay_viewport: Option<(u16, u16)>,
     restore_ticket: Option<u64>,
+    /// Restore input on failure, but fence old visuals until a new ticket succeeds.
+    restore_blocked: bool,
     local_session: String,
     scroll: usize,
     rect: Option<ShellDockRect>,
@@ -323,6 +327,7 @@ impl Default for DockState {
             host_placements: graphics::HostPlacements::default(),
             overlay_viewport: None,
             restore_ticket: None,
+            restore_blocked: false,
             local_session: crate::session::display_name(),
             scroll: 0,
             rect: None,
@@ -678,7 +683,7 @@ fn run_inner(
             dock.dirty = true;
         }
         expire_connecting(&mut machines);
-        if expire_candidate(&mut candidate, &machines, &writer) {
+        if expire_candidate(&mut candidate, &active, &mut dock, &machines, &writer)? {
             dock.pending_workspace_menu = None;
             dock.pending_local_session_click = None;
             set_machine_form_error(&mut dock, "Remote session preparation timed out.");
@@ -1304,25 +1309,45 @@ fn next_deadline(
 
 fn expire_candidate(
     candidate: &mut Option<SurfaceCandidate>,
+    active: &Endpoint,
+    dock: &mut DockState,
     machines: &HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
-) -> bool {
+) -> Result<bool> {
     if candidate
         .as_ref()
         .is_some_and(|candidate| candidate.deadline <= Instant::now())
     {
-        if let Some(expired) = candidate.take() {
-            let _ = send_interest(
-                &expired.endpoint,
-                SurfaceInterest::Suspended,
-                machines,
-                local_writer,
-            );
-        }
-        true
+        cancel_preparation(candidate, active, dock, |endpoint, interest| {
+            send_interest(endpoint, interest, machines, local_writer)
+        })?;
+        Ok(true)
     } else {
-        false
+        Ok(false)
     }
+}
+
+/// Failed preparations must not suspend the input-owning endpoint. Reclaiming
+/// input does not authorize queued stale visual frames.
+fn cancel_preparation(
+    candidate: &mut Option<SurfaceCandidate>,
+    active: &Endpoint,
+    dock: &mut DockState,
+    mut send: impl FnMut(&Endpoint, SurfaceInterest) -> Result<()>,
+) -> Result<()> {
+    let target = candidate
+        .take()
+        .map(|pending| pending.endpoint)
+        .unwrap_or_else(|| active.clone());
+    dock.restore_ticket = None;
+    if target == *active {
+        dock.restore_blocked = true;
+        send(active, SurfaceInterest::Active)?;
+    } else {
+        // A normal switch never demotes the old active endpoint.
+        let _ = send(&target, SurfaceInterest::Suspended);
+    }
+    Ok(())
 }
 
 fn reconnect_delay(id: &str, generation: u64, base: Duration) -> Duration {
@@ -1551,6 +1576,28 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
                     .and_then(|machine| machine.endpoint(session))
                     .and_then(|runtime| runtime.boot_id),
             };
+            // The host may resize before its input event is dequeued. An old
+            // already-enqueued prepared frame is still never paintable; request
+            // the current viewport immediately rather than waiting for timeout.
+            if candidate.as_ref().is_some_and(|pending| {
+                pending.endpoint == endpoint
+                    && endpoint == *active
+                    && pending.ticket == ticket
+                    && pending.boot_id == boot_id
+                    && dock.restore_ticket == Some(ticket)
+            }) && (frame.width, frame.height) != (size.width, size.height)
+                && dock.overlay_viewport != Some((size.width, size.height))
+            {
+                request_modal_restore(
+                    dock,
+                    active,
+                    candidate,
+                    machines,
+                    local_writer,
+                    (size.width, size.height),
+                )?;
+                return Ok(None);
+            }
             if !candidate.as_ref().is_some_and(|candidate| {
                 candidate.endpoint == endpoint
                     && candidate.ticket == ticket
@@ -1860,6 +1907,7 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
                 candidate.endpoint == endpoint && candidate.welcomed && candidate.ready && prepared
             });
             if (endpoint == *active
+                && !dock.restore_blocked
                 && (!dock.overlay_open() || dock.machine_form_backdrop_pending)
                 && candidate
                     .as_ref()
@@ -1926,6 +1974,8 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
                         );
                     }
                     commit_candidate(endpoint, active, candidate, machines, local_writer)?;
+                    dock.restore_ticket = None;
+                    dock.restore_blocked = false;
                     dock.sidebar_sync = None;
                     dock.pending_rect = None;
                     dock.selector_open = false;
@@ -1947,6 +1997,7 @@ fn handle_surface_message<B: ratatui::backend::Backend<Error = std::io::Error> +
         }
         ServerMessage::FrameDiff(diff)
             if endpoint == *active
+                && !dock.restore_blocked
                 && (!dock.overlay_open() || dock.machine_form_backdrop_pending)
                 && candidate
                     .as_ref()
@@ -2124,7 +2175,7 @@ fn cache_dock_projection(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle_dock_input(
+fn handle_dock_input<B: ratatui::backend::Backend<Error = std::io::Error> + std::io::Write>(
     message: &ClientMessage,
     dock: &mut DockState,
     active: &Endpoint,
@@ -2132,11 +2183,51 @@ fn handle_dock_input(
     pending_endpoint: &mut Option<Endpoint>,
     machines: &mut HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut ratatui::Terminal<B>,
     events: &Sender<ShellEvent>,
 ) -> Result<bool> {
-    if let ClientMessage::Resize { cols, rows, .. } = message {
-        dock.overlay_viewport = Some((*cols, *rows));
+    if let ClientMessage::Resize {
+        cols,
+        rows,
+        cell_width_px,
+        cell_height_px,
+    } = message
+    {
+        let size = (*cols, *rows);
+        let changed = dock.overlay_viewport != Some(size);
+        dock.overlay_viewport = Some(size);
+        if !dock.overlay_open()
+            && ((dock.restore_blocked
+                && candidate
+                    .as_ref()
+                    .is_none_or(|pending| pending.endpoint == *active))
+                || candidate.as_ref().is_some_and(|pending| {
+                    pending.endpoint == *active && dock.restore_ticket == Some(pending.ticket)
+                }))
+        {
+            // PrepareSurface carries size; do not follow it with ordinary Resize.
+            if changed || dock.restore_blocked {
+                if send_surface(
+                    active,
+                    &ClientMessage::CellPixels {
+                        cell_width_px: *cell_width_px,
+                        cell_height_px: *cell_height_px,
+                    },
+                    machines,
+                    local_writer,
+                )
+                .is_err()
+                {
+                    dock.warning = Some("surface restoration failed".into());
+                    cancel_preparation(candidate, active, dock, |endpoint, interest| {
+                        send_interest(endpoint, interest, machines, local_writer)
+                    })?;
+                    return Ok(true);
+                }
+                request_modal_restore(dock, active, candidate, machines, local_writer, size)?;
+            }
+            return Ok(true);
+        }
     }
     if dock.sidebars.is_some() && !dock.overlay_open() {
         if let ClientMessage::Mouse(mouse) = message {
@@ -3912,42 +4003,83 @@ fn close_selector(
     // a fresh ticketed complete surface. The existing server one-frame gate
     // retries this request under backpressure; no pixel/frame clone is replayed.
     // Preserve an already prepared user switch instead of switching back.
-    let restored = if candidate
+    if candidate
         .as_ref()
         .is_none_or(|pending| dock.restore_ticket == Some(pending.ticket))
     {
-        request_switch_at_size(
-            active.clone(),
-            candidate,
-            machines,
-            dock.local_workspaces.len(),
-            dock.sidebars.as_ref(),
-            local_writer,
-            match dock.overlay_viewport {
-                Some(size) => size,
-                None => crossterm::terminal::size()?,
-            },
-        )
-    } else {
-        Ok(())
-    };
-    dock.restore_ticket = candidate
+        let size = match dock.overlay_viewport {
+            Some(size) => size,
+            None => crossterm::terminal::size()?,
+        };
+        request_modal_restore(dock, active, candidate, machines, local_writer, size)?;
+    }
+    Ok(())
+}
+
+/// A modal restore is not a user endpoint switch. Refresh only its ticket and
+/// viewport; preserve its original deadline across resize bursts and never
+/// suspend the endpoint that still owns input. Install the fence before writes.
+fn request_modal_restore(
+    dock: &mut DockState,
+    active: &Endpoint,
+    candidate: &mut Option<SurfaceCandidate>,
+    machines: &HashMap<String, MachineRuntime>,
+    writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
+    (cols, rows): (u16, u16),
+) -> Result<()> {
+    if candidate
         .as_ref()
-        .filter(|pending| pending.endpoint == *active)
-        .map(|pending| pending.ticket);
-    if let Err(error) = restored {
-        if matches!(active, Endpoint::Local) {
-            return Err(error);
-        }
-        dock.warning = Some("active machine connection lost".to_string());
-        request_switch(
-            Endpoint::Local,
-            candidate,
-            machines,
-            dock.local_workspaces.len(),
-            dock.sidebars.as_ref(),
-            local_writer,
-        )?;
+        .is_some_and(|pending| pending.endpoint != *active)
+    {
+        return Ok(());
+    }
+    let boot_id = match active {
+        Endpoint::Local => None,
+        Endpoint::Remote {
+            machine_id,
+            session,
+        } => machines
+            .get(machine_id)
+            .and_then(|m| m.endpoint(session))
+            .and_then(|r| r.boot_id),
+    };
+    modal_restore_with_send(dock, active, candidate, boot_id, (cols, rows), |message| {
+        send_surface(active, message, machines, writer)
+    })
+}
+
+/// Narrow transport seam: deterministic queue rejection tests exercise the
+/// exact production fence and input-rollback path without a remote process.
+fn modal_restore_with_send(
+    dock: &mut DockState,
+    active: &Endpoint,
+    candidate: &mut Option<SurfaceCandidate>,
+    boot_id: Option<u64>,
+    (cols, rows): (u16, u16),
+    mut send: impl FnMut(&ClientMessage) -> Result<()>,
+) -> Result<()> {
+    let previous = candidate.take();
+    let ticket = next_connection_generation();
+    *candidate = Some(SurfaceCandidate {
+        ticket,
+        endpoint: active.clone(),
+        welcomed: true,
+        ready: true,
+        shell_dock: previous.as_ref().and_then(|p| p.shell_dock),
+        boot_id: previous.as_ref().map_or(boot_id, |pending| pending.boot_id),
+        deadline: previous.map_or_else(|| Instant::now() + SURFACE_PREPARE_TIMEOUT, |p| p.deadline),
+    });
+    dock.restore_ticket = Some(ticket);
+    dock.restore_blocked = false;
+    dock.overlay_viewport = Some((cols, rows));
+    let sent = send(&ClientMessage::PrepareSurface { ticket, cols, rows });
+    if sent.is_err() {
+        dock.warning = Some("surface restoration failed".into());
+        // Best effort is insufficient for restoring input: propagate a second
+        // send failure so normal transport failure handling can disconnect.
+        cancel_preparation(candidate, active, dock, |_, interest| {
+            send(&ClientMessage::SurfaceInterest(interest))
+        })?;
     }
     Ok(())
 }
@@ -3985,7 +4117,7 @@ fn owner_local_session_switch(
 fn request_user_switch(
     endpoint: Endpoint,
     dock: &mut DockState,
-    _active: &Endpoint,
+    active: &Endpoint,
     candidate: &mut Option<SurfaceCandidate>,
     pending_endpoint: &mut Option<Endpoint>,
     machines: &mut HashMap<String, MachineRuntime>,
@@ -4038,6 +4170,13 @@ fn request_user_switch(
         }
     }
     dock.warning = None;
+    if candidate.as_ref().is_some_and(|pending| {
+        pending.endpoint == *active && dock.restore_ticket == Some(pending.ticket)
+    }) {
+        cancel_preparation(candidate, active, dock, |endpoint, interest| {
+            send_interest(endpoint, interest, machines, local_writer)
+        })?;
+    }
     request_switch(
         endpoint,
         candidate,

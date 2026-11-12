@@ -5,9 +5,10 @@ use ratatui::layout::{Position, Size};
 use std::io::{self, Write};
 
 #[derive(Default)]
-struct Output {
-    bytes: Vec<u8>,
+pub(super) struct Output {
+    pub(super) bytes: Vec<u8>,
     cursor: Position,
+    pub(super) size: Option<Size>,
 }
 impl Write for Output {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -49,7 +50,7 @@ impl Backend for Output {
         Ok(())
     }
     fn size(&self) -> io::Result<Size> {
-        Ok(Size::new(80, 24))
+        Ok(self.size.unwrap_or(Size::new(80, 24)))
     }
     fn window_size(&mut self) -> io::Result<WindowSize> {
         Ok(WindowSize {
