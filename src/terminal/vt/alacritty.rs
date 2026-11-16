@@ -63,90 +63,57 @@ pub struct EventProxy {
 /// Colors the child set itself. A later host update must not replace these.
 #[derive(Default)]
 struct ChildColors {
-    pending: Vec<u8>,
     foreground: Option<[u8; 3]>,
     background: Option<[u8; 3]>,
     palette: [Option<[u8; 3]>; 16],
+    command: Option<u16>,
+    index: Option<usize>,
 }
 
 impl ChildColors {
-    fn observe(&mut self, bytes: &[u8]) {
-        self.pending.extend_from_slice(bytes);
-        if self.pending.len() > 8 * 1024 {
-            let keep = self.pending.len().saturating_sub(1024);
-            self.pending.drain(..keep);
-        }
-        let mut start = 0;
-        while start < self.pending.len() {
-            let Some(esc) = self.pending[start..].iter().position(|byte| *byte == 0x1b) else {
-                self.pending.clear();
-                return;
-            };
-            start += esc;
-            let rest = &self.pending[start..];
-            if rest.len() < 2 {
-                break;
-            }
-            if rest[1] != b']' {
-                start += 1;
-                continue;
-            }
-            let Some(end) = osc_terminator(rest) else {
-                break;
-            };
-            let sequence = rest[..end].to_vec();
-            self.apply_osc(&sequence);
-            start += end;
-        }
-        if start > 0 {
-            self.pending.drain(..start);
-        }
+    fn start(&mut self) {
+        self.command = None;
+        self.index = None;
     }
 
-    fn apply_osc(&mut self, sequence: &[u8]) {
-        let Ok(text) = std::str::from_utf8(sequence) else {
+    fn observe_parameter(&mut self, param: &[u8]) {
+        if self.command.is_none() {
+            let command = std::str::from_utf8(param)
+                .ok()
+                .and_then(|text| text.parse().ok());
+            self.command = command;
+            self.index = None;
+            match command {
+                Some(110) => self.foreground = None,
+                Some(111) => self.background = None,
+                Some(104) => self.palette = [None; 16],
+                _ => {}
+            }
             return;
-        };
-        let Some(body) = text.strip_prefix("\u{1b}]") else {
+        }
+        if param == b"?" {
             return;
-        };
-        let body = body.trim_end_matches(['\u{7}', '\u{1b}', '\\']);
-        if body == "110" {
-            self.foreground = None;
-        } else if body == "111" {
-            self.background = None;
-        } else if body == "104" {
-            self.palette = [None; 16];
-        } else if let Some(index) = body.strip_prefix("104;") {
-            if let Ok(index) = index.parse::<usize>() {
-                if index < 16 {
-                    self.palette[index] = None;
+        }
+        match self.command {
+            Some(10) => self.foreground = parse_child_rgb_bytes(param),
+            Some(11) => self.background = parse_child_rgb_bytes(param),
+            Some(110) | Some(111) => {}
+            Some(104) if param.is_empty() => self.palette = [None; 16],
+            Some(104) => {
+                if let Some(index) = parse_index(param) {
+                    if index < 16 {
+                        self.palette[index] = None;
+                    }
                 }
             }
-        } else if let Some(value) = body.strip_prefix("10;") {
-            if value != "?" {
-                if let Some(rgb) = parse_child_rgb(value) {
-                    self.foreground = Some(rgb);
+            Some(4) => match self.index.take() {
+                None => self.index = parse_index(param),
+                Some(index) if index < 16 => {
+                    self.palette[index] = parse_child_rgb_bytes(param);
                 }
-            }
-        } else if let Some(value) = body.strip_prefix("11;") {
-            if value != "?" {
-                if let Some(rgb) = parse_child_rgb(value) {
-                    self.background = Some(rgb);
-                }
-            }
-        } else if let Some(rest) = body.strip_prefix("4;") {
-            let Some((index, value)) = rest.split_once(';') else {
-                return;
-            };
-            let Ok(index) = index.parse::<usize>() else {
-                return;
-            };
-            if index < 16 && value != "?" {
-                if let Some(rgb) = parse_child_rgb(value) {
-                    self.palette[index] = Some(rgb);
-                }
-            }
+                Some(_) => {}
+            },
+            _ => {}
         }
     }
 
@@ -160,18 +127,14 @@ impl ChildColors {
     }
 }
 
-fn osc_terminator(bytes: &[u8]) -> Option<usize> {
-    let mut i = 2;
-    while i < bytes.len() {
-        if bytes[i] == 0x07 {
-            return Some(i + 1);
-        }
-        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
-            return Some(i + 2);
-        }
-        i += 1;
-    }
-    None
+fn parse_index(param: &[u8]) -> Option<usize> {
+    std::str::from_utf8(param)
+        .ok()
+        .and_then(|text| text.parse().ok())
+}
+
+fn parse_child_rgb_bytes(param: &[u8]) -> Option<[u8; 3]> {
+    parse_child_rgb(std::str::from_utf8(param).ok()?)
 }
 
 fn parse_child_rgb(value: &str) -> Option<[u8; 3]> {
@@ -181,11 +144,17 @@ fn parse_child_rgb(value: &str) -> Option<[u8; 3]> {
 
 fn parse_hash_rgb(value: &str) -> Option<[u8; 3]> {
     let hex = value.strip_prefix('#')?;
-    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+    if hex.is_empty() || hex.len() % 3 != 0 || hex.len() > 12 {
         return None;
     }
-    let channel = |start| u8::from_str_radix(&hex[start..start + 2], 16).ok();
-    Some([channel(0)?, channel(2)?, channel(4)?])
+    let width = hex.len() / 3;
+    let channel = |index| {
+        let digits = &hex[index * width..(index + 1) * width];
+        let value = u32::from_str_radix(digits, 16).ok()?;
+        let max = (1u32 << (4 * width)) - 1;
+        Some((255 * value / max) as u8)
+    };
+    Some([channel(0)?, channel(1)?, channel(2)?])
 }
 
 fn host_query_color(appearance: &PaneAppearance, index: usize) -> Option<[u8; 3]> {
@@ -203,6 +172,18 @@ fn host_query_color(appearance: &PaneAppearance, index: usize) -> Option<[u8; 3]
 }
 
 impl EventListener for EventProxy {
+    fn osc_start(&self) {
+        if let Ok(mut colors) = self.child_colors.lock() {
+            colors.start();
+        }
+    }
+
+    fn osc_parameter(&self, param: &[u8]) {
+        if let Ok(mut colors) = self.child_colors.lock() {
+            colors.observe_parameter(param);
+        }
+    }
+
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => {
@@ -333,6 +314,8 @@ pub struct AlacrittyEngine {
     program_status: ProgramStatusSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
+    // Read through `EventProxy`; the engine owns the allocation.
+    #[allow(dead_code)]
     child_colors: Arc<Mutex<ChildColors>>,
     history_budget_bytes: usize,
     output_generation: u64,
@@ -672,9 +655,6 @@ impl VtEngine for AlacrittyEngine {
         self.history_maintenance_cursors = [0; 2];
         self.history_maintenance_pending = true;
         self.history_metrics_cache.set(None);
-        if let Ok(mut colors) = self.child_colors.lock() {
-            colors.observe(bytes);
-        }
         self.parser.advance(&mut self.term, bytes);
         self.output_generation = self.output_generation.wrapping_add(1);
     }
@@ -3601,7 +3581,41 @@ mod tests {
         engine.advance(b"\x1b]10;?\x07");
         assert_eq!(recv_bytes(&rx), b"\x1b]10;rgb:3c3c/3838/3636\x07");
         engine.advance(b"\x1b]111\x07\x1b]11;?\x07");
-        assert_eq!(recv_bytes(&rx), b"\x1b]11;rgb:fbfb/f1f1/c7c7\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:fbfb/f1f1/c7c7\x07",
+            "reset restores host"
+        );
+
+        engine.advance(b"\x1b]11;?\x07\x1b]11;#010203\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:fbfb/f1f1/c7c7\x07",
+            "a query must not see a setter later in the same chunk"
+        );
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:0101/0202/0303\x07",
+            "#010203 is a child color"
+        );
+
+        engine.advance(b"\x1b]4;1;rgb:ff/00/00;2;rgb:00/ff/00\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07",
+            "grouped slot 1"
+        );
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;2;rgb:0000/ffff/0000\x07");
+        engine.advance(b"\x1b]104;1;2\x07\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:cccc/2424/1d1d\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert!(
+            rx.try_recv().is_err(),
+            "a grouped reset restores both slots"
+        );
     }
 
     #[test]

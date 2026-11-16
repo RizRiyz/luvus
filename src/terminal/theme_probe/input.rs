@@ -232,10 +232,14 @@ impl ColorReplyFilter {
 /// Block indefinitely while idle; use one-shot deadlines only for pending traffic.
 pub(crate) fn run_input_loop(
     pending: Vec<Event>,
+    partial: super::ColorAccumulator,
     mut send: impl FnMut(Event) -> bool,
     mut send_colors: impl FnMut(super::TerminalColors) -> bool,
 ) {
-    let mut filter = ColorReplyFilter::default();
+    let mut filter = ColorReplyFilter {
+        colors: partial,
+        ..ColorReplyFilter::default()
+    };
     let mut pending = pending.into_iter();
     let mut query_until = None;
     loop {

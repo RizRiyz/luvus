@@ -354,7 +354,8 @@ impl App {
             let continuous = match key.code {
                 KeyCode::Up | KeyCode::Down => true,
                 KeyCode::Left | KeyCode::Right => match tab {
-                    SettingsTab::Theme | SettingsTab::Language => true,
+                    SettingsTab::Theme => cursor >= THEME_FOLLOW_ROWS,
+                    SettingsTab::Language => true,
                     SettingsTab::Layout => matches!(
                         self.layout_rows().get(cursor),
                         Some(
@@ -1552,7 +1553,7 @@ mod tests {
     #[test]
     fn host_colors_follow_panes_without_replacing_a_manual_theme() {
         let _env = crate::persist::test_env("theme-follow-manual");
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         app.apply_theme("noir");
         let dark = host_colors([0x11, 0x11, 0x11]);
@@ -1573,8 +1574,58 @@ mod tests {
 
         app.config.theme_follow.light = "catppuccin-latte".into();
         assert!(app.apply_terminal_colors(&light));
-        assert_eq!(app.config.theme, "catppuccin-latte");
+        assert_eq!(app.effective_theme_id(), "catppuccin-latte");
+        assert_eq!(app.config.theme, "noir", "following is runtime-only");
         assert_eq!(app.pane_appearance.background, light.bg);
+        app.save_sidebars();
+        app.flush_config_for_test(&rx);
+        assert_eq!(
+            crate::config::load().theme,
+            "noir",
+            "automatic following must not replace the saved manual theme"
+        );
+    }
+
+    #[test]
+    fn an_empty_follow_target_does_not_freeze_terminal_derivation() {
+        let _env = crate::persist::test_env("theme-follow-empty-target");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("terminal");
+        app.config.theme_follow.auto_switch = true;
+        app.config.theme_follow.dark.clear();
+        let dark = host_colors([0x11, 0x11, 0x11]);
+        assert!(app.apply_terminal_colors(&dark));
+        assert_eq!(app.config.theme, "terminal");
+        assert_eq!(app.theme, Theme::from_terminal(&dark));
+    }
+
+    #[test]
+    fn held_theme_arrows_do_not_repeat_follow_controls() {
+        let _env = crate::persist::test_env("theme-follow-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_settings();
+        app.settings_set_tab(SettingsTab::Theme);
+        if let Some(ui) = app.settings.as_mut() {
+            ui.cursor = 0;
+        }
+        app.handle_event(phase(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
+        assert!(app.config.theme_follow.auto_switch);
+        app.handle_event(phase(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        assert!(
+            app.config.theme_follow.auto_switch,
+            "holding the arrow must not toggle following again"
+        );
     }
 
     #[test]

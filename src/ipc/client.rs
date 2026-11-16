@@ -326,14 +326,14 @@ where
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected handshake negotiation")),
     };
-    let pending = if probe_terminal && !input.started {
+    let (pending, partial) = if probe_terminal && !input.started {
         let probe = crate::terminal::theme_probe::probe();
         input.colors = probe.colors;
         protocol::write_message(
             &mut writer,
             &ClientMessage::TerminalColors(input.colors.clone()),
         )?;
-        probe.pending
+        (probe.pending, probe.partial)
     } else {
         if probe_terminal {
             // The sole input reader already owns stdin after initial attach.
@@ -342,7 +342,10 @@ where
                 &ClientMessage::TerminalColors(input.colors.clone()),
             )?;
         }
-        Vec::new()
+        (
+            Vec::new(),
+            crate::terminal::theme_probe::ColorAccumulator::default(),
+        )
     };
     crate::logging::event(
         crate::logging::EventKind::ClientHandshake,
@@ -388,7 +391,7 @@ where
     if !input.started {
         crate::push_key_protocol();
         let route = input.route.clone();
-        thread::spawn(move || input_loop(route, pending));
+        thread::spawn(move || input_loop(route, pending, partial));
         input.started = true;
     }
 
@@ -715,7 +718,12 @@ fn switched_args(raw: &[String], name: &str) -> Vec<String> {
     out
 }
 
-fn input_loop(route: InputRoute, pending: Vec<Event>) {
+fn input_loop(
+    route: InputRoute,
+    pending: Vec<Event>,
+    #[cfg_attr(windows, allow(unused_variables))]
+    partial: crate::terminal::theme_probe::ColorAccumulator,
+) {
     #[cfg(windows)]
     {
         crate::terminal::host_input::run_input_loop(pending, |event| route.send(event));
@@ -725,6 +733,7 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
     {
         crate::terminal::theme_probe::run_input_loop(
             pending,
+            partial,
             |event| route.send(event),
             |colors| route.send_message(ClientMessage::TerminalColors(Some(colors))),
         );

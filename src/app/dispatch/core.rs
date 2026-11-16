@@ -261,7 +261,10 @@ impl App {
             ("theme_follow.dark", next.theme_follow.dark.as_str()),
             ("theme_follow.light", next.theme_follow.light.as_str()),
         ] {
-            if !name.is_empty() && self.theme_registry.get(name).is_none() {
+            if next.theme_follow.auto_switch
+                && !name.is_empty()
+                && self.theme_registry.get(name).is_none()
+            {
                 return Err((
                     "invalid_request".to_string(),
                     format!("{field} `{name}` is not installed"),

@@ -2676,6 +2676,9 @@ pub struct App {
     /// Host colors from the foreground display. Pane queries follow these;
     /// UI derivation uses a copy; unreported colors remain absent for panes.
     pub(crate) host_terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
+    /// Runtime-only theme selected by `theme_follow`. `config.theme` remains
+    /// the saved manual preference.
+    followed_theme: Option<String>,
     /// Built-in, installed, and virtual themes in Settings display order.
     /// Loaded from the shared home-level `themes/` directory; rendering reads
     /// this in-memory snapshot and never touches the filesystem.
@@ -3534,6 +3537,7 @@ impl App {
             pane_appearance,
             probed_appearance: None,
             host_terminal_colors: None,
+            followed_theme: None,
             theme_registry,
             catalog,
             config,
@@ -4274,6 +4278,7 @@ impl App {
             pane_appearance,
             probed_appearance: None,
             host_terminal_colors: None,
+            followed_theme: None,
             theme_registry,
             catalog,
             config,
@@ -4663,15 +4668,23 @@ impl App {
             };
             let name = name.to_string();
             if let Some(theme) = self.theme_registry.theme(&name) {
-                self.config.theme = name.clone();
-                return self.set_effective_theme(&name, theme);
+                let changed = self.followed_theme.as_deref() != Some(name.as_str());
+                self.followed_theme = Some(name.clone());
+                return self.set_effective_theme(&name, theme) || changed;
             }
-            return false;
+        } else {
+            self.followed_theme = None;
         }
         if self.config.theme == "terminal" {
             return self.set_effective_theme("terminal", Theme::from_terminal(colors));
         }
         false
+    }
+
+    pub(crate) fn effective_theme_id(&self) -> &str {
+        self.followed_theme
+            .as_deref()
+            .unwrap_or(self.config.theme.as_str())
     }
 
     /// Install one resolved UI theme. Host pane colors, once known, stay on

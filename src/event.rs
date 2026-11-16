@@ -113,7 +113,9 @@ pub enum AppEvent {
         id: u64,
         colors: Option<TerminalColors>,
     },
-    /// Host colors observed by a monolithic local client.
+    /// Host colors observed by a monolithic local client. Windows keeps the
+    /// variant for one event enum, but its host-input reader does not emit it.
+    #[cfg_attr(windows, allow(dead_code))]
     HostTerminalColors(TerminalColors),
     /// Change one client's frame/input ownership without closing its transport.
     ClientSurfaceInterest {

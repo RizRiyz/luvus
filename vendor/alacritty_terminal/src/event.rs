@@ -124,6 +124,12 @@ pub trait OnResize {
 /// Event Loop for notifying the renderer about terminal events.
 pub trait EventListener {
     fn send_event(&self, _event: Event) {}
+
+    /// A new OSC sequence is starting, before its parameters.
+    fn osc_start(&self) {}
+
+    /// One completed OSC parameter, in parser order.
+    fn osc_parameter(&self, _param: &[u8]) {}
 }
 
 /// Null sink for events.

@@ -522,10 +522,7 @@ fn negotiate_local(
     let probe = if probe_terminal {
         probe_terminal_colors()
     } else {
-        crate::terminal::theme_probe::ProbeResult {
-            colors: None,
-            pending: Vec::new(),
-        }
+        crate::terminal::theme_probe::ProbeResult::default()
     };
     if probe_terminal {
         protocol::write_message(writer, &ClientMessage::TerminalColors(probe.colors.clone()))?;
@@ -1081,16 +1078,21 @@ fn start_input_reader(
             }
             #[cfg(not(windows))]
             {
-                crate::terminal::theme_probe::run_input_loop(pending, send, |colors| {
-                    if let Ok(mut cached) = host_colors.lock() {
-                        *cached = Some(colors.clone());
-                    }
-                    events
-                        .send(ShellEvent::Input(ClientMessage::TerminalColors(Some(
-                            colors,
-                        ))))
-                        .is_ok()
-                });
+                crate::terminal::theme_probe::run_input_loop(
+                    pending,
+                    crate::terminal::theme_probe::ColorAccumulator::default(),
+                    send,
+                    |colors| {
+                        if let Ok(mut cached) = host_colors.lock() {
+                            *cached = Some(colors.clone());
+                        }
+                        events
+                            .send(ShellEvent::Input(ClientMessage::TerminalColors(Some(
+                                colors,
+                            ))))
+                            .is_ok()
+                    },
+                );
             }
         })?;
     Ok(())
@@ -5826,10 +5828,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut writer = client.clone();
                 let result = negotiate_local(client, &mut writer, (80, 24), 0, || {
-                    crate::terminal::theme_probe::ProbeResult {
-                        colors: None,
-                        pending: Vec::new(),
-                    }
+                    crate::terminal::theme_probe::ProbeResult::default()
                 });
                 let result = result.map(|_| ()).map_err(|error| error.to_string());
                 // Hand the writer back so the connection stays open while the test waits.

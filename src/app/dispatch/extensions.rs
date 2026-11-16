@@ -13,7 +13,7 @@ struct AgentRowTitleUpdate {
 impl App {
     pub(super) fn api_theme_list(&mut self, method: &str, p: &Value) -> DispatchResult {
         let _ = (method, p);
-        Ok(self.theme_registry.list_json(&self.config.theme))
+        Ok(self.theme_registry.list_json(self.effective_theme_id()))
     }
 
     pub(super) fn api_theme_path(&mut self, method: &str, p: &Value) -> DispatchResult {
@@ -40,7 +40,7 @@ impl App {
                 ));
             }
             self.apply_theme(id);
-            Ok(json!({"type": "theme_selected", "id": self.config.theme}))
+            Ok(json!({"type": "theme_selected", "id": self.effective_theme_id()}))
         }
     }
 
