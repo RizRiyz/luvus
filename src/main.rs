@@ -1578,14 +1578,12 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     // local session that never resizes would split on the fallback aspect.
     let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
     app.set_client_cell_pixels(cell_width_px, cell_height_px);
-    let pending = if app.config.theme == "terminal" {
+    let pending = {
         let probe = terminal::theme_probe::probe();
         if let Some(colors) = probe.colors.as_ref() {
             app.apply_terminal_colors(colors);
         }
         probe.pending
-    } else {
-        Vec::new()
     };
     // Match the client path: query colors before enabling input protocols, so
     // any interleaved bytes are ordinary keys that can be replayed losslessly.
@@ -1749,7 +1747,11 @@ fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
 
     #[cfg(not(windows))]
     {
-        terminal::theme_probe::run_input_loop(pending, |event| send_input_event(&tx, event));
+        terminal::theme_probe::run_input_loop(
+            pending,
+            |event| send_input_event(&tx, event),
+            |colors| tx.send(AppEvent::HostTerminalColors(colors)).is_ok(),
+        );
     }
 }
 

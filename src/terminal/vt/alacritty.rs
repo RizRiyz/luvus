@@ -57,6 +57,149 @@ pub struct EventProxy {
     clipboard: ClipboardSlot,
     program_status: ProgramStatusSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
+    child_colors: Arc<Mutex<ChildColors>>,
+}
+
+/// Colors the child set itself. A later host update must not replace these.
+#[derive(Default)]
+struct ChildColors {
+    pending: Vec<u8>,
+    foreground: Option<[u8; 3]>,
+    background: Option<[u8; 3]>,
+    palette: [Option<[u8; 3]>; 16],
+}
+
+impl ChildColors {
+    fn observe(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+        if self.pending.len() > 8 * 1024 {
+            let keep = self.pending.len().saturating_sub(1024);
+            self.pending.drain(..keep);
+        }
+        let mut start = 0;
+        while start < self.pending.len() {
+            let Some(esc) = self.pending[start..].iter().position(|byte| *byte == 0x1b) else {
+                self.pending.clear();
+                return;
+            };
+            start += esc;
+            let rest = &self.pending[start..];
+            if rest.len() < 2 {
+                break;
+            }
+            if rest[1] != b']' {
+                start += 1;
+                continue;
+            }
+            let Some(end) = osc_terminator(rest) else {
+                break;
+            };
+            let sequence = rest[..end].to_vec();
+            self.apply_osc(&sequence);
+            start += end;
+        }
+        if start > 0 {
+            self.pending.drain(..start);
+        }
+    }
+
+    fn apply_osc(&mut self, sequence: &[u8]) {
+        let Ok(text) = std::str::from_utf8(sequence) else {
+            return;
+        };
+        let Some(body) = text.strip_prefix("\u{1b}]") else {
+            return;
+        };
+        let body = body.trim_end_matches(['\u{7}', '\u{1b}', '\\']);
+        if body == "110" {
+            self.foreground = None;
+        } else if body == "111" {
+            self.background = None;
+        } else if body == "104" {
+            self.palette = [None; 16];
+        } else if let Some(index) = body.strip_prefix("104;") {
+            if let Ok(index) = index.parse::<usize>() {
+                if index < 16 {
+                    self.palette[index] = None;
+                }
+            }
+        } else if let Some(value) = body.strip_prefix("10;") {
+            if value != "?" {
+                if let Some(rgb) = parse_child_rgb(value) {
+                    self.foreground = Some(rgb);
+                }
+            }
+        } else if let Some(value) = body.strip_prefix("11;") {
+            if value != "?" {
+                if let Some(rgb) = parse_child_rgb(value) {
+                    self.background = Some(rgb);
+                }
+            }
+        } else if let Some(rest) = body.strip_prefix("4;") {
+            let Some((index, value)) = rest.split_once(';') else {
+                return;
+            };
+            let Ok(index) = index.parse::<usize>() else {
+                return;
+            };
+            if index < 16 && value != "?" {
+                if let Some(rgb) = parse_child_rgb(value) {
+                    self.palette[index] = Some(rgb);
+                }
+            }
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<[u8; 3]> {
+        match index {
+            256 => self.foreground,
+            257 => self.background,
+            0..=15 => self.palette[index],
+            _ => None,
+        }
+    }
+}
+
+fn osc_terminator(bytes: &[u8]) -> Option<usize> {
+    let mut i = 2;
+    while i < bytes.len() {
+        if bytes[i] == 0x07 {
+            return Some(i + 1);
+        }
+        if bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
+            return Some(i + 2);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_child_rgb(value: &str) -> Option<[u8; 3]> {
+    let value = value.trim_end_matches(['\u{7}', '\\']);
+    crate::terminal::theme_probe::parse_rgb_value(value).or_else(|| parse_hash_rgb(value))
+}
+
+fn parse_hash_rgb(value: &str) -> Option<[u8; 3]> {
+    let hex = value.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |start| u8::from_str_radix(&hex[start..start + 2], 16).ok();
+    Some([channel(0)?, channel(2)?, channel(4)?])
+}
+
+fn host_query_color(appearance: &PaneAppearance, index: usize) -> Option<[u8; 3]> {
+    if index == NamedColor::Background as usize {
+        return Some(appearance.background);
+    }
+    let host = appearance.host.as_ref()?;
+    if index == NamedColor::Foreground as usize {
+        return Some(host.foreground);
+    }
+    if index < 16 && host.palette_mask & (1 << index) != 0 {
+        return Some(host.palette[index]);
+    }
+    None
 }
 
 impl EventListener for EventProxy {
@@ -66,13 +209,20 @@ impl EventListener for EventProxy {
                 let _ = self.tx.send(InputAction::Bytes(text.into_bytes()));
             }
             Event::ColorRequest(index, format) => {
-                if index == NamedColor::Background as usize {
-                    if let Ok(appearance) = self.appearance.lock() {
-                        let [r, g, b] = appearance.background;
-                        let _ = self
-                            .tx
-                            .send(InputAction::Bytes(format(Rgb { r, g, b }).into_bytes()));
-                    }
+                let child = self
+                    .child_colors
+                    .lock()
+                    .ok()
+                    .and_then(|colors| colors.get(index));
+                let host = self
+                    .appearance
+                    .lock()
+                    .ok()
+                    .and_then(|appearance| host_query_color(&appearance, index));
+                if let Some([r, g, b]) = child.or(host) {
+                    let _ = self
+                        .tx
+                        .send(InputAction::Bytes(format(Rgb { r, g, b }).into_bytes()));
                 }
             }
             Event::ColorSchemeRequest => {
@@ -183,6 +333,7 @@ pub struct AlacrittyEngine {
     program_status: ProgramStatusSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
+    child_colors: Arc<Mutex<ChildColors>>,
     history_budget_bytes: usize,
     output_generation: u64,
     // One bounded summary, invalidated at every storage mutation boundary.
@@ -232,12 +383,14 @@ impl AlacrittyEngine {
         let program_status: ProgramStatusSlot =
             Arc::new(Mutex::new(ProgramStatusSlotState::default()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
+        let child_colors = Arc::new(Mutex::new(ChildColors::default()));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
             title: title.clone(),
             clipboard: clipboard.clone(),
             program_status: program_status.clone(),
             appearance: appearance.clone(),
+            child_colors: child_colors.clone(),
         };
         // Alacritty retains history by rows, not bytes. Derive a conservative
         // capacity from Luvus's per-pane byte budget and current width. The
@@ -258,6 +411,7 @@ impl AlacrittyEngine {
             program_status,
             response_tx: resp_tx,
             appearance,
+            child_colors,
             history_budget_bytes,
             output_generation: 0,
             history_metrics_cache: Cell::new(None),
@@ -518,6 +672,9 @@ impl VtEngine for AlacrittyEngine {
         self.history_maintenance_cursors = [0; 2];
         self.history_maintenance_pending = true;
         self.history_metrics_cache.set(None);
+        if let Ok(mut colors) = self.child_colors.lock() {
+            colors.observe(bytes);
+        }
         self.parser.advance(&mut self.term, bytes);
         self.output_generation = self.output_generation.wrapping_add(1);
     }
@@ -3319,7 +3476,11 @@ mod tests {
         scheme: ColorScheme,
     ) -> (AlacrittyEngine, std::sync::mpsc::Receiver<InputAction>) {
         let (tx, rx) = channel();
-        let appearance = PaneAppearance { background, scheme };
+        let appearance = PaneAppearance {
+            background,
+            scheme,
+            host: None,
+        };
         let engine =
             AlacrittyEngine::with_appearance(40, 5, tx, budget_for_rows(40, 20), appearance);
         (engine, rx)
@@ -3374,6 +3535,7 @@ mod tests {
         engine.set_appearance(PaneAppearance {
             background: [0xf2, 0xe5, 0xbc],
             scheme: ColorScheme::Light,
+            host: None,
         });
         assert_eq!(recv_bytes(&rx), b"\x1b[?997;2n");
         engine.advance(b"\x1b[?996n");
@@ -3386,6 +3548,60 @@ mod tests {
 
         engine.advance(b"\x1b[?2040$p");
         assert_eq!(recv_bytes(&rx), b"\x1b[?2040;0$y");
+    }
+
+    #[test]
+    fn host_palette_queries_follow_the_host_until_the_child_sets_a_color() {
+        let mut palette = [[0; 3]; 16];
+        palette[1] = [0xcc, 0x24, 0x1d];
+        let host = crate::terminal::theme_probe::TerminalColors {
+            fg: [0xeb, 0xdb, 0xb2],
+            bg: [0x28, 0x28, 0x28],
+            palette,
+            palette_mask: 1 << 1,
+        };
+        let (mut engine, rx) = appearance_engine(host.bg, ColorScheme::Dark);
+        engine.set_appearance(PaneAppearance::from_terminal_colors(&host));
+        engine.advance(b"\x1b[?2031h");
+        assert!(
+            rx.try_recv().is_err(),
+            "subscribing does not invent a change"
+        );
+
+        engine.advance(b"\x1b]10;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]10;rgb:ebeb/dbdb/b2b2\x07");
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]11;rgb:2828/2828/2828\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:cccc/2424/1d1d\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert!(
+            rx.try_recv().is_err(),
+            "unreported palette slots stay unset"
+        );
+
+        engine.advance(b"\x1b]11;rgb:01/02/03\x07");
+        let mut light = host.clone();
+        light.bg = [0xfb, 0xf1, 0xc7];
+        light.fg = [0x3c, 0x38, 0x36];
+        engine.set_appearance(PaneAppearance::from_terminal_colors(&light));
+        assert_eq!(recv_bytes(&rx), b"\x1b[?997;2n");
+        engine.set_appearance(PaneAppearance::from_terminal_colors(&light));
+        assert!(
+            rx.try_recv().is_err(),
+            "the same appearance is not notified twice"
+        );
+
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:0101/0202/0303\x07",
+            "a child background survives the host update"
+        );
+        engine.advance(b"\x1b]10;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]10;rgb:3c3c/3838/3636\x07");
+        engine.advance(b"\x1b]111\x07\x1b]11;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]11;rgb:fbfb/f1f1/c7c7\x07");
     }
 
     #[test]

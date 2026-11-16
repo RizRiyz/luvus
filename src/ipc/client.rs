@@ -628,6 +628,13 @@ impl InputRoute {
         let Some(message) = event_message(event) else {
             return true;
         };
+        self.send_message(message)
+    }
+
+    fn send_message(&self, message: ClientMessage) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
         // The sole input reader owns the writer during I/O. Replacement and
         // shutdown must remain possible even if the peer stops reading.
         let (generation, writer) = {
@@ -716,7 +723,11 @@ fn input_loop(route: InputRoute, pending: Vec<Event>) {
 
     #[cfg(not(windows))]
     {
-        crate::terminal::theme_probe::run_input_loop(pending, |event| route.send(event));
+        crate::terminal::theme_probe::run_input_loop(
+            pending,
+            |event| route.send(event),
+            |colors| route.send_message(ClientMessage::TerminalColors(Some(colors))),
+        );
     }
 }
 
@@ -1978,6 +1989,7 @@ mod tests {
                 [238, 238, 238],
                 [20, 20, 20],
             ),
+            palette_mask: u16::MAX,
         };
         protocol::write_message(&mut writer, &ClientMessage::TerminalColors(Some(colors))).unwrap();
         writer.flush().unwrap();

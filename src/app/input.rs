@@ -1435,8 +1435,10 @@ impl App {
                 }
                 true
             }
+            AppEvent::HostTerminalColors(colors) => self.apply_terminal_colors(&colors),
             // Handled by the server loop; never reaches here at runtime.
             AppEvent::ClientConnected { .. }
+            | AppEvent::ClientTerminalColors { .. }
             | AppEvent::ClientDetach { .. }
             | AppEvent::ClientSurfaceInterest { .. }
             | AppEvent::ClientPrepareSurface { .. }

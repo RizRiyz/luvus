@@ -108,6 +108,13 @@ pub enum AppEvent {
     ClientDetach {
         id: u64,
     },
+    /// A later host-color report from one attached display.
+    ClientTerminalColors {
+        id: u64,
+        colors: Option<TerminalColors>,
+    },
+    /// Host colors observed by a monolithic local client.
+    HostTerminalColors(TerminalColors),
     /// Change one client's frame/input ownership without closing its transport.
     ClientSurfaceInterest {
         id: u64,

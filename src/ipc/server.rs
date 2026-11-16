@@ -406,8 +406,9 @@ pub fn run() -> Result<()> {
     app.reconcile_automations();
     shutdown::install(tx.clone());
 
-    let mut terminal_theme_enabled = app.config.theme == "terminal";
-    let terminal_theme = Arc::new(AtomicBool::new(terminal_theme_enabled));
+    // Host color sync is independent of the selected UI theme. The atomic
+    // stays true so a later theme change does not stop pane queries.
+    let terminal_theme = Arc::new(AtomicBool::new(true));
     api::start_server(api_listener, tx.clone(), events);
     start_client_listener(client_listener, tx.clone(), terminal_theme.clone());
     drop(startup_lock);
@@ -549,12 +550,6 @@ pub fn run() -> Result<()> {
             );
             record_event_render_request(source, changed, &mut render_request);
         }
-        let enabled = app.config.theme == "terminal";
-        if enabled != terminal_theme_enabled {
-            terminal_theme_enabled = enabled;
-            terminal_theme.store(enabled, Ordering::Relaxed);
-        }
-
         if app.should_quit {
             broadcast(
                 &mut clients,
@@ -837,6 +832,21 @@ fn apply(
             apply_foreground_client(app, clients, *foreground);
             app.mark_runtime_scans_dirty();
             true
+        }
+        AppEvent::HostTerminalColors(_) => false,
+        AppEvent::ClientTerminalColors { id, colors } => {
+            let Some(client) = clients.get_mut(&id) else {
+                return false;
+            };
+            let Some(colors) = colors else {
+                return false;
+            };
+            let unchanged = client.terminal_colors.as_ref() == Some(&colors);
+            client.terminal_colors = Some(colors.clone());
+            if unchanged || client.interest != SurfaceInterest::Active || *foreground != Some(id) {
+                return false;
+            }
+            app.apply_terminal_colors(&colors)
         }
         AppEvent::ClientDetach { id } => {
             crate::logging::event(
@@ -1305,9 +1315,6 @@ fn apply_foreground_client(app: &mut App, clients: &Clients, foreground: Option<
         return;
     };
     app.set_client_cell_pixels(client.cell_width_px, client.cell_height_px);
-    if app.config.theme != "terminal" {
-        return;
-    }
     if let Some(colors) = client.terminal_colors.as_ref() {
         app.apply_terminal_colors(colors);
     }
@@ -2389,7 +2396,15 @@ pub(super) fn handle_client(
                 let _ = app_tx.send(AppEvent::ClientDetach { id });
                 break;
             }
-            Ok(ClientMessage::Hello { .. } | ClientMessage::TerminalColors(_)) => {}
+            Ok(ClientMessage::TerminalColors(colors)) => {
+                if app_tx
+                    .send(AppEvent::ClientTerminalColors { id, colors })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMessage::Hello { .. }) => {}
         }
     }
 }

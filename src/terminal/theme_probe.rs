@@ -22,6 +22,14 @@ pub struct TerminalColors {
     pub fg: [u8; 3],
     pub bg: [u8; 3],
     pub palette: [[u8; 3]; 16],
+    /// Bit `n` is set only when the host actually reported ANSI color `n`.
+    /// Missing slots stay unset so a probe cannot invent a hardcoded palette.
+    #[serde(default = "reported_palette_mask")]
+    pub palette_mask: u16,
+}
+
+fn reported_palette_mask() -> u16 {
+    u16::MAX
 }
 
 /// A completed probe plus any input that arrived while replies were read.
@@ -31,9 +39,10 @@ pub struct ProbeResult {
     pub pending: Vec<Event>,
 }
 
-/// Query only the palette entries used by `Theme::from_terminal`.
+/// ANSI palette slots forwarded to pane queries. The 256-color cube is not
+/// part of the host's designed palette and is left to the child terminal.
 #[cfg(any(unix, test))]
-const PALETTE_QUERIES: [u8; 6] = [1, 2, 3, 4, 6, 8];
+const PALETTE_QUERIES: core::ops::Range<u8> = 0..16;
 
 /// The single query inventory used for emission, raw splitting, and late replies.
 /// Prefixes end at the OSC parameter separator, independent of color encoding.
@@ -44,11 +53,7 @@ fn requested_reply_prefixes() -> &'static [String] {
         [10, 11]
             .into_iter()
             .map(|command| format!("\x1b]{command};"))
-            .chain(
-                PALETTE_QUERIES
-                    .into_iter()
-                    .map(|index| format!("\x1b]4;{index};")),
-            )
+            .chain(PALETTE_QUERIES.map(|index| format!("\x1b]4;{index};")))
             .collect()
     })
 }
@@ -76,12 +81,7 @@ pub fn probe() -> ProbeResult {
     }
 
     let mut stdout = std::io::stdout();
-    for prefix in requested_reply_prefixes() {
-        if write!(stdout, "{prefix}?\x07").is_err() {
-            return ProbeResult::default();
-        }
-    }
-    if stdout.flush().is_err() {
+    if write!(stdout, "{}", color_query_sequence()).is_err() || stdout.flush().is_err() {
         return ProbeResult::default();
     }
 
@@ -221,48 +221,93 @@ fn complete_color_responses(data: &[u8]) -> usize {
     count
 }
 
+/// OSC 10/11/4 query written by the initial probe and by focus re-queries.
+///
+/// DEC 2031 (`CSI ?2031h` / `CSI ?996n`) is intentionally absent. Crossterm
+/// 0.29 treats `CSI ? ... n` as an unfinished sequence and keeps those bytes
+/// in its parser buffer, so a color-scheme report would swallow later input.
 #[cfg(any(unix, test))]
-fn parse_osc_responses(data: &[u8]) -> Option<TerminalColors> {
-    let text = String::from_utf8_lossy(data);
-    let mut fg = None;
-    let mut bg = None;
-    let mut palette = [[0u8; 3]; 16];
-    let mut palette_set = [false; 16];
+pub(crate) fn color_query_sequence() -> String {
+    let mut query = String::new();
+    for prefix in requested_reply_prefixes() {
+        query.push_str(prefix);
+        query.push('?');
+        query.push('\u{7}');
+    }
+    query
+}
 
-    for chunk in text.split('\x1b') {
-        if let Some(value) = chunk.strip_prefix("]10;") {
-            fg = parse_rgb_value(value);
-        } else if let Some(value) = chunk.strip_prefix("]11;") {
-            bg = parse_rgb_value(value);
-        } else if let Some(value) = chunk.strip_prefix("]4;") {
-            let Some((index, color)) = value.split_once(';') else {
-                continue;
+/// Streaming host-color assembly. Unreported palette slots stay zero and
+/// unset in `palette_mask` instead of being replaced by a default VGA table.
+#[cfg(any(unix, test))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ColorAccumulator {
+    fg: Option<[u8; 3]>,
+    bg: Option<[u8; 3]>,
+    palette: [[u8; 3]; 16],
+    mask: u16,
+}
+
+#[cfg(any(unix, test))]
+impl ColorAccumulator {
+    pub(crate) fn push_sequence(&mut self, sequence: &[u8]) {
+        let text = String::from_utf8_lossy(sequence);
+        let Some(body) = text.strip_prefix("\u{1b}]") else {
+            return;
+        };
+        let body = body.split(['\u{7}', '\u{1b}']).next().unwrap_or(body);
+        if let Some(value) = body.strip_prefix("10;") {
+            if let Some(rgb) = parse_rgb_value(value) {
+                self.fg = Some(rgb);
+            }
+        } else if let Some(value) = body.strip_prefix("11;") {
+            if let Some(rgb) = parse_rgb_value(value) {
+                self.bg = Some(rgb);
+            }
+        } else if let Some(rest) = body.strip_prefix("4;") {
+            let Some((index, color)) = rest.split_once(';') else {
+                return;
             };
             let Ok(index) = index.parse::<usize>() else {
-                continue;
+                return;
             };
-            if index < palette.len() {
+            if index < self.palette.len() {
                 if let Some(rgb) = parse_rgb_value(color) {
-                    palette[index] = rgb;
-                    palette_set[index] = true;
+                    self.palette[index] = rgb;
+                    self.mask |= 1 << index;
                 }
             }
         }
     }
 
-    let fg = fg?;
-    let bg = bg?;
-    let defaults = default_ansi_palette(fg, bg);
-    for (index, set) in palette_set.into_iter().enumerate() {
-        if !set {
-            palette[index] = defaults[index];
-        }
+    pub(crate) fn complete(&self) -> Option<TerminalColors> {
+        Some(TerminalColors {
+            fg: self.fg?,
+            bg: self.bg?,
+            palette: self.palette,
+            palette_mask: self.mask,
+        })
     }
-    Some(TerminalColors { fg, bg, palette })
 }
 
 #[cfg(any(unix, test))]
-fn parse_rgb_value(value: &str) -> Option<[u8; 3]> {
+fn parse_osc_responses(data: &[u8]) -> Option<TerminalColors> {
+    let mut colors = ColorAccumulator::default();
+    let mut i = 0;
+    while i < data.len() {
+        if is_color_response_start(&data[i..]) {
+            if let Some(len) = osc_end(&data[i..]) {
+                colors.push_sequence(&data[i..i + len]);
+                i += len;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    colors.complete()
+}
+
+pub(crate) fn parse_rgb_value(value: &str) -> Option<[u8; 3]> {
     let value = value.strip_prefix("rgb:")?;
     let value = value.split(['\x07', '\\']).next()?;
     let mut parts = value.split('/');
@@ -274,7 +319,6 @@ fn parse_rgb_value(value: &str) -> Option<[u8; 3]> {
     Some(rgb)
 }
 
-#[cfg(any(unix, test))]
 fn parse_component(value: &str) -> Option<u8> {
     let parsed = u16::from_str_radix(value, 16).ok()?;
     Some(match value.len() {
@@ -286,7 +330,8 @@ fn parse_component(value: &str) -> Option<u8> {
     })
 }
 
-#[cfg(any(unix, test))]
+/// Compatibility defaults for UI derivation only. Do not mark these as
+/// reported host slots or expose them to child color queries.
 pub(crate) fn default_ansi_palette(fg: [u8; 3], bg: [u8; 3]) -> [[u8; 3]; 16] {
     let luminance =
         |rgb: [u8; 3]| 0.2126 * rgb[0] as f32 + 0.7152 * rgb[1] as f32 + 0.0722 * rgb[2] as f32;
@@ -493,6 +538,99 @@ fn xterm_modifiers(value: u16) -> KeyModifiers {
 mod tests {
     use super::*;
 
+    /// Known-failing diagnostic for the deferred host DEC 2031 work. Kept out
+    /// of ordinary tests: Crossterm 0.29 currently retains the report and the
+    /// following key. Run explicitly with `--features dev-tools` when revisiting
+    /// upstream support; this PR intentionally does not enable host DEC 2031.
+    #[cfg(all(unix, feature = "dev-tools"))]
+    #[test]
+    fn realtime_scheme_report_queries_palette_without_focus_and_preserves_input() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        const CHILD: &str = "LUVUS_TEST_REALTIME_SCHEME_REPORT";
+        if std::env::var_os(CHILD).is_some() {
+            ratatui::crossterm::terminal::enable_raw_mode().unwrap();
+            print!("INPUT_READY");
+            std::io::stdout().flush().unwrap();
+            let mut keys = Vec::new();
+            run_input_loop(
+                Vec::new(),
+                |event| {
+                    let done = event == Event::Key(KeyCode::Char('!').into());
+                    keys.push(event);
+                    !done
+                },
+                |_| true,
+            );
+            ratatui::crossterm::terminal::disable_raw_mode().unwrap();
+            assert_eq!(keys, vec![Event::Key(KeyCode::Char('!').into())]);
+            return;
+        }
+
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let mut command = portable_pty::CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "terminal::theme_probe::tests::realtime_scheme_report_queries_palette_without_focus_and_preserves_input",
+            "--nocapture",
+        ]);
+        for (name, _) in std::env::vars_os() {
+            let name = name.to_string_lossy();
+            if name.starts_with("LUVUS_") || name.starts_with("WEZTERM_") {
+                command.env_remove(name.as_ref());
+            }
+        }
+        command.env(CHILD, "1");
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut chunk = [0; 1024];
+            let mut sent = false;
+            while let Ok(n) = reader.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                output.extend_from_slice(&chunk[..n]);
+                if !sent && output.windows(11).any(|s| s == b"INPUT_READY") {
+                    sent = true;
+                    writer.write_all(b"\x1b[?997;").unwrap();
+                    writer.flush().unwrap();
+                    std::thread::sleep(Duration::from_millis(5));
+                    writer.write_all(b"2n!").unwrap();
+                    writer.flush().unwrap();
+                }
+            }
+            let _ = tx.send(output);
+        });
+        let output = match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("fragmented CSI ?997;2n blocked the sole input reader and following key: {error}");
+            }
+        };
+        assert!(
+            child.wait().unwrap().success(),
+            "{}",
+            String::from_utf8_lossy(&output)
+        );
+        let queries = color_query_sequence();
+        assert!(
+            output
+                .windows(queries.len())
+                .any(|s| s == queries.as_bytes()),
+            "the report must query the host palette without a focus event"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn late_color_replies_do_not_become_pane_input() {
@@ -507,17 +645,30 @@ mod tests {
             print!("PROBE_DONE");
             std::io::stdout().flush().unwrap();
             let mut keys = Vec::new();
-            run_input_loop(probe.pending, |event| {
-                let done = matches!(
-                    event,
-                    Event::Key(KeyEvent {
-                        code: KeyCode::Char('!'),
-                        ..
-                    })
-                );
-                keys.push(event);
-                !done
-            });
+            let mut latest = None;
+            run_input_loop(
+                probe.pending,
+                |event| {
+                    let done = matches!(
+                        event,
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('!'),
+                            ..
+                        })
+                    );
+                    keys.push(event);
+                    !done
+                },
+                |colors| {
+                    latest = Some(colors);
+                    true
+                },
+            );
+            let colors = latest.expect("late OSC replies must reach the color path");
+            assert_eq!(colors.fg, [0x3c, 0x38, 0x36]);
+            assert_eq!(colors.bg, [0xfb, 0xf1, 0xc7]);
+            assert_eq!(colors.palette[1], [0xcc, 0x24, 0x1d]);
+            assert_eq!(colors.palette_mask & (1 << 1), 1 << 1);
             ratatui::crossterm::terminal::disable_raw_mode().unwrap();
             assert_eq!(keys, vec![Event::Key(KeyCode::Char('!').into())]);
             return;

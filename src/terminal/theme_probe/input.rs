@@ -55,6 +55,10 @@ struct ColorReplyFilter {
     bytes: Vec<u8>,
     pending: Vec<Event>,
     deadline: Option<Instant>,
+    reply_prefix: Vec<u8>,
+    reply_body: Vec<u8>,
+    colors: super::ColorAccumulator,
+    emitted: Option<super::TerminalColors>,
 }
 
 impl ColorReplyFilter {
@@ -105,8 +109,9 @@ impl ColorReplyFilter {
                 return self.passthrough(event);
             }
             for byte in bytes {
+                self.reply_body.push(*byte);
                 if *byte == 0x07 || (*escape && *byte == b'\\') {
-                    self.clear();
+                    self.finish_color_reply();
                     return DecodedEvents::None;
                 }
                 if *escape || (*byte == 0x1b && bytes.len() == 2 && bytes[1] != b'\\') {
@@ -141,7 +146,8 @@ impl ColorReplyFilter {
                 .iter()
                 .any(|prefix| prefix.as_bytes() == self.bytes)
             {
-                self.bytes.clear();
+                self.reply_prefix = std::mem::take(&mut self.bytes);
+                self.reply_body.clear();
                 self.pending.clear();
                 self.state = ReplyState::Reply {
                     escape: false,
@@ -184,12 +190,33 @@ impl ColorReplyFilter {
         self.replay()
     }
 
-    /// Reset all state after completion, interruption, or reply abandonment.
+    /// Parse one finished OSC reply. Invalid bodies are discarded, not keyed.
+    fn finish_color_reply(&mut self) {
+        let mut sequence = std::mem::take(&mut self.reply_prefix);
+        sequence.append(&mut self.reply_body);
+        self.colors.push_sequence(&sequence);
+        self.clear();
+    }
+
+    /// Newly completed foreground and background, once. An identical follow-up
+    /// reply must not ask the server to refresh again.
+    fn take_colors(&mut self) -> Option<super::TerminalColors> {
+        let next = self.colors.complete()?;
+        if self.emitted.as_ref() == Some(&next) {
+            return None;
+        }
+        self.emitted = Some(next.clone());
+        Some(next)
+    }
+
+    /// Reset reply framing. Parsed host colors survive a later palette slot.
     fn clear(&mut self) {
         self.state = ReplyState::Input;
         self.bytes.clear();
         self.pending.clear();
         self.deadline = None;
+        self.reply_prefix.clear();
+        self.reply_body.clear();
     }
 
     /// Release only tentative events unchanged and cancel their deadline.
@@ -203,9 +230,14 @@ impl ColorReplyFilter {
 
 /// One stdin owner for ordinary, federated, and monolithic Unix clients.
 /// Block indefinitely while idle; use one-shot deadlines only for pending traffic.
-pub(crate) fn run_input_loop(pending: Vec<Event>, mut send: impl FnMut(Event) -> bool) {
+pub(crate) fn run_input_loop(
+    pending: Vec<Event>,
+    mut send: impl FnMut(Event) -> bool,
+    mut send_colors: impl FnMut(super::TerminalColors) -> bool,
+) {
     let mut filter = ColorReplyFilter::default();
     let mut pending = pending.into_iter();
+    let mut query_until = None;
     loop {
         let decoded = if let Some(event) = pending.next() {
             filter.push(event, Instant::now())
@@ -218,7 +250,7 @@ pub(crate) fn run_input_loop(pending: Vec<Event>, mut send: impl FnMut(Event) ->
                         filter
                             .expire()
                             .for_each(|event| keep_going = keep_going && send(event));
-                        if !keep_going {
+                        if !keep_going || !emit_colors(&mut filter, &mut send_colors) {
                             return;
                         }
                         continue;
@@ -232,11 +264,43 @@ pub(crate) fn run_input_loop(pending: Vec<Event>, mut send: impl FnMut(Event) ->
             filter.push(event, Instant::now())
         };
         let mut keep_going = true;
-        decoded.for_each(|event| keep_going = keep_going && send(event));
-        if !keep_going {
+        decoded.for_each(|event| {
+            if matches!(event, Event::FocusGained) {
+                maybe_requery_host_colors(&mut query_until);
+            }
+            keep_going = keep_going && send(event);
+        });
+        if !keep_going || !emit_colors(&mut filter, &mut send_colors) {
             return;
         }
     }
+}
+
+fn emit_colors(
+    filter: &mut ColorReplyFilter,
+    send_colors: &mut impl FnMut(super::TerminalColors) -> bool,
+) -> bool {
+    match filter.take_colors() {
+        Some(colors) => send_colors(colors),
+        None => true,
+    }
+}
+
+/// Re-query OSC 10/11/4 when focus returns. Crossterm 0.29 never completes
+/// `CSI ?997`, so DEC 2031 notifications cannot be read without wedging input.
+/// A nested client does not query; the outer client owns the host terminal.
+fn maybe_requery_host_colors(query_until: &mut Option<Instant>) {
+    if std::env::var_os("LUVUS_ENV").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    let now = Instant::now();
+    if query_until.is_some_and(|until| now < until) {
+        return;
+    }
+    *query_until = Some(now + Duration::from_millis(80));
+    let mut stdout = std::io::stdout().lock();
+    let _ = std::io::Write::write_all(&mut stdout, super::color_query_sequence().as_bytes());
+    let _ = std::io::Write::flush(&mut stdout);
 }
 
 #[cfg(test)]
@@ -263,7 +327,7 @@ mod tests {
         );
         for bytes in [
             b"\x1b]x".as_slice(),
-            b"\x1b]4;5;rgb:ff/ff/ff\x07",
+            b"\x1b]4;16;rgb:ff/ff/ff\x07",
             b"10;rgb:ff/ff/ff",
             b"\x1bx",
             b"\x1b[A",
@@ -581,5 +645,47 @@ mod tests {
         }
         let oversized = format!("\x1b]10;rgb:{}", "a".repeat(4096));
         assert!(filter_bytes(oversized.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn mixed_replies_become_colors_without_leaking_into_keys() {
+        let mut filter = ColorReplyFilter::default();
+        let mut keys = Vec::new();
+        let bytes = b"a\x1b]10;rgb:ff/00/00\x07\x1b]11;rgb:";
+        for event in super::super::decode_pending_input(bytes) {
+            filter
+                .push(event, Instant::now())
+                .for_each(|event| keys.push(event));
+        }
+        assert!(
+            filter.take_colors().is_none(),
+            "background is still partial"
+        );
+        assert_eq!(keys, super::super::decode_pending_input(b"a"));
+        keys.clear();
+        for event in super::super::decode_pending_input(b"00/00/ff\x07z\x1b]4;2;rgb:00/ff/00\x07") {
+            filter
+                .push(event, Instant::now())
+                .for_each(|event| keys.push(event));
+        }
+        let colors = filter.take_colors().expect("fg and bg complete the probe");
+        assert_eq!(colors.fg, [0xff, 0, 0]);
+        assert_eq!(colors.bg, [0, 0, 0xff]);
+        assert_eq!(colors.palette_mask, 1 << 2);
+        assert_eq!(colors.palette[2], [0, 0xff, 0]);
+        assert!(
+            filter.take_colors().is_none(),
+            "identical colors are not refreshed"
+        );
+        assert_eq!(keys, super::super::decode_pending_input(b"z"));
+        let mut pasted = Vec::new();
+        filter
+            .push(
+                Event::Paste("\x1b]10;rgb:01/02/03\x07".into()),
+                Instant::now(),
+            )
+            .for_each(|event| pasted.push(event));
+        assert!(matches!(pasted[0], Event::Paste(_)));
+        assert!(filter.take_colors().is_none(), "paste is not a host reply");
     }
 }

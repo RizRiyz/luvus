@@ -593,7 +593,8 @@ fn run_inner(
     // lock. Start input only after the query, matching the ordinary thin-client
     // path, or attachment can remain on a blank alternate screen until a key
     // event happens to release the reader.
-    start_input_reader(probe.pending, events_tx.clone())?;
+    let host_colors = Arc::new(Mutex::new(probe.colors.clone()));
+    start_input_reader(probe.pending, events_tx.clone(), host_colors.clone())?;
 
     let mut candidate: Option<SurfaceCandidate> = None;
     let mut pending_endpoint: Option<Endpoint> = None;
@@ -872,6 +873,7 @@ fn run_inner(
                     &mut last_cursor,
                     host_cursor,
                     &mut cursor_visible,
+                    &host_colors,
                 )? {
                     exit = reason;
                     running = false;
@@ -892,6 +894,7 @@ fn run_inner(
                     &mut last_cursor,
                     host_cursor,
                     &mut cursor_visible,
+                    &host_colors,
                 )? {
                     exit = reason;
                     running = false;
@@ -1058,7 +1061,11 @@ fn start_local_reader(
     Ok(())
 }
 
-fn start_input_reader(pending: Vec<Event>, events: Sender<ShellEvent>) -> Result<()> {
+fn start_input_reader(
+    pending: Vec<Event>,
+    events: Sender<ShellEvent>,
+    host_colors: Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
+) -> Result<()> {
     std::thread::Builder::new()
         .name("client-input".to_string())
         .stack_size(256 * 1024)
@@ -1069,11 +1076,21 @@ fn start_input_reader(pending: Vec<Event>, events: Sender<ShellEvent>) -> Result
             };
             #[cfg(windows)]
             {
+                let _ = host_colors;
                 crate::terminal::host_input::run_input_loop(pending, send);
             }
             #[cfg(not(windows))]
             {
-                crate::terminal::theme_probe::run_input_loop(pending, send);
+                crate::terminal::theme_probe::run_input_loop(pending, send, |colors| {
+                    if let Ok(mut cached) = host_colors.lock() {
+                        *cached = Some(colors.clone());
+                    }
+                    events
+                        .send(ShellEvent::Input(ClientMessage::TerminalColors(Some(
+                            colors,
+                        ))))
+                        .is_ok()
+                });
             }
         })?;
     Ok(())
@@ -1340,6 +1357,7 @@ fn handle_link_event(
     last_cursor: &mut Option<(u16, u16)>,
     last_cursor_style: &mut super::client::AppliedHostCursor,
     cursor_visible: &mut bool,
+    host_colors: &Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 ) -> Result<Option<super::client::ClientExit>> {
     match event {
         LinkEvent::Message {
@@ -1384,6 +1402,7 @@ fn handle_link_event(
                 last_cursor,
                 last_cursor_style,
                 cursor_visible,
+                host_colors,
             )? {
                 return Ok(Some(exit));
             }
@@ -1489,6 +1508,7 @@ fn handle_surface_message(
     last_cursor: &mut Option<(u16, u16)>,
     last_cursor_style: &mut super::client::AppliedHostCursor,
     cursor_visible: &mut bool,
+    host_colors: &Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 ) -> Result<Option<super::client::ClientExit>> {
     let (message, prepared) = match message {
         ServerMessage::PreparedFrame { ticket, frame } => {
@@ -1595,9 +1615,10 @@ fn handle_surface_message(
                         .as_ref()
                         .ok_or_else(|| anyhow!("remote session connection closed"))?;
                     if probe_terminal {
-                        // The input reader already owns the terminal. Reprobing
-                        // here would race keyboard input and block switching.
-                        control.send(&ClientMessage::TerminalColors(None))?;
+                        // The input reader already owns the terminal. Send the
+                        // colors it has already assembled instead of probing again.
+                        let colors = host_colors.lock().ok().and_then(|colors| colors.clone());
+                        control.send(&ClientMessage::TerminalColors(colors))?;
                     }
                     control.send(&super::client::cell_pixels_message())?;
                     control.send(&ClientMessage::ShellDockLayout(layout))?;

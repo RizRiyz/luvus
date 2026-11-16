@@ -257,6 +257,17 @@ impl App {
                 format!("theme `{}` is not installed", next.theme),
             ));
         }
+        for (field, name) in [
+            ("theme_follow.dark", next.theme_follow.dark.as_str()),
+            ("theme_follow.light", next.theme_follow.light.as_str()),
+        ] {
+            if !name.is_empty() && self.theme_registry.get(name).is_none() {
+                return Err((
+                    "invalid_request".to_string(),
+                    format!("{field} `{name}` is not installed"),
+                ));
+            }
+        }
         let theme = self.theme_registry.theme_or_default(&next.theme);
         let sidebars = Sidebars::from_config(&next.sidebars());
         let keymap = keys::build_keymap(&next.keybindings);
@@ -277,6 +288,9 @@ impl App {
             pane.set_history_budget(history_budget);
         }
         self.config = next;
+        if let Some(colors) = self.host_terminal_colors.clone() {
+            self.apply_terminal_colors(&colors);
+        }
         self.changelog_rows = None;
         if let Some(patch) = persist_patch {
             self.persist_config_patch(patch);
