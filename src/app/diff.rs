@@ -608,6 +608,8 @@ impl App {
         }) {
             self.diff.cursor = position;
             self.diff.activation_blocked = false;
+            self.diff.scroll_detached = false;
+            self.diff.ensure_cursor_visible();
         } else {
             self.diff.selected_key = None;
             self.diff.activation_blocked = true;
@@ -2610,6 +2612,35 @@ mod tests {
                 assert!(!header.contains('/') && !header.contains('\\'));
             }
         }
+    }
+
+    #[test]
+    fn diff_search_cancel_and_query_row_reveal_the_selection() {
+        let _env = crate::persist::test_env("diff-search-reveal");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        install_snapshot(&mut app);
+        for index in 0..12 {
+            add_snapshot_file(&mut app, &format!("src/file-{index:02}.rs"));
+        }
+        app.files_mode = FilesMode::Diff;
+        app.files_focused = true;
+        app.diff.viewport = 8;
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_event(crate::event::AppEvent::Paste("file-11".into()));
+        assert!(app.diff.scroll > 0);
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.diff.cursor, 1);
+        assert!(app.diff.cursor < app.diff.scroll + app.diff.viewport);
+        app.diff.viewport = 8;
+        app.diff.scroll = 0;
+        app.diff.cursor = 7;
+        app.diff.scroll_detached = false;
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.diff.viewport = 7;
+        app.diff.ensure_cursor_visible();
+        assert!(app.diff.cursor >= app.diff.scroll && app.diff.cursor < app.diff.scroll + 7);
     }
 
     #[test]

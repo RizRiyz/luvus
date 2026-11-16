@@ -1615,7 +1615,9 @@ impl App {
             if self.sidebar_query_paste(s) {
                 return true;
             }
-            return false;
+            // A focused FILES or DIFF list owns paste even after its query is
+            // committed. Falling through would type into the pane underneath.
+            return self.files_focused || self.sidebar_focus.is_some();
         };
         for c in s.chars().filter(|c| !c.is_control()) {
             handler(self, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -3321,14 +3323,15 @@ impl App {
             self.set_files_mode(*mode);
             return;
         }
-        if self.file_clear_rect.is_some_and(hit) {
-            if self.file_clear_is_search {
-                self.file_search.clear_committed();
-                self.file_search_miss = false;
-                self.file_located = None;
-            } else {
-                self.file_tree.clear_filter();
-            }
+        if self.file_search_clear_rect.is_some_and(hit) {
+            self.file_search.clear_committed();
+            self.file_search_miss = false;
+            self.file_located = None;
+            self.files_focused = true;
+            return;
+        }
+        if self.file_filter_clear_rect.is_some_and(hit) {
+            self.file_tree.clear_filter();
             self.files_focused = true;
             return;
         }
@@ -6335,6 +6338,23 @@ mod tests {
             app.file_tree.filter.is_some(),
             "backslash opens the FILES filter"
         );
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        app.file_tree.filter.as_mut().unwrap().editing = false;
+        assert!(app.handle_event(crate::event::AppEvent::Paste("secret".into())));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "committed FILES focus consumes paste"
+        );
+        app.file_tree.filter = Some(crate::files::filter::FileFilter::start(
+            app.file_tree.root().to_path_buf(),
+            std::sync::mpsc::channel().0,
+            (0, 0),
+        ));
         app.handle_event(phase_event(
             KeyCode::Char('r'),
             KeyModifiers::NONE,

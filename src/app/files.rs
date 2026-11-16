@@ -77,7 +77,12 @@ impl App {
             return;
         }
         let cwd = self.ws().cwd.clone();
+        let root_changed = self.file_tree.root() != cwd.as_path();
         self.file_tree.set_root(cwd);
+        if root_changed {
+            self.file_located = None;
+            self.file_search_origin = None;
+        }
         let dirty_views: Vec<_> = self
             .layout()
             .leaves()
@@ -915,8 +920,14 @@ impl App {
                 self.reveal_file_cursor();
                 self.note_file_search_move();
             }
-            KeyCode::Left | KeyCode::Char('h') => self.collapse_file_row_or_parent(),
-            KeyCode::Right | KeyCode::Char('l') => self.expand_file_row_or_child(),
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.collapse_file_row_or_parent();
+                self.note_file_search_move();
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.expand_file_row_or_child();
+                self.note_file_search_move();
+            }
             KeyCode::Char('a') => {
                 if self.file_search_target_ok() {
                     self.open_file_menu_for_keyboard();
@@ -1770,6 +1781,50 @@ mod tests {
             "the command focuses instead of hiding FILES"
         );
         assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
+    }
+
+    #[test]
+    fn files_horizontal_navigation_updates_the_stable_path() {
+        let _env = crate::persist::test_env("files-horizontal-located");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let root = seed_keyboard_tree(&mut app);
+        app.file_located = Some(root.join("src"));
+        app.file_tree.cursor = 0;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.file_located.as_ref(), Some(&root.join("src/main.rs")));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.views.get(&app.layout().focus),
+            Some(ViewKind::File(view)) if view.path.ends_with("main.rs")
+        ));
+    }
+
+    #[test]
+    fn files_root_change_drops_the_previous_stable_path() {
+        let _env = crate::persist::test_env("files-root-located");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let root = seed_keyboard_tree(&mut app);
+        app.file_located = Some(root.join("src"));
+        app.move_dock(&DockKind::Files, Side::Right);
+        app.workspaces[0].cwd = PathBuf::from("/other-workspace");
+        app.follow_active_file_root();
+        assert!(app.file_located.is_none());
+        app.file_tree.apply_dir(
+            PathBuf::from("/other-workspace"),
+            vec![crate::files::Entry {
+                name: "other.txt".into(),
+                is_dir: false,
+            }],
+        );
+        app.files_focused = true;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.views.get(&app.layout().focus),
+            Some(ViewKind::File(view)) if view.path.ends_with("other.txt")
+        ));
     }
 
     fn seed_keyboard_tree(app: &mut App) -> PathBuf {

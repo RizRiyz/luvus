@@ -29,7 +29,8 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
     app.files_mode_rects.clear();
     app.diff_row_rects.clear();
     app.diff_hit_keys.clear();
-    app.file_clear_rect = None;
+    app.file_search_clear_rect = None;
+    app.file_filter_clear_rect = None;
     app.diff_clear_rect = None;
     app.diff_clear_is_search = false;
 
@@ -120,7 +121,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
             String::new()
         };
         app.file_clear_is_search = true;
-        app.file_clear_rect = crate::ui::sidebar::draw_dock_query(
+        app.file_search_clear_rect = crate::ui::sidebar::draw_dock_query(
             f,
             area,
             list_top,
@@ -140,7 +141,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
             ""
         };
         app.file_clear_is_search = false;
-        app.file_clear_rect = crate::ui::sidebar::draw_dock_query(
+        app.file_filter_clear_rect = crate::ui::sidebar::draw_dock_query(
             f,
             area,
             list_top,
@@ -372,6 +373,7 @@ fn draw_diff_list(
     let max_scroll = app.diff.rows.len().saturating_sub(cap);
     app.diff.scroll = app.diff.scroll.min(max_scroll);
     app.diff.viewport = cap;
+    app.diff.ensure_cursor_visible();
     let snapshot = app.diff.snapshot.as_ref().expect("rows require snapshot");
     // Like WORKSPACES/AGENTS, the active view and keyboard preselection are
     // independent. Rendering never changes the cursor or its stable key.
@@ -1066,6 +1068,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn files_search_and_filter_clear_targets_are_independent() {
+        use crate::app::App;
+        use crate::files::filter::FileFilter;
+        let _env = crate::persist::test_env("files-two-clear-targets");
+        let mut app = App::new(100, 30, std::sync::mpsc::channel().0).unwrap();
+        app.files_mode = crate::diff::FilesMode::Files;
+        app.file_tree.filter = Some(FileFilter::start(
+            app.file_tree.root().to_path_buf(),
+            std::sync::mpsc::channel().0,
+            (0, 0),
+        ));
+        app.file_tree.filter.as_mut().unwrap().editing = false;
+        app.file_search.begin();
+        app.file_search.append("src");
+        let theme = app.theme.clone();
+        let area = Rect::new(0, 0, 48, 12);
+        let mut buffer = Buffer::empty(area);
+        super::draw_files_dock(
+            &mut RenderTarget::new(&mut buffer, area),
+            area,
+            &mut app,
+            &theme,
+        );
+        let search = app.file_search_clear_rect.expect("search clear");
+        let filter = app.file_filter_clear_rect.expect("filter clear");
+        assert_ne!(search, filter);
     }
 
     #[test]

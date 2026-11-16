@@ -193,10 +193,12 @@ and does not hide rows. After `Enter`, `n` and `N` wrap to the next and previous
 match; they do nothing when nothing matches, and they never select a hidden row.
 `\` hides non-matching rows and is not a `/` alias. A plain `/` or `\` in a
 normal terminal pane still reaches that program. Scroll-history `/` and prefix
-`/` are unchanged. `Enter` commits and returns to list navigation. `Esc` while
-editing restores the text from when editing began and, for search, the previous
-selection. The next `Esc` clears a committed search, then a committed `\`
-filter, then leaves the dock. `q` leaves immediately. While editing, `/`, `\`,
+`/` are unchanged. `Enter` commits and returns to list navigation, except in
+a FILES `\` filter with a selected result, where it opens that result's action
+menu. `Esc` while editing `/` search restores the text from when editing began
+and the previous selection. `Esc` while editing a FILES `\` filter clears that
+filter and restores its saved tree position. The next `Esc` clears a committed
+search, then a committed `\` filter, then leaves the dock. `q` leaves immediately. While editing, `/`, `\`,
 `f`, `s`, and `n` are query text. `Backspace` deletes one character and `Ctrl+U`
 clears the text being edited. Pasted text stays in the query. AGENTS uses `f`
 for All / Active and `s` for all workspaces / this workspace. DIFF uses `f` to
@@ -215,8 +217,6 @@ hiding any more rows; `\` returns to filter editing. Without a filter, FILES
 `/` searches only the existing expanded tree rows.
 After `Enter` opens a file view, `x` closes that view. An opened DIFF review
 closes with `q` or `Esc`. Its `/` search stays exact content search.
-After `Enter` opens a file view, `x` closes that view. An opened DIFF review
-closes with `q` or `Esc`.
 
 **Rename dialogs** (a tab, a workspace, or a pane): `←` / `→` move the text
 cursor, `Home` / `End` jump to the start or end of the name, `Backspace` and

@@ -2588,7 +2588,7 @@ fn handle_dock_input(
     if machines.is_empty() {
         return Ok(false);
     }
-    if dock.navigation.is_some() {
+    if dock.navigation.is_some() && dock.focus_seen {
         if let ClientMessage::Paste(text) = message {
             if dock.workspace_search.editing() {
                 dock.workspace_search.append(text);
@@ -2613,7 +2613,10 @@ fn handle_dock_input(
         (dock.navigation, message, dock.rect)
     {
         if dock.workspace_search.editing() {
-            let query_key = crate::app::dock_filter::is_query_clear(key)
+            let query_key = (!crate::app::PrefixSpec::parse(&crate::config::load().prefix)
+                .unwrap_or_default()
+                .matches(key)
+                && crate::app::dock_filter::is_query_clear(key))
                 || crate::app::dock_filter::query_text_char(key).is_some()
                 || matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace);
             if query_key {
@@ -2638,7 +2641,10 @@ fn handle_dock_input(
             }
         }
         if dock.workspace_query.editing() {
-            let query_key = crate::app::dock_filter::is_query_clear(key)
+            let query_key = (!crate::app::PrefixSpec::parse(&crate::config::load().prefix)
+                .unwrap_or_default()
+                .matches(key)
+                && crate::app::dock_filter::is_query_clear(key))
                 || crate::app::dock_filter::query_text_char(key).is_some()
                 || matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace);
             if query_key {
@@ -3714,6 +3720,7 @@ fn locate_shell_search(
         dock.selected_hit = Some(dock_row_hit(&rows[index]));
         dock.selected_workspace_id = shell_row_identity(&rows[index]);
         dock.activation_blocked = false;
+        dock.navigation_reveal = true;
         dock.search_miss = false;
     } else {
         dock.search_miss = true;
@@ -3748,6 +3755,20 @@ fn remember_dock_selection(dock: &mut DockState, rows: &[MachineDockRow]) {
             return;
         }
         dock.selected_hit = None;
+        dock.activation_blocked = true;
+        dock.navigation = Some(dock.navigation.unwrap_or(0).min(rows.len() - 1));
+        return;
+    }
+    if let Some(id) = dock.selected_workspace_id.clone() {
+        if let Some(index) = rows
+            .iter()
+            .position(|row| shell_row_identity(row).as_ref() == Some(&id))
+        {
+            dock.navigation = Some(index);
+            dock.selected_hit = Some(dock_row_hit(&rows[index]));
+            dock.activation_blocked = false;
+            return;
+        }
         dock.activation_blocked = true;
         dock.navigation = Some(dock.navigation.unwrap_or(0).min(rows.len() - 1));
         return;
@@ -4517,18 +4538,19 @@ fn paint_dock_content(
                 bold: false,
             },
         );
-        if rect.width >= 12 {
+        let clear_width = (crate::ui::display_width(dock.clear_label) as u16).saturating_add(2);
+        if rect.width >= clear_width.saturating_add(4) {
             let clear = Rect::new(
-                rect.x + rect.width.saturating_sub(8),
+                rect.x + rect.width.saturating_sub(clear_width.saturating_add(2)),
                 rect.y + crate::ui::DOCK_HEADER_ROWS,
-                5,
+                clear_width,
                 1,
             );
             write_endpoint_text(
                 &mut cells,
                 geometry,
                 crate::ui::DOCK_HEADER_ROWS,
-                rect.width.saturating_sub(8),
+                rect.width.saturating_sub(clear_width.saturating_add(2)),
                 dock.clear_label,
                 StyleSpec {
                     fg: protocol::unpack(style.active_fg),
@@ -6821,6 +6843,34 @@ mod tests {
             "search cannot select a workspace the filter hid"
         );
         assert!(dock.selected_hit.is_none());
+    }
+
+    #[test]
+    fn federated_search_reveals_and_keeps_a_hidden_identity_blocked() {
+        let mut dock = DockState {
+            local_workspaces: vec![shell_workspace(0, "alpha"), shell_workspace(1, "beta")],
+            navigation: Some(0),
+            selected_hit: Some(DockHit::LocalWorkspace(0)),
+            selected_workspace_id: Some("local:alpha-0".into()),
+            scroll: 0,
+            ..DockState::default()
+        };
+        let rows = visible_dock_rows(&HashMap::new(), &Endpoint::Local, &dock);
+        dock.workspace_search.begin();
+        dock.workspace_search.append("beta");
+        locate_shell_search(&mut dock, &rows, true, true);
+        assert!(dock.navigation_reveal);
+        dock.workspace_query.begin();
+        dock.workspace_query.append("beta");
+        dock.workspace_query.commit();
+        dock.selected_hit = None;
+        dock.selected_workspace_id = Some("local:alpha-0".into());
+        let filtered = visible_dock_rows(&HashMap::new(), &Endpoint::Local, &dock);
+        remember_dock_selection(&mut dock, &filtered);
+        assert!(dock.activation_blocked);
+        assert!(dock.selected_hit.is_none());
+        dock.clear_label = "effacer";
+        assert!((crate::ui::display_width(dock.clear_label) as u16) + 2 > 5);
     }
 
     #[test]

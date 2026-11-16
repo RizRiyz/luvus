@@ -481,6 +481,34 @@ impl App {
                 }
             }
         }
+        // Row membership depends on program-status and session evidence even
+        // when no text query is active. Display text stays behind the query gate.
+        for workspace in &self.workspaces {
+            for tab in &workspace.tabs {
+                for pane in tab.layout.leaves() {
+                    let Some(status) = self.status.get(&pane) else {
+                        continue;
+                    };
+                    mix(&mut hash, &[u8::from(self.is_status_reporter_pane(pane))]);
+                    mix(
+                        &mut hash,
+                        &[u8::from(
+                            status
+                                .program_status
+                                .as_ref()
+                                .is_some_and(|store| !store.is_empty()),
+                        )],
+                    );
+                    if let Some(session) = &status.agent_session {
+                        mix_str(&mut hash, &session.agent);
+                        mix_str(&mut hash, &session.session_id);
+                    } else {
+                        mix_str(&mut hash, "");
+                    }
+                    mix(&mut hash, &[u8::from(status.agent_report.is_some())]);
+                }
+            }
+        }
         if self.agent_query.active() {
             self.mix_agent_match_text(&mut hash);
         }
@@ -667,6 +695,35 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn agent_filter_change_keeps_a_visible_selection_and_invalidates_reporters() {
+        let _env = crate::persist::test_env("agent-filter-selection-stamp");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        app.run_cmd(super::super::Cmd::ToggleAgents);
+        let before = app.filtered_agent_targets();
+        app.handle_agents_key(key(KeyCode::Char('f')));
+        app.handle_agents_key(key(KeyCode::Char('f')));
+        app.handle_agents_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.layout().focus,
+            pane,
+            "f must not erase a surviving selection"
+        );
+
+        app.filtered_agent_targets();
+        let before_stamp = app.agent_match_stamp();
+        app.status.get_mut(&pane).unwrap().agent_session = Some(super::super::AgentSession {
+            agent: "codex".into(),
+            session_id: "session-membership".into(),
+        });
+        assert_ne!(app.agent_match_stamp(), before_stamp);
+        assert!(app.filtered_agent_targets().contains(&AgentDockTarget::Live(pane)));
+        let _ = before;
     }
 
     #[test]

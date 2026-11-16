@@ -3187,7 +3187,8 @@ pub struct App {
     pub workspace_clear_is_search: bool,
     pub agent_clear_rect: Option<Rect>,
     pub agent_clear_is_search: bool,
-    pub file_clear_rect: Option<Rect>,
+    pub file_search_clear_rect: Option<Rect>,
+    pub file_filter_clear_rect: Option<Rect>,
     pub file_clear_is_search: bool,
     pub diff_clear_rect: Option<Rect>,
     pub diff_clear_is_search: bool,
@@ -3792,7 +3793,8 @@ impl App {
             workspace_clear_is_search: false,
             agent_clear_rect: None,
             agent_clear_is_search: false,
-            file_clear_rect: None,
+            file_search_clear_rect: None,
+            file_filter_clear_rect: None,
             file_clear_is_search: false,
             diff_clear_rect: None,
             diff_clear_is_search: false,
@@ -4559,7 +4561,8 @@ impl App {
             workspace_clear_is_search: false,
             agent_clear_rect: None,
             agent_clear_is_search: false,
-            file_clear_rect: None,
+            file_search_clear_rect: None,
+            file_filter_clear_rect: None,
             file_clear_is_search: false,
             diff_clear_rect: None,
             diff_clear_is_search: false,
@@ -4771,8 +4774,11 @@ impl App {
         }
         self.agents_active_only = active_only;
         self.agents_scroll = 0;
-        self.agent_cursor = 0;
-        self.agent_selected = None;
+        let rows = self.filtered_agent_targets();
+        self.align_agent_cursor(&rows);
+        if self.agent_selected.is_none() {
+            self.remember_agent_selection(&rows);
+        }
         true
     }
 
@@ -4804,8 +4810,11 @@ impl App {
         }
         self.agents_this_workspace = this_workspace;
         self.agents_scroll = 0;
-        self.agent_cursor = 0;
-        self.agent_selected = None;
+        let rows = self.filtered_agent_targets();
+        self.align_agent_cursor(&rows);
+        if self.agent_selected.is_none() {
+            self.remember_agent_selection(&rows);
+        }
         true
     }
 
