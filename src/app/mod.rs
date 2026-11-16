@@ -37,6 +37,7 @@ pub use board::{
 };
 pub(crate) mod diff;
 mod dispatch;
+pub(crate) mod dock_filter;
 mod file_jobs;
 pub(crate) mod files;
 mod git;
@@ -3157,9 +3158,39 @@ pub struct App {
     pub agents_area: Rect,
     /// Explicit keyboard ownership for WORKSPACES or AGENTS.
     pub sidebar_focus: Option<SidebarListFocus>,
-    /// Display-order cursors for the two built-in sidebar lists.
+    /// Display-order cursors for the two built-in sidebar lists. Indexes point
+    /// into the current filtered projection, never into a raw creation index.
     pub workspace_cursor: usize,
     pub agent_cursor: usize,
+    /// Runtime-only text queries. They are not persisted and do not cross docks.
+    pub(crate) workspace_query: crate::search::DockTextQuery,
+    pub(crate) agent_query: crate::search::DockTextQuery,
+    /// `/` search. It never changes the filtered projection.
+    pub(crate) workspace_search: crate::search::DockTextQuery,
+    pub(crate) agent_search: crate::search::DockTextQuery,
+    pub(crate) file_search: crate::search::DockTextQuery,
+    workspace_search_origin: Option<String>,
+    agent_search_origin: Option<dock_filter::AgentSelect>,
+    file_search_origin: Option<std::path::PathBuf>,
+    /// Path selected by FILES search. Enter/a ignore a row that slid into the slot.
+    file_located: Option<std::path::PathBuf>,
+    pub(crate) workspace_search_miss: bool,
+    pub(crate) agent_search_miss: bool,
+    pub(crate) file_search_miss: bool,
+    workspace_selected_id: Option<String>,
+    agent_selected: Option<dock_filter::AgentSelect>,
+    workspace_row_cache: dock_filter::RowCache<(usize, bool)>,
+    agent_row_cache: dock_filter::RowCache<AgentDockTarget>,
+    pub(crate) workspace_hit_ids: HashMap<usize, String>,
+    pub(crate) session_hit_ids: HashMap<usize, String>,
+    pub workspace_clear_rect: Option<Rect>,
+    pub workspace_clear_is_search: bool,
+    pub agent_clear_rect: Option<Rect>,
+    pub agent_clear_is_search: bool,
+    pub file_clear_rect: Option<Rect>,
+    pub file_clear_is_search: bool,
+    pub diff_clear_rect: Option<Rect>,
+    pub diff_clear_is_search: bool,
     /// The FILES dock (docs/38): the tree model, its scroll region, and the
     /// clickable rect per visible row (`(row index, rect)`), re-set each frame.
     pub file_tree: crate::files::FileTree,
@@ -3171,10 +3202,12 @@ pub struct App {
     pending_file_tree_api: Vec<(PathBuf, crate::ipc::api::ApiRequest)>,
     pub files_area: Rect,
     pub file_tree_rects: Vec<(usize, Rect)>,
+    pub(crate) file_hit_paths: HashMap<usize, PathBuf>,
     /// FILES/DIFF header controls and DIFF list rows (docs/88).
     pub files_mode: crate::diff::FilesMode,
     pub files_mode_rects: Vec<(crate::diff::FilesMode, Rect)>,
     pub diff_row_rects: Vec<(usize, Rect)>,
+    pub(crate) diff_hit_keys: HashMap<usize, crate::diff::DiffKey>,
     /// Visible source rows inside native DIFF panes. A click selects the exact
     /// stack-row identity and old/new side before note actions run.
     pub diff_source_rects: Vec<(PaneId, usize, crate::diff::DiffSide, Rect)>,
@@ -3737,6 +3770,32 @@ impl App {
             sidebar_focus: None,
             workspace_cursor: 0,
             agent_cursor: 0,
+            workspace_query: crate::search::DockTextQuery::default(),
+            agent_query: crate::search::DockTextQuery::default(),
+            workspace_search: crate::search::DockTextQuery::default(),
+            agent_search: crate::search::DockTextQuery::default(),
+            file_search: crate::search::DockTextQuery::default(),
+            workspace_search_origin: None,
+            agent_search_origin: None,
+            file_search_origin: None,
+            file_located: None,
+            workspace_search_miss: false,
+            agent_search_miss: false,
+            file_search_miss: false,
+            workspace_selected_id: None,
+            agent_selected: None,
+            workspace_row_cache: dock_filter::RowCache::default(),
+            agent_row_cache: dock_filter::RowCache::default(),
+            workspace_hit_ids: HashMap::new(),
+            session_hit_ids: HashMap::new(),
+            workspace_clear_rect: None,
+            workspace_clear_is_search: false,
+            agent_clear_rect: None,
+            agent_clear_is_search: false,
+            file_clear_rect: None,
+            file_clear_is_search: false,
+            diff_clear_rect: None,
+            diff_clear_is_search: false,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
             file_tree: {
@@ -3751,9 +3810,11 @@ impl App {
             pending_file_tree_api: Vec::new(),
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
+            file_hit_paths: HashMap::new(),
             files_mode: crate::diff::FilesMode::Files,
             files_mode_rects: Vec::new(),
             diff_row_rects: Vec::new(),
+            diff_hit_keys: HashMap::new(),
             diff_source_rects: Vec::new(),
             diff_note_rects: Vec::new(),
             preview_link_rects: Vec::new(),
@@ -4476,6 +4537,32 @@ impl App {
             sidebar_focus: None,
             workspace_cursor: 0,
             agent_cursor: 0,
+            workspace_query: crate::search::DockTextQuery::default(),
+            agent_query: crate::search::DockTextQuery::default(),
+            workspace_search: crate::search::DockTextQuery::default(),
+            agent_search: crate::search::DockTextQuery::default(),
+            file_search: crate::search::DockTextQuery::default(),
+            workspace_search_origin: None,
+            agent_search_origin: None,
+            file_search_origin: None,
+            file_located: None,
+            workspace_search_miss: false,
+            agent_search_miss: false,
+            file_search_miss: false,
+            workspace_selected_id: None,
+            agent_selected: None,
+            workspace_row_cache: dock_filter::RowCache::default(),
+            agent_row_cache: dock_filter::RowCache::default(),
+            workspace_hit_ids: HashMap::new(),
+            session_hit_ids: HashMap::new(),
+            workspace_clear_rect: None,
+            workspace_clear_is_search: false,
+            agent_clear_rect: None,
+            agent_clear_is_search: false,
+            file_clear_rect: None,
+            file_clear_is_search: false,
+            diff_clear_rect: None,
+            diff_clear_is_search: false,
             // Rooted at nothing; the first detect tick re-roots it to the active
             // node (set_root is a no-op when already correct).
             file_tree: {
@@ -4490,9 +4577,11 @@ impl App {
             pending_file_tree_api: Vec::new(),
             files_area: Rect::ZERO,
             file_tree_rects: Vec::new(),
+            file_hit_paths: HashMap::new(),
             files_mode: crate::diff::FilesMode::Files,
             files_mode_rects: Vec::new(),
             diff_row_rects: Vec::new(),
+            diff_hit_keys: HashMap::new(),
             diff_source_rects: Vec::new(),
             diff_note_rects: Vec::new(),
             preview_link_rects: Vec::new(),
@@ -4683,6 +4772,7 @@ impl App {
         self.agents_active_only = active_only;
         self.agents_scroll = 0;
         self.agent_cursor = 0;
+        self.agent_selected = None;
         true
     }
 
@@ -4715,6 +4805,7 @@ impl App {
         self.agents_this_workspace = this_workspace;
         self.agents_scroll = 0;
         self.agent_cursor = 0;
+        self.agent_selected = None;
         true
     }
 
@@ -4758,7 +4849,12 @@ impl App {
         }
         self.files_focused = false;
         self.sidebar_focus = Some(SidebarListFocus::Workspaces);
-        self.workspace_cursor = self.workspace_display_position(self.active_ws).unwrap_or(0);
+        let rows = self.filtered_workspace_rows();
+        self.workspace_cursor = rows
+            .iter()
+            .position(|(index, _)| *index == self.active_ws)
+            .unwrap_or(0);
+        self.remember_workspace_selection(&rows);
     }
 
     /// Give normal-mode keyboard input to the AGENTS list. The cursor starts at
@@ -4774,18 +4870,27 @@ impl App {
             .get(self.active_ws)
             .and_then(|workspace| workspace.tabs.get(workspace.active_tab))
             .map(|tab| tab.layout.focus);
-        let rows = self.agent_dock_targets();
+        let rows = self.filtered_agent_targets();
         self.agent_cursor = current
             .and_then(|pane| {
                 rows.iter()
                     .position(|target| *target == AgentDockTarget::Live(pane))
             })
             .unwrap_or_else(|| self.agent_cursor.min(rows.len().saturating_sub(1)));
+        self.remember_agent_selection(&rows);
     }
 
     /// Build the AGENTS rows in the same order as the renderer. This runs only
     /// for explicit keyboard input, not on the app loop or detection path.
     pub fn agent_dock_targets(&self) -> Vec<AgentDockTarget> {
+        self.agent_rows(true)
+    }
+
+    /// `include_program_reporters` adds the program-status rows the dock paints.
+    /// The text filter uses that wider set so the keyboard projection and the
+    /// pixels stay the same list. Elsewhere is always retained: workspace scope
+    /// does not hide blocked agents in other workspaces.
+    fn agent_rows(&self, include_program_reporters: bool) -> Vec<AgentDockTarget> {
         let scoped = self.agents_scope_active();
         let mut live = Vec::new();
         let mut blocked_elsewhere = Vec::new();
@@ -4796,12 +4901,12 @@ impl App {
                     let Some(status) = self.status.get(&pane) else {
                         continue;
                     };
-                    if !self.manifests.is_agent(&status.agent) && status.agent_session.is_none() {
-                        continue;
-                    }
-                    if visible {
+                    let recognized =
+                        self.manifests.is_agent(&status.agent) || status.agent_session.is_some();
+                    let program = include_program_reporters && self.is_status_reporter_pane(pane);
+                    if visible && (recognized || program) {
                         live.push(pane);
-                    } else if status.state == State::Blocked {
+                    } else if recognized && status.state == State::Blocked {
                         blocked_elsewhere.push(pane);
                     }
                 }
@@ -4900,42 +5005,123 @@ impl App {
             .min(len.saturating_sub(1));
     }
 
-    /// Keyboard navigation for WORKSPACES, mirroring FILES and DIFF.
+    /// Keyboard navigation for WORKSPACES. `/` searches the current projection
+    /// without hiding rows. `\` hides non-matching rows. Esc cancels an edit,
+    /// then clears search, then clears the filter, then leaves. `q` leaves
+    /// immediately. While editing, `/`, `\`, `n`, and letters are query text.
     pub fn handle_workspaces_key(&mut self, key: KeyEvent) -> bool {
-        // Filters, scope, and the row menu act once per press.
-        if is_key_repeat(&key) && key.code == KeyCode::Char('a') {
+        if self.workspace_search.editing() {
+            if self.prefix_while_editing(&key) {
+                return true;
+            }
+            match dock_filter::edit_query(&mut self.workspace_search, &key) {
+                dock_filter::QueryEdit::Updated => self.locate_workspace_search(true, true),
+                dock_filter::QueryEdit::Canceled => {
+                    self.workspace_selected_id = self.workspace_search_origin.clone();
+                    let rows = self.filtered_workspace_rows();
+                    self.align_workspace_cursor(&rows);
+                    self.workspace_search_miss = false;
+                }
+                dock_filter::QueryEdit::Committed | dock_filter::QueryEdit::Ignored => {}
+            }
             return true;
         }
-        let order = self.workspace_display_order();
+        if self.workspace_query.editing() {
+            if self.prefix_while_editing(&key) {
+                return true;
+            }
+            match dock_filter::edit_query(&mut self.workspace_query, &key) {
+                dock_filter::QueryEdit::Updated
+                | dock_filter::QueryEdit::Canceled
+                | dock_filter::QueryEdit::Committed => {
+                    let rows = self.filtered_workspace_rows();
+                    self.align_workspace_cursor(&rows);
+                }
+                dock_filter::QueryEdit::Ignored => {}
+            }
+            return true;
+        }
+        if dock_filter::action_repeat(&key, &['a'])
+            || (is_key_repeat(&key)
+                && (dock_filter::is_list_search_key(&key) || dock_filter::is_list_filter_key(&key)))
+        {
+            return true;
+        }
+        let order = self.filtered_workspace_rows();
+        self.align_workspace_cursor(&order);
+        if dock_filter::is_list_search_key(&key) {
+            self.workspace_search_origin = self.workspace_selected_id.clone();
+            self.workspace_search_miss = false;
+            self.workspace_search.begin();
+            return true;
+        }
+        if dock_filter::is_list_filter_key(&key) {
+            self.workspace_query.begin();
+            return true;
+        }
+        if self.workspace_search.active() {
+            if let Some(forward) = dock_filter::search_step_key(&key) {
+                self.locate_workspace_search(forward, false);
+                return true;
+            }
+        }
         let page = (usize::from(self.workspaces_area.height) / 2).max(1) as isize;
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
+            KeyCode::Esc => {
+                if self.workspace_search.active() {
+                    self.workspace_search.clear_committed();
+                    self.workspace_search_miss = false;
+                } else if self.workspace_query.active() {
+                    self.workspace_query.clear_committed();
+                    let rows = self.filtered_workspace_rows();
+                    self.align_workspace_cursor(&rows);
+                } else {
+                    self.sidebar_focus = None;
+                }
+            }
+            KeyCode::Char('q') => self.sidebar_focus = None,
             KeyCode::Up | KeyCode::Char('k') => {
-                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -1)
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -1);
+                self.remember_workspace_selection(&order);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), 1)
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), 1);
+                self.remember_workspace_selection(&order);
             }
             KeyCode::PageUp => {
-                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -page)
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), -page);
+                self.remember_workspace_selection(&order);
             }
             KeyCode::PageDown => {
-                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), page)
+                Self::move_sidebar_cursor(&mut self.workspace_cursor, order.len(), page);
+                self.remember_workspace_selection(&order);
             }
-            KeyCode::Home | KeyCode::Char('g') => self.workspace_cursor = 0,
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.workspace_cursor = 0;
+                self.remember_workspace_selection(&order);
+            }
             KeyCode::End | KeyCode::Char('G') => {
-                self.workspace_cursor = order.len().saturating_sub(1)
+                self.workspace_cursor = order.len().saturating_sub(1);
+                self.remember_workspace_selection(&order);
             }
             KeyCode::Enter => {
                 if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
-                    let tab = self.workspaces[workspace].active_tab;
-                    let pane = self.workspaces[workspace].tabs[tab].layout.focus;
-                    self.focus_location(workspace, tab, pane);
-                    self.sidebar_focus = None;
+                    if self.workspace_row_selected(workspace) {
+                        if let Some(workspace) = self.workspaces.get(workspace) {
+                            let tab = workspace.active_tab;
+                            let pane = workspace.tabs[tab].layout.focus;
+                            let index = order[self.workspace_cursor].0;
+                            self.focus_location(index, tab, pane);
+                            self.sidebar_focus = None;
+                        }
+                    }
                 }
             }
             KeyCode::Char('a') => {
                 if let Some(&(workspace, _)) = order.get(self.workspace_cursor) {
+                    if !self.workspace_row_selected(workspace) {
+                        return true;
+                    }
                     let anchor = self
                         .ws_rects
                         .iter()
@@ -4956,50 +5142,152 @@ impl App {
         true
     }
 
-    /// Keyboard navigation for AGENTS. `f` changes All/Active and `s` changes
-    /// workspace scope; row activation matches the existing mouse behavior.
+    /// Keyboard navigation for AGENTS. `/` searches the rows that remain after
+    /// scope, All/Active, and `\`. `\` hides non-matching rows. Lowercase `f`
+    /// changes All/Active and `s` changes workspace scope. Search cannot select
+    /// the blocked-elsewhere attention row.
     pub fn handle_agents_key(&mut self, key: KeyEvent) -> bool {
-        // Filters, scope, and the row menu act once per press.
-        if is_key_repeat(&key) && matches!(key.code, KeyCode::Char('a' | 'f' | 's')) {
+        if self.agent_search.editing() {
+            if self.prefix_while_editing(&key) {
+                return true;
+            }
+            match dock_filter::edit_query(&mut self.agent_search, &key) {
+                dock_filter::QueryEdit::Updated => self.locate_agent_search(true, true),
+                dock_filter::QueryEdit::Canceled => {
+                    self.agent_selected = self.agent_search_origin.clone();
+                    let rows = self.filtered_agent_targets();
+                    self.align_agent_cursor(&rows);
+                    self.agent_search_miss = false;
+                }
+                dock_filter::QueryEdit::Committed | dock_filter::QueryEdit::Ignored => {}
+            }
             return true;
         }
-        let rows = self.agent_dock_targets();
+        if self.agent_query.editing() {
+            if self.prefix_while_editing(&key) {
+                return true;
+            }
+            match dock_filter::edit_query(&mut self.agent_query, &key) {
+                dock_filter::QueryEdit::Updated
+                | dock_filter::QueryEdit::Canceled
+                | dock_filter::QueryEdit::Committed => {
+                    let rows = self.filtered_agent_targets();
+                    self.align_agent_cursor(&rows);
+                }
+                dock_filter::QueryEdit::Ignored => {}
+            }
+            return true;
+        }
+        if dock_filter::action_repeat(&key, &['a', 'f', 's'])
+            || (is_key_repeat(&key)
+                && (dock_filter::is_list_search_key(&key) || dock_filter::is_list_filter_key(&key)))
+        {
+            return true;
+        }
+        let rows = self.filtered_agent_targets();
+        self.align_agent_cursor(&rows);
+        if dock_filter::is_list_search_key(&key) {
+            self.agent_search_origin = self.agent_selected.clone();
+            self.agent_search_miss = false;
+            self.agent_search.begin();
+            return true;
+        }
+        if dock_filter::is_list_filter_key(&key) {
+            self.agent_query.begin();
+            return true;
+        }
+        match dock_filter::command_letter(&key) {
+            Some('f') => {
+                self.set_agents_filter(!self.agents_active_only);
+                let rows = self.filtered_agent_targets();
+                self.align_agent_cursor(&rows);
+                return true;
+            }
+            Some('s') => {
+                self.set_agents_scope(!self.agents_this_workspace);
+                let rows = self.filtered_agent_targets();
+                self.align_agent_cursor(&rows);
+                return true;
+            }
+            _ => {}
+        }
+        if self.agent_search.active() {
+            if let Some(forward) = dock_filter::search_step_key(&key) {
+                self.locate_agent_search(forward, false);
+                return true;
+            }
+        }
         let page = (usize::from(self.agents_area.height) / 2).max(1) as isize;
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.sidebar_focus = None,
+            KeyCode::Esc => {
+                if self.agent_search.active() {
+                    self.agent_search.clear_committed();
+                    self.agent_search_miss = false;
+                } else if self.agent_query.active() {
+                    self.agent_query.clear_committed();
+                    let rows = self.filtered_agent_targets();
+                    self.align_agent_cursor(&rows);
+                } else {
+                    self.sidebar_focus = None;
+                }
+            }
+            KeyCode::Char('q') => self.sidebar_focus = None,
             KeyCode::Up | KeyCode::Char('k') => {
-                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -1)
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -1);
+                self.remember_agent_selection(&rows);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), 1)
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), 1);
+                self.remember_agent_selection(&rows);
             }
-            KeyCode::PageUp => Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -page),
+            KeyCode::PageUp => {
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), -page);
+                self.remember_agent_selection(&rows);
+            }
             KeyCode::PageDown => {
-                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), page)
+                Self::move_sidebar_cursor(&mut self.agent_cursor, rows.len(), page);
+                self.remember_agent_selection(&rows);
             }
-            KeyCode::Home | KeyCode::Char('g') => self.agent_cursor = 0,
-            KeyCode::End | KeyCode::Char('G') => self.agent_cursor = rows.len().saturating_sub(1),
-            KeyCode::Char('f') => {
-                self.set_agents_filter(!self.agents_active_only);
+            KeyCode::Home | KeyCode::Char('g') => {
                 self.agent_cursor = 0;
+                self.remember_agent_selection(&rows);
             }
-            KeyCode::Char('s') => {
-                self.set_agents_scope(!self.agents_this_workspace);
-                self.agent_cursor = 0;
+            KeyCode::End | KeyCode::Char('G') => {
+                self.agent_cursor = rows.len().saturating_sub(1);
+                self.remember_agent_selection(&rows);
             }
             KeyCode::Enter => {
                 if let Some(target) = rows.get(self.agent_cursor).cloned() {
-                    self.sidebar_focus = None;
-                    self.activate_agent_dock_target(target);
+                    if self.agent_row_selected(&target) {
+                        self.sidebar_focus = None;
+                        self.activate_agent_dock_target(target);
+                    }
                 }
             }
             KeyCode::Char('a') => {
                 if let Some(target) = rows.get(self.agent_cursor).cloned() {
-                    self.open_agent_dock_action(target);
+                    if self.agent_row_selected(&target) {
+                        self.open_agent_dock_action(target);
+                    }
                 }
             }
             _ => {}
         }
+        true
+    }
+
+    /// The configured prefix still leaves a dock, including while a query is
+    /// being edited. The in-progress query is kept.
+    fn prefix_while_editing(&mut self, key: &KeyEvent) -> bool {
+        if !self.prefix.matches(key) {
+            return false;
+        }
+        self.workspace_query.commit();
+        self.agent_query.commit();
+        self.workspace_search.commit();
+        self.agent_search.commit();
+        self.sidebar_focus = None;
+        self.mode = Mode::Prefix;
         true
     }
 

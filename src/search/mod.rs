@@ -8,8 +8,13 @@ pub mod federation;
 pub mod files;
 mod fuzzy;
 pub mod local;
+mod query;
 
 pub use fuzzy::{FuzzyField, FuzzyQuery, PreparedText};
+pub use query::{
+    append_query, backspace_query, clear_query, locate_match, prepared_hit,
+    project_workspace_order, query_label, DockTextQuery,
+};
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
