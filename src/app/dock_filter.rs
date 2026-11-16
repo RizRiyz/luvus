@@ -722,7 +722,9 @@ mod tests {
             session_id: "session-membership".into(),
         });
         assert_ne!(app.agent_match_stamp(), before_stamp);
-        assert!(app.filtered_agent_targets().contains(&AgentDockTarget::Live(pane)));
+        assert!(app
+            .filtered_agent_targets()
+            .contains(&AgentDockTarget::Live(pane)));
         let _ = before;
     }
 
