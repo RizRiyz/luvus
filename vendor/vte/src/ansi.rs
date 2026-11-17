@@ -1390,10 +1390,6 @@ where
         if params.is_empty() || params[0].is_empty() {
             return;
         }
-        self.handler.osc_start();
-        for param in params {
-            self.handler.osc_parameter(param);
-        }
 
         match params[0] {
             // Set window title.

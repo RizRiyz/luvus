@@ -1602,6 +1602,49 @@ mod tests {
     }
 
     #[test]
+    fn followed_theme_reports_match_the_installed_theme() {
+        let _env = crate::persist::test_env("theme-follow-reported-id");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("noir");
+        app.config.theme_follow.auto_switch = true;
+        app.config.theme_follow.dark = "noir".into();
+        app.config.theme_follow.light = "catppuccin-latte".into();
+        let light = host_colors([0xf8, 0xf8, 0xf8]);
+        assert!(app.apply_terminal_colors(&light));
+        assert_eq!(app.config.theme, "noir");
+        assert_eq!(app.effective_theme_id(), "catppuccin-latte");
+        assert_eq!(
+            app.theme,
+            app.theme_registry.theme("catppuccin-latte").unwrap()
+        );
+
+        app.apply_theme("noir");
+        assert_eq!(app.config.theme, "noir");
+        assert_eq!(app.effective_theme_id(), "noir");
+        assert_eq!(app.theme, app.theme_registry.theme("noir").unwrap());
+        assert!(
+            app.theme_registry.list_json(app.effective_theme_id())["themes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|theme| theme["id"] == "noir" && theme["active"] == true)
+        );
+
+        assert!(app.apply_terminal_colors(&light));
+        assert_eq!(app.effective_theme_id(), "catppuccin-latte");
+        app.config.theme_follow.auto_switch = false;
+        assert!(app.apply_terminal_colors(&light));
+        assert_eq!(
+            app.config.theme, "noir",
+            "following stays out of the saved theme"
+        );
+        assert_eq!(app.effective_theme_id(), "noir");
+        assert_eq!(app.theme, app.theme_registry.theme("noir").unwrap());
+    }
+
+    #[test]
     fn held_theme_arrows_do_not_repeat_follow_controls() {
         let _env = crate::persist::test_env("theme-follow-repeat");
         let (tx, _rx) = std::sync::mpsc::channel();

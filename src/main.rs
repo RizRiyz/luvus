@@ -1578,13 +1578,13 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     // local session that never resizes would split on the fallback aspect.
     let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
     app.set_client_cell_pixels(cell_width_px, cell_height_px);
-    let (pending, partial) = {
-        let probe = terminal::theme_probe::probe();
-        if let Some(colors) = probe.colors.as_ref() {
-            app.apply_terminal_colors(colors);
-        }
-        (probe.pending, probe.partial)
-    };
+    let probe = terminal::theme_probe::probe();
+    if let Some(colors) = probe.colors.as_ref() {
+        app.apply_terminal_colors(colors);
+    }
+    #[cfg(not(windows))]
+    let partial = probe.partial;
+    let pending = probe.pending;
     // Match the client path: query colors before enabling input protocols, so
     // any interleaved bytes are ordinary keys that can be replayed losslessly.
     let _ = execute!(
@@ -1599,6 +1599,9 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     push_key_protocol();
     {
         let tx = tx.clone();
+        #[cfg(windows)]
+        thread::spawn(move || input_loop(tx, pending));
+        #[cfg(not(windows))]
         thread::spawn(move || input_loop(tx, pending, partial));
     }
     ipc::api::start_server(api_listener, tx.clone(), events);

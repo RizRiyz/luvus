@@ -40,6 +40,7 @@ pub struct ProbeResult {
     /// Colors already parsed before the probe returned, including a partial
     /// foreground or background that a later reply can complete.
     #[cfg(any(unix, test))]
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) partial: ColorAccumulator,
 }
 
@@ -232,6 +233,7 @@ fn complete_color_responses(data: &[u8]) -> usize {
 /// DEC 2031 (`CSI ?2031h` / `CSI ?996n`) is intentionally absent. Crossterm
 /// 0.29 treats `CSI ? ... n` as an unfinished sequence and keeps those bytes
 /// in its parser buffer, so a color-scheme report would swallow later input.
+#[cfg(any(unix, test))]
 pub(crate) fn color_query_sequence() -> String {
     let mut query = String::new();
     for prefix in requested_reply_prefixes() {
@@ -317,6 +319,7 @@ fn parse_osc_responses(data: &[u8]) -> Option<TerminalColors> {
     accumulate_osc_responses(data).complete()
 }
 
+#[cfg(any(unix, test))]
 pub(crate) fn parse_rgb_value(value: &str) -> Option<[u8; 3]> {
     let value = value.strip_prefix("rgb:")?;
     let value = value.split(['\x07', '\\']).next()?;
@@ -329,6 +332,7 @@ pub(crate) fn parse_rgb_value(value: &str) -> Option<[u8; 3]> {
     Some(rgb)
 }
 
+#[cfg(any(unix, test))]
 fn parse_component(value: &str) -> Option<u8> {
     let parsed = u16::from_str_radix(value, 16).ok()?;
     Some(match value.len() {

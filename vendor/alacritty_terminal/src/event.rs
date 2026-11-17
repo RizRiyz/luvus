@@ -125,11 +125,11 @@ pub trait OnResize {
 pub trait EventListener {
     fn send_event(&self, _event: Event) {}
 
-    /// A new OSC sequence is starting, before its parameters.
-    fn osc_start(&self) {}
-
-    /// One completed OSC parameter, in parser order.
-    fn osc_parameter(&self, _param: &[u8]) {}
+    /// A child color was set or reset at the moment the parser executes it.
+    ///
+    /// `None` is a reset. Queries are not reported here; they arrive separately
+    /// as `Event::ColorRequest` and must observe only earlier operations.
+    fn child_color(&self, _index: usize, _color: Option<Rgb>) {}
 }
 
 /// Null sink for events.

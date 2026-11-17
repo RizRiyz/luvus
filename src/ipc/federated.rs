@@ -591,7 +591,17 @@ fn run_inner(
     // path, or attachment can remain on a blank alternate screen until a key
     // event happens to release the reader.
     let host_colors = Arc::new(Mutex::new(probe.colors.clone()));
+    #[cfg(not(windows))]
+    let partial = local_reader_partial(&probe);
+    #[cfg(windows)]
     start_input_reader(probe.pending, events_tx.clone(), host_colors.clone())?;
+    #[cfg(not(windows))]
+    start_input_reader(
+        probe.pending,
+        partial,
+        events_tx.clone(),
+        host_colors.clone(),
+    )?;
 
     let mut candidate: Option<SurfaceCandidate> = None;
     let mut pending_endpoint: Option<Endpoint> = None;
@@ -1058,8 +1068,16 @@ fn start_local_reader(
     Ok(())
 }
 
+#[cfg(any(unix, test))]
+fn local_reader_partial(
+    probe: &crate::terminal::theme_probe::ProbeResult,
+) -> crate::terminal::theme_probe::ColorAccumulator {
+    probe.partial.clone()
+}
+
 fn start_input_reader(
     pending: Vec<Event>,
+    #[cfg(not(windows))] partial: crate::terminal::theme_probe::ColorAccumulator,
     events: Sender<ShellEvent>,
     host_colors: Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 ) -> Result<()> {
@@ -1078,21 +1096,16 @@ fn start_input_reader(
             }
             #[cfg(not(windows))]
             {
-                crate::terminal::theme_probe::run_input_loop(
-                    pending,
-                    crate::terminal::theme_probe::ColorAccumulator::default(),
-                    send,
-                    |colors| {
-                        if let Ok(mut cached) = host_colors.lock() {
-                            *cached = Some(colors.clone());
-                        }
-                        events
-                            .send(ShellEvent::Input(ClientMessage::TerminalColors(Some(
-                                colors,
-                            ))))
-                            .is_ok()
-                    },
-                );
+                crate::terminal::theme_probe::run_input_loop(pending, partial, send, |colors| {
+                    if let Ok(mut cached) = host_colors.lock() {
+                        *cached = Some(colors.clone());
+                    }
+                    events
+                        .send(ShellEvent::Input(ClientMessage::TerminalColors(Some(
+                            colors,
+                        ))))
+                        .is_ok()
+                });
             }
         })?;
     Ok(())
@@ -5801,6 +5814,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn local_reader_keeps_colors_consumed_before_the_probe_deadline() {
+        let mut partial = crate::terminal::theme_probe::ColorAccumulator::default();
+        partial.push_sequence(b"\x1b]10;rgb:aa/bb/cc\x07");
+        let probe = crate::terminal::theme_probe::ProbeResult {
+            colors: None,
+            pending: Vec::new(),
+            partial: partial.clone(),
+        };
+        let mut retained = local_reader_partial(&probe);
+        retained.push_sequence(b"\x1b]11;rgb:01/02/03\x07");
+        let colors = retained
+            .complete()
+            .expect("foreground retained from the probe completes the late background");
+        assert_eq!(colors.fg, [0xaa, 0xbb, 0xcc]);
+        assert_eq!(colors.bg, [0x01, 0x02, 0x03]);
+    }
 
     #[test]
     fn local_negotiation_reads_server_identity_before_sending_metadata() {

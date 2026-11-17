@@ -4674,11 +4674,26 @@ impl App {
             }
         } else {
             self.followed_theme = None;
+            return self.install_configured_theme(colors);
         }
         if self.config.theme == "terminal" {
             return self.set_effective_theme("terminal", Theme::from_terminal(colors));
         }
         false
+    }
+
+    fn install_configured_theme(
+        &mut self,
+        colors: &crate::terminal::theme_probe::TerminalColors,
+    ) -> bool {
+        let theme_id = self.config.theme.clone();
+        if theme_id == "terminal" {
+            return self.set_effective_theme("terminal", Theme::from_terminal(colors));
+        }
+        let Some(theme) = self.theme_registry.theme(&theme_id) else {
+            return false;
+        };
+        self.set_effective_theme(&theme_id, theme)
     }
 
     pub(crate) fn effective_theme_id(&self) -> &str {
@@ -4690,6 +4705,13 @@ impl App {
     /// Install one resolved UI theme. Host pane colors, once known, stay on
     /// the host palette instead of being replaced by this theme's RGB.
     pub(crate) fn set_effective_theme(&mut self, theme_id: &str, mut theme: Theme) -> bool {
+        if self
+            .followed_theme
+            .as_deref()
+            .is_some_and(|followed| followed != theme_id)
+        {
+            self.followed_theme = None;
+        }
         if theme_id == "terminal" {
             if let Some(colors) = self.host_terminal_colors.as_ref() {
                 theme = Theme::from_terminal(colors);

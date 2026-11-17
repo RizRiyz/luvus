@@ -326,27 +326,28 @@ where
         ServerMessage::Ready { probe_terminal } => probe_terminal,
         _ => return Err(anyhow!("unexpected handshake negotiation")),
     };
-    let (pending, partial) = if probe_terminal && !input.started {
+    let mut pending = Vec::new();
+    #[cfg(not(windows))]
+    let mut partial = crate::terminal::theme_probe::ColorAccumulator::default();
+    if probe_terminal && !input.started {
         let probe = crate::terminal::theme_probe::probe();
         input.colors = probe.colors;
         protocol::write_message(
             &mut writer,
             &ClientMessage::TerminalColors(input.colors.clone()),
         )?;
-        (probe.pending, probe.partial)
-    } else {
-        if probe_terminal {
-            // The sole input reader already owns stdin after initial attach.
-            protocol::write_message(
-                &mut writer,
-                &ClientMessage::TerminalColors(input.colors.clone()),
-            )?;
+        pending = probe.pending;
+        #[cfg(not(windows))]
+        {
+            partial = probe.partial;
         }
-        (
-            Vec::new(),
-            crate::terminal::theme_probe::ColorAccumulator::default(),
-        )
-    };
+    } else if probe_terminal {
+        // The sole input reader already owns stdin after initial attach.
+        protocol::write_message(
+            &mut writer,
+            &ClientMessage::TerminalColors(input.colors.clone()),
+        )?;
+    }
     crate::logging::event(
         crate::logging::EventKind::ClientHandshake,
         &[
@@ -391,6 +392,9 @@ where
     if !input.started {
         crate::push_key_protocol();
         let route = input.route.clone();
+        #[cfg(windows)]
+        thread::spawn(move || input_loop(route, pending));
+        #[cfg(not(windows))]
         thread::spawn(move || input_loop(route, pending, partial));
         input.started = true;
     }
@@ -721,8 +725,7 @@ fn switched_args(raw: &[String], name: &str) -> Vec<String> {
 fn input_loop(
     route: InputRoute,
     pending: Vec<Event>,
-    #[cfg_attr(windows, allow(unused_variables))]
-    partial: crate::terminal::theme_probe::ColorAccumulator,
+    #[cfg(not(windows))] partial: crate::terminal::theme_probe::ColorAccumulator,
 ) {
     #[cfg(windows)]
     {

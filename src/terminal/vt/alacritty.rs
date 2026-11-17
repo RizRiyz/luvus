@@ -61,58 +61,23 @@ pub struct EventProxy {
 }
 
 /// Colors the child set itself. A later host update must not replace these.
+///
+/// Updates arrive from the parser's `set_color` / `reset_color` calls, not from
+/// OSC parameter enumeration. A query in the same sequence therefore cannot see
+/// a setter the parser has not executed yet.
 #[derive(Default)]
 struct ChildColors {
     foreground: Option<[u8; 3]>,
     background: Option<[u8; 3]>,
     palette: [Option<[u8; 3]>; 16],
-    command: Option<u16>,
-    index: Option<usize>,
 }
 
 impl ChildColors {
-    fn start(&mut self) {
-        self.command = None;
-        self.index = None;
-    }
-
-    fn observe_parameter(&mut self, param: &[u8]) {
-        if self.command.is_none() {
-            let command = std::str::from_utf8(param)
-                .ok()
-                .and_then(|text| text.parse().ok());
-            self.command = command;
-            self.index = None;
-            match command {
-                Some(110) => self.foreground = None,
-                Some(111) => self.background = None,
-                Some(104) => self.palette = [None; 16],
-                _ => {}
-            }
-            return;
-        }
-        if param == b"?" {
-            return;
-        }
-        match self.command {
-            Some(10) => self.foreground = parse_child_rgb_bytes(param),
-            Some(11) => self.background = parse_child_rgb_bytes(param),
-            Some(110) | Some(111) => {}
-            Some(104) if param.is_empty() => self.palette = [None; 16],
-            Some(104) => {
-                if let Some(index) = parse_index(param) {
-                    if index < 16 {
-                        self.palette[index] = None;
-                    }
-                }
-            }
-            Some(4) => match self.index.take() {
-                None => self.index = parse_index(param),
-                Some(index) if index < 16 => {
-                    self.palette[index] = parse_child_rgb_bytes(param);
-                }
-                Some(_) => {}
-            },
+    fn set(&mut self, index: usize, color: Option<[u8; 3]>) {
+        match index {
+            256 => self.foreground = color,
+            257 => self.background = color,
+            0..=15 => self.palette[index] = color,
             _ => {}
         }
     }
@@ -127,24 +92,14 @@ impl ChildColors {
     }
 }
 
-fn parse_index(param: &[u8]) -> Option<usize> {
-    std::str::from_utf8(param)
-        .ok()
-        .and_then(|text| text.parse().ok())
-}
-
-fn parse_child_rgb_bytes(param: &[u8]) -> Option<[u8; 3]> {
-    parse_child_rgb(std::str::from_utf8(param).ok()?)
-}
-
-fn parse_child_rgb(value: &str) -> Option<[u8; 3]> {
-    let value = value.trim_end_matches(['\u{7}', '\\']);
-    crate::terminal::theme_probe::parse_rgb_value(value).or_else(|| parse_hash_rgb(value))
-}
-
+#[cfg(test)]
 fn parse_hash_rgb(value: &str) -> Option<[u8; 3]> {
     let hex = value.strip_prefix('#')?;
-    if hex.is_empty() || hex.len() % 3 != 0 || hex.len() > 12 {
+    if hex.is_empty()
+        || hex.len() % 3 != 0
+        || hex.len() > 12
+        || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return None;
     }
     let width = hex.len() / 3;
@@ -172,15 +127,9 @@ fn host_query_color(appearance: &PaneAppearance, index: usize) -> Option<[u8; 3]
 }
 
 impl EventListener for EventProxy {
-    fn osc_start(&self) {
+    fn child_color(&self, index: usize, color: Option<Rgb>) {
         if let Ok(mut colors) = self.child_colors.lock() {
-            colors.start();
-        }
-    }
-
-    fn osc_parameter(&self, param: &[u8]) {
-        if let Ok(mut colors) = self.child_colors.lock() {
-            colors.observe_parameter(param);
+            colors.set(index, color.map(|color| [color.r, color.g, color.b]));
         }
     }
 
@@ -3615,6 +3564,104 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "a grouped reset restores both slots"
+        );
+    }
+
+    #[test]
+    fn child_color_updates_follow_parser_order_and_keep_invalid_values() {
+        let mut palette = [[0; 3]; 16];
+        palette[1] = [0xcc, 0x24, 0x1d];
+        let host = crate::terminal::theme_probe::TerminalColors {
+            fg: [0xeb, 0xdb, 0xb2],
+            bg: [0x28, 0x28, 0x28],
+            palette,
+            palette_mask: 1 << 1,
+        };
+        let (mut engine, rx) = appearance_engine(host.bg, ColorScheme::Dark);
+        engine.set_appearance(PaneAppearance::from_terminal_colors(&host));
+
+        assert_eq!(parse_hash_rgb("#000000"), Some([0, 0, 0]));
+        assert_eq!(parse_hash_rgb("#fff"), Some([255, 255, 255]));
+        assert_eq!(parse_hash_rgb("#ffff00000000"), Some([255, 0, 0]));
+        assert_eq!(parse_hash_rgb("#aé"), None);
+        assert_eq!(parse_hash_rgb("#0é000"), None);
+
+        engine.advance(b"\x1b]11;rgb:01/02/03\x07");
+        engine.advance(b"\x1b]11;not-a-color\x07");
+        engine.advance(b"\x1b]11;#a\xC3\xA9\x07");
+        engine.advance(b"\x1b]11;#0\xC3\xA9000\x07");
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:0101/0202/0303\x07",
+            "an invalid background setter keeps the child color"
+        );
+
+        engine.advance(b"\x1b]4;1;rgb:ff/00/00\x07\x1b]4;1;invalid\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07",
+            "an invalid palette setter keeps the child color"
+        );
+
+        engine.advance(b"\x1b]4;1;?;2;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07",
+            "a grouped query must not clear the saved slot"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an unreported grouped query stays unset"
+        );
+
+        engine.advance(b"\x1b]4;1;?;2;#00ff00\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:ffff/0000/0000\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;2;rgb:0000/ffff/0000\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:ffff/0000/0000\x07");
+
+        engine.advance(b"\x1b]4;2;rgb:00/00/ff\x07");
+        engine.advance(b"\x1b]4;1;?;2;#000000;1;#00ff00\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07",
+            "a query is answered before a later setter in the same OSC"
+        );
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:0000/ffff/0000\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;2;rgb:0000/0000/0000\x07");
+
+        engine.advance(b"\x1b]10;?;#ff0000\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]10;rgb:ebeb/dbdb/b2b2\x07",
+            "OSC 10 query uses the foreground slot, not the next color"
+        );
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:ffff/0000/0000\x07",
+            "the following OSC 10 parameter advances to the background"
+        );
+
+        engine.advance(b"\x1b]4;1;rgb:ff/00/00\x07\x1b]4;2;rgb:00/ff/00\x07");
+        engine.advance(b"\x1b]104;1\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:cccc/2424/1d1d\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;2;rgb:0000/ffff/0000\x07",
+            "OSC 104 with an index resets only that slot"
+        );
+        engine.advance(b"\x1b]104\x07\x1b]4;2;?\x07");
+        assert!(
+            rx.try_recv().is_err(),
+            "OSC 104 without indexes resets the palette"
         );
     }
 
