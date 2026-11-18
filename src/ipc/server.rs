@@ -231,6 +231,8 @@ struct ClientState {
     cell_width_px: u16,
     cell_height_px: u16,
     terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
+    /// Distinguishes “probe still running” from “this display reported none”.
+    colors_known: bool,
     render_buf: Buffer,
     last_frame: Option<protocol::FrameData>,
     behind: bool,
@@ -260,6 +262,12 @@ struct RenderScratch {
     dead: Vec<u64>,
 }
 
+struct ReportedDisplay {
+    terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
+    colors_known: bool,
+    interest: SurfaceInterest,
+}
+
 impl ClientState {
     fn new(
         sender: ClientSender,
@@ -267,7 +275,7 @@ impl ClientState {
         rows: u16,
         cell_width_px: u16,
         cell_height_px: u16,
-        terminal_colors: Option<crate::terminal::theme_probe::TerminalColors>,
+        display: ReportedDisplay,
         last_activity: u64,
     ) -> Self {
         let size = (cols.max(1), rows.max(1));
@@ -276,7 +284,8 @@ impl ClientState {
             size,
             cell_width_px,
             cell_height_px,
-            terminal_colors,
+            terminal_colors: display.terminal_colors,
+            colors_known: display.colors_known,
             render_buf: Buffer::empty(Rect::new(0, 0, size.0, size.1)),
             last_frame: None,
             behind: false,
@@ -285,7 +294,7 @@ impl ClientState {
             retained_hyperlinks: Vec::new(),
             retained_ready: false,
             last_activity,
-            interest: SurfaceInterest::Active,
+            interest: display.interest,
             prepare_ticket: None,
             shell_dock_layout: protocol::ShellDockLayout::default(),
             shell_sidebars: None,
@@ -797,6 +806,8 @@ fn apply(
             cols,
             rows,
             terminal_colors,
+            colors_known,
+            interest,
         } => {
             crate::logging::event(
                 crate::logging::EventKind::ServerClientAttach,
@@ -823,13 +834,21 @@ fn apply(
                     // fallback aspect.
                     0,
                     0,
-                    terminal_colors,
+                    ReportedDisplay {
+                        terminal_colors,
+                        colors_known,
+                        interest,
+                    },
                     activity,
                 ),
             );
-            app.commander = None;
-            *foreground = Some(id);
-            apply_foreground_client(app, clients, *foreground);
+            // A background handshake is not the current display. Its colors stay
+            // on that client until it becomes Active.
+            if interest == SurfaceInterest::Active {
+                app.commander = None;
+                *foreground = Some(id);
+                apply_foreground_client(app, clients, *foreground);
+            }
             app.mark_runtime_scans_dirty();
             true
         }
@@ -838,15 +857,28 @@ fn apply(
             let Some(client) = clients.get_mut(&id) else {
                 return false;
             };
-            let Some(colors) = colors else {
-                return false;
-            };
-            let unchanged = client.terminal_colors.as_ref() == Some(&colors);
-            client.terminal_colors = Some(colors.clone());
-            if unchanged || client.interest != SurfaceInterest::Active || *foreground != Some(id) {
-                return false;
+            let applies = client.interest == SurfaceInterest::Active && *foreground == Some(id);
+            match colors {
+                Some(colors) => {
+                    let unchanged =
+                        client.colors_known && client.terminal_colors.as_ref() == Some(&colors);
+                    client.terminal_colors = Some(colors.clone());
+                    client.colors_known = true;
+                    if unchanged || !applies {
+                        return false;
+                    }
+                    app.apply_terminal_colors(&colors)
+                }
+                None => {
+                    let unchanged = client.colors_known && client.terminal_colors.is_none();
+                    client.terminal_colors = None;
+                    client.colors_known = true;
+                    if unchanged || !applies {
+                        return false;
+                    }
+                    app.clear_host_terminal_colors()
+                }
             }
-            app.apply_terminal_colors(&colors)
         }
         AppEvent::ClientDetach { id } => {
             crate::logging::event(
@@ -1315,8 +1347,13 @@ fn apply_foreground_client(app: &mut App, clients: &Clients, foreground: Option<
         return;
     };
     app.set_client_cell_pixels(client.cell_width_px, client.cell_height_px);
+    if !client.colors_known {
+        return;
+    }
     if let Some(colors) = client.terminal_colors.as_ref() {
         app.apply_terminal_colors(colors);
+    } else {
+        app.clear_host_terminal_colors();
     }
 }
 
@@ -2141,13 +2178,21 @@ pub(super) fn handle_client(
     {
         return;
     }
-    let terminal_colors = if probe_terminal {
-        match protocol::read_message::<_, ClientMessage>(&mut reader) {
-            Ok(ClientMessage::TerminalColors(colors)) => colors,
-            _ => return,
-        }
+    // A background connection sends its non-Active interest before colors.
+    // Reading that interest first keeps the new client from becoming the
+    // foreground display and applying its palette during handshake.
+    let mut interest = SurfaceInterest::Active;
+    let (terminal_colors, colors_known) = if probe_terminal {
+        let colors = loop {
+            match protocol::read_message::<_, ClientMessage>(&mut reader) {
+                Ok(ClientMessage::SurfaceInterest(next)) => interest = next,
+                Ok(ClientMessage::TerminalColors(next)) => break next,
+                _ => return,
+            }
+        };
+        (colors, true)
     } else {
-        None
+        (None, true)
     };
 
     let (message_tx, message_rx) = mpsc::channel::<ServerMessage>();
@@ -2194,6 +2239,8 @@ pub(super) fn handle_client(
             cols,
             rows,
             terminal_colors,
+            colors_known,
+            interest,
         })
         .is_err()
     {
@@ -2686,6 +2733,197 @@ mod tests {
         let _ = std::fs::remove_dir(&dir);
     }
 
+    fn host_report(bg: [u8; 3]) -> crate::terminal::theme_probe::TerminalColors {
+        crate::terminal::theme_probe::TerminalColors {
+            fg: [0xee, 0xee, 0xee],
+            bg,
+            palette: [[0; 3]; 16],
+            palette_mask: 1,
+        }
+    }
+
+    fn connect_display(
+        id: u64,
+        colors: Option<crate::terminal::theme_probe::TerminalColors>,
+        colors_known: bool,
+        interest: SurfaceInterest,
+    ) -> AppEvent {
+        let (messages, _rx) = mpsc::channel();
+        AppEvent::ClientConnected {
+            id,
+            messages,
+            frame_pending: Arc::new(AtomicBool::new(false)),
+            cols: 80,
+            rows: 24,
+            terminal_colors: colors,
+            colors_known,
+            interest,
+        }
+    }
+
+    #[test]
+    fn suspended_handshake_keeps_the_current_display_palette() {
+        let _env = crate::persist::test_env("theme-owner-background");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("terminal");
+        let dark = host_report([0x11, 0x11, 0x11]);
+        let mut clients = HashMap::new();
+        let mut foreground = None;
+        let mut size = (80, 24);
+        let mut activity = 1;
+        assert!(apply(
+            connect_display(1, Some(dark.clone()), true, SurfaceInterest::Active),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        let light = host_report([0xf8, 0xf8, 0xf8]);
+        assert!(apply(
+            connect_display(2, Some(light.clone()), true, SurfaceInterest::Suspended),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert_eq!(foreground, Some(1));
+        assert_eq!(clients[&2].interest, SurfaceInterest::Suspended);
+        assert_eq!(clients[&2].terminal_colors.as_ref(), Some(&light));
+        assert_eq!(app.host_terminal_colors.as_ref(), Some(&dark));
+        assert_ne!(app.theme, crate::ui::theme::Theme::terminal_native());
+    }
+
+    #[test]
+    fn explicit_empty_foreground_restores_terminal_fallback() {
+        let _env = crate::persist::test_env("theme-owner-clear");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("terminal");
+        let dark = host_report([0x11, 0x11, 0x11]);
+        let mut clients = HashMap::new();
+        let mut foreground = None;
+        let mut size = (80, 24);
+        let mut activity = 1;
+        assert!(apply(
+            connect_display(1, Some(dark), true, SurfaceInterest::Active),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert!(apply(
+            connect_display(2, None, true, SurfaceInterest::Active),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert_eq!(foreground, Some(2));
+        assert!(app.host_terminal_colors.is_none());
+        assert_eq!(app.config.theme, "terminal");
+        assert_eq!(app.theme, crate::ui::theme::Theme::terminal_native());
+    }
+
+    #[test]
+    fn pending_probe_does_not_clear_and_a_later_report_applies() {
+        let _env = crate::persist::test_env("theme-owner-pending");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("terminal");
+        let dark = host_report([0x11, 0x11, 0x11]);
+        let mut clients = HashMap::new();
+        let mut foreground = None;
+        let mut size = (80, 24);
+        let mut activity = 1;
+        assert!(apply(
+            connect_display(1, Some(dark.clone()), true, SurfaceInterest::Active),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert!(apply(
+            connect_display(2, None, false, SurfaceInterest::Active),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert_eq!(foreground, Some(2));
+        assert_eq!(
+            app.host_terminal_colors.as_ref(),
+            Some(&dark),
+            "a probe that has not arrived must not clear the previous display"
+        );
+        let light = host_report([0xf8, 0xf8, 0xf8]);
+        assert!(apply(
+            AppEvent::ClientTerminalColors {
+                id: 2,
+                colors: Some(light.clone()),
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert_eq!(app.host_terminal_colors.as_ref(), Some(&light));
+    }
+
+    #[test]
+    fn activating_a_suspended_client_replays_its_cached_colors() {
+        let _env = crate::persist::test_env("theme-owner-replay");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("terminal");
+        let dark = host_report([0x11, 0x11, 0x11]);
+        let light = host_report([0xf8, 0xf8, 0xf8]);
+        let mut clients = HashMap::new();
+        let mut foreground = None;
+        let mut size = (80, 24);
+        let mut activity = 1;
+        assert!(apply(
+            connect_display(1, Some(dark), true, SurfaceInterest::Active),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert!(apply(
+            connect_display(2, Some(light.clone()), true, SurfaceInterest::Suspended),
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert!(apply(
+            AppEvent::ClientSurfaceInterest {
+                id: 2,
+                interest: SurfaceInterest::Active,
+            },
+            &mut app,
+            &mut clients,
+            &mut foreground,
+            &mut size,
+            &mut activity,
+        ));
+        assert_eq!(foreground, Some(2));
+        assert_eq!(app.host_terminal_colors.as_ref(), Some(&light));
+    }
+
     fn display_client(
         cols: u16,
         rows: u16,
@@ -2702,7 +2940,11 @@ mod tests {
                 rows,
                 0,
                 0,
-                None,
+                super::ReportedDisplay {
+                    terminal_colors: None,
+                    colors_known: false,
+                    interest: SurfaceInterest::Active,
+                },
                 activity,
             ),
             rx,
@@ -3844,7 +4086,11 @@ mod tests {
             32,
             0,
             0,
-            None,
+            super::ReportedDisplay {
+                terminal_colors: None,
+                colors_known: false,
+                interest: SurfaceInterest::Active,
+            },
             1,
         );
         let frame = || {

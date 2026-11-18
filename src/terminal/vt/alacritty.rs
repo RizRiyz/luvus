@@ -3666,6 +3666,21 @@ mod tests {
     }
 
     #[test]
+    fn clearing_host_appearance_keeps_child_default_colors() {
+        let (mut engine, rx) = appearance_engine([0x11, 0x11, 0x11], ColorScheme::Dark);
+        engine.advance(b"\x1b]10;rgb:aa/bb/cc\x07\x1b]11;rgb:01/02/03\x07");
+        engine.set_appearance(PaneAppearance {
+            background: [0x1e, 0x20, 0x30],
+            scheme: ColorScheme::Dark,
+            host: None,
+        });
+        engine.advance(b"\x1b]10;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]10;rgb:aaaa/bbbb/cccc\x07");
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]11;rgb:0101/0202/0303\x07");
+    }
+
+    #[test]
     fn osc7501_reports_are_coalesced_and_query_echoes_terminator() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut engine = AlacrittyEngine::new(80, 24, tx, budget_for_rows(80, 1000));

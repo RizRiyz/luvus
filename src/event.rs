@@ -103,6 +103,10 @@ pub enum AppEvent {
         cols: u16,
         rows: u16,
         terminal_colors: Option<TerminalColors>,
+        /// `false` means the probe has not finished. `true` with `None` is an
+        /// explicit report that this display has no host colors.
+        colors_known: bool,
+        interest: crate::ipc::protocol::SurfaceInterest,
     },
     /// A binary client detached.
     ClientDetach {

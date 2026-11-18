@@ -255,7 +255,7 @@ pub(super) enum ClientExit {
 struct ClientInput {
     route: InputRoute,
     started: bool,
-    colors: Option<crate::terminal::theme_probe::TerminalColors>,
+    colors: std::sync::Arc<std::sync::Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
     #[cfg(windows)]
     windows_input_mode: Option<crate::terminal::host_input::WindowsInputModeGuard>,
 }
@@ -273,6 +273,7 @@ where
     W: Write + Send + 'static,
 {
     let truecolor = protocol::truecolor_supported();
+    input.route.colors = std::sync::Arc::clone(&input.colors);
     let size = terminal.size()?;
     write_handshake_message(&mut writer, &hello_message(size.width, size.height))?;
 
@@ -331,10 +332,12 @@ where
     let mut partial = crate::terminal::theme_probe::ColorAccumulator::default();
     if probe_terminal && !input.started {
         let probe = crate::terminal::theme_probe::probe();
-        input.colors = probe.colors;
+        if let Ok(mut colors) = input.colors.lock() {
+            *colors = probe.colors;
+        }
         protocol::write_message(
             &mut writer,
-            &ClientMessage::TerminalColors(input.colors.clone()),
+            &ClientMessage::TerminalColors(handshake_terminal_colors(&input.colors)),
         )?;
         pending = probe.pending;
         #[cfg(not(windows))]
@@ -345,7 +348,7 @@ where
         // The sole input reader already owns stdin after initial attach.
         protocol::write_message(
             &mut writer,
-            &ClientMessage::TerminalColors(input.colors.clone()),
+            &ClientMessage::TerminalColors(handshake_terminal_colors(&input.colors)),
         )?;
     }
     crate::logging::event(
@@ -530,6 +533,7 @@ struct InputRoute {
     writer: Arc<Mutex<RouteWriter>>,
     writer_ready: Arc<Condvar>,
     closed: Arc<AtomicBool>,
+    colors: std::sync::Arc<std::sync::Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 }
 
 #[derive(Default)]
@@ -738,9 +742,20 @@ fn input_loop(
             pending,
             partial,
             |event| route.send(event),
-            |colors| route.send_message(ClientMessage::TerminalColors(Some(colors))),
+            |colors| {
+                if let Ok(mut cached) = route.colors.lock() {
+                    *cached = Some(colors.clone());
+                }
+                route.send_message(ClientMessage::TerminalColors(Some(colors)))
+            },
         );
     }
+}
+
+fn handshake_terminal_colors(
+    colors: &std::sync::Arc<std::sync::Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
+) -> Option<crate::terminal::theme_probe::TerminalColors> {
+    colors.lock().ok().and_then(|colors| colors.clone())
 }
 
 fn hello_message(cols: u16, rows: u16) -> ClientMessage {
@@ -2025,6 +2040,32 @@ mod tests {
 
         // `server` kills only the child handle spawned above, even if an
         // assertion panics. It never addresses an inherited production socket.
+    }
+
+    #[test]
+    fn reconnect_handshake_uses_the_latest_cached_host_colors() {
+        let cached = std::sync::Arc::new(std::sync::Mutex::new(Some(
+            crate::terminal::theme_probe::TerminalColors {
+                fg: [1, 1, 1],
+                bg: [2, 2, 2],
+                palette: [[0; 3]; 16],
+                palette_mask: 0,
+            },
+        )));
+        let route = super::InputRoute {
+            colors: std::sync::Arc::clone(&cached),
+            ..super::InputRoute::default()
+        };
+        let latest = crate::terminal::theme_probe::TerminalColors {
+            fg: [3, 3, 3],
+            bg: [4, 4, 4],
+            palette: [[0; 3]; 16],
+            palette_mask: 1,
+        };
+        if let Ok(mut slot) = route.colors.lock() {
+            *slot = Some(latest.clone());
+        }
+        assert_eq!(super::handshake_terminal_colors(&cached), Some(latest));
     }
 
     /// Subprocess entry point for `real_server_accepts_a_terminal_palette`.

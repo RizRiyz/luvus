@@ -4696,6 +4696,25 @@ impl App {
         self.set_effective_theme(&theme_id, theme)
     }
 
+    /// Drop host-derived pane colors for a display that explicitly has none.
+    ///
+    /// Child-set foreground and background stay in the terminal engine. The
+    /// saved theme is restored without writing an automatic follow choice.
+    pub(crate) fn clear_host_terminal_colors(&mut self) -> bool {
+        let had_host =
+            self.host_terminal_colors.take().is_some() || self.probed_appearance.take().is_some();
+        self.followed_theme = None;
+        let theme_id = self.config.theme.clone();
+        let restored = if theme_id == "terminal" {
+            self.set_effective_theme("terminal", Theme::terminal_native())
+        } else if let Some(theme) = self.theme_registry.theme(&theme_id) {
+            self.set_effective_theme(&theme_id, theme)
+        } else {
+            false
+        };
+        had_host || restored
+    }
+
     pub(crate) fn effective_theme_id(&self) -> &str {
         self.followed_theme
             .as_deref()
