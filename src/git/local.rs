@@ -723,6 +723,8 @@ mod tests {
         g(&["init", "-q"]);
         g(&["config", "user.email", "t@t"]);
         g(&["config", "user.name", "t"]);
+        // Git for Windows ships `core.autocrlf=true` system-wide; keep checkouts byte-exact.
+        g(&["config", "core.autocrlf", "false"]);
         std::fs::write(dir.join("src/a.rs"), b"one\n").unwrap();
         g(&["add", "-A"]);
         g(&["commit", "-qm", "init"]);
@@ -985,6 +987,8 @@ worktree /repo/odd\nname\0HEAD bbbb2222\0branch refs/heads/odd\0\0";
         g(&["init", "-q", "-b", "main"]);
         g(&["config", "user.email", "t@t"]);
         g(&["config", "user.name", "t"]);
+        // Git for Windows ships `core.autocrlf=true` system-wide; keep checkouts byte-exact.
+        g(&["config", "core.autocrlf", "false"]);
         write("X", "base\n");
         g(&["add", "."]);
         g(&["commit", "-q", "-m", "base"]);
@@ -1238,6 +1242,8 @@ mod change_tests {
         g(&["init", "-q"]);
         g(&["config", "user.email", "t@t"]);
         g(&["config", "user.name", "t"]);
+        // Git for Windows ships `core.autocrlf=true` system-wide; keep checkouts byte-exact.
+        g(&["config", "core.autocrlf", "false"]);
 
         let file = dir.join("a.txt");
         std::fs::write(&file, "one\ntwo\nthree\nfour\nfive\n").unwrap();
