@@ -552,6 +552,21 @@ fn xterm_modifiers(value: u16) -> KeyModifiers {
 mod tests {
     use super::*;
 
+    #[test]
+    fn color_query_covers_the_shared_inventory_without_dec_2031() {
+        let query = color_query_sequence();
+        assert!(query.contains("\u{1b}]10;?\u{7}"));
+        assert!(query.contains("\u{1b}]11;?\u{7}"));
+        for index in 0..16 {
+            assert!(
+                query.contains(&format!("\u{1b}]4;{index};?\u{7}")),
+                "missing ANSI slot {index}"
+            );
+        }
+        assert!(!query.contains("2031"));
+        assert!(!query.contains("?996"));
+    }
+
     /// Known-failing diagnostic for the deferred host DEC 2031 work. Kept out
     /// of ordinary tests: Crossterm 0.29 currently retains the report and the
     /// following key. Run explicitly with `--features dev-tools` when revisiting
