@@ -282,6 +282,50 @@ mod tests {
     }
 
     #[test]
+    fn workspace_path_accepts_later_dense_alignments() {
+        let query = FuzzyQuery::new("bld", false);
+        for (name, path) in [
+            ("app", "/home/bob/projects/build/app"),
+            ("service", "/backup/build/service"),
+        ] {
+            assert!(
+                prepared_workspace_hit(&query, name, path, Some("main")),
+                "{path}"
+            );
+        }
+
+        // Three query characters can span six characters, but not seven.
+        assert!(prepared_mixed_hit(&query, &[], &["/backup/b12l3d"]));
+        assert!(!prepared_mixed_hit(&query, &[], &["/backup/b12l34d"]));
+        assert!(
+            prepared_mixed_hit(&query, &["b12l34d"], &[]),
+            "labels still allow sparse hits"
+        );
+    }
+
+    #[test]
+    fn workspace_path_density_counts_folded_unicode_scalars() {
+        let query = FuzzyQuery::new("σσk", false);
+        assert!(prepared_mixed_hit(&query, &[], &["/Σ-backup/ΣééςéK"]));
+        assert!(!prepared_mixed_hit(&query, &[], &["/Σ-backup/ΣééςééK"]));
+        assert!(!prepared_mixed_hit(
+            &FuzzyQuery::new("σσk", true),
+            &[],
+            &["/Σ-backup/ΣééςéK"]
+        ));
+        assert!(prepared_mixed_hit(
+            &FuzzyQuery::new("ΣςK", true),
+            &[],
+            &["/Σ-backup/ΣééςéK"]
+        ));
+        assert!(!prepared_mixed_hit(
+            &FuzzyQuery::new("ss", false),
+            &[],
+            &["/ß"]
+        ));
+    }
+
+    #[test]
     fn workspace_path_rejects_sparse_absolute_matches() {
         let skills = FuzzyQuery::new("skills", false);
         let ivc = "/Users/misaka/Developer/InfinityValley/ivc.feat-user-birthday-7121999519";

@@ -963,6 +963,49 @@ mod tests {
         assert!(app.agent_menu.is_none());
     }
 
+    fn dense_path_app() -> App {
+        let mut app = App::new(100, 30, std::sync::mpsc::channel().0).unwrap();
+        app.workspaces[0].worktree = None;
+        app.workspaces[0].name = "app".into();
+        app.workspaces[0].cwd = "/home/bob/projects/build/app".into();
+        app.workspaces[0].branch = Some("main".into());
+        app
+    }
+
+    #[test]
+    fn workspace_dock_finds_later_dense_path_alignments() {
+        let _env = crate::persist::test_env("workspace-dense-path");
+        let mut app = dense_path_app();
+        app.workspace_query.begin();
+        app.workspace_query.append("bld");
+        app.workspace_query.commit();
+        app.workspace_search.begin();
+        app.workspace_search.append("bld");
+        app.locate_workspace_search(true, true);
+        assert!(
+            !app.workspace_search_miss,
+            "WORKSPACES must retain and find the row"
+        );
+        assert!(app.workspace_row_selected(0));
+    }
+
+    #[test]
+    fn agent_dock_finds_later_dense_path_alignments() {
+        let _env = crate::persist::test_env("agent-dense-path");
+        let mut app = dense_path_app();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        commit_agent_query(&mut app, "bld");
+        app.agent_search.begin();
+        app.agent_search.append("bld");
+        app.locate_agent_search(true, true);
+        assert!(
+            !app.agent_search_miss,
+            "AGENTS must retain and find the row"
+        );
+        assert!(app.agent_row_selected(&AgentDockTarget::Live(pane)));
+    }
+
     #[test]
     fn workspace_filter_does_not_keep_sparse_absolute_path_matches() {
         let _env = crate::persist::test_env("workspace-sparse-path");

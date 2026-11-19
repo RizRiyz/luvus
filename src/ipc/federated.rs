@@ -6844,6 +6844,42 @@ mod tests {
     }
 
     #[test]
+    fn federated_dock_finds_later_dense_path_alignments() {
+        let mut machine = machine_with_sessions("box", &["default"], MachineState::Online);
+        let mut service = shell_workspace(0, "service");
+        service.cwd = "/backup/build/service".into();
+        let mut sparse = shell_workspace(1, "other");
+        sparse.cwd = "/backup/b12l34d/other".into();
+        machine.runtime.workspaces = vec![service, sparse];
+        let machines = HashMap::from([("box".into(), machine)]);
+        let mut dock = DockState::default();
+        dock.workspace_query.begin();
+        dock.workspace_query.append("bld");
+        dock.workspace_query.commit();
+        let rows = visible_dock_rows(&machines, &Endpoint::Local, &dock);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, MachineDockRow::RemoteWorkspace(..)))
+                .count(),
+            1,
+            "keep the dense match but not the sparse one"
+        );
+        dock.workspace_search.begin();
+        dock.workspace_search.append("bld");
+        locate_shell_search(&mut dock, &rows, true, true);
+        assert_eq!(
+            dock.selected_hit,
+            Some(DockHit::RemoteWorkspace(
+                Endpoint::Remote {
+                    machine_id: "box".into(),
+                    session: "default".into()
+                },
+                0,
+            )),
+        );
+    }
+
+    #[test]
     fn federated_search_reveals_and_keeps_a_hidden_identity_blocked() {
         let mut dock = DockState {
             local_workspaces: vec![shell_workspace(0, "alpha"), shell_workspace(1, "beta")],

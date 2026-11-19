@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::casefold::{chars_with_source, fold_text};
+use super::casefold::{chars_with_source, fold_char, fold_text};
 
 #[derive(Clone, Debug)]
 pub struct PreparedText {
@@ -177,12 +177,67 @@ impl FuzzyQuery {
         }
         self.tokens.iter().all(|token| {
             fields.iter().enumerate().any(|(index, field)| {
-                score_token(self.case_sensitive, token, field).is_some_and(|(_, _, safe)| {
-                    !strict.get(index).copied().unwrap_or(false) || safe
-                })
+                if strict.get(index).copied().unwrap_or(false) {
+                    dense_token_match(self.case_sensitive, token, field.text)
+                } else {
+                    score_token(self.case_sensitive, token, field).is_some()
+                }
             })
         })
     }
+}
+
+fn dense_token_match(case_sensitive: bool, token: &Token, text: &PreparedText) -> bool {
+    let needle = if case_sensitive {
+        &token.exact
+    } else {
+        &token.folded
+    };
+    if text.ascii && needle.is_ascii() {
+        let hay = if case_sensitive {
+            text.original.as_bytes()
+        } else {
+            &text.folded
+        };
+        return has_dense_alignment(hay.iter().copied(), needle.bytes());
+    }
+    has_dense_alignment(
+        text.original
+            .chars()
+            .map(|ch| fold_char(ch, case_sensitive)),
+        needle.chars(),
+    )
+}
+
+fn has_dense_alignment<T: Eq>(
+    hay: impl Iterator<Item = T>,
+    needle: impl DoubleEndedIterator<Item = T> + Clone,
+) -> bool {
+    let len = needle.clone().count();
+    if len == 0 {
+        return false;
+    }
+    let max_span = len.saturating_mul(2);
+    // For each prefix, the latest start dominates: all stored prefixes end
+    // before the next input character, and a later start only shortens its span.
+    // Updating longest prefixes first prevents reusing one input character.
+    // One pass over the path, O(len) work per character and O(len) scratch.
+    let mut starts = vec![usize::MAX; len - 1];
+    for (end, ch) in hay.enumerate() {
+        for (index, wanted) in (0..len).rev().zip(needle.clone().rev()) {
+            if ch != wanted {
+                continue;
+            }
+            let start = if index == 0 { end } else { starts[index - 1] };
+            if start != usize::MAX && end - start < max_span {
+                if index == len - 1 {
+                    return true;
+                }
+                starts[index] = start;
+            }
+        }
+    }
+    false
 }
 
 fn score_token(
@@ -334,6 +389,11 @@ mod tests {
     #[test]
     fn output_rejects_sparse_but_keeps_dense_subsequences() {
         assert!(score("bld", "build failed").unwrap().output_safe());
+        // Strict sidebar acceptance can find a later alignment without changing
+        // the global finder's original score or its output safety decision.
+        let path_score = score("bld", "/backup/build/service").unwrap();
+        assert!(!path_score.output_safe());
+        assert_eq!(path_score.byte_positions, [1, 11, 12]);
         assert!(!score("fzpn1fl", "fuzzy-benchmark-pane-1-auth-failure")
             .unwrap()
             .output_safe());
