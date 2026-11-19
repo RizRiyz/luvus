@@ -242,9 +242,9 @@ while editing restores the text and, for search, the previous selection; the nex
 dock. While editing, `/`, `\`, `f`, `s`, and `n` are query text. `Backspace`
 deletes one character and `Ctrl+U` clears the text being edited. Search only sees
 rows that remain after workspace scope, All/Active or DIFF review state, and the
-`\` filter. A workspace match can be its name, path, or branch, and a matching
+`\` filter. A workspace match can be its name, path, or branch. Name and branch keep short acronym matches, but a path match must be contiguous or dense, so letters gathered across an absolute path do not count. A matching
 worktree keeps the parent it is grouped under. An agent match can be its name,
-agent, session title, workspace, or path. The blocked-elsewhere overflow line
+agent, session title, workspace, or path, and that path uses the same contiguous or dense rule. The blocked-elsewhere overflow line
 stays while a text filter is active: it is global attention, not a row search
 can select.
 

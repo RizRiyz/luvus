@@ -12,8 +12,8 @@ mod query;
 
 pub use fuzzy::{FuzzyField, FuzzyQuery, PreparedText};
 pub use query::{
-    append_query, backspace_query, clear_query, locate_match, prepared_hit,
-    project_workspace_order, query_label, DockTextQuery,
+    append_query, backspace_query, clear_query, locate_match, prepared_hit, prepared_mixed_hit,
+    prepared_workspace_hit, project_workspace_order, query_label, DockTextQuery,
 };
 
 use std::cmp::Ordering;

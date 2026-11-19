@@ -140,50 +140,8 @@ impl FuzzyQuery {
         for token in &self.tokens {
             let mut best: Option<(i64, usize, Vec<usize>, bool)> = None;
             for (field_index, field) in fields.iter().enumerate() {
-                let scored =
-                    if field.text.ascii && token.exact.is_ascii() && token.folded.is_ascii() {
-                        let hay = if self.case_sensitive {
-                            field.text.original.as_bytes()
-                        } else {
-                            field.text.folded.as_slice()
-                        };
-                        let needle = if self.case_sensitive {
-                            token.exact.as_bytes()
-                        } else {
-                            token.folded.as_bytes()
-                        };
-                        score_one(
-                            hay,
-                            needle,
-                            |index| field.text.is_boundary(index),
-                            field.weight,
-                        )
-                    } else {
-                        let (hay, bytes, boundaries) =
-                            unicode_chars(&field.text.original, self.case_sensitive);
-                        let needle = if self.case_sensitive {
-                            token.exact.chars().collect::<Vec<_>>()
-                        } else {
-                            token.folded.chars().collect::<Vec<_>>()
-                        };
-                        score_one(
-                            &hay,
-                            &needle,
-                            |index| boundaries.get(index).copied().unwrap_or(false),
-                            field.weight,
-                        )
-                        .map(|(score, positions, safe)| {
-                            (
-                                score,
-                                positions
-                                    .into_iter()
-                                    .filter_map(|index| bytes.get(index).copied())
-                                    .collect(),
-                                safe,
-                            )
-                        })
-                    };
-                let Some((score, positions, safe)) = scored else {
+                let Some((score, positions, safe)) = score_token(self.case_sensitive, token, field)
+                else {
                     continue;
                 };
                 let candidate = (score, field_index, positions, safe);
@@ -210,6 +168,68 @@ impl FuzzyQuery {
             output_safe,
         })
     }
+
+    /// Every token must hit at least one field. A strict field accepts only an
+    /// exact, prefix, contiguous, or dense subsequence match.
+    pub(crate) fn accepts(&self, fields: &[FuzzyField<'_>], strict: &[bool]) -> bool {
+        if self.tokens.is_empty() || fields.is_empty() {
+            return false;
+        }
+        self.tokens.iter().all(|token| {
+            fields.iter().enumerate().any(|(index, field)| {
+                score_token(self.case_sensitive, token, field).is_some_and(|(_, _, safe)| {
+                    !strict.get(index).copied().unwrap_or(false) || safe
+                })
+            })
+        })
+    }
+}
+
+fn score_token(
+    case_sensitive: bool,
+    token: &Token,
+    field: &FuzzyField<'_>,
+) -> Option<(i64, Vec<usize>, bool)> {
+    if field.text.ascii && token.exact.is_ascii() && token.folded.is_ascii() {
+        let hay = if case_sensitive {
+            field.text.original.as_bytes()
+        } else {
+            field.text.folded.as_slice()
+        };
+        let needle = if case_sensitive {
+            token.exact.as_bytes()
+        } else {
+            token.folded.as_bytes()
+        };
+        return score_one(
+            hay,
+            needle,
+            |index| field.text.is_boundary(index),
+            field.weight,
+        );
+    }
+    let (hay, bytes, boundaries) = unicode_chars(&field.text.original, case_sensitive);
+    let needle = if case_sensitive {
+        token.exact.chars().collect::<Vec<_>>()
+    } else {
+        token.folded.chars().collect::<Vec<_>>()
+    };
+    score_one(
+        &hay,
+        &needle,
+        |index| boundaries.get(index).copied().unwrap_or(false),
+        field.weight,
+    )
+    .map(|(score, positions, safe)| {
+        (
+            score,
+            positions
+                .into_iter()
+                .filter_map(|index| bytes.get(index).copied())
+                .collect(),
+            safe,
+        )
+    })
 }
 
 fn score_one<T: Eq>(

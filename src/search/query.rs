@@ -136,6 +136,44 @@ pub fn prepared_hit(query: &FuzzyQuery, fields: &[PreparedText]) -> bool {
     query.score(&weighted).is_some()
 }
 
+/// Label text keeps short acronym matches. Absolute paths only count when the
+/// hit is exact, a prefix, contiguous, or dense enough to be `output_safe`.
+pub fn prepared_mixed_hit(query: &FuzzyQuery, labels: &[&str], paths: &[&str]) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let labels: Vec<PreparedText> = labels.iter().copied().map(PreparedText::new).collect();
+    let paths: Vec<PreparedText> = paths.iter().copied().map(PreparedText::new).collect();
+    let mut fields = Vec::with_capacity(labels.len() + paths.len());
+    let mut strict = Vec::with_capacity(labels.len() + paths.len());
+    for text in &labels {
+        fields.push(FuzzyField { text, weight: 1 });
+        strict.push(false);
+    }
+    for text in &paths {
+        fields.push(FuzzyField { text, weight: 1 });
+        strict.push(true);
+    }
+    if fields.is_empty() {
+        return false;
+    }
+    query.accepts(&fields, &strict)
+}
+
+/// Workspace text match. Name and branch are labels; `cwd` is a strict path.
+pub fn prepared_workspace_hit(
+    query: &FuzzyQuery,
+    name: &str,
+    cwd: &str,
+    branch: Option<&str>,
+) -> bool {
+    let mut labels = vec![name];
+    if let Some(branch) = branch {
+        labels.push(branch);
+    }
+    prepared_mixed_hit(query, &labels, &[cwd])
+}
+
 /// Keep linked-worktree order. A non-matching parent stays only as context for
 /// a matching child and keeps its own workspace index.
 pub fn project_workspace_order(
@@ -241,5 +279,44 @@ mod tests {
             Some(0)
         );
         assert_eq!(locate_match(rows.len(), 0, true, false, |_| false), None);
+    }
+
+    #[test]
+    fn workspace_path_rejects_sparse_absolute_matches() {
+        let skills = FuzzyQuery::new("skills", false);
+        let ivc = "/Users/misaka/Developer/InfinityValley/ivc.feat-user-birthday-7121999519";
+        assert!(
+            !prepared_workspace_hit(
+                &skills,
+                "ivc.feat-user-birthday-7121999519",
+                ivc,
+                Some("develop")
+            ),
+            "letters gathered across an absolute path are not a workspace match"
+        );
+        assert!(prepared_workspace_hit(
+            &skills,
+            "skills",
+            "/Users/misaka/Developer/Personal/skills",
+            None,
+        ));
+        assert!(prepared_workspace_hit(
+            &FuzzyQuery::new("secret", false),
+            "ivc.feat-secret-ugc",
+            "/Users/misaka/Developer/InfinityValley/ivc.feat-secret-ugc",
+            None,
+        ));
+        assert!(prepared_workspace_hit(
+            &FuzzyQuery::new("personal skills", false),
+            "skills",
+            "/Users/misaka/Developer/Personal/skills",
+            None,
+        ));
+        assert!(prepared_workspace_hit(
+            &FuzzyQuery::new("gsc", false),
+            "GlobalSearchCatalog",
+            "/tmp/catalog",
+            None,
+        ));
     }
 }

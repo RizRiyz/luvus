@@ -3683,14 +3683,12 @@ fn shell_workspace_matches(
     query: &crate::search::FuzzyQuery,
     workspace: &protocol::ShellWorkspace,
 ) -> bool {
-    let mut fields = vec![
-        crate::search::PreparedText::new(&workspace.name),
-        crate::search::PreparedText::new(&workspace.cwd),
-    ];
-    if let Some(branch) = &workspace.branch {
-        fields.push(crate::search::PreparedText::new(branch));
-    }
-    crate::search::prepared_hit(query, &fields)
+    crate::search::prepared_workspace_hit(
+        query,
+        &workspace.name,
+        &workspace.cwd,
+        workspace.branch.as_deref(),
+    )
 }
 
 fn locate_shell_search(

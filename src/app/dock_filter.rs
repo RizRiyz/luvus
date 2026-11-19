@@ -6,9 +6,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::ids::PaneId;
-use crate::search::{
-    prepared_hit, project_workspace_order, DockTextQuery, FuzzyQuery, PreparedText,
-};
+use crate::search::{project_workspace_order, DockTextQuery, FuzzyQuery};
 
 use super::{is_key_repeat, AgentDockTarget, App};
 
@@ -203,12 +201,10 @@ impl App {
         }
         let order = self.workspace_display_order();
         let fuzzy = self.workspace_query.fuzzy();
-        let prepared: Vec<Vec<PreparedText>> =
-            self.workspaces.iter().map(workspace_fields).collect();
         let rows = project_workspace_order(&order, |index| {
-            prepared
+            self.workspaces
                 .get(index)
-                .is_some_and(|fields| prepared_hit(&fuzzy, fields))
+                .is_some_and(|workspace| workspace_matches(&fuzzy, workspace))
         });
         self.workspace_row_cache.store(stamp, query, rows.clone());
         rows
@@ -320,8 +316,6 @@ impl App {
         }
         let rows = self.filtered_workspace_rows();
         let fuzzy = self.workspace_search.fuzzy();
-        let prepared: Vec<Vec<PreparedText>> =
-            self.workspaces.iter().map(workspace_fields).collect();
         let found = crate::search::locate_match(
             rows.len(),
             self.workspace_cursor,
@@ -329,9 +323,9 @@ impl App {
             inclusive,
             |index| {
                 let (workspace, _) = rows[index];
-                prepared
+                self.workspaces
                     .get(workspace)
-                    .is_some_and(|fields| prepared_hit(&fuzzy, fields))
+                    .is_some_and(|workspace| workspace_matches(&fuzzy, workspace))
             },
         );
         if let Some(index) = found {
@@ -578,19 +572,22 @@ impl App {
         query: &FuzzyQuery,
         target: &AgentDockTarget,
     ) -> bool {
-        let fields = self.agent_match_fields(target);
-        prepared_hit(query, &fields)
+        let (labels, paths) = self.agent_match_texts(target);
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        crate::search::prepared_mixed_hit(query, &labels, &paths)
     }
 
-    pub(crate) fn agent_match_fields(&self, target: &AgentDockTarget) -> Vec<PreparedText> {
-        let mut texts = Vec::new();
+    fn agent_match_texts(&self, target: &AgentDockTarget) -> (Vec<String>, Vec<String>) {
+        let mut labels = Vec::new();
+        let mut paths = Vec::new();
         match target {
             AgentDockTarget::Live(pane) | AgentDockTarget::Elsewhere(pane) => {
                 if let Some(label) = self.status_reporter_label(*pane) {
-                    texts.push(label.to_string());
+                    labels.push(label.to_string());
                 }
                 if let Some(status) = self.status.get(pane) {
-                    texts.push(status.agent.clone());
+                    labels.push(status.agent.clone());
                 }
                 if let Some(name) = self
                     .agent_names
@@ -598,14 +595,14 @@ impl App {
                     .find(|(_, id)| **id == *pane)
                     .map(|(name, _)| name.clone())
                 {
-                    texts.push(name);
+                    labels.push(name);
                 }
                 if let Some(title) = self.pane_title(*pane) {
-                    texts.push(title);
+                    labels.push(title);
                 }
                 if let Some(workspace) = App::workspace_of_pane(self, *pane) {
-                    texts.push(workspace.name.clone());
-                    texts.push(workspace.cwd.display().to_string());
+                    labels.push(workspace.name.clone());
+                    paths.push(workspace.cwd.display().to_string());
                 }
             }
             AgentDockTarget::Automation(id) => {
@@ -615,37 +612,34 @@ impl App {
                     .iter()
                     .find(|automation| &automation.id == id)
                 {
-                    texts.push(automation.task.agent_id.clone());
-                    texts.push(automation.task.title.clone());
+                    labels.push(automation.task.agent_id.clone());
+                    labels.push(automation.task.title.clone());
                     if let Some(workspace) = self
                         .workspaces
                         .iter()
                         .find(|workspace| workspace.id == automation.task.workspace_id)
                     {
-                        texts.push(workspace.name.clone());
-                        texts.push(workspace.cwd.display().to_string());
+                        labels.push(workspace.name.clone());
+                        paths.push(workspace.cwd.display().to_string());
                     }
                 }
             }
             AgentDockTarget::Session(index) => {
                 if let Some(session) = self.resumable.get(*index) {
-                    texts.push(session.agent.clone());
-                    texts.push(session.cwd.display().to_string());
+                    labels.push(session.agent.clone());
+                    paths.push(session.cwd.display().to_string());
                     if let Some(name) = session.cwd.file_name().and_then(|name| name.to_str()) {
-                        texts.push(name.to_string());
+                        labels.push(name.to_string());
                     }
                     if let Some(title) =
                         self.agent_row_title_for_session(&session.agent, &session.session_id)
                     {
-                        texts.push(title.to_string());
+                        labels.push(title.to_string());
                     }
                 }
             }
         }
-        texts
-            .into_iter()
-            .map(|text| PreparedText::new(&text))
-            .collect()
+        (labels, paths)
     }
 
     pub(crate) fn sidebar_query_paste(&mut self, text: &str) -> bool {
@@ -677,15 +671,13 @@ impl App {
     }
 }
 
-fn workspace_fields(workspace: &super::Workspace) -> Vec<PreparedText> {
-    let mut fields = vec![
-        PreparedText::new(&workspace.name),
-        PreparedText::new(&workspace.cwd.display().to_string()),
-    ];
-    if let Some(branch) = &workspace.branch {
-        fields.push(PreparedText::new(branch));
-    }
-    fields
+fn workspace_matches(query: &FuzzyQuery, workspace: &super::Workspace) -> bool {
+    crate::search::prepared_workspace_hit(
+        query,
+        &workspace.name,
+        &workspace.cwd.display().to_string(),
+        workspace.branch.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -969,5 +961,81 @@ mod tests {
         assert_eq!(app.layout().focus, stayed);
         app.handle_agents_key(key(KeyCode::Char('a')));
         assert!(app.agent_menu.is_none());
+    }
+
+    #[test]
+    fn workspace_filter_does_not_keep_sparse_absolute_path_matches() {
+        let _env = crate::persist::test_env("workspace-sparse-path");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[0].worktree = None;
+        app.workspaces[0].name = "ivc.feat-user-birthday-7121999519".into();
+        app.workspaces[0].cwd = std::path::PathBuf::from(
+            "/Users/misaka/Developer/InfinityValley/ivc.feat-user-birthday-7121999519",
+        );
+        app.workspaces[0].branch = Some("develop".into());
+        let pane = app.layout().focus;
+        app.workspaces.push(super::super::Workspace {
+            id: crate::ids::public_id("workspace"),
+            name: "skills".into(),
+            cwd: std::path::PathBuf::from("/Users/misaka/Developer/Personal/skills"),
+            branch: None,
+            git_ahead_behind: None,
+            worktree: None,
+            tabs: vec![super::super::Tab::panes(super::super::TileLayout::new(
+                pane,
+            ))],
+            active_tab: 0,
+            pinned: false,
+        });
+        app.workspace_query.begin();
+        app.workspace_query.append("skills");
+        app.workspace_query.commit();
+        let names: Vec<_> = app
+            .filtered_workspace_rows()
+            .into_iter()
+            .filter_map(|(index, _)| {
+                app.workspaces
+                    .get(index)
+                    .map(|workspace| workspace.name.clone())
+            })
+            .collect();
+        assert_eq!(names, vec!["skills".to_string()]);
+    }
+
+    #[test]
+    fn agent_filter_does_not_keep_sparse_absolute_path_matches() {
+        let _env = crate::persist::test_env("agent-sparse-path");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let pane = app.layout().focus;
+        app.workspaces[0].worktree = None;
+        app.workspaces[0].name = "ivc.feat-user-birthday-7121999519".into();
+        app.workspaces[0].cwd = std::path::PathBuf::from(
+            "/Users/misaka/Developer/InfinityValley/ivc.feat-user-birthday-7121999519",
+        );
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        app.agent_query.begin();
+        app.agent_query.append("skills");
+        app.agent_query.commit();
+        assert!(
+            !app.filtered_agent_targets()
+                .contains(&AgentDockTarget::Live(pane)),
+            "an ivc absolute path must not match skills"
+        );
+        app.agent_names.insert("skills".into(), pane);
+        assert!(
+            app.filtered_agent_targets()
+                .contains(&AgentDockTarget::Live(pane)),
+            "the pane name still matches"
+        );
+        app.agent_names.remove("skills");
+        app.workspaces[0].cwd = std::path::PathBuf::from("/Users/misaka/Developer/Personal/skills");
+        app.workspaces[0].name = "skills".into();
+        assert!(
+            app.filtered_agent_targets()
+                .contains(&AgentDockTarget::Live(pane)),
+            "a contiguous skills path still matches"
+        );
     }
 }
