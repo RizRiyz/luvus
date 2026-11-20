@@ -107,6 +107,7 @@ printf '%s\n' 'it'"'"'s 100% \done'
 x='a\\b'; printf '%s\n' "$x"
 [ -n "${HOME:-}" ] && printf 'home\n'
 "#;
+    #[cfg(unix)]
     const AWKWARD_OUT: &str = "0.14.3|ab+1\nit's 100% \\done\na\\\\b\nhome\n";
 
     #[test]
