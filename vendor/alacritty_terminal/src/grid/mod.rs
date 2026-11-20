@@ -137,7 +137,43 @@ pub struct Grid<T> {
 
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
+
+    /// Anchors moved while columns were reflowed. The terminal applies this
+    /// immediately after `resize` and then clears it.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    graphics_reflow: Vec<GraphicsReflow>,
+
+    /// Next temporary anchor used when a reflow has to split one row's images.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    next_temp_anchor: u64,
 }
+
+/// An anchor/column adjustment recorded while rows were merged or wrapped.
+///
+/// `dest_anchor >= GRAPHICS_TEMP_ANCHOR` means the destination row is holding
+/// a placeholder id. The caller replaces it with a real anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GraphicsReflow {
+    pub anchor: u64,
+    pub at: u32,
+    pub dest_column: i32,
+    pub dest_anchor: u64,
+    pub kind: GraphicsReflowKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphicsReflowKind {
+    /// Placements with `column < at` move onto `dest_anchor` at
+    /// `column + dest_column`. When `entire` is set, every placement moves.
+    MovePrefix { entire: bool },
+    /// Placements with `column >= at` move onto `dest_anchor` at `column - at`.
+    MoveSuffix,
+    /// Every placement on `anchor` shifts by `dest_column`.
+    Shift,
+}
+
+/// Temporary anchors assigned during reflow, before the pane allocator runs.
+pub const GRAPHICS_TEMP_ANCHOR: u64 = 1 << 62;
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
     pub fn new(lines: usize, columns: usize, max_scroll_limit: usize) -> Grid<T> {
@@ -149,7 +185,32 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             cursor: Cursor::default(),
             lines,
             columns,
+            graphics_reflow: Vec::new(),
+            next_temp_anchor: 0,
         }
+    }
+
+    pub fn take_graphics_reflow(&mut self) -> Vec<GraphicsReflow> {
+        std::mem::take(&mut self.graphics_reflow)
+    }
+
+    pub fn replace_graphics_anchor(&mut self, from: u64, to: u64) {
+        if from == 0 {
+            return;
+        }
+        let start = self.topmost_line().0;
+        let end = self.bottommost_line().0;
+        for line in start..=end {
+            let row = &mut self[Line(line)];
+            if row.graphics_anchor() == from {
+                row.set_graphics_anchor(to);
+            }
+        }
+    }
+
+    fn alloc_temp_anchor(&mut self) -> u64 {
+        self.next_temp_anchor = self.next_temp_anchor.wrapping_add(1).max(1);
+        GRAPHICS_TEMP_ANCHOR.saturating_add(self.next_temp_anchor)
     }
 
     /// Update the size of the scrollback history.

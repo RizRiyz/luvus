@@ -757,6 +757,31 @@ impl Pane {
         self.data_pending.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn output_deadline(&self) -> Option<std::time::Instant> {
+        self.engine
+            .lock()
+            .ok()
+            .and_then(|engine| engine.output_deadline())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn expire_output(&self, now: std::time::Instant) -> bool {
+        let changed = self.engine.lock().is_ok_and(|mut engine| {
+            let changed = engine.expire_output(now);
+            if changed {
+                self.content_revision.fetch_add(1, Ordering::AcqRel);
+            }
+            changed
+        });
+        if changed {
+            self.data_pending.store(true, Ordering::Release);
+            self.history_maintenance_pending
+                .store(true, Ordering::Release);
+        }
+        changed
+    }
+
     pub(crate) fn has_history_maintenance(&self) -> bool {
         #[cfg(windows)]
         {
@@ -1302,6 +1327,13 @@ fn read_loop(
     loop {
         match reader.read(&mut buf) {
             Ok(0) | Err(_) => {
+                if let Ok(mut terminal) = engine.lock() {
+                    if let Some(at) = terminal.output_deadline() {
+                        if terminal.expire_output(at) {
+                            content_revision.fetch_add(1, Ordering::AcqRel);
+                        }
+                    }
+                }
                 let _ = tx.send(AppEvent::PtyIoClosed(id));
                 break;
             }
@@ -1481,6 +1513,53 @@ mod reap_tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         drop(pane);
         assert!(wait_gone(pid), "exit is still reaped without a timer");
+    }
+
+    #[test]
+    fn quiet_pty_sync_timeout_commits_and_announces_without_more_output() {
+        let _env = crate::persist::test_env("pty-sync-timeout");
+        let (tx, rx) = mpsc::channel();
+        let pane = Pane::spawn_command(
+            PaneId::alloc(),
+            20,
+            5,
+            std::env::current_dir().unwrap(),
+            tx,
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '\\033[?2026hQUIET-SYNC'; sleep 10".into(),
+            ],
+            &[],
+            64 * 1024,
+            PaneAppearance::default(),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut notified = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "one-shot output deadline must wake a quiet PTY"
+            );
+            if let Ok(AppEvent::PtyData(_)) = rx.recv_timeout(remaining) {
+                pane.take_data_pending();
+                notified = true;
+            }
+            if pane
+                .engine
+                .lock()
+                .unwrap()
+                .screen_rows()
+                .join("")
+                .contains("QUIET-SYNC")
+            {
+                assert!(notified);
+                break;
+            }
+        }
+        assert!(pane.engine.lock().unwrap().output_deadline().is_none());
     }
 
     #[test]

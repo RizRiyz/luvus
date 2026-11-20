@@ -1578,7 +1578,7 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     // local session that never resizes would split on the fallback aspect.
     let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
     app.set_client_cell_pixels(cell_width_px, cell_height_px);
-    let pending = if app.config.theme == "terminal" {
+    let mut pending = if app.config.theme == "terminal" {
         let probe = terminal::theme_probe::probe();
         if let Some(colors) = probe.colors.as_ref() {
             app.apply_terminal_colors(colors);
@@ -1587,6 +1587,28 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     } else {
         Vec::new()
     };
+    let host_draw = app.host_draw.clone();
+    let (graphics, extra) = terminal::theme_probe::probe_kitty_graphics();
+    let graphics_supported = graphics == Some(true);
+    // --local has no host placement encoder. Probing is still explicit, but
+    // never advertise child drawing support from a text-only render path.
+    host_draw.store(false, std::sync::atomic::Ordering::Release);
+    pending.extend(extra);
+    if terminal::kitty_graphics::cell_size_query_required(
+        graphics_supported,
+        ipc::client::reported_ioctl_cells(),
+    ) {
+        let (cells, extra) = terminal::theme_probe::probe_host_cell_size();
+        pending.extend(extra);
+        if let Some((width, height)) = cells {
+            app.set_client_cell_pixels(width, height);
+        }
+    }
+    #[cfg(not(windows))]
+    terminal::theme_probe::set_host_report_handler(move |report| {
+        let terminal::theme_probe::HostReport::Graphics(_) = report;
+        host_draw.store(false, std::sync::atomic::Ordering::Release);
+    });
     // Match the client path: query colors before enabling input protocols, so
     // any interleaved bytes are ordinary keys that can be replayed losslessly.
     let _ = execute!(

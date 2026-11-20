@@ -1,7 +1,7 @@
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
 use crate::ui::theme::Theme;
@@ -61,7 +61,7 @@ pub(crate) fn draw_session_menu(
     };
     app.named_session_menu_rect = Some(area);
 
-    f.render_widget(Clear, area);
+    f.clear_overlay(area);
     f.render_widget(
         Block::new().style(Style::new().bg(theme.surface0).fg(theme.text)),
         area,

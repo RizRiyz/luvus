@@ -6,6 +6,7 @@ import os
 import pathlib
 import json
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -46,6 +47,33 @@ def wait_event(reader, expected, terminal_id=None):
             return event
 
 
+def wait_owner_socket(socket_path, server, deadline):
+    """Wait within startup's deadline for bind + owner-only chmod to finish.
+
+    Only an absent path or pending mode is retryable. A wrong object/owner
+    fails closed; protocol requests and their errors are never retried here.
+    """
+    while True:
+        if server.poll() is not None:
+            raise RuntimeError("isolated Luvus server exited before endpoint readiness")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("isolated Luvus endpoint did not become owner-only before startup deadline")
+        try:
+            info = socket_path.lstat()
+        except FileNotFoundError:
+            info = None
+        if info is not None:
+            if not stat.S_ISSOCK(info.st_mode):
+                raise RuntimeError("isolated Luvus endpoint is not a Unix socket (symlinks forbidden)")
+            if info.st_uid != os.geteuid():
+                raise RuntimeError("isolated Luvus endpoint has the wrong owner")
+            if stat.S_IMODE(info.st_mode) == 0o600:
+                return
+        # This is the existing startup readiness wait, not a post-start delay.
+        time.sleep(min(0.025, remaining))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--luvus", default=str(ROOT / "target" / "debug" / "luvus"))
@@ -74,10 +102,7 @@ def main():
         )
         try:
             deadline = time.monotonic() + 10
-            while not socket_path.exists():
-                if server.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError("isolated Luvus server did not start")
-                time.sleep(0.025)
+            wait_owner_socket(socket_path, server, deadline)
 
             capability = request(socket_path, {"id":"cap","method":"uhp.capabilities","params":{}})
             assert capability["result"]["protocol"] == {"name":"luvus-uhp","major":1,"minor":0}

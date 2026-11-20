@@ -189,7 +189,15 @@ fn actor_loop(
         }
         arm_or_finish_submit_delay(&mut pending, now);
         let wants_write = matches!(pending.front(), Some(PendingWrite::Bytes { .. }));
-        let timeout = poll_timeout(&pending, history_compaction_deadline, now);
+        let output_deadline = engine
+            .lock()
+            .ok()
+            .and_then(|terminal| terminal.output_deadline());
+        let deadline = history_compaction_deadline
+            .into_iter()
+            .chain(output_deadline)
+            .min();
+        let timeout = poll_timeout(&pending, deadline, now);
         let mut fds = [
             libc::pollfd {
                 fd: master.as_raw_fd(),
@@ -252,6 +260,17 @@ fn actor_loop(
         if terminal_events & (libc::POLLERR | libc::POLLNVAL) != 0 {
             break;
         }
+        let expired = engine.lock().is_ok_and(|mut terminal| {
+            if terminal.expire_output(Instant::now()) {
+                content_revision.fetch_add(1, Ordering::AcqRel);
+                true
+            } else {
+                false
+            }
+        });
+        if expired && !data_pending.swap(true, Ordering::AcqRel) {
+            let _ = app_tx.send(AppEvent::PtyData(id));
+        }
         if history_compaction_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let more = engine
                 .lock()
@@ -272,6 +291,14 @@ fn actor_loop(
             .is_ok_and(|mut terminal| terminal.finish_output_batch_step())
         {
             thread::yield_now();
+        }
+    }
+    // EOF/cancellation must not leave a final synchronized frame hidden.
+    if let Ok(mut terminal) = engine.lock() {
+        if let Some(at) = terminal.output_deadline() {
+            if terminal.expire_output(at) {
+                content_revision.fetch_add(1, Ordering::AcqRel);
+            }
         }
     }
     let _ = app_tx.send(AppEvent::PtyIoClosed(id));

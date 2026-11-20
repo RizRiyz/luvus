@@ -854,8 +854,9 @@ pub(super) fn draw_named_delete_confirm(
     t: &Theme,
 ) -> (Option<Rect>, Option<Rect>) {
     use ratatui::layout::Alignment;
-    use ratatui::widgets::{Block, Borders, Clear};
+    use ratatui::widgets::{Block, Borders};
     // Dim backdrop.
+    f.cover_graphics(area);
     let buf = f.buffer_mut();
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
@@ -869,7 +870,7 @@ pub(super) fn draw_named_delete_confirm(
     let mx = area.x + (area.width.saturating_sub(w)) / 2;
     let my = area.y + (area.height.saturating_sub(h)) / 2;
     let modal = Rect::new(mx, my, w, h);
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.coral).bg(t.surface0))

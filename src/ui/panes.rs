@@ -823,7 +823,7 @@ fn paint_terminal_cell(
     let symbol = if symbol.starts_with(char::is_control) {
         " "
     } else {
-        symbol
+        crate::terminal::kitty_graphics::host_cell_symbol(symbol)
     };
     let x = content.x + column;
     let y = content.y + row;

@@ -36,6 +36,13 @@ const REPLY_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 // Even continuous unterminated traffic cannot hold the input route indefinitely.
 const REPLY_MAX_DURATION: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReportKind {
+    Color,
+    Graphics,
+    CellSize,
+}
+
 #[derive(Default)]
 enum ReplyState {
     #[default]
@@ -46,6 +53,7 @@ enum ReplyState {
     Reply {
         escape: bool,
         until: Instant,
+        kind: ReportKind,
     },
 }
 
@@ -100,27 +108,67 @@ impl ColorReplyFilter {
             }
             _ => &[],
         };
-        if let ReplyState::Reply { escape, until } = &mut self.state {
+        if matches!(self.state, ReplyState::Reply { .. }) {
             if bytes.is_empty() {
                 return self.passthrough(event);
             }
+            let (mut escape, until, kind) = match self.state {
+                ReplyState::Reply {
+                    escape,
+                    until,
+                    kind,
+                } => (escape, until, kind),
+                _ => unreachable!(),
+            };
             for byte in bytes {
-                if *byte == 0x07 || (*escape && *byte == b'\\') {
-                    self.clear();
-                    return DecodedEvents::None;
+                match kind {
+                    ReportKind::CellSize => {
+                        if !byte.is_ascii_digit() && !matches!(*byte, b';' | b't') {
+                            self.clear();
+                            return self.push_current(event, now);
+                        }
+                        self.bytes.push(*byte);
+                        if *byte == b't' {
+                            // Only the initial bounded raw query can establish
+                            // geometry. Crossterm discards complete late CSI t
+                            // reports; event reconstruction is not a raw path.
+                            self.clear();
+                            return DecodedEvents::None;
+                        }
+                    }
+                    ReportKind::Graphics => {
+                        self.bytes.push(*byte);
+                        if *byte == 0x07 || (escape && *byte == b'\\') {
+                            super::note_graphics_reply(&self.bytes);
+                            self.clear();
+                            return DecodedEvents::None;
+                        }
+                        if escape || (*byte == 0x1b && bytes.len() == 2 && bytes[1] != b'\\') {
+                            self.clear();
+                            return self.push_current(event, now);
+                        }
+                        escape = *byte == 0x1b;
+                    }
+                    ReportKind::Color => {
+                        if *byte == 0x07 || (escape && *byte == b'\\') {
+                            self.clear();
+                            return DecodedEvents::None;
+                        }
+                        if escape || (*byte == 0x1b && bytes.len() == 2 && bytes[1] != b'\\') {
+                            self.clear();
+                            return self.push_current(event, now);
+                        }
+                        escape = *byte == 0x1b;
+                    }
                 }
-                if *escape || (*byte == 0x1b && bytes.len() == 2 && bytes[1] != b'\\') {
-                    // A new escape sequence interrupts the abandoned reply.
-                    // Reprocess its event, but never replay the old reply body.
-                    self.clear();
-                    return self.push_current(event, now);
-                }
-                *escape = *byte == 0x1b;
             }
-            self.deadline = Some((now + REPLY_IDLE_TIMEOUT).min(*until));
+            if let ReplyState::Reply { escape: slot, .. } = &mut self.state {
+                *slot = escape;
+            }
+            self.deadline = Some((now + REPLY_IDLE_TIMEOUT).min(until));
             return DecodedEvents::None;
         }
-        if self.pending.is_empty() && bytes != b"\x1b" && bytes != b"\x1b]" {
+        if self.pending.is_empty() && bytes != b"\x1b" && bytes != b"\x1b]" && bytes != b"\x1b_" {
             return DecodedEvents::One(event);
         }
         if self.bytes == b"\x1b" && bytes == b"\x1b]" {
@@ -146,6 +194,7 @@ impl ColorReplyFilter {
                 self.state = ReplyState::Reply {
                     escape: false,
                     until: now + REPLY_MAX_DURATION,
+                    kind: ReportKind::Color,
                 };
                 self.deadline = Some(now + REPLY_IDLE_TIMEOUT);
                 return DecodedEvents::None;
@@ -154,6 +203,26 @@ impl ColorReplyFilter {
                 .iter()
                 .any(|prefix| prefix.as_bytes().starts_with(&self.bytes))
             {
+                self.state = ReplyState::Prefix;
+                self.deadline = Some(now + PREFIX_TIMEOUT);
+                return DecodedEvents::None;
+            }
+            if self.bytes.starts_with(b"\x1b_G") || self.bytes.starts_with(b"\x1b[6;") {
+                let kind = if self.bytes.starts_with(b"\x1b_G") {
+                    ReportKind::Graphics
+                } else {
+                    ReportKind::CellSize
+                };
+                self.pending.clear();
+                self.state = ReplyState::Reply {
+                    escape: false,
+                    until: now + REPLY_MAX_DURATION,
+                    kind,
+                };
+                self.deadline = Some(now + REPLY_IDLE_TIMEOUT);
+                return DecodedEvents::None;
+            }
+            if b"\x1b_G".starts_with(&self.bytes) || b"\x1b[6;".starts_with(&self.bytes) {
                 self.state = ReplyState::Prefix;
                 self.deadline = Some(now + PREFIX_TIMEOUT);
                 return DecodedEvents::None;
@@ -581,5 +650,26 @@ mod tests {
         }
         let oversized = format!("\x1b]10;rgb:{}", "a".repeat(4096));
         assert!(filter_bytes(oversized.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn graphics_and_cell_size_replies_do_not_become_keys() {
+        let graphics = b"\x1b_Gi=1917;OK\x1b\\z";
+        assert_eq!(
+            filter_bytes(graphics),
+            super::super::decode_pending_input(b"z")
+        );
+        let refused = b"\x1b_Gi=1917;ENOTSUPPORTED\x1b\\";
+        assert!(filter_bytes(refused).is_empty());
+        let partial = b"\x1b_Gi=1917;OK";
+        assert!(filter_bytes(partial).is_empty());
+        let cell = b"\x1b[6;20;10t!";
+        assert_eq!(filter_bytes(cell), super::super::decode_pending_input(b"!"));
+        assert_eq!(
+            filter_bytes(b"\x1b[6;20;x!"),
+            super::super::decode_pending_input(b"x!")
+        );
+        let partial_cell = b"\x1b[6;20;10";
+        assert!(filter_bytes(partial_cell).is_empty());
     }
 }

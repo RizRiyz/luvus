@@ -5,7 +5,7 @@
 use super::*;
 use crate::app::{GeneralRow, LayoutRow, ModuleRow, SettingsTab};
 use crate::module::manifest::SettingKind;
-use ratatui::widgets::{Borders, Clear};
+use ratatui::widgets::Borders;
 
 pub(super) struct SettingsHits {
     pub modal: Rect,
@@ -95,7 +95,7 @@ pub(super) fn draw_settings(
         centered_rect(area, w, h)
     };
 
-    f.render_widget(Clear, modal);
+    f.clear_overlay(modal);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
@@ -1447,7 +1447,7 @@ pub(super) fn draw_module_setting_prompt(f: &mut RenderTarget, area: Rect, app: 
         w,
         h,
     );
-    f.render_widget(Clear, rect);
+    f.clear_overlay(rect);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))
@@ -1719,6 +1719,7 @@ fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
 
 /// Dim the whole frame toward `crust` so the dialog reads as focused.
 fn dim_backdrop(f: &mut RenderTarget, area: Rect, t: &Theme) {
+    f.cover_graphics(area);
     let buf = f.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {

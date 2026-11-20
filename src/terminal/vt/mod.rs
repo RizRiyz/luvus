@@ -384,6 +384,16 @@ pub trait VtEngine: Send {
         false
     }
 
+    /// One-shot parser deadline; no idle polling when absent.
+    fn output_deadline(&self) -> Option<std::time::Instant> {
+        None
+    }
+
+    /// Commit timed-out synchronized output. True means screen content changed.
+    fn expire_output(&mut self, _now: std::time::Instant) -> bool {
+        false
+    }
+
     /// Monotonic generation of successfully parsed terminal output.
     fn output_generation(&self) -> u64;
 
@@ -648,6 +658,35 @@ pub trait VtEngine: Send {
     /// Dump the visible screen as ANSI so it can be replayed into a fresh
     /// engine on restore (session persistence). Trailing blanks are trimmed.
     fn snapshot_ansi(&self) -> String;
+
+    /// Whether this pane currently holds Kitty image placements.
+    fn has_kitty_graphics(&self) -> bool {
+        false
+    }
+
+    /// Placements visible in the current viewport, clipped later by the pane
+    /// rectangle. `cell_*_px` sizes rows and columns when the child omitted them.
+    fn kitty_visible_placements(
+        &self,
+        _cell_width_px: u16,
+        _cell_height_px: u16,
+    ) -> Vec<crate::terminal::kitty_graphics::VisiblePlacement> {
+        Vec::new()
+    }
+
+    #[cfg(test)]
+    fn host_graphics_ready(&self) -> bool {
+        false
+    }
+
+    /// Test override for the shared foreground runtime geometry.
+    #[cfg(test)]
+    fn set_runtime_cell_pixels(&mut self, _width: u16, _height: u16) {}
+
+    /// Images this pane still stores, including ones scrolled out of view.
+    fn retained_kitty_images(&self) -> Vec<(u32, u64)> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
