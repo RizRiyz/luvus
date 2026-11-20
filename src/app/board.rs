@@ -3015,16 +3015,21 @@ enum WorkerShell {
     Posix,
     PowerShell,
     Cmd,
+    Nushell,
 }
 
 impl WorkerShell {
-    /// Unix panes always use POSIX syntax. Windows panes follow the configured
-    /// shell; anything unrecognised keeps the POSIX form.
+    /// Unix panes use POSIX syntax unless the configured shell is Nushell,
+    /// which cannot parse it. Windows panes follow the configured shell;
+    /// anything unrecognised keeps the POSIX form.
     fn of(shell: &str) -> Self {
         if cfg!(windows) {
             Self::classify(shell)
         } else {
-            Self::Posix
+            match Self::classify(shell) {
+                Self::Nushell => Self::Nushell,
+                _ => Self::Posix,
+            }
         }
     }
 
@@ -3039,6 +3044,7 @@ impl WorkerShell {
         match base.trim_end_matches(".exe") {
             "pwsh" | "powershell" => Self::PowerShell,
             "cmd" => Self::Cmd,
+            "nu" => Self::Nushell,
             _ => Self::Posix,
         }
     }
@@ -3065,6 +3071,18 @@ impl WorkerShell {
             // cmd has no escape for `"` inside quotes; Windows paths cannot
             // contain one, so soften any stray quote rather than break out.
             Self::Cmd => format!("\"{}\"", s.replace('"', "'")),
+            // Nushell raw strings expand and escape nothing; use one more `#`
+            // than the longest run following a `'` in `s`, so it cannot close
+            // the string early.
+            Self::Nushell => {
+                let mut longest = 0;
+                for (i, _) in s.match_indices('\'') {
+                    let run = s[i + 1..].chars().take_while(|&c| c == '#').count();
+                    longest = longest.max(run);
+                }
+                let hashes = "#".repeat(longest + 1);
+                format!("r{hashes}'{s}'{hashes}")
+            }
         }
     }
 
@@ -3081,10 +3099,12 @@ impl WorkerShell {
     }
 
     /// Invoke a quoted program. PowerShell parses a leading quoted string as
-    /// an expression, so it needs the call operator.
+    /// an expression, so it needs the call operator; Nushell does too, and
+    /// `run-external` takes the program as any string expression.
     fn invoke(self, program: &str) -> String {
         match self {
             Self::PowerShell => format!("& {program}"),
+            Self::Nushell => format!("run-external {program}"),
             Self::Posix | Self::Cmd => program.to_string(),
         }
     }
@@ -3098,6 +3118,7 @@ fn manual_agent_runner_line(shell: &str) -> String {
         WorkerShell::PowerShell => "\"$env:LUVUS_BIN_PATH\"",
         WorkerShell::Cmd => "\"%LUVUS_BIN_PATH%\"",
         WorkerShell::Posix => "\"$LUVUS_BIN_PATH\"",
+        WorkerShell::Nushell => "$env.LUVUS_BIN_PATH",
     };
     format!("{} __task-worker", shell.invoke(program))
 }
@@ -3128,6 +3149,13 @@ impl AutomationWorkerLaunch {
         );
         if task_id_prefix && shell == WorkerShell::Posix {
             format!("LUVUS_TASK_ID={} {command}", shell.arg(&self.task_id))
+        } else if task_id_prefix && shell == WorkerShell::Nushell {
+            // Nushell's `NAME=value` prefix rejects a quoted value, so a
+            // task id that needs quoting goes through `with-env`.
+            format!(
+                "with-env {{ LUVUS_TASK_ID: {} }} {{ {command} }}",
+                shell.arg(&self.task_id)
+            )
         } else {
             command
         }
@@ -4833,12 +4861,55 @@ mod tests {
         for shell in ["cmd", "cmd.exe", r"C:\Windows\System32\cmd.exe"] {
             assert_eq!(WorkerShell::classify(shell), WorkerShell::Cmd, "{shell}");
         }
-        for shell in ["bash", "/bin/zsh", "fish", "nu", ""] {
+        for shell in ["bash", "/bin/zsh", "fish", "nushell", ""] {
             assert_eq!(WorkerShell::classify(shell), WorkerShell::Posix, "{shell}");
         }
         if !cfg!(windows) {
             assert_eq!(WorkerShell::of("pwsh"), WorkerShell::Posix);
         }
+    }
+
+    #[test]
+    fn worker_shell_recognises_nushell_on_every_platform() {
+        for shell in [
+            "nu",
+            "/run/current-system/sw/bin/nu",
+            "/nix/store/abc-nushell-0.108.0/bin/nu",
+            r"C:\Program Files\nu\bin\nu.exe",
+        ] {
+            assert_eq!(
+                WorkerShell::classify(shell),
+                WorkerShell::Nushell,
+                "{shell}"
+            );
+            assert_eq!(WorkerShell::of(shell), WorkerShell::Nushell, "{shell}");
+        }
+    }
+
+    #[test]
+    fn nushell_quotes_with_raw_strings_that_cannot_close_early() {
+        assert_eq!(
+            WorkerShell::Nushell.quote("/opt/my luvus"),
+            "r#'/opt/my luvus'#"
+        );
+        assert_eq!(WorkerShell::Nushell.quote("it's $x"), "r#'it's $x'#");
+        assert_eq!(WorkerShell::Nushell.quote("a'#b'##c"), "r###'a'#b'##c'###");
+        assert_eq!(WorkerShell::Nushell.quote(""), "r#''#");
+    }
+
+    #[test]
+    fn automation_worker_line_for_nushell_uses_run_external() {
+        let launch = worker_launch("/opt/my luvus/it's/luvus");
+        assert_eq!(
+            launch.line_for(WorkerShell::Nushell, true),
+            "with-env { LUVUS_TASK_ID: t1 } { run-external r#'/opt/my luvus/it's/luvus'# __automation-worker t1 automation_1 run_1 }"
+        );
+        let mut odd = worker_launch("/bin/luvus");
+        odd.task_id = "t 1".into();
+        assert_eq!(
+            odd.line_for(WorkerShell::Nushell, true),
+            "with-env { LUVUS_TASK_ID: r#'t 1'# } { run-external r#'/bin/luvus'# __automation-worker r#'t 1'# automation_1 run_1 }"
+        );
     }
 
     #[test]
@@ -4918,6 +4989,10 @@ mod tests {
         assert_eq!(
             manual_agent_runner_line("bash"),
             "\"$LUVUS_BIN_PATH\" __task-worker"
+        );
+        assert_eq!(
+            manual_agent_runner_line("/run/current-system/sw/bin/nu"),
+            "run-external $env.LUVUS_BIN_PATH __task-worker"
         );
     }
 
