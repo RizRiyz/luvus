@@ -63,10 +63,10 @@ pub struct SettingsUi {
     /// Candidate prefix captured once and waiting for the same chord again.
     /// Nothing is persisted until confirmation succeeds.
     pub prefix_candidate: Option<String>,
-    /// First visual row shown in the Layout tab. Persisting this while the modal
-    /// is open prevents a visible dock/bar button click from re-anchoring the
-    /// list around its newly selected row.
-    pub layout_scroll: usize,
+    /// First visual row shown in the scrolling tabs (General and Layout).
+    /// Persisting this while the modal is open prevents a visible button click
+    /// from re-anchoring the list around its newly selected row.
+    pub list_scroll: usize,
     /// In the Keys tab: capturing the next key press to rebind `cursor`'s command.
     pub capturing: bool,
 }
@@ -119,6 +119,7 @@ pub enum GeneralRow {
     /// Open a new tab/split at the workspace root instead of inheriting the
     /// focused pane's cwd.
     NewPaneToWorkspaceRoot,
+    FocusFollowsMouse,
     /// Show each agent's live session title in the AGENTS sidebar.
     AgentTitle,
     SoundStyle,
@@ -152,6 +153,7 @@ impl App {
             GeneralRow::CheckUpdates,
             GeneralRow::ResumeFlags,
             GeneralRow::NewPaneToWorkspaceRoot,
+            GeneralRow::FocusFollowsMouse,
             GeneralRow::AgentTitle,
             GeneralRow::SoundStyle,
             GeneralRow::SoundDone,
@@ -167,7 +169,7 @@ impl App {
     /// Preserve the existing divider above `AgentTitle`; adding a Commander
     /// setting before it shifts that boundary by one.
     pub fn general_section_start(&self) -> usize {
-        8
+        9
     }
 
     /// The Layout tab's ordered selectable rows (docs/29). The first index of the
@@ -243,7 +245,7 @@ impl App {
             tab: SettingsTab::General,
             cursor: 0,
             prefix_candidate: None,
-            layout_scroll: 0,
+            list_scroll: 0,
             capturing: false,
         });
     }
@@ -472,6 +474,7 @@ impl App {
                     Some(LayoutRow::SidebarWidth)
                         | Some(LayoutRow::RightWidth)
                         | Some(LayoutRow::MobileWidth)
+                        | Some(LayoutRow::Scrollback)
                         | Some(LayoutRow::DiffContext)
                         | Some(LayoutRow::Dock(_))
                         | Some(LayoutRow::Bar(_))
@@ -484,6 +487,8 @@ impl App {
                     self.general_rows().get(i),
                     Some(GeneralRow::FileOpen)
                         | Some(GeneralRow::FileClick)
+                        | Some(GeneralRow::ShiftEnter)
+                        | Some(GeneralRow::CommanderWorking)
                         | Some(GeneralRow::SoundStyle)
                 ),
                 // Number/enum module settings likewise only move via `‹ ›`.
@@ -509,7 +514,7 @@ impl App {
             ui.tab = tab;
             ui.cursor = cursor;
             ui.prefix_candidate = None;
-            ui.layout_scroll = 0;
+            ui.list_scroll = 0;
             ui.capturing = false;
         }
     }
@@ -1372,6 +1377,10 @@ impl App {
                     !self.config.layout.new_pane_to_workspace_root;
                 self.persist_config();
             }
+            Some(GeneralRow::FocusFollowsMouse) => {
+                self.config.layout.focus_follows_mouse = !self.config.layout.focus_follows_mouse;
+                self.persist_config();
+            }
             Some(GeneralRow::AgentTitle) => {
                 self.config.layout.agent_title = !self.config.layout.agent_title;
                 self.persist_config();
@@ -1704,7 +1713,7 @@ mod tests {
         terminal
             .draw(|frame| crate::ui::render(frame, &mut app))
             .unwrap();
-        let before = app.settings.as_ref().unwrap().layout_scroll;
+        let before = app.settings.as_ref().unwrap().list_scroll;
         assert!(before > 0, "the regression requires a scrolled Layout list");
 
         let rows = app.layout_rows();
@@ -1727,7 +1736,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            app.settings.as_ref().unwrap().layout_scroll,
+            app.settings.as_ref().unwrap().list_scroll,
             before,
             "clicking a visible placement button must not re-anchor the modal"
         );
@@ -1928,6 +1937,29 @@ mod tests {
         assert!(!old.layout.new_pane_to_workspace_root);
     }
 
+    #[test]
+    fn focus_follows_mouse_toggle_persists() {
+        let _env = crate::persist::test_env("focus-follows-mouse");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(80, 24, tx).unwrap();
+        assert!(!app.config.layout.focus_follows_mouse);
+        let old: crate::config::Config = serde_json::from_str(r#"{"layout":{}}"#).unwrap();
+        assert!(!old.layout.focus_follows_mouse);
+
+        let row = app
+            .general_rows()
+            .iter()
+            .position(|r| *r == GeneralRow::FocusFollowsMouse)
+            .unwrap();
+        assert!(row < app.general_section_start());
+        app.adjust_general(row, 1);
+        assert!(app.config.layout.focus_follows_mouse);
+        app.flush_config_for_test(&rx);
+        assert!(crate::config::load().layout.focus_follows_mouse);
+        app.adjust_general(row, 1);
+        assert!(!app.config.layout.focus_follows_mouse);
+    }
+
     // The General tab is the two file choosers plus the Notifications section:
     // the selected sound style, two persisted event toggles, and separate test
     // rows for the completion and attention cues.
@@ -1940,7 +1972,7 @@ mod tests {
         if let Some(ui) = app.settings.as_mut() {
             ui.tab = SettingsTab::General;
         }
-        assert_eq!(app.settings_rows(SettingsTab::General), 14);
+        assert_eq!(app.settings_rows(SettingsTab::General), 15);
         let rows = app.general_rows();
         assert_eq!(rows[0], GeneralRow::FileOpen, "file-open leads the tab");
         assert_eq!(
@@ -2366,6 +2398,106 @@ mod tests {
             config::FILE_CLICK_TAB,
             "the arrow is what steps the value"
         );
+    }
+
+    /// The scrollback slider is drawn with `‹ ›` arrows like the width sliders,
+    /// so a click on its row body must only select it. It was missing from the
+    /// Layout slider list, so the click stepped the budget and persisted it.
+    #[test]
+    fn clicking_the_scrollback_row_body_selects_without_changing_it() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-scrollback-body-click");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::Layout;
+            ui.cursor = 0;
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        let i = app
+            .layout_rows()
+            .iter()
+            .position(|row| matches!(row, LayoutRow::Scrollback))
+            .expect("the Layout tab has a scrollback row");
+        let rect = app
+            .settings_ctl_rects
+            .iter()
+            .find(|(index, _)| *index == i)
+            .map(|(_, rect)| *rect)
+            .expect("the scrollback row has a control rect");
+        let before = app.config.layout.scrollback_bytes;
+
+        app.handle_settings_click(rect.x + 2, rect.y);
+
+        assert_eq!(app.settings.as_ref().unwrap().cursor, i);
+        assert_eq!(app.config.layout.scrollback_bytes, before);
+        assert_eq!(crate::config::load().layout.scrollback_bytes, before);
+    }
+
+    /// The modified-Enter and Commander sliders follow the same rule as the
+    /// file choosers: a click on the row body selects them, only the arrows
+    /// step the value. Both were missing from the slider list.
+    #[test]
+    fn clicking_legacy_slider_row_bodies_selects_without_changing_them() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let _env = crate::persist::test_env("settings-slider-body-click-legacy");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(100, 30, tx).unwrap();
+        app.open_settings();
+        if let Some(ui) = app.settings.as_mut() {
+            ui.tab = SettingsTab::General;
+            ui.cursor = 0;
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+
+        for row in [GeneralRow::ShiftEnter, GeneralRow::CommanderWorking] {
+            let i = app
+                .general_rows()
+                .iter()
+                .position(|r| *r == row)
+                .unwrap_or_else(|| panic!("{row:?} is on the General tab"));
+            let rect = app
+                .settings_ctl_rects
+                .iter()
+                .find(|(index, _)| *index == i)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("{row:?} has a control rect"));
+            let before = (
+                app.config.layout.shift_enter.clone(),
+                app.config.commander_working_policy,
+            );
+
+            app.handle_settings_click(rect.x + 2, rect.y);
+
+            assert_eq!(
+                app.settings.as_ref().unwrap().cursor,
+                i,
+                "{row:?} body click moves the cursor to it"
+            );
+            assert_eq!(
+                (
+                    app.config.layout.shift_enter.clone(),
+                    app.config.commander_working_policy
+                ),
+                before,
+                "{row:?} body click does not step the value"
+            );
+            let loaded = crate::config::load();
+            assert_eq!(
+                loaded.layout.shift_enter, before.0,
+                "{row:?} body click does not persist a change"
+            );
+            assert_eq!(
+                loaded.commander_working_policy, before.1,
+                "{row:?} body click does not persist a change"
+            );
+        }
     }
 
     /// The General tab's modified-Enter fallback chooser cycles through the
