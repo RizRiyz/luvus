@@ -4701,8 +4701,8 @@ impl App {
     /// Child-set foreground and background stay in the terminal engine. The
     /// saved theme is restored without writing an automatic follow choice.
     pub(crate) fn clear_host_terminal_colors(&mut self) -> bool {
-        let had_host =
-            self.host_terminal_colors.take().is_some() || self.probed_appearance.take().is_some();
+        let had_colors = self.host_terminal_colors.take().is_some();
+        let had_probe = self.probed_appearance.take().is_some();
         self.followed_theme = None;
         let theme_id = self.config.theme.clone();
         let restored = if theme_id == "terminal" {
@@ -4710,9 +4710,10 @@ impl App {
         } else if let Some(theme) = self.theme_registry.theme(&theme_id) {
             self.set_effective_theme(&theme_id, theme)
         } else {
-            false
+            let theme = self.theme_registry.theme_or_default(&theme_id);
+            self.set_effective_theme(&theme_id, theme)
         };
-        had_host || restored
+        had_colors || had_probe || restored
     }
 
     pub(crate) fn effective_theme_id(&self) -> &str {
@@ -10391,6 +10392,80 @@ mod tests {
     use std::sync::mpsc;
 
     use crate::persist::TEST_ENV_LOCK as ENV_GUARD;
+
+    fn host_report(bg: [u8; 3]) -> crate::terminal::theme_probe::TerminalColors {
+        crate::terminal::theme_probe::TerminalColors {
+            fg: [0xee, 0xee, 0xee],
+            bg,
+            palette: [[0; 3]; 16],
+            palette_mask: 1,
+        }
+    }
+
+    #[test]
+    fn clearing_host_colors_drops_the_probed_pane_background() {
+        let _env = crate::persist::test_env("theme-clear-probe");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("terminal");
+        let dark = host_report([0x11, 0x22, 0x33]);
+        assert!(app.apply_terminal_colors(&dark));
+        assert!(app.probed_appearance.is_some());
+        app.clear_host_terminal_colors();
+        assert!(app.host_terminal_colors.is_none());
+        assert!(
+            app.probed_appearance.is_none(),
+            "clearing host colors must drop the probed background too"
+        );
+        assert_ne!(app.pane_appearance.background, dark.bg);
+        assert_eq!(
+            app.pane_appearance.background,
+            crate::terminal::appearance::DEFAULT_BG
+        );
+        assert!(app.pane_appearance.host.is_none());
+        assert_eq!(app.config.theme, "terminal");
+    }
+
+    #[test]
+    fn clearing_host_colors_restores_a_registered_manual_theme() {
+        let _env = crate::persist::test_env("theme-clear-registered");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("noir");
+        let dark = host_report([0x11, 0x22, 0x33]);
+        assert!(app.apply_terminal_colors(&dark));
+        app.clear_host_terminal_colors();
+        let noir = app.theme_registry.theme("noir").unwrap();
+        assert_eq!(app.config.theme, "noir");
+        assert_eq!(app.theme, noir);
+        assert!(app.probed_appearance.is_none());
+        assert_ne!(app.pane_appearance.background, dark.bg);
+        assert!(app.pane_appearance.host.is_none());
+    }
+
+    #[test]
+    fn clearing_host_colors_uses_the_default_when_the_saved_theme_is_gone() {
+        let _env = crate::persist::test_env("theme-clear-missing");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("noir");
+        let dark = host_report([0x11, 0x22, 0x33]);
+        assert!(app.apply_terminal_colors(&dark));
+        app.config.theme = "missing-theme".into();
+        app.clear_host_terminal_colors();
+        let fallback = app.theme_registry.theme_or_default("missing-theme");
+        assert_eq!(app.config.theme, "missing-theme");
+        assert_eq!(app.theme, fallback);
+        assert!(app.probed_appearance.is_none());
+        assert_eq!(
+            app.pane_appearance,
+            child_appearance(&app.theme_registry, "missing-theme", &fallback, None)
+        );
+        assert_ne!(app.pane_appearance.background, dark.bg);
+    }
 
     #[test]
     fn worktree_create_pending_is_carried_in_the_error_message() {
