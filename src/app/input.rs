@@ -1277,7 +1277,21 @@ impl App {
                     .as_mut()
                     .filter(|f| f.instance == instance && f.generation == generation)
                 {
+                    let selected = filter.selected_path.clone();
                     filter.rows = rows;
+                    if let Some(selected) = selected {
+                        if let Some(index) = filter.rows.iter().position(|row| row.path == selected)
+                        {
+                            self.file_tree.cursor = index;
+                            filter.activation_blocked = false;
+                        } else {
+                            filter.activation_blocked = true;
+                        }
+                    } else {
+                        self.file_tree.cursor = 0;
+                        filter.selected_path = filter.rows.first().map(|row| row.path.clone());
+                        filter.activation_blocked = filter.selected_path.is_none();
+                    }
                     filter.partial = partial;
                     filter.loading = false;
                     true
@@ -1567,7 +1581,12 @@ impl App {
             Self::handle_pane_rename_key
         } else {
             if self.files_focused && self.files_mode == crate::diff::FilesMode::Files {
-                if let Some(filter) = self.file_tree.filter.as_mut() {
+                if let Some(filter) = self
+                    .file_tree
+                    .filter
+                    .as_mut()
+                    .filter(|filter| filter.editing)
+                {
                     if self.file_menu.is_none() {
                         filter.append(s);
                         self.file_tree.cursor = 0;
@@ -1575,8 +1594,30 @@ impl App {
                     }
                     return true;
                 }
+                if self.file_search.editing() {
+                    self.file_search.append(s);
+                    self.locate_file_search(true, true);
+                    return true;
+                }
             }
-            return false;
+            if self.files_focused && self.files_mode == crate::diff::FilesMode::Diff {
+                if self.diff.list_search.editing() {
+                    self.diff.list_search.append(s);
+                    self.locate_diff_search(true, true);
+                    return true;
+                }
+                if self.diff.list_query.editing() {
+                    self.diff.list_query.append(s);
+                    self.diff.rebuild_rows();
+                    return true;
+                }
+            }
+            if self.sidebar_query_paste(s) {
+                return true;
+            }
+            // A focused FILES or DIFF list owns paste even after its query is
+            // committed. Falling through would type into the pane underneath.
+            return self.files_focused || self.sidebar_focus.is_some();
         };
         for c in s.chars().filter(|c| !c.is_control()) {
             handler(self, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
@@ -2567,7 +2608,13 @@ impl App {
             if let Some((i, _)) = self.tab_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_tab_menu(*i, c, r);
             } else if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
-                self.open_ws_menu(*i, c, r);
+                if self
+                    .workspaces
+                    .get(*i)
+                    .is_some_and(|ws| self.workspace_hit_ids.get(i) == Some(&ws.id))
+                {
+                    self.open_ws_menu(*i, c, r);
+                }
             } else if let Some((id, _)) = self.agent_rects.iter().find(|(_, rect)| hit(*rect)) {
                 self.open_agent_menu(AgentTarget::Live(*id), c, r); // live agent → Close
             } else if let Some((id, _)) = self.automation_rects.iter().find(|(_, rect)| hit(*rect))
@@ -2579,11 +2626,22 @@ impl App {
                     self.open_agent_menu(AgentTarget::Automation(id), c, r);
                 }
             } else if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
-                self.open_agent_menu(AgentTarget::Session(*i), c, r); // session → Resume/Close
+                if self
+                    .resumable
+                    .get(*i)
+                    .is_some_and(|session| self.session_hit_ids.get(i) == Some(&session.session_id))
+                {
+                    self.open_agent_menu(AgentTarget::Session(*i), c, r);
+                } // session → Resume/Close
             } else if let Some((row, _)) = self.diff_row_rects.iter().find(|(_, rect)| hit(*rect)) {
-                self.open_diff_menu(*row, c, r);
+                if self.diff_hit_is_current(*row) {
+                    self.open_diff_menu(*row, c, r);
+                }
             } else if let Some((i, _)) = self.file_tree_rects.iter().find(|(_, rect)| hit(*rect)) {
-                self.open_file_menu(*i, c, r); // FILES-dock row → new/rename/delete (docs/38)
+                let i = *i;
+                if self.file_hit_is_current(i) {
+                    self.open_file_menu(i, c, r);
+                }
             } else if let Some(automation) =
                 self.orch_hits
                     .iter()
@@ -3187,6 +3245,32 @@ impl App {
                 return;
             }
         }
+        if self.workspace_clear_rect.is_some_and(hit) {
+            if self.workspace_clear_is_search {
+                self.workspace_search.clear_committed();
+                self.workspace_search_miss = false;
+            } else {
+                self.workspace_query.clear_committed();
+            }
+            self.sidebar_focus = Some(SidebarListFocus::Workspaces);
+            self.files_focused = false;
+            let rows = self.filtered_workspace_rows();
+            self.align_workspace_cursor(&rows);
+            return;
+        }
+        if self.agent_clear_rect.is_some_and(hit) {
+            if self.agent_clear_is_search {
+                self.agent_search.clear_committed();
+                self.agent_search_miss = false;
+            } else {
+                self.agent_query.clear_committed();
+            }
+            self.sidebar_focus = Some(SidebarListFocus::Agents);
+            self.files_focused = false;
+            let rows = self.filtered_agent_targets();
+            self.align_agent_cursor(&rows);
+            return;
+        }
         if let Some((i, _)) = self.tab_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
             if i >= self.ws().tabs.len() {
@@ -3224,6 +3308,13 @@ impl App {
         // Clicking a resumable session row reopens it into a pane.
         if let Some((i, _)) = self.session_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
+            if !self
+                .resumable
+                .get(i)
+                .is_some_and(|session| self.session_hit_ids.get(&i) == Some(&session.session_id))
+            {
+                return;
+            }
             self.sidebar_focus = None;
             self.resume_session(i);
             return;
@@ -3232,8 +3323,34 @@ impl App {
             self.set_files_mode(*mode);
             return;
         }
+        if self.file_search_clear_rect.is_some_and(hit) {
+            self.file_search.clear_committed();
+            self.file_search_miss = false;
+            self.file_located = None;
+            self.files_focused = true;
+            return;
+        }
+        if self.file_filter_clear_rect.is_some_and(hit) {
+            self.file_tree.clear_filter();
+            self.files_focused = true;
+            return;
+        }
+        if self.diff_clear_rect.is_some_and(hit) {
+            if self.diff_clear_is_search {
+                self.diff.list_search.clear_committed();
+                self.diff.list_search_miss = false;
+            } else {
+                self.diff.list_query.clear_committed();
+                self.diff.rebuild_rows();
+            }
+            self.files_focused = true;
+            return;
+        }
         if let Some((row, _)) = self.diff_row_rects.iter().find(|(_, rect)| hit(*rect)) {
             let row = *row;
+            if !self.diff_hit_is_current(row) {
+                return;
+            }
             let target = if m.modifiers.contains(KeyModifiers::SHIFT) {
                 crate::app::files::OpenTarget::Pane
             } else {
@@ -3249,6 +3366,9 @@ impl App {
         // read-only pane beside the focus, and never configurable.
         if let Some((i, _)) = self.file_tree_rects.iter().find(|(_, rect)| hit(*rect)) {
             let i = *i;
+            if !self.file_hit_is_current(i) {
+                return;
+            }
             let target = if m.modifiers.contains(KeyModifiers::SHIFT) {
                 crate::app::files::OpenTarget::Pane
             } else {
@@ -3289,7 +3409,14 @@ impl App {
             return;
         }
         if let Some((i, _)) = self.ws_rects.iter().find(|(_, rect)| hit(*rect)) {
-            let i = (*i).min(self.workspaces.len().saturating_sub(1));
+            let i = *i;
+            if !self
+                .workspaces
+                .get(i)
+                .is_some_and(|ws| self.workspace_hit_ids.get(&i) == Some(&ws.id))
+            {
+                return;
+            }
             self.sidebar_focus = None;
             let tab = self.workspaces[i].active_tab;
             let pane = self.workspaces[i].tabs[tab].layout.focus;
@@ -5286,10 +5413,41 @@ impl App {
         // Editing a FILES query has the same precedence as other text inputs.
         if self.files_focused
             && self.files_mode == crate::diff::FilesMode::Files
-            && self.file_tree.filter.is_some()
+            && (self
+                .file_tree
+                .filter
+                .as_ref()
+                .is_some_and(|filter| filter.editing)
+                || self.file_search.editing())
             && !self.prefix.matches(&key)
         {
             return self.handle_file_tree_key(key);
+        }
+        if self.files_focused
+            && self.files_mode == crate::diff::FilesMode::Diff
+            && (self.diff.list_query.editing() || self.diff.list_search.editing())
+            && !self.prefix.matches(&key)
+        {
+            return self.handle_diff_list_key(key);
+        }
+        // Editing a dock query owns ordinary characters before direct
+        // shortcuts, matching the FILES filter. The prefix still wins.
+        if let Some(focus) = self.sidebar_focus {
+            let editing = match focus {
+                SidebarListFocus::Workspaces => {
+                    self.workspace_query.editing() || self.workspace_search.editing()
+                }
+                SidebarListFocus::Agents => {
+                    self.agent_query.editing() || self.agent_search.editing()
+                }
+            };
+            if editing && !self.prefix.matches(&key) {
+                match focus {
+                    SidebarListFocus::Workspaces => self.handle_workspaces_key(key),
+                    SidebarListFocus::Agents => self.handle_agents_key(key),
+                };
+                return true;
+            }
         }
         // Explicit direct shortcuts are the only normal-mode keys Luvus takes
         // before pane/dashboard dispatch. The configured prefix retains
@@ -5307,6 +5465,10 @@ impl App {
         // WORKSPACES/AGENTS dock focus is explicit and separate from pane focus.
         if let Some(focus) = self.sidebar_focus {
             if self.prefix.matches(&key) {
+                self.workspace_query.commit();
+                self.agent_query.commit();
+                self.workspace_search.commit();
+                self.agent_search.commit();
                 self.sidebar_focus = None;
                 self.mode = Mode::Prefix;
             } else {
@@ -5322,6 +5484,9 @@ impl App {
         // keys never leak into the pane until Esc/q returns control to it.
         if self.files_focused {
             if self.prefix.matches(&key) {
+                self.file_search.commit();
+                self.diff.list_query.commit();
+                self.diff.list_search.commit();
                 self.files_focused = false;
                 self.mode = Mode::Prefix;
             } else {
@@ -6160,16 +6325,36 @@ mod tests {
         app.files_focused = true;
         app.files_mode = crate::diff::FilesMode::Files;
         app.handle_event(phase_event(
-            KeyCode::Char('f'),
+            KeyCode::Char('\\'),
             KeyModifiers::NONE,
             KeyEventKind::Press,
         ));
         app.handle_event(phase_event(
-            KeyCode::Char('f'),
+            KeyCode::Char('\\'),
             KeyModifiers::NONE,
             KeyEventKind::Release,
         ));
-        assert!(app.file_tree.filter.is_some(), "f opens the FILES filter");
+        assert!(
+            app.file_tree.filter.is_some(),
+            "backslash opens the FILES filter"
+        );
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        app.file_tree.filter.as_mut().unwrap().editing = false;
+        assert!(app.handle_event(crate::event::AppEvent::Paste("secret".into())));
+        assert!(
+            input_rx.try_recv().is_err(),
+            "committed FILES focus consumes paste"
+        );
+        app.file_tree.filter = Some(crate::files::filter::FileFilter::start(
+            app.file_tree.root().to_path_buf(),
+            std::sync::mpsc::channel().0,
+            (0, 0),
+        ));
         app.handle_event(phase_event(
             KeyCode::Char('r'),
             KeyModifiers::NONE,

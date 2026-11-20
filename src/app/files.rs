@@ -77,7 +77,12 @@ impl App {
             return;
         }
         let cwd = self.ws().cwd.clone();
+        let root_changed = self.file_tree.root() != cwd.as_path();
         self.file_tree.set_root(cwd);
+        if root_changed {
+            self.file_located = None;
+            self.file_search_origin = None;
+        }
         let dirty_views: Vec<_> = self
             .layout()
             .leaves()
@@ -575,9 +580,10 @@ impl App {
         } else {
             0
         };
+        let search_rows = u16::from(self.file_search.editing() || self.file_search.active());
         self.files_area
             .height
-            .saturating_sub(crate::ui::DOCK_HEADER_ROWS.saturating_add(filter_rows))
+            .saturating_sub(crate::ui::DOCK_HEADER_ROWS.saturating_add(filter_rows + search_rows))
             .max(1) as usize
     }
 
@@ -658,63 +664,283 @@ impl App {
 
     /// Navigate the FILES tree while it owns keyboard focus. Returns to the
     /// pane before opening a file so its native view receives subsequent keys.
-    pub fn handle_file_tree_key(&mut self, key: KeyEvent) -> bool {
+    pub(crate) fn locate_file_search(&mut self, forward: bool, inclusive: bool) {
+        if !self.file_search.active() {
+            self.file_search_miss = false;
+            return;
+        }
+        let fuzzy = self.file_search.fuzzy();
+        let root = self.file_tree.root().to_path_buf();
+        let rows = self.file_tree.visible_rows().to_vec();
+        let found = crate::search::locate_match(
+            rows.len(),
+            self.file_tree.cursor,
+            forward,
+            inclusive,
+            |index| {
+                let row = &rows[index];
+                let path = row
+                    .path
+                    .strip_prefix(&root)
+                    .unwrap_or(&row.path)
+                    .display()
+                    .to_string();
+                let fields = [
+                    crate::search::PreparedText::new(&row.name),
+                    crate::search::PreparedText::new(&path),
+                ];
+                crate::search::prepared_hit(&fuzzy, &fields)
+            },
+        );
+        if let Some(index) = found {
+            self.file_tree.cursor = index;
+            self.file_located = Some(rows[index].path.clone());
+            if let Some(filter) = self.file_tree.filter.as_mut() {
+                filter.selected_path = Some(rows[index].path.clone());
+                filter.activation_blocked = false;
+            }
+            self.file_search_miss = false;
+            self.reveal_file_cursor();
+        } else {
+            self.file_search_miss = true;
+        }
+    }
+
+    fn note_file_search_move(&mut self) {
+        let cursor = self.file_tree.cursor;
         if let Some(filter) = self.file_tree.filter.as_mut() {
+            filter.selected_path = filter.rows.get(cursor).map(|row| row.path.clone());
+            filter.activation_blocked = filter.selected_path.is_none();
+        }
+        let cursor = self.file_tree.cursor;
+        self.file_located = self
+            .file_tree
+            .visible_rows()
+            .get(cursor)
+            .map(|row| row.path.clone());
+    }
+
+    pub(crate) fn file_hit_is_current(&mut self, index: usize) -> bool {
+        let Some(path) = self.file_hit_paths.get(&index) else {
+            return false;
+        };
+        self.file_tree
+            .visible_rows()
+            .get(index)
+            .is_some_and(|row| &row.path == path)
+    }
+
+    fn file_search_target_ok(&mut self) -> bool {
+        if let Some(filter) = self.file_tree.filter.as_ref() {
+            return !filter.loading
+                && !filter.activation_blocked
+                && filter
+                    .rows
+                    .get(self.file_tree.cursor)
+                    .is_some_and(|row| filter.selected_path.as_ref() == Some(&row.path));
+        }
+        let Some(path) = &self.file_located else {
+            return !self.file_search.active();
+        };
+        if let Some(index) = self
+            .file_tree
+            .visible_rows()
+            .iter()
+            .position(|row| &row.path == path)
+        {
+            self.file_tree.cursor = index;
+            self.reveal_file_cursor();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn handle_file_tree_key(&mut self, key: KeyEvent) -> bool {
+        if self
+            .file_tree
+            .filter
+            .as_ref()
+            .is_some_and(|filter| filter.editing)
+        {
+            let filter = self.file_tree.filter.as_mut().expect("editing filter");
+            if super::dock_filter::is_query_clear(&key) {
+                crate::search::clear_query(&mut filter.query);
+                filter.recompute();
+                self.file_tree.cursor = 0;
+                self.file_tree.scroll = 0;
+                return true;
+            }
             match key.code {
                 KeyCode::Esc => self.file_tree.clear_filter(),
-                KeyCode::Enter => self.open_file_menu_for_keyboard(),
+                KeyCode::Tab => {
+                    filter.editing = false;
+                    self.note_file_search_move();
+                }
+                KeyCode::Enter => {
+                    if self.file_search_target_ok() {
+                        self.open_file_menu_for_keyboard();
+                    }
+                }
                 KeyCode::Backspace => {
-                    filter.query.pop();
+                    crate::search::backspace_query(&mut filter.query);
                     filter.recompute();
                     self.file_tree.cursor = 0;
                     self.file_tree.scroll = 0;
                 }
-                KeyCode::Char(ch)
-                    if !super::keys::is_ctrl_chord(key.modifiers)
-                        && (!key.modifiers.contains(KeyModifiers::ALT)
-                            || key.modifiers.contains(KeyModifiers::CONTROL)) =>
-                {
+                KeyCode::Char(ch) if super::dock_filter::query_text_char(&key) == Some(ch) => {
                     filter.append(&ch.to_string());
                     self.file_tree.cursor = 0;
                     self.file_tree.scroll = 0;
                 }
-                KeyCode::Up => self.move_file_cursor(-1),
-                KeyCode::Down => self.move_file_cursor(1),
-                KeyCode::PageUp => self.move_file_cursor(-(self.file_tree_page() as isize)),
-                KeyCode::PageDown => self.move_file_cursor(self.file_tree_page() as isize),
+                KeyCode::Up => {
+                    self.move_file_cursor(-1);
+                    self.note_file_search_move();
+                }
+                KeyCode::Down => {
+                    self.move_file_cursor(1);
+                    self.note_file_search_move();
+                }
+                KeyCode::PageUp => {
+                    self.move_file_cursor(-(self.file_tree_page() as isize));
+                    self.note_file_search_move();
+                }
+                KeyCode::PageDown => {
+                    self.move_file_cursor(self.file_tree_page() as isize);
+                    self.note_file_search_move();
+                }
                 _ => {}
             }
             return true;
         }
-        let page = self.file_tree_page() as isize;
-        match key.code {
-            KeyCode::Char('f') if key.modifiers == KeyModifiers::NONE => {
-                self.file_tree.filter = Some(crate::files::filter::FileFilter::start(
-                    self.file_tree.root().to_path_buf(),
-                    self.app_tx.clone(),
-                    (self.file_tree.cursor, self.file_tree.scroll),
-                ));
-                self.file_tree.cursor = 0;
-                self.file_tree.scroll = 0;
+        if self.file_search.editing() {
+            match super::dock_filter::edit_query(&mut self.file_search, &key) {
+                super::dock_filter::QueryEdit::Updated => self.locate_file_search(true, true),
+                super::dock_filter::QueryEdit::Canceled => {
+                    self.file_located = self.file_search_origin.clone();
+                    self.file_search_miss = false;
+                    if let Some(path) = self.file_located.clone() {
+                        if let Some(index) = self
+                            .file_tree
+                            .visible_rows()
+                            .iter()
+                            .position(|row| row.path == path)
+                        {
+                            self.file_tree.cursor = index;
+                            if let Some(filter) = self.file_tree.filter.as_mut() {
+                                filter.selected_path = Some(path);
+                                filter.activation_blocked = false;
+                            }
+                            self.reveal_file_cursor();
+                        } else if let Some(filter) = self.file_tree.filter.as_mut() {
+                            filter.activation_blocked = true;
+                        }
+                    }
+                }
+                super::dock_filter::QueryEdit::Committed
+                | super::dock_filter::QueryEdit::Ignored => {}
             }
-            KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
-            KeyCode::Up | KeyCode::Char('k') => self.move_file_cursor(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_file_cursor(1),
-            KeyCode::PageUp => self.move_file_cursor(-page),
-            KeyCode::PageDown => self.move_file_cursor(page),
+            return true;
+        }
+        let page = self.file_tree_page() as isize;
+        if super::is_key_repeat(&key)
+            && (super::dock_filter::is_list_search_key(&key)
+                || super::dock_filter::is_list_filter_key(&key))
+        {
+            return true;
+        }
+        if super::dock_filter::is_list_search_key(&key) {
+            let cursor = self.file_tree.cursor;
+            self.file_search_origin = self
+                .file_tree
+                .visible_rows()
+                .get(cursor)
+                .map(|row| row.path.clone());
+            self.file_search_miss = false;
+            self.file_search.begin();
+            return true;
+        }
+        if super::dock_filter::is_list_filter_key(&key) {
+            if let Some(filter) = self.file_tree.filter.as_mut() {
+                filter.editing = true;
+                return true;
+            }
+            self.file_tree.filter = Some(crate::files::filter::FileFilter::start(
+                self.file_tree.root().to_path_buf(),
+                self.app_tx.clone(),
+                (self.file_tree.cursor, self.file_tree.scroll),
+            ));
+            self.file_tree.cursor = 0;
+            self.file_tree.scroll = 0;
+            return true;
+        }
+        if self.file_search.active() {
+            if let Some(forward) = super::dock_filter::search_step_key(&key) {
+                self.locate_file_search(forward, false);
+                return true;
+            }
+        }
+        match key.code {
+            KeyCode::Esc => {
+                if self.file_search.active() {
+                    self.file_search.clear_committed();
+                    self.file_search_miss = false;
+                    self.file_located = None;
+                } else if self.file_tree.filter.is_some() {
+                    self.file_tree.clear_filter();
+                } else {
+                    self.files_focused = false;
+                }
+            }
+            KeyCode::Char('q') => self.files_focused = false,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_file_cursor(-1);
+                self.note_file_search_move();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_file_cursor(1);
+                self.note_file_search_move();
+            }
+            KeyCode::PageUp => {
+                self.move_file_cursor(-page);
+                self.note_file_search_move();
+            }
+            KeyCode::PageDown => {
+                self.move_file_cursor(page);
+                self.note_file_search_move();
+            }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.file_tree.cursor = 0;
                 self.reveal_file_cursor();
+                self.note_file_search_move();
             }
             KeyCode::End | KeyCode::Char('G') => {
                 let len = self.file_tree.visible_rows().len();
                 self.file_tree.cursor = len.saturating_sub(1);
                 self.reveal_file_cursor();
+                self.note_file_search_move();
             }
-            KeyCode::Left | KeyCode::Char('h') => self.collapse_file_row_or_parent(),
-            KeyCode::Right | KeyCode::Char('l') => self.expand_file_row_or_child(),
-            KeyCode::Char('a') => self.open_file_menu_for_keyboard(),
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.collapse_file_row_or_parent();
+                self.note_file_search_move();
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.expand_file_row_or_child();
+                self.note_file_search_move();
+            }
+            KeyCode::Char('a') => {
+                if self.file_search_target_ok() {
+                    self.open_file_menu_for_keyboard();
+                }
+            }
             KeyCode::Enter => {
+                if !self.file_search_target_ok() {
+                    return true;
+                }
+                if self.file_tree.filter.is_some() {
+                    self.open_file_menu_for_keyboard();
+                    return true;
+                }
                 let target = if key.modifiers.contains(KeyModifiers::SHIFT) {
                     OpenTarget::Pane
                 } else {
@@ -1557,6 +1783,50 @@ mod tests {
         assert_eq!(app.sidebars.side_of(&DockKind::Files), Some(Side::Right));
     }
 
+    #[test]
+    fn files_horizontal_navigation_updates_the_stable_path() {
+        let _env = crate::persist::test_env("files-horizontal-located");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let root = seed_keyboard_tree(&mut app);
+        app.file_located = Some(root.join("src"));
+        app.file_tree.cursor = 0;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.file_located.as_ref(), Some(&root.join("src/main.rs")));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.views.get(&app.layout().focus),
+            Some(ViewKind::File(view)) if view.path.ends_with("main.rs")
+        ));
+    }
+
+    #[test]
+    fn files_root_change_drops_the_previous_stable_path() {
+        let _env = crate::persist::test_env("files-root-located");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let root = seed_keyboard_tree(&mut app);
+        app.file_located = Some(root.join("src"));
+        app.move_dock(&DockKind::Files, Side::Right);
+        app.workspaces[0].cwd = PathBuf::from("/other-workspace");
+        app.follow_active_file_root();
+        assert!(app.file_located.is_none());
+        app.file_tree.apply_dir(
+            PathBuf::from("/other-workspace"),
+            vec![crate::files::Entry {
+                name: "other.txt".into(),
+                is_dir: false,
+            }],
+        );
+        app.files_focused = true;
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.views.get(&app.layout().focus),
+            Some(ViewKind::File(view)) if view.path.ends_with("other.txt")
+        ));
+    }
+
     fn seed_keyboard_tree(app: &mut App) -> PathBuf {
         let root = PathBuf::from("keyboard-project");
         app.file_tree.set_root(root.clone());
@@ -1609,7 +1879,7 @@ mod tests {
         );
         app.files_focused = true;
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        app.handle_file_tree_key(key(KeyCode::Char('f')));
+        app.handle_file_tree_key(key(KeyCode::Char('\\')));
         assert!(app.handle_event(AppEvent::Paste("uq\nfltr".into())));
         assert_eq!(app.file_tree.filter.as_ref().unwrap().query, "uqfltr");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1629,7 +1899,7 @@ mod tests {
         assert!(app.file_tree.filter.is_none());
         assert_eq!(app.file_tree.visible_rows().len(), 1);
         assert!(!app.file_tree.visible_rows()[0].expanded);
-        app.handle_file_tree_key(key(KeyCode::Char('f')));
+        app.handle_file_tree_key(key(KeyCode::Char('\\')));
         let filter = app.file_tree.filter.as_ref().unwrap();
         app.handle_event(AppEvent::FileFilterResults {
             instance: filter.instance,
@@ -1647,7 +1917,7 @@ mod tests {
             matches!(app.views.get(&app.layout().focus), Some(ViewKind::File(view)) if view.path == path)
         );
         app.files_focused = true;
-        app.handle_file_tree_key(key(KeyCode::Char('f')));
+        app.handle_file_tree_key(key(KeyCode::Char('\\')));
         app.handle_file_tree_key(key(KeyCode::Esc));
         assert!(app.file_tree.filter.is_none());
         assert!(app.files_focused);
@@ -1657,13 +1927,212 @@ mod tests {
     }
 
     #[test]
+    fn files_search_locates_visible_directories_by_relative_path_and_reveals() {
+        let _env = crate::persist::test_env("files-search-directories");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        // The workspace directory name must not make every row match `needle`.
+        let root = PathBuf::from("/fixture/needle-workspace");
+        app.file_tree.set_root(root.clone());
+        let entries = || {
+            vec![
+                crate::files::Entry {
+                    name: "README.md".into(),
+                    is_dir: false,
+                },
+                crate::files::Entry {
+                    name: "other".into(),
+                    is_dir: true,
+                },
+                crate::files::Entry {
+                    name: "needle-one".into(),
+                    is_dir: true,
+                },
+                crate::files::Entry {
+                    name: "needle-two".into(),
+                    is_dir: true,
+                },
+            ]
+        };
+        app.file_tree.apply_dir(root.clone(), entries());
+        app.file_tree.apply_dir(
+            root.join("needle-one"),
+            vec![crate::files::Entry {
+                name: "child".into(),
+                is_dir: true,
+            }],
+        );
+        app.files_area = ratatui::layout::Rect::new(0, 0, 30, 4);
+        app.files_focused = true;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_file_tree_key(key(KeyCode::Char('/')));
+        app.handle_event(AppEvent::Paste("needle".into()));
+        let cursor = app.file_tree.cursor;
+        assert_eq!(
+            app.file_tree.visible_rows()[cursor].path,
+            root.join("needle-one")
+        );
+        assert!(
+            !app.file_tree.visible_rows()[cursor].expanded,
+            "collapsed directory itself is searchable"
+        );
+        assert!(
+            app.file_tree.scroll > 0,
+            "off-viewport directory must be revealed without waiting for render"
+        );
+        app.handle_file_tree_key(key(KeyCode::Enter)); // commit only
+        app.handle_file_tree_key(key(KeyCode::Char('n')));
+        assert_eq!(app.file_located.as_ref(), Some(&root.join("needle-two")));
+        let visible_page = app
+            .files_area
+            .height
+            .saturating_sub(crate::ui::DOCK_HEADER_ROWS + 1)
+            .max(1) as usize;
+        assert!(
+            app.file_tree.cursor >= app.file_tree.scroll
+                && app.file_tree.cursor < app.file_tree.scroll + visible_page,
+            "query row must count against the viewport before rendering"
+        );
+        app.handle_file_tree_key(key(KeyCode::Char('n')));
+        assert_eq!(app.file_located.as_ref(), Some(&root.join("needle-one")));
+        app.handle_file_tree_key(key(KeyCode::Char('N')));
+        assert_eq!(app.file_located.as_ref(), Some(&root.join("needle-two")));
+        app.handle_file_tree_key(key(KeyCode::Char('/')));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_event(AppEvent::Paste("needle-one".into()));
+        app.handle_file_tree_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.file_located.as_ref(),
+            Some(&root.join("needle-two")),
+            "cancel restores stable directory"
+        );
+        app.handle_file_tree_key(key(KeyCode::Char('N')));
+        app.handle_file_tree_key(key(KeyCode::Enter)); // directory activation
+        assert!(app.file_menu.is_none());
+        let cursor = app.file_tree.cursor;
+        assert!(app.file_tree.visible_rows()[cursor].expanded);
+        app.handle_file_tree_key(key(KeyCode::Char('/')));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_event(AppEvent::Paste("needle-one/child".into()));
+        assert_eq!(
+            app.file_located.as_ref(),
+            Some(&root.join("needle-one/child"))
+        );
+        app.handle_file_tree_key(key(KeyCode::Enter));
+        app.handle_file_tree_key(key(KeyCode::Char('/')));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_event(AppEvent::Paste("needle-two".into()));
+        let mut reordered = entries();
+        reordered.reverse();
+        app.file_tree.apply_dir(root.clone(), reordered);
+        app.handle_file_tree_key(key(KeyCode::Esc)); // restore child by path, not its old index
+        app.handle_file_tree_key(key(KeyCode::Char('a')));
+        assert_eq!(
+            app.file_menu.as_ref().map(|menu| &menu.path),
+            Some(&root.join("needle-one/child")),
+            "refresh reorder cannot retarget directory actions"
+        );
+        app.file_menu = None;
+        app.file_tree.apply_dir(
+            root.clone(),
+            vec![crate::files::Entry {
+                name: "replacement".into(),
+                is_dir: true,
+            }],
+        );
+        app.handle_file_tree_key(key(KeyCode::Enter));
+        app.handle_file_tree_key(key(KeyCode::Char('a')));
+        assert!(
+            app.file_menu.is_none(),
+            "deleted directory cannot activate a replacement"
+        );
+        assert!(!app.file_tree.visible_rows()[0].expanded);
+    }
+
+    #[test]
+    fn files_search_preserves_rows_and_searches_committed_filter_results() {
+        let _env = crate::persist::test_env("files-search-projection");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        seed_keyboard_tree(&mut app);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let before = app.file_tree.visible_rows().to_vec();
+        app.handle_file_tree_key(key(KeyCode::Char('/')));
+        app.handle_file_tree_key(key(KeyCode::Char('n')));
+        app.handle_file_tree_key(key(KeyCode::Char('o')));
+        app.handle_file_tree_key(key(KeyCode::Enter));
+        assert_eq!(app.file_tree.visible_rows(), before);
+        assert!(app.file_located.as_ref().unwrap().ends_with("notes.txt"));
+        app.handle_file_tree_key(key(KeyCode::Char('n')));
+        assert!(app.file_located.as_ref().unwrap().ends_with("notes.txt"));
+        app.handle_file_tree_key(key(KeyCode::Esc));
+        app.handle_file_tree_key(key(KeyCode::Char('\\')));
+        let filter = app.file_tree.filter.as_ref().unwrap();
+        app.handle_event(AppEvent::FileFilterResults {
+            instance: filter.instance,
+            generation: filter.generation,
+            rows: before
+                .iter()
+                .filter(|row| row.name == "notes.txt")
+                .cloned()
+                .collect(),
+            partial: false,
+        });
+        app.handle_file_tree_key(key(KeyCode::Tab));
+        assert!(!app.file_tree.filter.as_ref().unwrap().editing);
+        app.handle_file_tree_key(key(KeyCode::Char('/')));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for ch in "main".chars() {
+            app.handle_file_tree_key(key(KeyCode::Char(ch)));
+        }
+        assert!(app.file_search_miss, "hidden main.rs cannot be found");
+        app.handle_file_tree_key(key(KeyCode::Enter));
+        app.handle_file_tree_key(key(KeyCode::Esc));
+        assert!(
+            app.file_tree.filter.is_some(),
+            "first Esc clears search only"
+        );
+        app.handle_file_tree_key(key(KeyCode::Esc));
+        assert!(app.file_tree.filter.is_none());
+    }
+
+    #[test]
+    fn files_query_edit_caps_unicode_and_drops_controls() {
+        let _env = crate::persist::test_env("files-query-edit");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        seed_keyboard_tree(&mut app);
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        app.handle_file_tree_key(key(KeyCode::Char('\\'), KeyModifiers::NONE));
+        app.handle_file_tree_key(key(KeyCode::Char('你'), KeyModifiers::NONE));
+        assert_eq!(app.file_tree.filter.as_ref().unwrap().query, "你");
+        app.handle_file_tree_key(key(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.file_tree.filter.as_ref().unwrap().query, "");
+        assert!(app.handle_event(crate::event::AppEvent::Paste("a\u{0001}\nb".into())));
+        assert_eq!(app.file_tree.filter.as_ref().unwrap().query, "ab");
+        app.handle_file_tree_key(key(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.file_tree.filter.as_ref().unwrap().query, "");
+        for _ in 0..300 {
+            app.handle_file_tree_key(key(KeyCode::Char('a'), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            app.file_tree.filter.as_ref().unwrap().query.chars().count(),
+            256
+        );
+        let saved = app.file_tree.filter.as_ref().unwrap().saved_position;
+        app.handle_file_tree_key(key(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.file_tree.filter.is_none());
+        assert_eq!((app.file_tree.cursor, app.file_tree.scroll), saved);
+    }
+
+    #[test]
     fn files_filter_rejects_stale_results_and_clears_on_workspace_change() {
         let _env = crate::persist::test_env("files-filter-stale");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         seed_keyboard_tree(&mut app);
         app.file_tree.cursor = 2;
-        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::NONE));
         let filter = app.file_tree.filter.as_ref().unwrap();
         let instance = filter.instance;
         let generation = filter.generation;
@@ -4347,7 +4816,7 @@ mod tests {
         assert!(!app.file_tree.root_loaded());
 
         app.files_focused = true;
-        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::NONE));
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
         let filter = app.file_tree.filter.as_ref().unwrap();
         assert!(app.handle_event(AppEvent::FileFilterResults {
@@ -4367,7 +4836,7 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
         let text = buffer_text(&term);
-        assert!(text.contains("f: m"), "the active query remains visible");
+        assert!(text.contains("\\: m"), "the active query remains visible");
         assert!(text.contains("match.rs"), "the indexed match is rendered");
         assert_eq!(
             app.file_tree_rects.len(),

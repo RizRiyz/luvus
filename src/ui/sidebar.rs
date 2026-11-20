@@ -5,7 +5,7 @@
 //! single-purpose left sidebar.
 
 use super::*;
-use crate::app::SidebarListFocus;
+use crate::app::{AgentDockTarget, SidebarListFocus};
 
 fn attention(s: State) -> u8 {
     match s {
@@ -71,6 +71,66 @@ fn dock_row_stride(paths_visible: bool) -> u16 {
 /// How many items fit in a list `rows` tall at its current row height.
 fn list_capacity(rows: u16, row_stride: u16) -> usize {
     (rows / row_stride) as usize
+}
+
+/// Which runtime query the dock line and its clear button refer to.
+fn visible_dock_query<'a>(
+    search: &'a crate::search::DockTextQuery,
+    filter: &'a crate::search::DockTextQuery,
+) -> Option<(bool, &'a crate::search::DockTextQuery)> {
+    if search.editing() || (search.active() && !filter.editing()) {
+        return Some((true, search));
+    }
+    if filter.editing() || filter.active() {
+        return Some((false, filter));
+    }
+    None
+}
+
+/// A query label plus a clear control, clipped to the dock. Returns the clear hit
+/// only when the whole word fits.
+pub(crate) fn draw_dock_query(
+    f: &mut RenderTarget,
+    area: Rect,
+    y: u16,
+    label: &str,
+    clear: &str,
+    t: &Theme,
+) -> Option<Rect> {
+    if y >= area.bottom() || area.width < 4 {
+        return None;
+    }
+    let clear_label = format!(" {clear} ");
+    let clear_width = crate::ui::display_width(&clear_label) as u16;
+    let clear_fits = area.width > clear_width.saturating_add(6);
+    let reserved = if clear_fits {
+        clear_width.saturating_add(1)
+    } else {
+        1
+    };
+    let query_width = usize::from(area.width.saturating_sub(2 + reserved));
+    let clipped = crate::ui::truncate(label, query_width);
+    f.render_widget(
+        Paragraph::new(Span::styled(clipped, Style::new().fg(t.accent))),
+        Rect::new(area.x, y, area.width, 1),
+    );
+    if !clear_fits {
+        return None;
+    }
+    let rect = Rect::new(
+        area.right().saturating_sub(clear_width + 1),
+        y,
+        clear_width,
+        1,
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            clear_label,
+            Style::new().fg(t.crust).bg(t.surface1),
+        )),
+        rect,
+    );
+    Some(rect)
 }
 
 /// A scrollbar on the sidebar's right edge, shown only when the list overflows
@@ -450,11 +510,35 @@ fn draw_workspaces_dock(
     } else {
         None
     };
-    let nlist_top = area.y + DOCK_HEADER_ROWS;
-    let nrows = area.height.saturating_sub(DOCK_HEADER_ROWS);
+    app.workspace_clear_rect = None;
+    app.workspace_clear_is_search = false;
+    let shown = visible_dock_query(&app.workspace_search, &app.workspace_query);
+    let query_rows = u16::from(shown.is_some() && area.height > DOCK_HEADER_ROWS);
+    if area.height > DOCK_HEADER_ROWS {
+        if let Some((search, query)) = shown {
+            let status = if search && app.workspace_search_miss {
+                format!(" {}", app.catalog.dock_no_matches)
+            } else {
+                String::new()
+            };
+            app.workspace_clear_is_search = search;
+            app.workspace_clear_rect = draw_dock_query(
+                f,
+                area,
+                area.y + DOCK_HEADER_ROWS,
+                &crate::search::query_label(if search { "/" } else { "\\" }, query.text(), &status),
+                app.catalog.dock_clear,
+                t,
+            );
+        }
+    }
+    let nlist_top = area.y + DOCK_HEADER_ROWS + query_rows;
+    let nrows = area.height.saturating_sub(DOCK_HEADER_ROWS + query_rows);
     let paths_visible = app.config.layout.workspace_paths;
     let row_stride = dock_row_stride(paths_visible);
-    let ntotal = app.workspaces.len();
+    let order = app.filtered_workspace_rows();
+    app.align_workspace_cursor(&order);
+    let ntotal = order.len();
     // A machine-aware display client owns only the endpoint labels. The server
     // still owns the Workspaces layout and appends a bounded client projection
     // to this list, so remote endpoints share its row height and Show Paths
@@ -482,14 +566,9 @@ fn draw_workspaces_dock(
         .saturating_mul(row_stride);
     let workspace_top = nlist_top.saturating_add(if endpoint_leading { endpoint_rows } else { 0 });
     // Draw order groups each worktree under the node it branched from (docs/18
-    // WT-4), so scroll positions index into this order, not raw creation order.
-    let order = app.workspace_display_order();
-    let active_pos = order
-        .iter()
-        .position(|(i, _)| *i == app.active_ws)
-        .unwrap_or(0);
+    // WT-4). A text query keeps that order and any parent needed for context.
+    let active_pos = order.iter().position(|(i, _)| *i == app.active_ws);
     let keyboard_focused = app.sidebar_focus == Some(SidebarListFocus::Workspaces);
-    app.workspace_cursor = app.workspace_cursor.min(ntotal.saturating_sub(1));
     // Auto-reveal the active workspace when it changes (cycle / new / resume), without
     // fighting wheel scrolling (which never changes `active_ws`).
     if keyboard_focused {
@@ -499,10 +578,12 @@ fn draw_workspaces_dock(
             app.workspaces_scroll = app.workspace_cursor + 1 - ncap;
         }
     } else if app.active_ws != app.last_active_ws_shown {
-        if active_pos < app.workspaces_scroll {
-            app.workspaces_scroll = active_pos;
-        } else if ncap > 0 && active_pos >= app.workspaces_scroll + ncap {
-            app.workspaces_scroll = active_pos + 1 - ncap;
+        if let Some(active_pos) = active_pos {
+            if active_pos < app.workspaces_scroll {
+                app.workspaces_scroll = active_pos;
+            } else if ncap > 0 && active_pos >= app.workspaces_scroll + ncap {
+                app.workspaces_scroll = active_pos + 1 - ncap;
+            }
         }
         app.last_active_ws_shown = app.active_ws;
     }
@@ -517,10 +598,15 @@ fn draw_workspaces_dock(
         .unwrap_or(u16::MAX)
         .saturating_mul(row_stride);
     app.workspaces_area = Rect::new(area.x, workspace_top, area.width, workspace_rows);
+    let no_matches = visible.is_empty();
     for (vi, (i, is_member)) in visible.into_iter().enumerate() {
         let y = workspace_top + vi as u16 * row_stride;
         let active = i == app.active_ws;
-        let selected = keyboard_focused && nscroll + vi == app.workspace_cursor;
+        let selected = keyboard_focused
+            && nscroll + vi == app.workspace_cursor
+            && app.workspace_row_selected(i);
+        app.workspace_hit_ids
+            .insert(i, app.workspaces[i].id.clone());
         ws_rects.push((i, Rect::new(area.x, y, area.width, row_stride)));
         let st = rollup(app, i);
         let ws = &app.workspaces[i];
@@ -547,6 +633,16 @@ fn draw_workspaces_dock(
                 active_bg: t.sel_bg,
                 selected_bg: t.surface1,
             },
+        );
+    }
+    if no_matches && app.workspace_query.active() && workspace_top < area.bottom() {
+        line_at(
+            f,
+            workspace_top,
+            Line::from(Span::styled(
+                cat.dock_no_matches,
+                Style::new().fg(t.overlay0),
+            )),
         );
     }
     draw_scrollbar(
@@ -619,10 +715,32 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             x = x.saturating_add(w);
         }
     }
+    app.agent_clear_rect = None;
+    app.agent_clear_is_search = false;
+    let shown = visible_dock_query(&app.agent_search, &app.agent_query);
+    let show_query = shown.is_some() && area.height > DOCK_HEADER_ROWS;
+    if show_query {
+        if let Some((search, query)) = shown {
+            let status = if search && app.agent_search_miss {
+                format!(" {}", app.catalog.dock_no_matches)
+            } else {
+                String::new()
+            };
+            app.agent_clear_is_search = search;
+            app.agent_clear_rect = draw_dock_query(
+                f,
+                area,
+                aheader + DOCK_HEADER_ROWS,
+                &crate::search::query_label(if search { "/" } else { "\\" }, query.text(), &status),
+                app.catalog.dock_clear,
+                t,
+            );
+        }
+    }
     // Workspace scope is controlled by prefix `A`, Settings → Keys, or an
     // agent/session row's context menu. It consumes no extra dock row.
     let scoped = app.agents_scope_active();
-    let alist_top = aheader + DOCK_HEADER_ROWS;
+    let alist_top = aheader + DOCK_HEADER_ROWS + u16::from(show_query);
     let arows = area.bottom().saturating_sub(alist_top);
     let paths_visible = app.config.layout.agent_paths;
     let row_stride = dock_row_stride(paths_visible);
@@ -752,13 +870,46 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     // Preserve the allocation-free default path: unscoped All indexes the
     // existing history directly, while only the opt-in scoped projection builds
     // an index. Active does neither because history is hidden.
-    let resumable_total = if active_only {
+    let mut resumable_total = if active_only {
         0
     } else if scoped {
         resumable_scoped.len()
     } else {
         app.resumable.len()
     };
+    let mut resumable_filtered = Vec::new();
+    if app.agent_query.active() {
+        // Paint the keyboard projection, including its order. Elsewhere stays
+        // outside the scrolled rows so blocked attention is not filtered away.
+        let projected = app.filtered_agent_targets();
+        app.align_agent_cursor(&projected);
+        let mut next_live = Vec::new();
+        let mut next_scheduled = Vec::new();
+        for target in &projected {
+            match target {
+                AgentDockTarget::Live(id) => {
+                    let wsname = app
+                        .workspace_of_pane(*id)
+                        .map(|workspace| workspace.name.clone())
+                        .unwrap_or_default();
+                    next_live.push((*id, wsname));
+                }
+                AgentDockTarget::Automation(id) => {
+                    if let Some(row) = scheduled
+                        .iter()
+                        .find(|(scheduled_id, ..)| scheduled_id == id)
+                    {
+                        next_scheduled.push(row.clone());
+                    }
+                }
+                AgentDockTarget::Session(index) => resumable_filtered.push(*index),
+                AgentDockTarget::Elsewhere(_) => {}
+            }
+        }
+        live = next_live;
+        scheduled = next_scheduled;
+        resumable_total = resumable_filtered.len();
+    }
     let atotal = live.len() + scheduled.len() + resumable_total;
     // The overflow line is always visible while attention is hidden, even if no
     // local rows exist. Reserve exactly one terminal row for it.
@@ -783,7 +934,9 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             f,
             alist_top,
             Line::from(Span::styled(
-                if active_only {
+                if app.agent_query.active() {
+                    cat.dock_no_matches
+                } else if active_only {
                     cat.no_active_agents
                 } else {
                     cat.no_agents_or_sessions
@@ -794,10 +947,11 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
     } else {
         for (vi, k) in (ascroll..atotal).take(acap).enumerate() {
             let y = alist_top + vi as u16 * row_stride;
-            let selected = keyboard_focused && app.agent_cursor == k;
+            let mut selected = keyboard_focused && app.agent_cursor == k;
             if let Some((id, wsname)) = live.get(k) {
                 // A live agent: runtime status + which workspace it runs in.
                 let id = *id;
+                selected &= app.agent_row_selected(&AgentDockTarget::Live(id));
                 let focused = id == focus;
                 let st = pane_state(app, id);
                 let mut agent = app
@@ -872,6 +1026,8 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             } else if let Some((automation, agent, workspace, deadline, starting, target_state)) =
                 scheduled.get(k.saturating_sub(live.len()))
             {
+                selected &=
+                    app.agent_row_selected(&AgentDockTarget::Automation(automation.clone()));
                 automation_rects.push((
                     automation.clone(),
                     Rect::new(area.x, y, area.width, row_stride),
@@ -916,13 +1072,18 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             } else {
                 // A resumable session discovered on disk — click to reopen.
                 let visible_index = k - live.len() - scheduled.len();
-                let si = if scoped {
+                let si = if app.agent_query.active() {
+                    resumable_filtered[visible_index]
+                } else if scoped {
                     resumable_scoped[visible_index]
                 } else {
                     visible_index
                 };
+                selected &= app.agent_row_selected(&AgentDockTarget::Session(si));
                 let s = &app.resumable[si];
                 let row = Rect::new(area.x, y, area.width, row_stride);
+                app.session_hit_ids
+                    .insert(si, app.resumable[si].session_id.clone());
                 session_rects.push((si, row));
                 let label = " resume  ";
                 let prefix_w = 1 + crate::ui::display_width(label);
@@ -1009,7 +1170,10 @@ fn draw_agents_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) 
             );
             app.agents_elsewhere_rect =
                 Some((blocked_elsewhere[0], Rect::new(area.x, y, area.width, 1)));
-            if keyboard_focused && app.agent_cursor == atotal {
+            if keyboard_focused
+                && app.agent_cursor == atotal
+                && app.agent_row_selected(&AgentDockTarget::Elsewhere(blocked_elsewhere[0]))
+            {
                 f.buffer_mut().set_style(
                     Rect::new(area.x, y, area.width.saturating_sub(1), 1),
                     Style::new().fg(t.accent).bg(t.surface1),
@@ -1471,6 +1635,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         let id = app.layout().focus;
+        app.workspaces[0].name = "proj".into();
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
 
@@ -1538,6 +1703,90 @@ mod tests {
         assert!(app.agent_rects.iter().any(|(id, _)| *id == pane));
     }
 
+    #[test]
+    fn dock_headers_keep_native_controls_without_query_buttons() {
+        let _env = crate::persist::test_env("dock-header-no-query-buttons");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let theme = app.theme.clone();
+        for width in [8, 16, 26, 48] {
+            let area = Rect::new(0, 0, width, 12);
+            for dock in 0..4 {
+                let mut buffer = ratatui::buffer::Buffer::empty(area);
+                let mut target = crate::ui::RenderTarget::new(&mut buffer, area);
+                match dock {
+                    0 => {
+                        super::draw_workspaces_dock(&mut target, area, &mut app, &theme);
+                    }
+                    1 => {
+                        super::draw_agents_dock(&mut target, area, &mut app, &theme);
+                    }
+                    mode => {
+                        app.files_mode = if mode == 2 {
+                            crate::diff::FilesMode::Files
+                        } else {
+                            crate::diff::FilesMode::Diff
+                        };
+                        crate::ui::files::draw_files_dock(&mut target, area, &mut app, &theme);
+                    }
+                }
+                let header: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+                assert!(
+                    !header.contains('/') && !header.contains('\\'),
+                    "dock {dock} width {width}: {header}"
+                );
+                if dock == 0 && width >= 16 {
+                    assert!(header.contains('+'));
+                }
+                if dock == 1 && width >= 26 {
+                    assert!(header.contains("All") && header.contains("Active"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dock_text_filter_renders_in_a_short_dock_and_clears_by_mouse() {
+        let _env = crate::persist::test_env("dock-text-filter-geometry");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.server_mode = true;
+        app.sidebars.left.docks = vec![crate::app::DockKind::Workspaces];
+        app.workspaces[0].name = "alpha".into();
+        app.workspaces[0].cwd = std::path::PathBuf::from("/tmp/alpha");
+        app.workspaces[0].branch = None;
+        app.run_cmd(crate::app::Cmd::FocusWorkspaces);
+        app.workspace_query.begin();
+        app.workspace_query.append("zzzqqq");
+        app.workspace_query.commit();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+        assert!(
+            buffer_contains(&term, "no matches"),
+            "rows {:?}",
+            app.filtered_workspace_rows()
+        );
+        let clear = app.workspace_clear_rect.expect("clear control");
+        app.handle_event(crate::event::AppEvent::Mouse(
+            ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::Down(
+                    ratatui::crossterm::event::MouseButton::Left,
+                ),
+                column: clear.x,
+                row: clear.y,
+                modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+            },
+        ));
+        assert!(!app.workspace_query.active());
+        let mut tiny = App::new(16, 5, std::sync::mpsc::channel().0).unwrap();
+        tiny.workspace_query.begin();
+        tiny.workspace_query.append("alpha");
+        let mut tiny_term = Terminal::new(TestBackend::new(16, 5)).unwrap();
+        tiny_term
+            .draw(|f| crate::ui::render(f, &mut tiny))
+            .expect("a very short dock does not panic");
+    }
+
     // The focused agent's "project · =pane" line sits on the selection
     // background, so it must use the same readable colour the workspaces dock
     // gives its path row. Pinned to `overlay0` it was almost invisible on green.
@@ -1547,6 +1796,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
         let id = app.layout().focus;
+        app.workspaces[0].name = "proj".into();
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
         term.draw(|f| crate::ui::render(f, &mut app)).unwrap();

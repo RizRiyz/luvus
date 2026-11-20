@@ -3367,14 +3367,26 @@ mod tests {
         );
 
         // All the way down: Down keeps stepping through every reference row until
-        // the last block (Mouse) is on screen — nothing is unreachable.
+        // the last block (Sidebar docks) is on screen — nothing is unreachable.
         for _ in 0..app.settings_rows(crate::app::SettingsTab::Keys) {
             app.handle_settings_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         let bottom = screen(&mut app);
         assert!(
-            bottom.contains("Mouse") && bottom.contains("right-click"),
-            "the last reference block (Mouse) is reachable:\n{bottom}"
+            bottom.contains("Sidebar docks") && bottom.contains("enter / a"),
+            "the last reference block (Sidebar docks) is reachable:\n{bottom}"
+        );
+        let mut mouse_view = bottom.clone();
+        for _ in 0..app.settings_rows(crate::app::SettingsTab::Keys) {
+            if mouse_view.contains("Mouse") && mouse_view.contains("right-click") {
+                break;
+            }
+            app.handle_settings_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            mouse_view = screen(&mut app);
+        }
+        assert!(
+            mouse_view.contains("Mouse") && mouse_view.contains("right-click"),
+            "the Mouse reference stays reachable above Sidebar docks:\n{mouse_view}"
         );
         // Copy & paste is its own labeled section (just above Mouse), so a user
         // looking for it can reach it even when reference row counts change.

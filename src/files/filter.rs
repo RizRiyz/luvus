@@ -8,16 +8,19 @@ use crate::event::AppEvent;
 use crate::search::{FuzzyField, FuzzyQuery, PreparedText};
 
 static NEXT_FILTER: AtomicU64 = AtomicU64::new(1);
-const QUERY_CAP: usize = 256;
 
 pub struct FileFilter {
     pub instance: u64,
     pub query: String,
+    /// Tab retains the projection and returns to navigation; Enter still opens actions.
+    pub editing: bool,
     pub loading: bool,
     pub partial: bool,
     pub rows: Vec<VisibleRow>,
     pub generation: u64,
     pub saved_position: (usize, usize),
+    pub selected_path: Option<PathBuf>,
+    pub activation_blocked: bool,
     pending: Arc<Mutex<Option<(u64, String)>>>,
     wake: mpsc::SyncSender<()>,
 }
@@ -84,11 +87,14 @@ impl FileFilter {
         let mut filter = Self {
             instance,
             query: String::new(),
+            editing: true,
             loading: true,
             partial: false,
             rows: Vec::new(),
             generation: 0,
             saved_position: position,
+            selected_path: None,
+            activation_blocked: true,
             pending,
             wake,
         };
@@ -97,15 +103,15 @@ impl FileFilter {
     }
 
     pub fn append(&mut self, text: &str) {
-        let remaining = QUERY_CAP.saturating_sub(self.query.chars().count());
-        self.query
-            .extend(text.chars().filter(|c| !c.is_control()).take(remaining));
+        crate::search::append_query(&mut self.query, text);
         self.recompute();
     }
 
     pub fn recompute(&mut self) {
         self.generation += 1;
         self.loading = true;
+        self.selected_path = None;
+        self.activation_blocked = true;
         self.rows.clear();
         *self.pending.lock().unwrap() = Some((self.generation, self.query.clone()));
         let _ = self.wake.try_send(());

@@ -29,9 +29,15 @@ off by default, turn on the events you want in **Settings → General**.
 Click a row to jump to that agent's pane from anywhere, across workspaces. For
 keyboard navigation, press `Ctrl+Space a` to focus AGENTS, move with arrows or
 `j` / `k`, and press `Enter` to open the selected live or resumable agent. Press
-`a` for the selected row's right-click actions, `f` to switch All / Active, `s`
-to switch all workspaces / this workspace, and `Esc` or `q` to return input to
-the pane. Choose **Hide Path** in any agent row's menu for a compact one-row
+`a` for the selected row's right-click actions, `/` to search the visible rows
+by name, agent, session title, workspace, or path without hiding them. Path text must be contiguous or dense, so letters gathered across an absolute path do not count. Press `n` / `N`
+to wrap through matches, `\` to hide non-matching rows, `f` to switch All /
+Active, `s` to switch all workspaces / this workspace, and `Esc` or `q` to
+return input to the pane. Search runs only after scope, All/Active, and `\`.
+Both queries are temporary, stay on this dock, and are not saved. A blocked
+agent outside the current workspace stays on the overflow line and is not a
+search hit. While a query is being edited, typed and pasted characters, including
+`/`, `\`, `f`, `s`, and `n`, stay in the query. Choose **Hide Path** in any agent row's menu for a compact one-row
 list, then **Show Path** to restore the workspace and session detail rows. The
 choice persists across restarts.
 

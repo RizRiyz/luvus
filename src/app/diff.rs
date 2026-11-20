@@ -195,6 +195,7 @@ impl App {
     /// make a later j/k selection jump back when a refresh completes.
     fn sync_diff_list_selection(&mut self) {
         self.diff.selected_key = self.diff.selected_file().map(|file| file.key.clone());
+        self.diff.activation_blocked = self.diff.selected_key.is_none();
     }
 
     pub fn refresh_diff_status(&mut self, force: bool) {
@@ -538,21 +539,151 @@ impl App {
 
     /// Navigate the DIFF list while the shared FILES/DIFF dock owns keyboard
     /// focus. Opening a review returns normal keys to the new native view.
+    fn diff_list_can_activate(&self) -> bool {
+        if self.diff.activation_blocked {
+            return false;
+        }
+        let Some(file) = self.diff.selected_file() else {
+            return false;
+        };
+        self.diff
+            .selected_key
+            .as_ref()
+            .is_none_or(|key| key == &file.key)
+    }
+
+    pub(crate) fn locate_diff_search(&mut self, forward: bool, inclusive: bool) {
+        if !self.diff.list_search.active() {
+            self.diff.list_search_miss = false;
+            return;
+        }
+        let fuzzy = self.diff.list_search.fuzzy();
+        let rows = self.diff.rows.clone();
+        let found = crate::search::locate_match(
+            rows.len(),
+            self.diff.cursor,
+            forward,
+            inclusive,
+            |index| {
+                let crate::diff::DiffListRow::File(file_index) = rows[index] else {
+                    return false;
+                };
+                self.diff
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.files.get(file_index))
+                    .is_some_and(|file| crate::diff::model::diff_path_matches(file, &fuzzy))
+            },
+        );
+        if let Some(index) = found {
+            self.diff.cursor = index;
+            self.diff.scroll_detached = false;
+            self.diff.ensure_cursor_visible();
+            self.sync_diff_list_selection();
+            self.diff.activation_blocked = false;
+            self.diff.list_search_miss = false;
+        } else {
+            self.diff.list_search_miss = true;
+        }
+    }
+
+    fn restore_diff_search_origin(&mut self) {
+        self.diff.selected_key = self.diff.search_origin.clone();
+        self.diff.list_search_miss = false;
+        let Some(key) = self.diff.selected_key.clone() else {
+            // A search begun without a valid selection cannot restore a new
+            // occupant when canceled. Explicit navigation can select it.
+            self.diff.activation_blocked = true;
+            return;
+        };
+        if let Some(position) = self.diff.rows.iter().position(|row| {
+            let crate::diff::DiffListRow::File(index) = row else {
+                return false;
+            };
+            self.diff
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.files.get(*index))
+                .is_some_and(|file| file.key == key)
+        }) {
+            self.diff.cursor = position;
+            self.diff.activation_blocked = false;
+            self.diff.scroll_detached = false;
+            self.diff.ensure_cursor_visible();
+        } else {
+            self.diff.selected_key = None;
+            self.diff.activation_blocked = true;
+        }
+    }
+
+    /// DIFF list keys. `/` searches paths in the rows left by `f` and `\`.
+    /// `\` hides other paths. `f` still cycles the review-state filter. Native
+    /// DIFF content search is a different handler and is unchanged.
     pub fn handle_diff_list_key(&mut self, key: KeyEvent) -> bool {
-        // Filter cycling and refresh stay in this list; hold them once.
-        if super::is_key_repeat(&key) && matches!(key.code, KeyCode::Char('f' | 'r')) {
+        if self.diff.list_search.editing() {
+            match super::dock_filter::edit_query(&mut self.diff.list_search, &key) {
+                super::dock_filter::QueryEdit::Updated => self.locate_diff_search(true, true),
+                super::dock_filter::QueryEdit::Canceled => self.restore_diff_search_origin(),
+                super::dock_filter::QueryEdit::Committed
+                | super::dock_filter::QueryEdit::Ignored => {}
+            }
             return true;
+        }
+        if self.diff.list_query.editing() {
+            match super::dock_filter::edit_query(&mut self.diff.list_query, &key) {
+                super::dock_filter::QueryEdit::Updated
+                | super::dock_filter::QueryEdit::Canceled
+                | super::dock_filter::QueryEdit::Committed => self.diff.rebuild_rows(),
+                super::dock_filter::QueryEdit::Ignored => {}
+            }
+            return true;
+        }
+        if super::is_key_repeat(&key)
+            && (matches!(key.code, KeyCode::Char('f' | 'r'))
+                || super::dock_filter::is_list_search_key(&key)
+                || super::dock_filter::is_list_filter_key(&key))
+        {
+            return true;
+        }
+        if super::dock_filter::is_list_search_key(&key) {
+            self.diff.search_origin = self.diff.selected_key.clone();
+            self.diff.list_search_miss = false;
+            self.diff.list_search.begin();
+            return true;
+        }
+        if super::dock_filter::is_list_filter_key(&key) {
+            self.diff.list_query.begin();
+            return true;
+        }
+        if self.diff.list_search.active() {
+            if let Some(forward) = super::dock_filter::search_step_key(&key) {
+                self.locate_diff_search(forward, false);
+                return true;
+            }
         }
         let page = self.diff.viewport.max(1) as isize;
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.files_focused = false,
+            KeyCode::Esc => {
+                if self.diff.list_search.active() {
+                    self.diff.list_search.clear_committed();
+                    self.diff.list_search_miss = false;
+                } else if self.diff.list_query.active() {
+                    self.diff.list_query.clear_committed();
+                    self.diff.rebuild_rows();
+                } else {
+                    self.files_focused = false;
+                }
+            }
+            KeyCode::Char('q') => self.files_focused = false,
             KeyCode::Up | KeyCode::Char('k') => self.move_diff_list_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_diff_list_cursor(1),
             KeyCode::PageUp => self.move_diff_list_page(-page),
             KeyCode::PageDown => self.move_diff_list_page(page),
             KeyCode::Home | KeyCode::Char('g') => self.move_diff_list_to_edge(false),
             KeyCode::End | KeyCode::Char('G') => self.move_diff_list_to_edge(true),
-            KeyCode::Char('a') => self.open_diff_menu_for_keyboard(),
+            KeyCode::Char('a') if self.diff_list_can_activate() => {
+                self.open_diff_menu_for_keyboard()
+            }
             KeyCode::Char('f') => {
                 self.diff.filter = self.diff.filter.cycle();
                 self.diff.rebuild_rows();
@@ -562,7 +693,7 @@ impl App {
                     self.refresh_diff_status(true);
                 }
             }
-            KeyCode::Enter if self.diff.selected_file().is_some() => {
+            KeyCode::Enter if self.diff_list_can_activate() => {
                 let target = if key.modifiers.contains(KeyModifiers::SHIFT) {
                     OpenTarget::Pane
                 } else {
@@ -577,6 +708,20 @@ impl App {
         true
     }
 
+    pub(crate) fn diff_hit_is_current(&self, row: usize) -> bool {
+        let Some(expected) = self.diff_hit_keys.get(&row) else {
+            return false;
+        };
+        let Some(DiffListRow::File(index)) = self.diff.rows.get(row) else {
+            return false;
+        };
+        self.diff
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.files.get(*index))
+            .is_some_and(|file| &file.key == expected)
+    }
+
     pub fn diff_row_activate(&mut self, row: usize, target: OpenTarget) {
         if !self.diff_snapshot_matches_active_workspace() {
             self.refresh_diff_status(true);
@@ -589,6 +734,7 @@ impl App {
             return;
         };
         self.diff.selected_key = Some(file.key.clone());
+        self.diff.activation_blocked = false;
         self.open_diff_view(file.key, target);
     }
 
@@ -2408,6 +2554,96 @@ mod tests {
     }
 
     #[test]
+    fn diff_list_f_cycle_renders_current_state_even_when_empty_or_querying() {
+        let _env = crate::persist::test_env("diff-visible-filter-state");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        install_snapshot(&mut app);
+        app.diff.snapshot.as_mut().unwrap().files.clear();
+        app.diff.rebuild_rows();
+        app.files_mode = FilesMode::Diff;
+        app.files_focused = true;
+        app.move_dock(&DockKind::Files, crate::app::Side::Right);
+        app.sidebars.right.visible = true;
+        app.sidebars.right.width = 48;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let labels = [
+            "All",
+            "Unviewed",
+            "Modified since review",
+            "Has notes",
+            "All",
+        ];
+        for (step, expected) in labels.into_iter().enumerate() {
+            if step > 0 {
+                app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+            }
+            for query in 0..4 {
+                app.diff.list_search.clear_committed();
+                app.diff.list_query.clear_committed();
+                if query == 1 || query == 3 {
+                    app.diff.list_search.begin();
+                    app.diff.list_search.append("missing");
+                    app.diff.list_search.commit();
+                }
+                if query == 2 || query == 3 {
+                    app.diff.list_query.begin();
+                    app.diff.list_query.append("missing");
+                    app.diff.list_query.commit();
+                }
+                terminal
+                    .draw(|frame| crate::ui::render(frame, &mut app))
+                    .unwrap();
+                let area = app.files_area;
+                let status: String = (area.x..area.right())
+                    .map(|x| {
+                        terminal.backend().buffer()[(x, area.y + crate::ui::DOCK_HEADER_ROWS)]
+                            .symbol()
+                    })
+                    .collect();
+                assert!(
+                    status.contains(&format!("f: {expected}")),
+                    "cycle {step}, query {query}: {status}"
+                );
+                let header: String = (area.x..area.right())
+                    .map(|x| terminal.backend().buffer()[(x, area.y)].symbol())
+                    .collect();
+                assert!(header.contains("FILES") && header.contains("DIFF"));
+                assert!(!header.contains('/') && !header.contains('\\'));
+            }
+        }
+    }
+
+    #[test]
+    fn diff_search_cancel_and_query_row_reveal_the_selection() {
+        let _env = crate::persist::test_env("diff-search-reveal");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        install_snapshot(&mut app);
+        for index in 0..12 {
+            add_snapshot_file(&mut app, &format!("src/file-{index:02}.rs"));
+        }
+        app.files_mode = FilesMode::Diff;
+        app.files_focused = true;
+        app.diff.viewport = 8;
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_event(crate::event::AppEvent::Paste("file-11".into()));
+        assert!(app.diff.scroll > 0);
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.diff.cursor, 1);
+        assert!(app.diff.cursor < app.diff.scroll + app.diff.viewport);
+        app.diff.viewport = 8;
+        app.diff.scroll = 0;
+        app.diff.cursor = 7;
+        app.diff.scroll_detached = false;
+        app.handle_diff_list_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.diff.viewport = 7;
+        app.diff.ensure_cursor_visible();
+        assert!(app.diff.cursor >= app.diff.scroll && app.diff.cursor < app.diff.scroll + 7);
+    }
+
+    #[test]
     fn diff_list_enter_opens_the_native_review_and_returns_pane_input() {
         let _env = crate::persist::test_env("diff-list-enter");
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -2423,6 +2659,124 @@ mod tests {
             .views
             .values()
             .any(|view| matches!(view, ViewKind::Diff(diff) if diff.key == key)));
+    }
+
+    #[test]
+    fn diff_list_search_keeps_rows_and_filter_composes_with_state() {
+        let _env = crate::persist::test_env("diff-list-search-filter");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        let first = install_snapshot(&mut app);
+        let second = add_snapshot_file(&mut app, "src/second.rs");
+        app.diff.snapshot.as_mut().unwrap().files[1].key.layer = DiffLayer::Staged;
+        app.diff.snapshot.as_mut().unwrap().files[0].viewed_fingerprint = Some(
+            app.diff.snapshot.as_ref().unwrap().files[0]
+                .fingerprint
+                .clone(),
+        );
+        app.diff.rebuild_rows();
+        app.files_mode = FilesMode::Diff;
+        app.files_focused = true;
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let all_rows = app.diff.rows.len();
+        app.handle_diff_list_key(key(KeyCode::Char('f')));
+        assert_eq!(app.diff.filter, crate::diff::model::DiffFilter::Unviewed);
+        assert!(app
+            .diff
+            .rows
+            .iter()
+            .any(|row| matches!(row, DiffListRow::Group(DiffLayer::Staged))));
+        assert!(app.diff.rows.iter().all(|row| match row {
+            DiffListRow::File(index) =>
+                app.diff.snapshot.as_ref().unwrap().files[*index].key != first,
+            DiffListRow::Group(_) => true,
+        }));
+        app.handle_diff_list_key(key(KeyCode::Char('\\')));
+        for ch in ['s', 'e', 'c', 'o', 'n', 'd'] {
+            app.handle_diff_list_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_diff_list_key(key(KeyCode::Char('f')));
+        assert_eq!(app.diff.list_query.text(), "secondf");
+        app.handle_diff_list_key(key(KeyCode::Backspace));
+        app.handle_diff_list_key(key(KeyCode::Enter));
+        assert!(app
+            .diff
+            .rows
+            .iter()
+            .any(|row| matches!(row, DiffListRow::Group(DiffLayer::Staged))));
+        assert!(!app
+            .diff
+            .rows
+            .iter()
+            .any(|row| matches!(row, DiffListRow::Group(DiffLayer::Worktree))));
+        app.handle_diff_list_key(key(KeyCode::Char('/')));
+        app.handle_diff_list_key(key(KeyCode::Char('z')));
+        assert!(app.diff.list_search_miss);
+        assert_eq!(app.diff.rows.len(), 2, "one heading and one file remain");
+        app.handle_diff_list_key(key(KeyCode::Esc));
+        app.handle_diff_list_key(key(KeyCode::Esc));
+        app.handle_diff_list_key(key(KeyCode::Char('f')));
+        app.handle_diff_list_key(key(KeyCode::Char('f')));
+        app.handle_diff_list_key(key(KeyCode::Char('f')));
+        assert_eq!(app.diff.filter, crate::diff::model::DiffFilter::All);
+        app.handle_diff_list_key(key(KeyCode::Char('/')));
+        for ch in ['l', 'i', 'b'] {
+            app.handle_diff_list_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_diff_list_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.diff.rows.len(),
+            all_rows,
+            "search does not hide DIFF rows"
+        );
+        assert_eq!(app.diff.selected_key.as_ref(), Some(&first));
+        app.handle_diff_list_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            app.diff.selected_key.as_ref(),
+            Some(&first),
+            "only one path matches"
+        );
+        app.diff.snapshot.as_mut().unwrap().files.swap(0, 1);
+        app.diff.rebuild_rows();
+        assert_eq!(
+            app.diff.selected_file().map(|file| &file.key),
+            Some(&first),
+            "refresh reorder retains layer/path identity"
+        );
+        let removed = app
+            .diff
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .files
+            .iter()
+            .position(|file| file.key == first)
+            .unwrap();
+        app.diff.snapshot.as_mut().unwrap().files.remove(removed);
+        app.diff.rebuild_rows();
+        app.diff.rebuild_rows(); // a second refresh must not adopt the replacement
+        app.handle_diff_list_key(key(KeyCode::Enter));
+        assert!(
+            !app.views
+                .values()
+                .any(|view| matches!(view, ViewKind::Diff(_))),
+            "Enter must not open the file that replaced the deleted row"
+        );
+        app.handle_diff_list_key(key(KeyCode::Char('a')));
+        assert!(app.diff_menu.is_none());
+        let surviving = app.diff.snapshot.as_ref().unwrap().files[0].key.clone();
+        assert_eq!(surviving.display_path(), second.display_path());
+        app.open_diff_view(surviving, OpenTarget::Tab);
+        let id = app.layout().focus;
+        assert!(app.handle_diff_key(id, key(KeyCode::Char('/'))));
+        assert!(matches!(
+            app.views.get(&id),
+            Some(ViewKind::Diff(view)) if view.search.is_some()
+        ));
+        assert!(
+            !app.diff.list_search.editing(),
+            "content / is not the list search"
+        );
     }
 
     #[test]
