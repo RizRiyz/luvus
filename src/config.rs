@@ -32,6 +32,10 @@ pub struct Config {
     pub version: u32,
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// Opt-in switch between two chosen themes when the host appearance
+    /// changes. Disabled by default, so a probe never replaces a manual theme.
+    #[serde(default)]
+    pub theme_follow: ThemeFollowConfig,
     /// UI language code (docs/21) — `"en"` (default) or any `i18n::LANGS` code.
     #[serde(default = "default_lang")]
     pub language: String,
@@ -133,6 +137,18 @@ pub struct Config {
     /// only presentation preferences survive a restart.
     #[serde(default)]
     pub bars: BarConfig,
+}
+
+/// Host light/dark theme names used only while `auto_switch` is true.
+/// Empty or unknown names fail closed and leave the manual theme in place.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThemeFollowConfig {
+    #[serde(default)]
+    pub auto_switch: bool,
+    #[serde(default)]
+    pub dark: String,
+    #[serde(default)]
+    pub light: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -532,6 +548,7 @@ impl Default for Config {
         Config {
             version: CONFIG_VERSION,
             theme: default_theme(),
+            theme_follow: ThemeFollowConfig::default(),
             language: default_lang(),
             shell: default_shell_choice(),
             sidebar_width: default_sidebar_width(),

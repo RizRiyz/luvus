@@ -1331,6 +1331,194 @@ mod tests {
         }
     }
 
+    /// Exercise the real App → sidebar → workspace_row/agent renderer, with
+    /// the same palette, geometry and semantic focus on both sides. These
+    /// expected cells are the pre-native Terminal derivation, not ANSI-only
+    /// assertions (which missed the lost active/keyboard-selection hierarchy).
+    #[test]
+    fn terminal_sidebar_probe_preserves_derived_selection_layers() {
+        use ratatui::style::{Color, Modifier};
+        let _env = crate::persist::test_env("terminal-sidebar-derived");
+        for (fg, bg, active_bg, selected_bg, muted) in [
+            (
+                [238; 3],
+                [26, 26, 46],
+                [30, 39, 67],
+                [67, 68, 71],
+                [157, 157, 165],
+            ),
+            (
+                [51; 3],
+                [245, 245, 240],
+                [208, 208, 229],
+                [149, 149, 147],
+                [138, 138, 136],
+            ),
+        ] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(120, 40, tx).unwrap();
+            app.downsample = false;
+            app.config.theme = "terminal".into();
+            app.config.theme_follow.auto_switch = false;
+            app.theme = crate::ui::theme::Theme::terminal_native();
+            app.hover = None;
+            app.workspaces[0].name = "fixture-workspace".into();
+            app.workspaces[0].branch = None;
+            let pane = app.layout().focus;
+            app.status.get_mut(&pane).unwrap().agent = "claude".into();
+            app.resumable = vec![crate::agent::SessionInfo {
+                agent: "claude".into(),
+                session_id: "fixture-session".into(),
+                cwd: app.workspaces[0].cwd.clone(),
+                updated: std::time::UNIX_EPOCH,
+            }];
+            let colors = crate::terminal::theme_probe::TerminalColors {
+                fg,
+                bg,
+                palette: crate::terminal::theme_probe::default_ansi_palette(fg, bg),
+                palette_mask: u16::MAX,
+            };
+            app.apply_terminal_colors(&colors);
+            let rgb = |v: [u8; 3]| Color::Rgb(v[0], v[1], v[2]);
+            let accent = rgb(colors.palette[4]);
+            let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            for keyboard in [false, true] {
+                app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Workspaces);
+                app.workspace_cursor = 0;
+                term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+                let row = app.ws_rects[0].1;
+                let buffer = term.backend().buffer();
+                let expected = rgb(if keyboard { selected_bg } else { active_bg });
+                assert_eq!(
+                    buffer[(row.x, row.y)].bg,
+                    expected,
+                    "workspace keyboard={keyboard}, bg={bg:?}"
+                );
+                let name = &buffer[(row.x + 4, row.y)];
+                assert_eq!((name.fg, name.bg), (accent, expected));
+                assert!(name.modifier.contains(Modifier::BOLD));
+
+                app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Agents);
+                app.agent_cursor = 0;
+                term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+                let row = app
+                    .agent_rects
+                    .iter()
+                    .find(|(id, _)| *id == pane)
+                    .unwrap()
+                    .1;
+                let buffer = term.backend().buffer();
+                assert_eq!(
+                    buffer[(row.x, row.y)].bg,
+                    expected,
+                    "agent keyboard={keyboard}, bg={bg:?}"
+                );
+                let name = (row.x..row.right())
+                    .find_map(|x| {
+                        (buffer[(x, row.y)].symbol() == "c").then_some(&buffer[(x, row.y)])
+                    })
+                    .expect("live claude name");
+                assert_eq!((name.fg, name.bg), (accent, expected));
+                assert!(name.modifier.contains(Modifier::BOLD));
+                let unselected = app.session_rects[0].1;
+                assert_eq!(buffer[(unselected.x, unselected.y)].bg, Color::Reset);
+                assert_ne!(rgb(active_bg), rgb(selected_bg));
+            }
+            // Same shared WORKSPACES renderer also handles a non-active row
+            // and client-shell hover without changing App's active workspace.
+            for hovered in [false, true] {
+                let area = Rect::new(0, 0, 24, 2);
+                let mut buffer = Buffer::empty(area);
+                crate::ui::workspace_row::draw(
+                    &mut buffer,
+                    area,
+                    crate::ui::workspace_row::WorkspaceRow {
+                        name: "other",
+                        branch: None,
+                        path: "~/other",
+                        dot: "○",
+                        dot_color: app.theme.overlay0,
+                        nested: false,
+                        active: false,
+                        selected: false,
+                        hovered,
+                    },
+                    crate::ui::workspace_row::Palette {
+                        accent: app.theme.accent,
+                        normal: app.theme.subtext1,
+                        muted: app.theme.overlay0,
+                        path: app.theme.subtext0,
+                        branch: app.theme.green,
+                        active_bg: app.theme.sel_bg,
+                        selected_bg: app.theme.surface1,
+                    },
+                );
+                assert_eq!(
+                    buffer[(0, 0)].bg,
+                    if hovered {
+                        rgb(selected_bg)
+                    } else {
+                        Color::Reset
+                    }
+                );
+                assert_eq!(buffer[(4, 0)].fg, app.theme.subtext1);
+                assert!(!buffer[(4, 0)].modifier.contains(Modifier::BOLD));
+            }
+            assert_eq!(app.theme.subtext0, rgb(muted));
+            assert_eq!(
+                (
+                    app.theme.base,
+                    app.theme.mantle,
+                    app.theme.crust,
+                    app.theme.surface0
+                ),
+                (Color::Reset, Color::Reset, Color::Reset, Color::Reset)
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_sidebar_without_probe_keeps_native_fallback() {
+        let _env = crate::persist::test_env("terminal-sidebar-no-probe");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.config.theme = "terminal".into();
+        app.theme = crate::ui::theme::Theme::terminal_native();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        for keyboard in [false, true] {
+            app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Workspaces);
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let row = app.ws_rects[0].1;
+            assert_eq!(
+                term.backend().buffer()[(row.x, row.y)].bg,
+                ratatui::style::Color::Indexed(8)
+            );
+            app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Agents);
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let row = app
+                .agent_rects
+                .iter()
+                .find(|(id, _)| *id == pane)
+                .unwrap()
+                .1;
+            assert_eq!(
+                term.backend().buffer()[(row.x, row.y)].bg,
+                ratatui::style::Color::Indexed(8)
+            );
+            assert_eq!(
+                fg_of_row(&term, "claude"),
+                Some(ratatui::style::Color::Indexed(4))
+            );
+        }
+        assert_eq!(
+            app.theme,
+            crate::ui::theme::Theme::terminal_native(),
+            "no-probe fallback never had derived layers"
+        );
+    }
+
     #[test]
     fn keyboard_focus_highlights_workspace_and_agent_rows() {
         let _env = crate::persist::test_env("sidebar-keyboard-highlight");
@@ -1470,6 +1658,9 @@ mod tests {
         let _env = crate::persist::test_env("agent-mention");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        // This test exercises delegation metadata, not shell titles or a long checkout name.
+        app.config.layout.agent_title = false;
+        app.workspaces[0].name = "fixture".into();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -1546,6 +1737,9 @@ mod tests {
         let _env = crate::persist::test_env("agent-meta-colour");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        // Shell titles and checkout-name truncation are outside this color fixture.
+        app.config.layout.agent_title = false;
+        app.workspaces[0].name = "fixture".into();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();

@@ -124,6 +124,12 @@ pub trait OnResize {
 /// Event Loop for notifying the renderer about terminal events.
 pub trait EventListener {
     fn send_event(&self, _event: Event) {}
+
+    /// A child color was set or reset at the moment the parser executes it.
+    ///
+    /// `None` is a reset. Queries are not reported here; they arrive separately
+    /// as `Event::ColorRequest` and must observe only earlier operations.
+    fn child_color(&self, _index: usize, _color: Option<Rgb>) {}
 }
 
 /// Null sink for events.

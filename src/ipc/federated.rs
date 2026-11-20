@@ -308,6 +308,7 @@ struct DockState {
     /// selector opens or closes before the matching Repeat/Release arrives.
     key_owners: HashMap<(KeyCode, bool), KeyOwner>,
     dirty: bool,
+    host_colors: Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 }
 
 impl Default for DockState {
@@ -386,6 +387,7 @@ impl Default for DockState {
             machine_popup: None,
             key_owners: HashMap::new(),
             dirty: true,
+            host_colors: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -522,10 +524,7 @@ fn negotiate_local(
     let probe = if probe_terminal {
         probe_terminal_colors()
     } else {
-        crate::terminal::theme_probe::ProbeResult {
-            colors: None,
-            pending: Vec::new(),
-        }
+        crate::terminal::theme_probe::ProbeResult::default()
     };
     if probe_terminal {
         protocol::write_message(writer, &ClientMessage::TerminalColors(probe.colors.clone()))?;
@@ -593,7 +592,18 @@ fn run_inner(
     // lock. Start input only after the query, matching the ordinary thin-client
     // path, or attachment can remain on a blank alternate screen until a key
     // event happens to release the reader.
-    start_input_reader(probe.pending, events_tx.clone())?;
+    let host_colors = Arc::new(Mutex::new(probe.colors.clone()));
+    #[cfg(not(windows))]
+    let partial = local_reader_partial(&probe);
+    #[cfg(windows)]
+    start_input_reader(probe.pending, events_tx.clone(), host_colors.clone())?;
+    #[cfg(not(windows))]
+    start_input_reader(
+        probe.pending,
+        partial,
+        events_tx.clone(),
+        host_colors.clone(),
+    )?;
 
     let mut candidate: Option<SurfaceCandidate> = None;
     let mut pending_endpoint: Option<Endpoint> = None;
@@ -613,6 +623,7 @@ fn run_inner(
         working_label: labels.mc_working,
         ..DockState::default()
     };
+    dock.host_colors = Arc::clone(&host_colors);
     let mut last_cursor = None;
     let mut cursor_visible = false;
     let mut exit = super::client::ClientExit::Done;
@@ -767,6 +778,19 @@ fn run_inner(
                 dock.dirty = true;
             }
             ShellEvent::Input(message) => {
+                if let ClientMessage::TerminalColors(colors) = &message {
+                    if let Ok(mut cached) = host_colors.lock() {
+                        *cached = colors.clone();
+                    }
+                    if let Err(error) = send_surface(&active, &message, &machines, &writer) {
+                        if matches!(active, Endpoint::Local) {
+                            return Err(error);
+                        }
+                        dock.warning = Some("active machine connection lost".to_string());
+                        dock.dirty = true;
+                    }
+                    continue;
+                }
                 let phase_route = owned_key_phase(&message, &mut dock, &active);
                 let phase_endpoint = match phase_route {
                     OwnedKeyPhase::Consume => continue,
@@ -836,6 +860,7 @@ fn run_inner(
                         dock.local_workspaces.len(),
                         dock.sidebars.as_ref(),
                         &writer,
+                        &host_colors,
                     )?;
                 }
             }
@@ -872,6 +897,7 @@ fn run_inner(
                     &mut last_cursor,
                     host_cursor,
                     &mut cursor_visible,
+                    &host_colors,
                 )? {
                     exit = reason;
                     running = false;
@@ -892,6 +918,7 @@ fn run_inner(
                     &mut last_cursor,
                     host_cursor,
                     &mut cursor_visible,
+                    &host_colors,
                 )? {
                     exit = reason;
                     running = false;
@@ -1058,7 +1085,19 @@ fn start_local_reader(
     Ok(())
 }
 
-fn start_input_reader(pending: Vec<Event>, events: Sender<ShellEvent>) -> Result<()> {
+#[cfg(any(unix, test))]
+fn local_reader_partial(
+    probe: &crate::terminal::theme_probe::ProbeResult,
+) -> crate::terminal::theme_probe::ColorAccumulator {
+    probe.partial.clone()
+}
+
+fn start_input_reader(
+    pending: Vec<Event>,
+    #[cfg(not(windows))] partial: crate::terminal::theme_probe::ColorAccumulator,
+    events: Sender<ShellEvent>,
+    host_colors: Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
+) -> Result<()> {
     std::thread::Builder::new()
         .name("client-input".to_string())
         .stack_size(256 * 1024)
@@ -1069,11 +1108,21 @@ fn start_input_reader(pending: Vec<Event>, events: Sender<ShellEvent>) -> Result
             };
             #[cfg(windows)]
             {
+                let _ = host_colors;
                 crate::terminal::host_input::run_input_loop(pending, send);
             }
             #[cfg(not(windows))]
             {
-                crate::terminal::theme_probe::run_input_loop(pending, send);
+                crate::terminal::theme_probe::run_input_loop(pending, partial, send, |colors| {
+                    if let Ok(mut cached) = host_colors.lock() {
+                        *cached = Some(colors.clone());
+                    }
+                    events
+                        .send(ShellEvent::Input(ClientMessage::TerminalColors(Some(
+                            colors,
+                        ))))
+                        .is_ok()
+                });
             }
         })?;
     Ok(())
@@ -1340,6 +1389,7 @@ fn handle_link_event(
     last_cursor: &mut Option<(u16, u16)>,
     last_cursor_style: &mut super::client::AppliedHostCursor,
     cursor_visible: &mut bool,
+    host_colors: &Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 ) -> Result<Option<super::client::ClientExit>> {
     match event {
         LinkEvent::Message {
@@ -1384,6 +1434,7 @@ fn handle_link_event(
                 last_cursor,
                 last_cursor_style,
                 cursor_visible,
+                host_colors,
             )? {
                 return Ok(Some(exit));
             }
@@ -1489,6 +1540,7 @@ fn handle_surface_message(
     last_cursor: &mut Option<(u16, u16)>,
     last_cursor_style: &mut super::client::AppliedHostCursor,
     cursor_visible: &mut bool,
+    host_colors: &Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 ) -> Result<Option<super::client::ClientExit>> {
     let (message, prepared) = match message {
         ServerMessage::PreparedFrame { ticket, frame } => {
@@ -1583,7 +1635,7 @@ fn handle_surface_message(
                 session,
             } = &endpoint
             {
-                let result = (|| {
+                let result: Result<()> = (|| {
                     let layout = dock_layout(&endpoint, machines, dock.local_workspaces.len());
                     let runtime = machines
                         .get_mut(machine_id)
@@ -1594,10 +1646,20 @@ fn handle_surface_message(
                         .control
                         .as_ref()
                         .ok_or_else(|| anyhow!("remote session connection closed"))?;
+                    // Interest is not Active before any cached colors. The server
+                    // then stores those colors without taking the current display.
+                    let interest = if is_candidate {
+                        SurfaceInterest::Prepared
+                    } else {
+                        SurfaceInterest::Suspended
+                    };
                     if probe_terminal {
-                        // The input reader already owns the terminal. Reprobing
-                        // here would race keyboard input and block switching.
-                        control.send(&ClientMessage::TerminalColors(None))?;
+                        let colors = host_colors.lock().ok().and_then(|colors| colors.clone());
+                        for message in remote_probe_preface(interest, colors) {
+                            control.send(&message)?;
+                        }
+                    } else {
+                        control.send(&ClientMessage::SurfaceInterest(interest))?;
                     }
                     control.send(&super::client::cell_pixels_message())?;
                     control.send(&ClientMessage::ShellDockLayout(layout))?;
@@ -1610,11 +1672,7 @@ fn handle_surface_message(
                             ..layout
                         }))?;
                     }
-                    control.send(&ClientMessage::SurfaceInterest(if is_candidate {
-                        SurfaceInterest::Prepared
-                    } else {
-                        SurfaceInterest::Suspended
-                    }))
+                    Ok(())
                 })();
                 if let Err(error) = result {
                     if let Some(runtime) = machines
@@ -1860,7 +1918,14 @@ fn handle_surface_message(
                             local_writer,
                         );
                     }
-                    commit_candidate(endpoint, active, candidate, machines, local_writer)?;
+                    commit_candidate(
+                        endpoint,
+                        active,
+                        candidate,
+                        machines,
+                        local_writer,
+                        host_colors,
+                    )?;
                     dock.sidebar_sync = None;
                     dock.pending_rect = None;
                     dock.selector_open = false;
@@ -2063,6 +2128,11 @@ fn handle_dock_input(
     terminal: &mut DefaultTerminal,
     events: &Sender<ShellEvent>,
 ) -> Result<bool> {
+    // Host colors belong to the active endpoint, even while a form, selector,
+    // or popup owns ordinary keys and mouse input.
+    if matches!(message, ClientMessage::TerminalColors(_)) {
+        return Ok(false);
+    }
     if dock.sidebars.is_some() && !dock.overlay_open() {
         if let ClientMessage::Mouse(mouse) = message {
             if dock.width_drag.is_some()
@@ -3733,6 +3803,7 @@ fn refresh_catalog(
             dock.local_workspaces.len(),
             dock.sidebars.as_ref(),
             local_writer,
+            &dock.host_colors,
         )?;
     }
     let rows = projected_dock_row_count(machines, &Endpoint::Local, 0);
@@ -3793,6 +3864,7 @@ fn try_open_pending_endpoint(
                 dock.local_workspaces.len(),
                 dock.sidebars.as_ref(),
                 local_writer,
+                &dock.host_colors,
             )?;
             *pending = None;
             dock.dirty = true;
@@ -3860,6 +3932,7 @@ fn close_selector(
             dock.local_workspaces.len(),
             dock.sidebars.as_ref(),
             local_writer,
+            &dock.host_colors,
         )?;
     }
     Ok(())
@@ -3958,6 +4031,7 @@ fn request_user_switch(
         dock.local_workspaces.len(),
         dock.sidebars.as_ref(),
         local_writer,
+        &dock.host_colors,
     )?;
     Ok(true)
 }
@@ -3969,6 +4043,7 @@ fn request_switch(
     local_workspace_count: usize,
     sidebars: Option<&protocol::ShellSidebars>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
+    host_colors: &Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 ) -> Result<()> {
     if let Some(previous) = candidate.take() {
         let _ = send_interest(
@@ -3987,10 +4062,10 @@ fn request_switch(
                 local_writer,
                 &ClientMessage::ShellDockLayout(dock_layout(&endpoint, machines, 0)),
             )?;
-            send_local(
-                local_writer,
-                &ClientMessage::SurfaceInterest(SurfaceInterest::Prepared),
-            )?;
+            let colors = host_colors.lock().ok().and_then(|colors| colors.clone());
+            for message in prepare_surface_messages(&colors) {
+                send_local(local_writer, &message)?;
+            }
             if let Ok((cols, rows)) = crossterm::terminal::size() {
                 send_local(local_writer, &super::client::resize_message(cols, rows))?;
             }
@@ -4027,7 +4102,10 @@ fn request_switch(
                 machines,
                 local_workspace_count,
             )))?;
-            control.send(&ClientMessage::SurfaceInterest(SurfaceInterest::Prepared))?;
+            let colors = host_colors.lock().ok().and_then(|colors| colors.clone());
+            for message in prepare_surface_messages(&colors) {
+                control.send(&message)?;
+            }
             if let Ok((cols, rows)) = crossterm::terminal::size() {
                 control.send(&super::client::resize_message(cols, rows))?;
             }
@@ -4064,8 +4142,14 @@ fn commit_candidate(
     candidate: &mut Option<SurfaceCandidate>,
     machines: &HashMap<String, MachineRuntime>,
     local_writer: &Arc<Mutex<crate::ipc::transport::Conn>>,
+    host_colors: &Arc<Mutex<Option<crate::terminal::theme_probe::TerminalColors>>>,
 ) -> Result<()> {
-    send_interest(&endpoint, SurfaceInterest::Active, machines, local_writer)?;
+    // Store the latest host colors before Active, so the server applies this
+    // display's cache instead of a focus reply it may suppress as unchanged.
+    let colors = host_colors.lock().ok().and_then(|colors| colors.clone());
+    for message in activate_surface_messages(&colors) {
+        send_surface(&endpoint, &message, machines, local_writer)?;
+    }
     // Once a complete candidate frame is valid, suspend the previous direct
     // endpoint. Its SSH connection remains alive without rendering or input.
     if *active != endpoint {
@@ -4094,6 +4178,34 @@ fn send_surface(
             .ok_or_else(|| anyhow!("remote session connection is unavailable"))?
             .send(message),
     }
+}
+
+fn remote_probe_preface(
+    interest: SurfaceInterest,
+    colors: Option<crate::terminal::theme_probe::TerminalColors>,
+) -> [ClientMessage; 2] {
+    [
+        ClientMessage::SurfaceInterest(interest),
+        ClientMessage::TerminalColors(colors),
+    ]
+}
+
+fn prepare_surface_messages(
+    colors: &Option<crate::terminal::theme_probe::TerminalColors>,
+) -> [ClientMessage; 2] {
+    [
+        ClientMessage::SurfaceInterest(SurfaceInterest::Prepared),
+        ClientMessage::TerminalColors(colors.clone()),
+    ]
+}
+
+fn activate_surface_messages(
+    colors: &Option<crate::terminal::theme_probe::TerminalColors>,
+) -> [ClientMessage; 2] {
+    [
+        ClientMessage::TerminalColors(colors.clone()),
+        ClientMessage::SurfaceInterest(SurfaceInterest::Active),
+    ]
 }
 
 fn send_interest(
@@ -5780,6 +5892,144 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_reader_keeps_colors_consumed_before_the_probe_deadline() {
+        let mut partial = crate::terminal::theme_probe::ColorAccumulator::default();
+        partial.push_sequence(b"\x1b]10;rgb:aa/bb/cc\x07");
+        let probe = crate::terminal::theme_probe::ProbeResult {
+            colors: None,
+            pending: Vec::new(),
+            partial: partial.clone(),
+        };
+        let mut retained = local_reader_partial(&probe);
+        retained.push_sequence(b"\x1b]11;rgb:01/02/03\x07");
+        let colors = retained
+            .complete()
+            .expect("foreground retained from the probe completes the late background");
+        assert_eq!(colors.fg, [0xaa, 0xbb, 0xcc]);
+        assert_eq!(colors.bg, [0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn background_probe_preface_sets_interest_before_colors() {
+        let colors = crate::terminal::theme_probe::TerminalColors {
+            fg: [1, 2, 3],
+            bg: [4, 5, 6],
+            palette: [[0; 3]; 16],
+            palette_mask: 0,
+        };
+        for interest in [SurfaceInterest::Prepared, SurfaceInterest::Suspended] {
+            let messages = remote_probe_preface(interest, Some(colors.clone()));
+            assert!(
+                matches!(messages[0], ClientMessage::SurfaceInterest(seen) if seen == interest)
+            );
+            assert!(matches!(
+                &messages[1],
+                ClientMessage::TerminalColors(Some(seen)) if seen.bg == [4, 5, 6]
+            ));
+        }
+    }
+
+    #[test]
+    fn background_interest_arrives_before_cached_colors() {
+        let dir =
+            std::env::temp_dir().join(format!("luvus-background-colors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("s");
+        let _ = std::fs::remove_file(&sock);
+        let listener = crate::ipc::transport::bind(&sock).unwrap();
+        let (app_tx, app_rx) = std::sync::mpsc::channel();
+        let terminal_theme = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        std::thread::spawn(move || {
+            let conn = crate::ipc::transport::incoming(&listener).next().unwrap();
+            crate::ipc::server::handle_client(7, conn, app_tx, terminal_theme);
+        });
+        let mut client = crate::ipc::transport::connect(&sock).unwrap();
+        protocol::write_message(
+            &mut client,
+            &ClientMessage::Hello {
+                version: PROTOCOL_VERSION,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .unwrap();
+        let mut reader = std::io::BufReader::new(client.clone());
+        assert!(matches!(
+            protocol::read_message::<_, ServerMessage>(&mut reader).unwrap(),
+            ServerMessage::Welcome { error: None, .. }
+        ));
+        assert!(matches!(
+            protocol::read_message::<_, ServerMessage>(&mut reader).unwrap(),
+            ServerMessage::Ready {
+                probe_terminal: true
+            }
+        ));
+        assert!(matches!(
+            protocol::read_message::<_, ServerMessage>(&mut reader).unwrap(),
+            ServerMessage::EndpointIdentity { .. }
+        ));
+        protocol::write_message(
+            &mut client,
+            &ClientMessage::SurfaceInterest(SurfaceInterest::Suspended),
+        )
+        .unwrap();
+        protocol::write_message(
+            &mut client,
+            &ClientMessage::TerminalColors(Some(crate::terminal::theme_probe::TerminalColors {
+                fg: [1, 1, 1],
+                bg: [2, 2, 2],
+                palette: [[0; 3]; 16],
+                palette_mask: 0,
+            })),
+        )
+        .unwrap();
+        let event = app_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("background handshake must register without taking the display");
+        match event {
+            crate::event::AppEvent::ClientConnected {
+                interest,
+                colors_known,
+                terminal_colors,
+                ..
+            } => {
+                assert_eq!(interest, SurfaceInterest::Suspended);
+                assert!(colors_known);
+                assert_eq!(terminal_colors.unwrap().bg, [2, 2, 2]);
+            }
+            _ => panic!("background handshake did not register the suspended client"),
+        }
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn local_and_remote_activation_replay_cached_host_colors() {
+        let colors = Some(crate::terminal::theme_probe::TerminalColors {
+            fg: [9, 9, 9],
+            bg: [8, 8, 8],
+            palette: [[0; 3]; 16],
+            palette_mask: 0,
+        });
+        let prepare = prepare_surface_messages(&colors);
+        assert!(matches!(
+            prepare[0],
+            ClientMessage::SurfaceInterest(SurfaceInterest::Prepared)
+        ));
+        assert!(
+            matches!(&prepare[1], ClientMessage::TerminalColors(Some(seen)) if seen.bg == [8, 8, 8])
+        );
+        let activate = activate_surface_messages(&colors);
+        assert!(
+            matches!(&activate[0], ClientMessage::TerminalColors(Some(seen)) if seen.bg == [8, 8, 8])
+        );
+        assert!(matches!(
+            activate[1],
+            ClientMessage::SurfaceInterest(SurfaceInterest::Active)
+        ));
+    }
+
+    #[test]
     fn local_negotiation_reads_server_identity_before_sending_metadata() {
         // Windows named-pipe flushes wait for the peer to read. The server sends
         // EndpointIdentity after Ready, so a client that writes CellPixels before
@@ -5805,10 +6055,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut writer = client.clone();
                 let result = negotiate_local(client, &mut writer, (80, 24), 0, || {
-                    crate::terminal::theme_probe::ProbeResult {
-                        colors: None,
-                        pending: Vec::new(),
-                    }
+                    crate::terminal::theme_probe::ProbeResult::default()
                 });
                 let result = result.map(|_| ()).map_err(|error| error.to_string());
                 // Hand the writer back so the connection stays open while the test waits.

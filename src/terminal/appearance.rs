@@ -31,10 +31,6 @@ impl ColorScheme {
         }
     }
 
-    pub fn is_dark(self) -> bool {
-        self == Self::Dark
-    }
-
     pub fn dsr(self) -> &'static [u8] {
         match self {
             Self::Dark => b"\x1b[?997;1n",
@@ -43,11 +39,23 @@ impl ColorScheme {
     }
 }
 
+/// Host foreground and ANSI palette reported alongside a pane appearance.
+/// Absent entries are not filled with a hardcoded default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostPalette {
+    pub foreground: [u8; 3],
+    pub palette: [[u8; 3]; 16],
+    pub palette_mask: u16,
+}
+
 /// The background and declared color-scheme preference visible to one child.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaneAppearance {
     pub background: [u8; 3],
     pub scheme: ColorScheme,
+    /// Host colors for OSC 10/4 replies. `None` keeps the theme background
+    /// path and does not invent palette entries.
+    pub host: Option<HostPalette>,
 }
 
 impl PaneAppearance {
@@ -66,13 +74,22 @@ impl PaneAppearance {
                 .map(|appearance| appearance.scheme)
                 .unwrap_or(ColorScheme::Dark),
         };
-        Self { background, scheme }
+        Self {
+            background,
+            scheme,
+            host: None,
+        }
     }
 
     pub fn from_terminal_colors(colors: &TerminalColors) -> Self {
         Self {
             background: colors.bg,
             scheme: ColorScheme::from_terminal_colors(colors),
+            host: Some(HostPalette {
+                foreground: colors.fg,
+                palette: colors.palette,
+                palette_mask: colors.palette_mask,
+            }),
         }
     }
 }
@@ -82,6 +99,7 @@ impl Default for PaneAppearance {
         Self {
             background: DEFAULT_BG,
             scheme: ColorScheme::Dark,
+            host: None,
         }
     }
 }
@@ -109,6 +127,7 @@ mod tests {
             fg: [0xca, 0xd3, 0xf5],
             bg: [0x1e, 0x20, 0x30],
             palette: [[0; 3]; 16],
+            palette_mask: 0,
         };
         assert_eq!(
             ColorScheme::from_terminal_colors(&colors),
@@ -138,6 +157,7 @@ mod tests {
         let probed = PaneAppearance {
             background: [0xf2, 0xe5, 0xbc],
             scheme: ColorScheme::Light,
+            host: None,
         };
         assert_eq!(
             PaneAppearance::resolve(Color::Reset, ThemeAppearance::Terminal, Some(probed)),

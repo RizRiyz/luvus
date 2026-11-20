@@ -57,22 +57,102 @@ pub struct EventProxy {
     clipboard: ClipboardSlot,
     program_status: ProgramStatusSlot,
     appearance: Arc<Mutex<PaneAppearance>>,
+    child_colors: Arc<Mutex<ChildColors>>,
+}
+
+/// Colors the child set itself. A later host update must not replace these.
+///
+/// Updates arrive from the parser's `set_color` / `reset_color` calls, not from
+/// OSC parameter enumeration. A query in the same sequence therefore cannot see
+/// a setter the parser has not executed yet.
+#[derive(Default)]
+struct ChildColors {
+    foreground: Option<[u8; 3]>,
+    background: Option<[u8; 3]>,
+    palette: [Option<[u8; 3]>; 16],
+}
+
+impl ChildColors {
+    fn set(&mut self, index: usize, color: Option<[u8; 3]>) {
+        match index {
+            256 => self.foreground = color,
+            257 => self.background = color,
+            0..=15 => self.palette[index] = color,
+            _ => {}
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<[u8; 3]> {
+        match index {
+            256 => self.foreground,
+            257 => self.background,
+            0..=15 => self.palette[index],
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+fn parse_hash_rgb(value: &str) -> Option<[u8; 3]> {
+    let hex = value.strip_prefix('#')?;
+    if hex.is_empty()
+        || hex.len() % 3 != 0
+        || hex.len() > 12
+        || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let width = hex.len() / 3;
+    let channel = |index| {
+        let digits = &hex[index * width..(index + 1) * width];
+        let value = u32::from_str_radix(digits, 16).ok()?;
+        let max = (1u32 << (4 * width)) - 1;
+        Some((255 * value / max) as u8)
+    };
+    Some([channel(0)?, channel(1)?, channel(2)?])
+}
+
+fn host_query_color(appearance: &PaneAppearance, index: usize) -> Option<[u8; 3]> {
+    if index == NamedColor::Background as usize {
+        return Some(appearance.background);
+    }
+    let host = appearance.host.as_ref()?;
+    if index == NamedColor::Foreground as usize {
+        return Some(host.foreground);
+    }
+    if index < 16 && host.palette_mask & (1 << index) != 0 {
+        return Some(host.palette[index]);
+    }
+    None
 }
 
 impl EventListener for EventProxy {
+    fn child_color(&self, index: usize, color: Option<Rgb>) {
+        if let Ok(mut colors) = self.child_colors.lock() {
+            colors.set(index, color.map(|color| [color.r, color.g, color.b]));
+        }
+    }
+
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => {
                 let _ = self.tx.send(InputAction::Bytes(text.into_bytes()));
             }
             Event::ColorRequest(index, format) => {
-                if index == NamedColor::Background as usize {
-                    if let Ok(appearance) = self.appearance.lock() {
-                        let [r, g, b] = appearance.background;
-                        let _ = self
-                            .tx
-                            .send(InputAction::Bytes(format(Rgb { r, g, b }).into_bytes()));
-                    }
+                let child = self
+                    .child_colors
+                    .lock()
+                    .ok()
+                    .and_then(|colors| colors.get(index));
+                let host = self
+                    .appearance
+                    .lock()
+                    .ok()
+                    .and_then(|appearance| host_query_color(&appearance, index));
+                if let Some([r, g, b]) = child.or(host) {
+                    let _ = self
+                        .tx
+                        .send(InputAction::Bytes(format(Rgb { r, g, b }).into_bytes()));
                 }
             }
             Event::ColorSchemeRequest => {
@@ -183,6 +263,9 @@ pub struct AlacrittyEngine {
     program_status: ProgramStatusSlot,
     response_tx: InputSender,
     appearance: Arc<Mutex<PaneAppearance>>,
+    // Read through `EventProxy`; the engine owns the allocation.
+    #[allow(dead_code)]
+    child_colors: Arc<Mutex<ChildColors>>,
     history_budget_bytes: usize,
     output_generation: u64,
     // One bounded summary, invalidated at every storage mutation boundary.
@@ -232,12 +315,14 @@ impl AlacrittyEngine {
         let program_status: ProgramStatusSlot =
             Arc::new(Mutex::new(ProgramStatusSlotState::default()));
         let appearance = Arc::new(Mutex::new(initial_appearance));
+        let child_colors = Arc::new(Mutex::new(ChildColors::default()));
         let proxy = EventProxy {
             tx: resp_tx.clone(),
             title: title.clone(),
             clipboard: clipboard.clone(),
             program_status: program_status.clone(),
             appearance: appearance.clone(),
+            child_colors: child_colors.clone(),
         };
         // Alacritty retains history by rows, not bytes. Derive a conservative
         // capacity from Luvus's per-pane byte budget and current width. The
@@ -258,6 +343,7 @@ impl AlacrittyEngine {
             program_status,
             response_tx: resp_tx,
             appearance,
+            child_colors,
             history_budget_bytes,
             output_generation: 0,
             history_metrics_cache: Cell::new(None),
@@ -3319,7 +3405,11 @@ mod tests {
         scheme: ColorScheme,
     ) -> (AlacrittyEngine, std::sync::mpsc::Receiver<InputAction>) {
         let (tx, rx) = channel();
-        let appearance = PaneAppearance { background, scheme };
+        let appearance = PaneAppearance {
+            background,
+            scheme,
+            host: None,
+        };
         let engine =
             AlacrittyEngine::with_appearance(40, 5, tx, budget_for_rows(40, 20), appearance);
         (engine, rx)
@@ -3374,6 +3464,7 @@ mod tests {
         engine.set_appearance(PaneAppearance {
             background: [0xf2, 0xe5, 0xbc],
             scheme: ColorScheme::Light,
+            host: None,
         });
         assert_eq!(recv_bytes(&rx), b"\x1b[?997;2n");
         engine.advance(b"\x1b[?996n");
@@ -3386,6 +3477,207 @@ mod tests {
 
         engine.advance(b"\x1b[?2040$p");
         assert_eq!(recv_bytes(&rx), b"\x1b[?2040;0$y");
+    }
+
+    #[test]
+    fn host_palette_queries_follow_the_host_until_the_child_sets_a_color() {
+        let mut palette = [[0; 3]; 16];
+        palette[1] = [0xcc, 0x24, 0x1d];
+        let host = crate::terminal::theme_probe::TerminalColors {
+            fg: [0xeb, 0xdb, 0xb2],
+            bg: [0x28, 0x28, 0x28],
+            palette,
+            palette_mask: 1 << 1,
+        };
+        let (mut engine, rx) = appearance_engine(host.bg, ColorScheme::Dark);
+        engine.set_appearance(PaneAppearance::from_terminal_colors(&host));
+        engine.advance(b"\x1b[?2031h");
+        assert!(
+            rx.try_recv().is_err(),
+            "subscribing does not invent a change"
+        );
+
+        engine.advance(b"\x1b]10;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]10;rgb:ebeb/dbdb/b2b2\x07");
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]11;rgb:2828/2828/2828\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:cccc/2424/1d1d\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert!(
+            rx.try_recv().is_err(),
+            "unreported palette slots stay unset"
+        );
+
+        engine.advance(b"\x1b]11;rgb:01/02/03\x07");
+        let mut light = host.clone();
+        light.bg = [0xfb, 0xf1, 0xc7];
+        light.fg = [0x3c, 0x38, 0x36];
+        engine.set_appearance(PaneAppearance::from_terminal_colors(&light));
+        assert_eq!(recv_bytes(&rx), b"\x1b[?997;2n");
+        engine.set_appearance(PaneAppearance::from_terminal_colors(&light));
+        assert!(
+            rx.try_recv().is_err(),
+            "the same appearance is not notified twice"
+        );
+
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:0101/0202/0303\x07",
+            "a child background survives the host update"
+        );
+        engine.advance(b"\x1b]10;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]10;rgb:3c3c/3838/3636\x07");
+        engine.advance(b"\x1b]111\x07\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:fbfb/f1f1/c7c7\x07",
+            "reset restores host"
+        );
+
+        engine.advance(b"\x1b]11;?\x07\x1b]11;#010203\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:fbfb/f1f1/c7c7\x07",
+            "a query must not see a setter later in the same chunk"
+        );
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:0101/0202/0303\x07",
+            "#010203 is a child color"
+        );
+
+        engine.advance(b"\x1b]4;1;rgb:ff/00/00;2;rgb:00/ff/00\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07",
+            "grouped slot 1"
+        );
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;2;rgb:0000/ffff/0000\x07");
+        engine.advance(b"\x1b]104;1;2\x07\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:cccc/2424/1d1d\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert!(
+            rx.try_recv().is_err(),
+            "a grouped reset restores both slots"
+        );
+    }
+
+    #[test]
+    fn child_color_updates_follow_parser_order_and_keep_invalid_values() {
+        let mut palette = [[0; 3]; 16];
+        palette[1] = [0xcc, 0x24, 0x1d];
+        let host = crate::terminal::theme_probe::TerminalColors {
+            fg: [0xeb, 0xdb, 0xb2],
+            bg: [0x28, 0x28, 0x28],
+            palette,
+            palette_mask: 1 << 1,
+        };
+        let (mut engine, rx) = appearance_engine(host.bg, ColorScheme::Dark);
+        engine.set_appearance(PaneAppearance::from_terminal_colors(&host));
+
+        assert_eq!(parse_hash_rgb("#000000"), Some([0, 0, 0]));
+        assert_eq!(parse_hash_rgb("#fff"), Some([255, 255, 255]));
+        assert_eq!(parse_hash_rgb("#ffff00000000"), Some([255, 0, 0]));
+        assert_eq!(parse_hash_rgb("#aé"), None);
+        assert_eq!(parse_hash_rgb("#0é000"), None);
+
+        engine.advance(b"\x1b]11;rgb:01/02/03\x07");
+        engine.advance(b"\x1b]11;not-a-color\x07");
+        engine.advance(b"\x1b]11;#a\xC3\xA9\x07");
+        engine.advance(b"\x1b]11;#0\xC3\xA9000\x07");
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:0101/0202/0303\x07",
+            "an invalid background setter keeps the child color"
+        );
+
+        engine.advance(b"\x1b]4;1;rgb:ff/00/00\x07\x1b]4;1;invalid\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07",
+            "an invalid palette setter keeps the child color"
+        );
+
+        engine.advance(b"\x1b]4;1;?;2;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07",
+            "a grouped query must not clear the saved slot"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an unreported grouped query stays unset"
+        );
+
+        engine.advance(b"\x1b]4;1;?;2;#00ff00\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:ffff/0000/0000\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;2;rgb:0000/ffff/0000\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:ffff/0000/0000\x07");
+
+        engine.advance(b"\x1b]4;2;rgb:00/00/ff\x07");
+        engine.advance(b"\x1b]4;1;?;2;#000000;1;#00ff00\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;1;rgb:ffff/0000/0000\x07",
+            "a query is answered before a later setter in the same OSC"
+        );
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:0000/ffff/0000\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;2;rgb:0000/0000/0000\x07");
+
+        engine.advance(b"\x1b]10;?;#ff0000\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]10;rgb:ebeb/dbdb/b2b2\x07",
+            "OSC 10 query uses the foreground slot, not the next color"
+        );
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]11;rgb:ffff/0000/0000\x07",
+            "the following OSC 10 parameter advances to the background"
+        );
+
+        engine.advance(b"\x1b]4;1;rgb:ff/00/00\x07\x1b]4;2;rgb:00/ff/00\x07");
+        engine.advance(b"\x1b]104;1\x07");
+        engine.advance(b"\x1b]4;1;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]4;1;rgb:cccc/2424/1d1d\x07");
+        engine.advance(b"\x1b]4;2;?\x07");
+        assert_eq!(
+            recv_bytes(&rx),
+            b"\x1b]4;2;rgb:0000/ffff/0000\x07",
+            "OSC 104 with an index resets only that slot"
+        );
+        engine.advance(b"\x1b]104\x07\x1b]4;2;?\x07");
+        assert!(
+            rx.try_recv().is_err(),
+            "OSC 104 without indexes resets the palette"
+        );
+    }
+
+    #[test]
+    fn clearing_host_appearance_keeps_child_default_colors() {
+        let (mut engine, rx) = appearance_engine([0x11, 0x11, 0x11], ColorScheme::Dark);
+        engine.advance(b"\x1b]10;rgb:aa/bb/cc\x07\x1b]11;rgb:01/02/03\x07");
+        engine.set_appearance(PaneAppearance {
+            background: [0x1e, 0x20, 0x30],
+            scheme: ColorScheme::Dark,
+            host: None,
+        });
+        engine.advance(b"\x1b]10;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]10;rgb:aaaa/bbbb/cccc\x07");
+        engine.advance(b"\x1b]11;?\x07");
+        assert_eq!(recv_bytes(&rx), b"\x1b]11;rgb:0101/0202/0303\x07");
     }
 
     #[test]

@@ -11,6 +11,8 @@ use crate::ui::theme;
 pub const KEYS_PREFIX_ROW: usize = 0;
 pub const KEYS_PRESET_ROW: usize = 1;
 pub const KEYS_HEADER_ROWS: usize = 2;
+/// Auto-switch, dark theme, and light theme sit above the theme list.
+pub const THEME_FOLLOW_ROWS: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingsTab {
@@ -271,7 +273,7 @@ impl App {
     pub fn settings_rows(&self, tab: SettingsTab) -> usize {
         match tab {
             SettingsTab::General => self.general_rows().len(),
-            SettingsTab::Theme => self.theme_registry.entries().len(),
+            SettingsTab::Theme => self.theme_registry.entries().len() + THEME_FOLLOW_ROWS,
             SettingsTab::Layout => self.layout_rows().len(),
             // Rebindable commands first, then the read-only reference rows — the
             // cursor steps through both so the whole reference is keyboard-reachable.
@@ -352,7 +354,8 @@ impl App {
             let continuous = match key.code {
                 KeyCode::Up | KeyCode::Down => true,
                 KeyCode::Left | KeyCode::Right => match tab {
-                    SettingsTab::Theme | SettingsTab::Language => true,
+                    SettingsTab::Theme => cursor >= THEME_FOLLOW_ROWS,
+                    SettingsTab::Language => true,
                     SettingsTab::Layout => matches!(
                         self.layout_rows().get(cursor),
                         Some(
@@ -498,10 +501,12 @@ impl App {
 
     fn settings_set_tab(&mut self, tab: SettingsTab) {
         let cursor = match tab {
-            SettingsTab::Theme => self
-                .theme_registry
-                .index_of(&self.config.theme)
-                .unwrap_or(0),
+            SettingsTab::Theme => {
+                self.theme_registry
+                    .index_of(&self.config.theme)
+                    .unwrap_or(0)
+                    + THEME_FOLLOW_ROWS
+            }
             SettingsTab::Language => lang_cursor(&self.config.language),
             _ => 0,
         };
@@ -535,13 +540,15 @@ impl App {
         }
         // Theme / Language preview live as the selection moves.
         if tab == SettingsTab::Theme {
-            if let Some(id) = self
-                .theme_registry
-                .entries()
-                .get(new)
-                .map(|entry| entry.id.clone())
-            {
-                self.apply_theme(&id);
+            if let Some(index) = new.checked_sub(THEME_FOLLOW_ROWS) {
+                if let Some(id) = self
+                    .theme_registry
+                    .entries()
+                    .get(index)
+                    .map(|entry| entry.id.clone())
+                {
+                    self.apply_theme(&id);
+                }
             }
         } else if tab == SettingsTab::Language {
             self.apply_language(crate::i18n::LANGS[new]);
@@ -554,7 +561,11 @@ impl App {
         };
         match tab {
             // radio tabs: ‹ › move the selection like up/down
-            SettingsTab::Theme | SettingsTab::Language => self.settings_move(delta),
+            SettingsTab::Theme if cursor < THEME_FOLLOW_ROWS => {
+                self.adjust_theme_follow(cursor, delta)
+            }
+            SettingsTab::Theme => self.settings_move(delta),
+            SettingsTab::Language => self.settings_move(delta),
             SettingsTab::Layout => self.adjust_layout(cursor, delta),
             SettingsTab::General => self.adjust_general(cursor, delta),
             // Only the preset row responds to ‹ › (it cycles presets); rebinding a
@@ -575,8 +586,11 @@ impl App {
             ui.prefix_candidate = None;
         }
         match tab {
+            SettingsTab::Theme if cursor < THEME_FOLLOW_ROWS => self.adjust_theme_follow(cursor, 1),
             SettingsTab::Theme => {
-                let index = cursor.min(self.theme_registry.entries().len().saturating_sub(1));
+                let index = cursor
+                    .saturating_sub(THEME_FOLLOW_ROWS)
+                    .min(self.theme_registry.entries().len().saturating_sub(1));
                 if let Some(id) = self
                     .theme_registry
                     .entries()
@@ -834,8 +848,76 @@ impl App {
         }
     }
 
+    fn adjust_theme_follow(&mut self, cursor: usize, delta: i32) {
+        match cursor {
+            0 => {
+                self.config.theme_follow.auto_switch = !self.config.theme_follow.auto_switch;
+            }
+            1 => self.cycle_theme_follow_name(true, delta),
+            2 => self.cycle_theme_follow_name(false, delta),
+            _ => return,
+        }
+        if cursor != 0 {
+            // cycle_theme_follow_name already persisted and reapplied.
+            return;
+        }
+        self.persist_config();
+        self.reapply_host_theme();
+    }
+
+    fn cycle_theme_follow_name(&mut self, dark: bool, delta: i32) {
+        let mut names = vec![String::new()];
+        names.extend(
+            self.theme_registry
+                .entries()
+                .iter()
+                .map(|entry| entry.id.clone()),
+        );
+        let current = if dark {
+            self.config.theme_follow.dark.as_str()
+        } else {
+            self.config.theme_follow.light.as_str()
+        };
+        let index = names.iter().position(|name| name == current).unwrap_or(0) as i32;
+        let count = names.len() as i32;
+        let next = ((index + delta).rem_euclid(count.max(1))) as usize;
+        let chosen = names[next].clone();
+        if dark {
+            self.config.theme_follow.dark = chosen;
+        } else {
+            self.config.theme_follow.light = chosen;
+        }
+        self.persist_config();
+        self.reapply_host_theme();
+    }
+
+    pub(crate) fn theme_follow_label(&self, dark: bool) -> String {
+        let name = if dark {
+            self.config.theme_follow.dark.as_str()
+        } else {
+            self.config.theme_follow.light.as_str()
+        };
+        if name.is_empty() {
+            self.catalog.theme_follow_off.to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
+    fn reapply_host_theme(&mut self) {
+        if let Some(colors) = self.host_terminal_colors.clone() {
+            self.apply_terminal_colors(&colors);
+        }
+    }
+
     fn settings_enter_theme(&mut self, cursor: usize) {
-        let index = cursor.min(self.theme_registry.entries().len().saturating_sub(1));
+        if cursor < THEME_FOLLOW_ROWS {
+            self.adjust_theme_follow(cursor, 1);
+            return;
+        }
+        let index = cursor
+            .saturating_sub(THEME_FOLLOW_ROWS)
+            .min(self.theme_registry.entries().len().saturating_sub(1));
         if let Some((id, removable)) = self.theme_registry.entries().get(index).map(|entry| {
             (
                 entry.id.clone(),
@@ -1457,6 +1539,171 @@ mod tests {
 
     fn phase(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> AppEvent {
         AppEvent::Key(KeyEvent::new_with_kind(code, modifiers, kind))
+    }
+
+    fn host_colors(bg: [u8; 3]) -> crate::terminal::theme_probe::TerminalColors {
+        crate::terminal::theme_probe::TerminalColors {
+            fg: [0xee, 0xee, 0xee],
+            bg,
+            palette: [[0; 3]; 16],
+            palette_mask: 1,
+        }
+    }
+
+    #[test]
+    fn host_colors_follow_panes_without_replacing_a_manual_theme() {
+        let _env = crate::persist::test_env("theme-follow-manual");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.apply_theme("noir");
+        let dark = host_colors([0x11, 0x11, 0x11]);
+        assert!(app.apply_terminal_colors(&dark));
+        assert_eq!(app.config.theme, "noir");
+        assert_eq!(app.pane_appearance.background, dark.bg);
+        assert_eq!(app.pane_appearance.host.unwrap().palette_mask, 1);
+
+        app.config.theme_follow.auto_switch = true;
+        app.config.theme_follow.dark = "noir".into();
+        app.config.theme_follow.light = "missing-theme".into();
+        let light = host_colors([0xf8, 0xf8, 0xf8]);
+        assert!(app.apply_terminal_colors(&light));
+        assert_eq!(
+            app.config.theme, "noir",
+            "an unknown follow target stays put"
+        );
+
+        app.config.theme_follow.light = "catppuccin-latte".into();
+        assert!(app.apply_terminal_colors(&light));
+        assert_eq!(app.effective_theme_id(), "catppuccin-latte");
+        assert_eq!(app.config.theme, "noir", "following is runtime-only");
+        assert_eq!(app.pane_appearance.background, light.bg);
+        app.save_sidebars();
+        app.flush_config_for_test(&rx);
+        assert_eq!(
+            crate::config::load().theme,
+            "noir",
+            "automatic following must not replace the saved manual theme"
+        );
+    }
+
+    #[test]
+    fn an_empty_follow_target_does_not_freeze_terminal_derivation() {
+        let _env = crate::persist::test_env("theme-follow-empty-target");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("terminal");
+        app.config.theme_follow.auto_switch = true;
+        app.config.theme_follow.dark.clear();
+        let dark = host_colors([0x11, 0x11, 0x11]);
+        assert!(app.apply_terminal_colors(&dark));
+        assert_eq!(app.config.theme, "terminal");
+        assert_eq!(app.theme, Theme::from_terminal(&dark));
+    }
+
+    #[test]
+    fn followed_theme_reports_match_the_installed_theme() {
+        let _env = crate::persist::test_env("theme-follow-reported-id");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        app.apply_theme("noir");
+        app.config.theme_follow.auto_switch = true;
+        app.config.theme_follow.dark = "noir".into();
+        app.config.theme_follow.light = "catppuccin-latte".into();
+        let light = host_colors([0xf8, 0xf8, 0xf8]);
+        assert!(app.apply_terminal_colors(&light));
+        assert_eq!(app.config.theme, "noir");
+        assert_eq!(app.effective_theme_id(), "catppuccin-latte");
+        assert_eq!(
+            app.theme,
+            app.theme_registry.theme("catppuccin-latte").unwrap()
+        );
+
+        app.apply_theme("noir");
+        assert_eq!(app.config.theme, "noir");
+        assert_eq!(app.effective_theme_id(), "noir");
+        assert_eq!(app.theme, app.theme_registry.theme("noir").unwrap());
+        assert!(
+            app.theme_registry.list_json(app.effective_theme_id())["themes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|theme| theme["id"] == "noir" && theme["active"] == true)
+        );
+
+        assert!(app.apply_terminal_colors(&light));
+        assert_eq!(app.effective_theme_id(), "catppuccin-latte");
+        app.config.theme_follow.auto_switch = false;
+        assert!(app.apply_terminal_colors(&light));
+        assert_eq!(
+            app.config.theme, "noir",
+            "following stays out of the saved theme"
+        );
+        assert_eq!(app.effective_theme_id(), "noir");
+        assert_eq!(app.theme, app.theme_registry.theme("noir").unwrap());
+    }
+
+    #[test]
+    fn held_theme_arrows_do_not_repeat_follow_controls() {
+        let _env = crate::persist::test_env("theme-follow-repeat");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.open_settings();
+        app.settings_set_tab(SettingsTab::Theme);
+        if let Some(ui) = app.settings.as_mut() {
+            ui.cursor = 0;
+        }
+        app.handle_event(phase(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
+        assert!(app.config.theme_follow.auto_switch);
+        app.handle_event(phase(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ));
+        assert!(
+            app.config.theme_follow.auto_switch,
+            "holding the arrow must not toggle following again"
+        );
+    }
+
+    #[test]
+    fn terminal_reselection_and_host_refresh_rederive_without_changing_manual_themes() {
+        let _env = crate::persist::test_env("terminal-reselection-derived");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        app.downsample = false;
+        assert!(!app.config.theme_follow.auto_switch);
+        app.apply_theme("terminal");
+        assert_eq!(app.theme, Theme::terminal_native());
+        let dark = host_colors([26, 26, 46]);
+        app.apply_terminal_colors(&dark);
+        assert_eq!(app.theme, Theme::from_terminal(&dark));
+        app.apply_theme("noir");
+        let manual = app.theme.clone();
+        let light = host_colors([248; 3]);
+        app.apply_terminal_colors(&light);
+        assert_eq!(app.theme, manual);
+        app.apply_theme("terminal");
+        assert_eq!(app.theme, Theme::from_terminal(&light));
+        app.apply_terminal_colors(&dark);
+        assert_eq!(
+            app.theme,
+            Theme::from_terminal(&dark),
+            "focus query updates derivation"
+        );
+        assert!(
+            !app.apply_terminal_colors(&dark),
+            "identical replies do not refresh"
+        );
+        assert_eq!(
+            app.pane_appearance.host.unwrap().palette_mask,
+            dark.palette_mask
+        );
     }
 
     #[test]
@@ -2571,7 +2818,7 @@ mod tests {
         assert_eq!(crate::config::load().theme, "custom-enter");
         app.open_settings();
         app.settings_set_tab(SettingsTab::Theme);
-        let index = app.theme_registry.index_of("custom-enter").unwrap();
+        let index = app.theme_registry.index_of("custom-enter").unwrap() + THEME_FOLLOW_ROWS;
         app.settings_activate(index);
         assert!(!app.theme_uninstall_pending("custom-enter"));
         app.settings_enter_theme(index);

@@ -760,6 +760,9 @@ impl App {
                 );
                 return true;
             }
+            AppEvent::HostTerminalColors(colors) => {
+                return self.apply_terminal_colors(&colors);
+            }
             other => other,
         };
         // Control-API requests and parked `wait.output` replies must be answered
@@ -1435,8 +1438,10 @@ impl App {
                 }
                 true
             }
-            // Handled by the server loop; never reaches here at runtime.
-            AppEvent::ClientConnected { .. }
+            // Handled before the empty-workspace guard, or by the server loop.
+            AppEvent::HostTerminalColors(_)
+            | AppEvent::ClientConnected { .. }
+            | AppEvent::ClientTerminalColors { .. }
             | AppEvent::ClientDetach { .. }
             | AppEvent::ClientSurfaceInterest { .. }
             | AppEvent::ClientPrepareSurface { .. }
