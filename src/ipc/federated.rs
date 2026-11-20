@@ -2626,11 +2626,8 @@ fn handle_dock_input(
                         locate_shell_search(dock, &rows, true, true);
                     }
                     crate::app::dock_filter::QueryEdit::Canceled => {
-                        dock.selected_hit = dock.search_origin.clone();
-                        dock.selected_workspace_id = dock.search_origin_id.clone();
-                        dock.search_miss = false;
                         let rows = visible_dock_rows(machines, active, dock);
-                        remember_dock_selection(dock, &rows);
+                        restore_canceled_shell_search(dock, &rows);
                     }
                     crate::app::dock_filter::QueryEdit::Committed
                     | crate::app::dock_filter::QueryEdit::Ignored => {}
@@ -3730,6 +3727,16 @@ fn shell_row_identity(row: &MachineDockRow) -> Option<String> {
         MachineDockRow::LocalWorkspace(ws) => Some(format!("local:{}", ws.id)),
         MachineDockRow::RemoteWorkspace(endpoint, ws) => Some(format!("{endpoint:?}:{}", ws.id)),
         _ => None,
+    }
+}
+
+fn restore_canceled_shell_search(dock: &mut DockState, rows: &[MachineDockRow]) {
+    dock.selected_hit = dock.search_origin.clone();
+    dock.selected_workspace_id = dock.search_origin_id.clone();
+    dock.search_miss = false;
+    remember_dock_selection(dock, rows);
+    if !dock.activation_blocked {
+        dock.navigation_reveal = true;
     }
 }
 
@@ -6089,17 +6096,25 @@ fn client_repeat_allowed(key: KeyEvent, dock: &DockState) -> bool {
     let navigation_open = dock.selector_open
         || dock.navigation.is_some()
         || matches!(dock.machine_popup, Some(MachinePopup::Menu { .. }));
-    navigation_open
-        && matches!(
-            key.code,
-            KeyCode::Up
-                | KeyCode::Down
-                | KeyCode::PageUp
-                | KeyCode::PageDown
-                | KeyCode::Home
-                | KeyCode::End
-                | KeyCode::Char('j' | 'k' | 'g' | 'G')
-        )
+    if !navigation_open {
+        return false;
+    }
+    if matches!(
+        key.code,
+        KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Char('j' | 'k' | 'g' | 'G')
+    ) {
+        return true;
+    }
+    let editing = dock.workspace_search.editing() || dock.workspace_query.editing();
+    editing
+        && (key.code == KeyCode::Backspace
+            || crate::app::dock_filter::query_text_char(&key).is_some())
 }
 
 #[cfg(test)]
@@ -6276,6 +6291,43 @@ mod tests {
         assert!(machine_can_disconnect(&MachineState::Reconnecting {
             at: Instant::now()
         }));
+    }
+
+    #[test]
+    fn dock_query_repeats_text_and_backspace_but_not_activation() {
+        let mut dock = DockState {
+            navigation: Some(0),
+            ..DockState::default()
+        };
+        let phase = |dock: &mut DockState, code| {
+            let key = KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Repeat);
+            dock.key_owners
+                .insert(federated_key_identity(key), KeyOwner::Client);
+            owned_key_phase(&ClientMessage::Key(key), dock, &Endpoint::Local)
+        };
+        dock.workspace_search.begin();
+        assert_eq!(
+            phase(&mut dock, KeyCode::Char('x')),
+            OwnedKeyPhase::ClientRepeat
+        );
+        assert_eq!(
+            phase(&mut dock, KeyCode::Backspace),
+            OwnedKeyPhase::ClientRepeat
+        );
+        assert_eq!(phase(&mut dock, KeyCode::Enter), OwnedKeyPhase::Consume);
+        dock.workspace_search.commit();
+        assert_eq!(
+            phase(&mut dock, KeyCode::Down),
+            OwnedKeyPhase::ClientRepeat,
+            "navigation repeats stay available outside query editing"
+        );
+        assert_eq!(phase(&mut dock, KeyCode::Char('x')), OwnedKeyPhase::Consume);
+        assert_eq!(phase(&mut dock, KeyCode::Backspace), OwnedKeyPhase::Consume);
+        dock.workspace_query.begin();
+        assert_eq!(
+            phase(&mut dock, KeyCode::Char('你')),
+            OwnedKeyPhase::ClientRepeat
+        );
     }
 
     #[test]
@@ -6876,6 +6928,49 @@ mod tests {
                 },
                 0,
             )),
+        );
+    }
+
+    #[test]
+    fn federated_search_cancel_reveals_the_restored_origin() {
+        let mut dock = DockState {
+            local_workspaces: (0..8)
+                .map(|index| shell_workspace(index, &format!("row{index}")))
+                .collect(),
+            navigation: Some(0),
+            selected_hit: Some(DockHit::LocalWorkspace(0)),
+            selected_workspace_id: Some("local:row0-0".into()),
+            scroll: 0,
+            ..DockState::default()
+        };
+        let rows = visible_dock_rows(&HashMap::new(), &Endpoint::Local, &dock);
+        dock.search_origin = dock.selected_hit.clone();
+        dock.search_origin_id = dock.selected_workspace_id.clone();
+        dock.workspace_search.begin();
+        dock.workspace_search.append("row7");
+        locate_shell_search(&mut dock, &rows, true, true);
+        reveal_workspace(&rows, &Endpoint::Local, &mut dock, 2, false);
+        let match_scroll = dock.scroll;
+        assert!(match_scroll > 1, "the off-screen match moves the viewport");
+        assert!(
+            !dock.navigation_reveal,
+            "painting consumes the search reveal"
+        );
+
+        restore_canceled_shell_search(&mut dock, &rows);
+        assert_eq!(dock.navigation, Some(1), "origin is the first workspace");
+        assert!(
+            dock.navigation_reveal,
+            "canceling search must reveal the restored origin"
+        );
+        reveal_workspace(&rows, &Endpoint::Local, &mut dock, 2, false);
+        assert!(dock.scroll <= 1 && dock.scroll < match_scroll);
+
+        dock.scroll = 3;
+        reveal_workspace(&rows, &Endpoint::Local, &mut dock, 2, false);
+        assert_eq!(
+            dock.scroll, 3,
+            "wheel scrolling stays until the next reveal"
         );
     }
 
