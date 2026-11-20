@@ -299,7 +299,11 @@ pub(super) fn install(
 
 fn detect_target(destination: &str) -> Result<DetectedTarget> {
     let mut posix = super::ssh::ssh_command(destination, true);
-    posix.arg("uname -s; uname -m; printf '%s\\n' \"$HOME\"");
+    // Under `sh`, whatever the login shell: Nushell's own `uname` has no `-s`.
+    posix.arg(super::command::posix_script(
+        "uname -s; uname -m; printf '%s\\n' \"$HOME\"",
+        &[],
+    )?);
     let output = super::ssh::run_bounded_with_input(posix, PROVISION_TIMEOUT, None)?;
     if let Some(error) = super::ssh::transport_failure(destination, &output) {
         return Err(error);
@@ -556,14 +560,11 @@ fn install_local(
         &format!("v{}/{checksum}", env!("CARGO_PKG_VERSION")),
     )?;
     record_plan(&planned)?;
-    let remote_command = format!(
-        "sh -c {} -- {} {} {} {}",
-        quote_posix(INSTALL_LOCAL_POSIX),
-        env!("CARGO_PKG_VERSION"),
-        checksum,
+    let remote_command = local_install_command(
+        &checksum,
         crate::ipc::protocol::PROTOCOL_VERSION,
         super::MACHINE_ENDPOINT_VERSION,
-    );
+    )?;
     let mut command = super::ssh::ssh_command(destination, true);
     command.arg(remote_command);
     let output = super::ssh::run_bounded_with_owned_input(command, PROVISION_TIMEOUT, Some(bytes))?;
@@ -580,8 +581,18 @@ fn install_local(
     ensure_planned_path(&planned, installed_path(destination, output.stdout)?)
 }
 
-fn quote_posix(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+/// The remote command for [`INSTALL_LOCAL_POSIX`], which reads the binary
+/// from stdin.
+fn local_install_command(checksum: &str, protocol: u32, endpoint: u32) -> Result<String> {
+    super::command::posix_script(
+        INSTALL_LOCAL_POSIX,
+        &[
+            env!("CARGO_PKG_VERSION"),
+            checksum,
+            &protocol.to_string(),
+            &endpoint.to_string(),
+        ],
+    )
 }
 
 fn install_posix(destination: &str) -> Result<String> {
@@ -807,14 +818,12 @@ mod tests {
         )
         .into_bytes();
         let checksum = format!("{:x}", Sha256::digest(&fixture));
-        let remote_command = format!(
-            "sh -c {} -- {} {} {} {}",
-            quote_posix(INSTALL_LOCAL_POSIX),
-            env!("CARGO_PKG_VERSION"),
-            checksum,
+        let remote_command = local_install_command(
+            &checksum,
             crate::ipc::protocol::PROTOCOL_VERSION,
             crate::machine::MACHINE_ENDPOINT_VERSION,
-        );
+        )
+        .unwrap();
         let mut command = std::process::Command::new("sh");
         command.arg("-c").arg(remote_command).env("HOME", &home);
         let output = super::super::ssh::run_bounded_with_owned_input(

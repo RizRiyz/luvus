@@ -33,6 +33,34 @@ pub(crate) fn append(command: &mut Command, binary: &str, args: &[&str]) -> anyh
     Ok(())
 }
 
+/// The remote command line that runs a fixed POSIX `script` under `sh`, with
+/// `args` as its `$1`, `$2`, and so on.
+///
+/// OpenSSH hands this line to the remote user's login shell, which need not be
+/// POSIX: Nushell, for one, rejects POSIX loops, tests, and `'\''` escapes. So
+/// the line uses only words that POSIX shells and Nushell both read literally:
+/// the script travels as one single-quoted word with no single quote inside,
+/// and `sh` restores it with its `printf %b` builtin before running it. The
+/// remote host needs nothing but `sh`.
+pub(crate) fn posix_script(script: &str, args: &[&str]) -> anyhow::Result<String> {
+    if args.iter().any(|arg| {
+        arg.is_empty()
+            || !arg
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-+".contains(&byte))
+    }) {
+        anyhow::bail!("invalid remote machine command argument");
+    }
+    // `printf %b` turns `\\` back into `\` and `\0047` into `'`.
+    let encoded = script.replace('\\', "\\\\").replace('\'', "\\0047");
+    let mut line = format!("sh -c 'eval \"$(printf %b \"$0\")\"' '{encoded}'");
+    for arg in args {
+        line.push(' ');
+        line.push_str(arg);
+    }
+    Ok(line)
+}
+
 fn windows_script(binary: &str, args: &[&str]) -> String {
     let binary = binary.replace('\'', "''");
     format!(
@@ -70,6 +98,69 @@ exit $code
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Quotes, backslash escapes, `%`, expansions, and several lines, as the
+    /// fixed remote scripts use them.
+    const AWKWARD: &str = r#"set -eu
+printf '%s|%s\n' "$1" "$2"
+printf '%s\n' 'it'"'"'s 100% \done'
+x='a\\b'; printf '%s\n' "$x"
+[ -n "${HOME:-}" ] && printf 'home\n'
+"#;
+    #[cfg(unix)]
+    const AWKWARD_OUT: &str = "0.14.3|ab+1\nit's 100% \\done\na\\\\b\nhome\n";
+
+    #[test]
+    fn posix_script_sends_no_single_quote_inside_the_script() {
+        let line = posix_script(AWKWARD, &["0.14.3", "ab+1"]).unwrap();
+        assert_eq!(line.matches('\'').count(), 4, "{line}");
+        assert!(line.ends_with("' 0.14.3 ab+1"), "{line}");
+    }
+
+    #[test]
+    fn posix_script_rejects_arguments_a_login_shell_would_interpret() {
+        for arg in ["", "a b", "a'b", "$HOME", "a;b", "a\nb"] {
+            assert!(posix_script("true", &[arg]).is_err(), "{arg:?}");
+        }
+    }
+
+    /// Run the line the way OpenSSH does: as the `-c` command of the remote
+    /// login shell.
+    #[cfg(unix)]
+    fn run_as_login_shell(shell: &str, line: &str) -> Option<std::process::Output> {
+        let mut command = Command::new(shell);
+        if shell == "nu" {
+            command.arg("--no-config-file");
+        }
+        command.arg("-c").arg(line).env("HOME", "/nonexistent-home");
+        match command.output() {
+            Ok(output) => Some(output),
+            // Nushell is optional on CI hosts; POSIX `sh` is not.
+            Err(error) if shell == "nu" && error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("{shell}: {error}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_script_runs_unchanged_under_posix_and_nushell_login_shells() {
+        let line = posix_script(AWKWARD, &["0.14.3", "ab+1"]).unwrap();
+        for shell in ["sh", "nu"] {
+            let Some(output) = run_as_login_shell(shell, &line) else {
+                continue;
+            };
+            assert!(
+                output.status.success(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                AWKWARD_OUT,
+                "{shell}"
+            );
+        }
+    }
 
     #[cfg(windows)]
     #[test]
