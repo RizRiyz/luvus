@@ -960,34 +960,27 @@ fn remote_fallback_ssh_command(args: &[String]) -> Result<Command> {
     }
 
     let mut bridge_args = Vec::new();
-    if let Some(name) = session::active_name() {
-        bridge_args.push("--session".to_string());
-        bridge_args.push(name);
+    let name;
+    if let Some(active) = session::active_name() {
+        name = active;
+        bridge_args.extend(["--session", name.as_str()]);
     } else if session::explicit_session_requested() {
-        bridge_args.push("--session".to_string());
-        bridge_args.push(session::DEFAULT_SESSION_NAME.to_string());
+        bridge_args.extend(["--session", session::DEFAULT_SESSION_NAME]);
     }
-    bridge_args.push("remote-client-bridge".to_string());
-    let bridge_args = bridge_args
-        .iter()
-        .map(|arg| posix_shell_quote(arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let script = format!(
-        "for luvus_bin in \"$HOME/.local/bin/luvus\" \"$HOME/.cargo/bin/luvus\" \
-         \"$HOME/.nix-profile/bin/luvus\" /usr/local/bin/luvus \
-         /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do \
-         if [ -x \"$luvus_bin\" ]; then exec \"$luvus_bin\" {bridge_args}; fi; done; \
-         printf '%s\\n' 'luvus remote: executable not found in common install locations' >&2; \
-         exit 127"
-    );
-    cmd.arg(host).arg(script).stderr(Stdio::inherit());
+    bridge_args.push("remote-client-bridge");
+    // The remote login shell need not be POSIX, so the search runs under `sh`.
+    let line = machine::command::posix_script(REMOTE_FALLBACK_SCRIPT, &bridge_args)?;
+    cmd.arg(host).arg(line).stderr(Stdio::inherit());
     Ok(cmd)
 }
 
-fn posix_shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
+/// Finds Luvus in the official installer's locations and execs it with this
+/// script's arguments.
+const REMOTE_FALLBACK_SCRIPT: &str = r#"for luvus_bin in "$HOME/.local/bin/luvus" "$HOME/.cargo/bin/luvus" "$HOME/.nix-profile/bin/luvus" /usr/local/bin/luvus /opt/homebrew/bin/luvus /home/linuxbrew/.linuxbrew/bin/luvus; do
+  if [ -x "$luvus_bin" ]; then exec "$luvus_bin" "$@"; fi
+done
+printf '%s\n' 'luvus remote: executable not found in common install locations' >&2
+exit 127"#;
 
 fn server_running(sock: &Path) -> bool {
     ipc::transport::endpoint_exists(sock, Duration::from_millis(50))
@@ -2189,21 +2182,64 @@ mod tests {
             ]
         );
         assert_eq!(actual[7], "devbox");
-        let script = &actual[8];
-        assert!(script.contains("\"$HOME/.local/bin/luvus\""));
-        assert!(script.contains("\"$HOME/.cargo/bin/luvus\""));
-        assert!(script.contains("\"$HOME/.nix-profile/bin/luvus\""));
-        assert!(script.contains("/usr/local/bin/luvus"));
-        assert!(script.contains("/opt/homebrew/bin/luvus"));
-        assert!(script.contains("/home/linuxbrew/.linuxbrew/bin/luvus"));
-        assert!(script.contains("'--session' 'api' 'remote-client-bridge'"));
-        assert!(script.ends_with("exit 127"));
+        let line = &actual[8];
+        assert!(line.starts_with("sh -c "), "{line}");
+        assert!(line.contains("\"$HOME/.local/bin/luvus\""));
+        assert!(line.contains("\"$HOME/.cargo/bin/luvus\""));
+        assert!(line.contains("\"$HOME/.nix-profile/bin/luvus\""));
+        assert!(line.contains("/usr/local/bin/luvus"));
+        assert!(line.contains("/opt/homebrew/bin/luvus"));
+        assert!(line.contains("/home/linuxbrew/.linuxbrew/bin/luvus"));
+        assert!(line.contains("exit 127"));
+        assert!(
+            line.ends_with("' --session api remote-client-bridge"),
+            "{line}"
+        );
     }
 
+    /// The fallback reaches the remote login shell as one command line. It must
+    /// exec the installed binary with the bridge arguments under a POSIX login
+    /// shell and under Nushell, which rejects POSIX loops.
+    #[cfg(unix)]
     #[test]
-    fn remote_bridge_shell_arguments_are_single_quoted() {
-        assert_eq!(posix_shell_quote("plain"), "'plain'");
-        assert_eq!(posix_shell_quote("team's"), "'team'\\''s'");
+    fn remote_bridge_fallback_runs_under_posix_and_nushell_login_shells() {
+        let _env = crate::persist::test_env("remote-fallback-shells");
+        let home = crate::persist::config_dir().join("home");
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("luvus");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s|' \"$@\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let line = machine::command::posix_script(
+            REMOTE_FALLBACK_SCRIPT,
+            &["--session", "api", "remote-client-bridge"],
+        )
+        .unwrap();
+        for shell in ["sh", "nu"] {
+            let mut command = Command::new(shell);
+            if shell == "nu" {
+                command.arg("--no-config-file");
+            }
+            let output = match command.arg("-c").arg(&line).env("HOME", &home).output() {
+                Ok(output) => output,
+                // Nushell is optional on CI hosts; POSIX `sh` is not.
+                Err(error) if shell == "nu" && error.kind() == std::io::ErrorKind::NotFound => {
+                    continue
+                }
+                Err(error) => panic!("{shell}: {error}"),
+            };
+            assert!(
+                output.status.success(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "--session|api|remote-client-bridge|",
+                "{shell}"
+            );
+        }
     }
 
     /// Manual benchmark of the server render hot path (full UI render + in-place
