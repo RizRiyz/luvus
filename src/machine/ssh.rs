@@ -249,10 +249,14 @@ fn provision_allowed(profile: &MachineProfile, approved: bool) -> bool {
 
 fn discover_binary(destination: &str) -> Result<String> {
     let mut command = ssh_command(destination, true);
-    // OpenSSH already invokes the remote login shell. Passing this fixed
-    // script as the only command argument preserves it as one command string;
-    // no profile or user data is interpolated into it.
-    command.arg(posix_discovery_script());
+    // OpenSSH invokes the remote login shell, which need not be POSIX, so the
+    // fixed script runs under `sh`; no profile or user data is interpolated
+    // into it. cmd.exe and PowerShell reject the line, which leads below to
+    // the Windows discovery attempt as before.
+    command.arg(super::command::posix_script(
+        &posix_discovery_script(),
+        &[],
+    )?);
     let output = run_bounded(command, PROBE_TIMEOUT)?;
     if let Some(error) = transport_failure(destination, &output) {
         return Err(error);
@@ -952,9 +956,10 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         // System-wide locations are left out so a Luvus installed on this
         // machine cannot turn the expected miss into a hit.
+        let line = super::super::command::posix_script(&discovery_script_with(""), &[]).unwrap();
         let output = Command::new("sh")
             .arg("-c")
-            .arg(discovery_script_with(""))
+            .arg(line)
             .env("HOME", &home)
             .output()
             .unwrap();
