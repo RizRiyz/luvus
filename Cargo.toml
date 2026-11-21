@@ -53,6 +53,8 @@ default = []
 dev-tools = []
 
 [dependencies]
+# Dated, source-cited LLM list prices for Mission Control cost estimates
+llm-prices = "1.8"
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["serde"] }
 portable-pty = "0.9"
