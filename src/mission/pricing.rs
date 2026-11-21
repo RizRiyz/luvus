@@ -101,12 +101,21 @@ fn claude_model(model: &str) -> Option<ClaudeModel<'_>> {
 
 /// Rough USD price per **million** tokens as `(input, output, cache)` for `model`.
 /// `None` for an unknown model, so its cost is shown as "—" rather than a wrong
-/// number. Estimates only; overridable via config (MC-5). Kept deliberately
-/// conservative and easy to eyeball. Anthropic rows track the current first-party
-/// API rates (2026-08): Fable/Mythos 5 at $10/$50, Opus 4.5–5 at $5/$25,
-/// Haiku 4.5 at $1/$5, with cache at the standard 0.1× input read rate.
+/// number. Estimates only; overridable via config (MC-5).
+///
+/// Exact model ids are priced from `llm_prices`: each provider's list price,
+/// with the row's source page and check date, and the model's own cache-read
+/// price as `cache` (input price when the provider lists none). Ids it does not
+/// carry (family aliases such as `opus`, `claude-mythos-preview`, cloud ids)
+/// fall back to the family table below: Fable/Mythos 5 at $10/$50, Opus 4.5–5
+/// at $5/$25, Haiku 4.5 at $1/$5, with cache at the 0.1× input read rate.
 pub fn model_price(model: &str) -> Option<(f64, f64, f64)> {
     let m = model.to_lowercase();
+    if let Some(p) = llm_prices::lookup(&m) {
+        if let (Some(input), Some(output)) = (p.input, p.output) {
+            return Some((input, output, p.cache_read.unwrap_or(input)));
+        }
+    }
     let p = match claude_model(&m) {
         Some(ClaudeModel::MythosPreview) => (25.0, 125.0, 2.5),
         Some(ClaudeModel::FamilyAlias { family: "fable" }) => (10.0, 50.0, 1.0),
@@ -295,6 +304,19 @@ mod tests {
             model_price("pricing-for-claude-mythos-preview-estimate"),
             None
         );
+    }
+
+    #[test]
+    fn exact_ids_use_their_own_list_price() {
+        // Opus 5.5 is $4/$20 with $0.20 cache reads, not the Opus 4.5-5 card.
+        assert_eq!(model_price("claude-opus-5-5"), Some((4.0, 20.0, 0.2)));
+        // Haiku 5.5 is a tenth of Haiku 4.5.
+        assert_eq!(model_price("claude-haiku-5-5"), Some((0.1, 0.5, 0.01)));
+        // OpenAI: gpt-5-mini is $0.25/$2, o3 has been $2/$8 since June 2025.
+        assert_eq!(model_price("gpt-5-mini"), Some((0.25, 2.0, 0.025)));
+        assert_eq!(model_price("o3"), Some((2.0, 8.0, 0.5)));
+        // Gemini ids were unpriced.
+        assert_eq!(model_price("gemini-2.5-pro"), Some((1.25, 10.0, 0.125)));
     }
 
     #[test]
