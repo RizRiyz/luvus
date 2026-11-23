@@ -2079,6 +2079,18 @@ fn cache_dock_projection(
     }
 }
 
+/// Whether an editing dock query consumes `key`. Ctrl+U clears the query
+/// unless it is the configured prefix; the config is read only for that chord,
+/// so ordinary typing never touches the disk.
+fn dock_query_consumes(key: &KeyEvent) -> bool {
+    crate::app::dock_filter::query_text_char(key).is_some()
+        || matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace)
+        || (crate::app::dock_filter::is_query_clear(key)
+            && !crate::app::PrefixSpec::parse(&crate::config::load().prefix)
+                .unwrap_or_default()
+                .matches(key))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_dock_input(
     message: &ClientMessage,
@@ -2613,12 +2625,7 @@ fn handle_dock_input(
         (dock.navigation, message, dock.rect)
     {
         if dock.workspace_search.editing() {
-            let query_key = (!crate::app::PrefixSpec::parse(&crate::config::load().prefix)
-                .unwrap_or_default()
-                .matches(key)
-                && crate::app::dock_filter::is_query_clear(key))
-                || crate::app::dock_filter::query_text_char(key).is_some()
-                || matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace);
+            let query_key = dock_query_consumes(key);
             if query_key {
                 match crate::app::dock_filter::edit_query(&mut dock.workspace_search, key) {
                     crate::app::dock_filter::QueryEdit::Updated => {
@@ -2638,12 +2645,7 @@ fn handle_dock_input(
             }
         }
         if dock.workspace_query.editing() {
-            let query_key = (!crate::app::PrefixSpec::parse(&crate::config::load().prefix)
-                .unwrap_or_default()
-                .matches(key)
-                && crate::app::dock_filter::is_query_clear(key))
-                || crate::app::dock_filter::query_text_char(key).is_some()
-                || matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace);
+            let query_key = dock_query_consumes(key);
             if query_key {
                 if !matches!(
                     crate::app::dock_filter::edit_query(&mut dock.workspace_query, key),
@@ -2658,7 +2660,6 @@ fn handle_dock_input(
             }
         }
         if !rect.workspace_modal
-            && key.kind != KeyEventKind::Repeat
             && key.kind != KeyEventKind::Repeat
             && crate::app::dock_filter::is_list_search_key(key)
         {
