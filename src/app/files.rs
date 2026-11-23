@@ -772,7 +772,7 @@ impl App {
                 return true;
             }
             match key.code {
-                KeyCode::Esc => self.file_tree.clear_filter(),
+                KeyCode::Esc => self.clear_retained_file_filter(),
                 KeyCode::Tab => {
                     filter.editing = false;
                     self.note_file_search_move();
@@ -887,7 +887,7 @@ impl App {
                     self.file_search_miss = false;
                     self.file_located = None;
                 } else if self.file_tree.filter.is_some() {
-                    self.file_tree.clear_filter();
+                    self.clear_retained_file_filter();
                 } else {
                     self.files_focused = false;
                 }
@@ -1026,8 +1026,13 @@ impl App {
         if let Some(search) = self.search.as_mut() {
             search.file_action = None;
         } else {
-            self.file_tree.clear_filter();
+            self.clear_retained_file_filter();
         }
+    }
+
+    fn clear_retained_file_filter(&mut self) {
+        self.file_tree.clear_filter();
+        self.note_file_search_move();
     }
 
     #[cfg(test)]
@@ -1041,7 +1046,7 @@ impl App {
         if self.search.is_some() && !self.finish_search_file_action(&menu.path) {
             return;
         }
-        self.file_tree.clear_filter();
+        self.clear_retained_file_filter();
         // New entries land *inside* a folder, or beside a clicked file.
         let dir = if menu.is_dir {
             menu.path.clone()
@@ -1924,6 +1929,53 @@ mod tests {
         app.handle_file_tree_key(key(KeyCode::Esc));
         assert!(!app.files_focused);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn retained_filter(app: &mut App, path: PathBuf) {
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::NONE));
+        let filter = app.file_tree.filter.as_mut().unwrap();
+        filter.loading = false;
+        filter.rows = vec![crate::files::VisibleRow {
+            path,
+            name: "match".into(),
+            depth: 1,
+            is_dir: false,
+            expanded: false,
+            loading: false,
+        }];
+        app.handle_file_tree_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn clearing_a_retained_file_filter_follows_the_restored_row() {
+        let _env = crate::persist::test_env("files-filter-restored-path");
+        let mut hidden = App::new(80, 24, std::sync::mpsc::channel().0).unwrap();
+        let root = seed_keyboard_tree(&mut hidden);
+        let nested = root.join("src/main.rs");
+        retained_filter(&mut hidden, nested);
+        hidden.handle_file_tree_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(hidden.file_tree.filter.is_none());
+        assert_eq!(hidden.file_tree.cursor, 0);
+        assert_eq!(
+            hidden.file_located.as_deref(),
+            Some(root.join("src").as_path())
+        );
+        hidden.handle_file_tree_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(hidden.file_tree.visible_rows()[0].expanded);
+        assert!(hidden.file_menu.is_none());
+
+        let mut visible = App::new(80, 24, std::sync::mpsc::channel().0).unwrap();
+        let root = seed_keyboard_tree(&mut visible);
+        retained_filter(&mut visible, root.join("README.md"));
+        visible.handle_file_tree_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(visible.file_tree.cursor, 0);
+        assert_eq!(
+            visible.file_located.as_deref(),
+            Some(root.join("src").as_path())
+        );
+        visible.handle_file_tree_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(visible.file_tree.visible_rows()[0].expanded);
+        assert_eq!(visible.file_tree.cursor, 0);
     }
 
     #[test]

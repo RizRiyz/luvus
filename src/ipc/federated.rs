@@ -3665,16 +3665,67 @@ fn visible_dock_rows(
     if !dock.workspace_query.active() {
         return rows;
     }
-    let query = dock.workspace_query.fuzzy();
-    rows.into_iter()
-        .filter(|row| match row {
-            MachineDockRow::LocalWorkspace(workspace)
-            | MachineDockRow::RemoteWorkspace(_, workspace) => {
-                shell_workspace_matches(&query, workspace)
-            }
-            MachineDockRow::LocalHeading | MachineDockRow::Machine(_) => true,
-        })
-        .collect()
+    filter_shell_workspace_rows(rows, &dock.workspace_query.fuzzy())
+}
+
+fn filter_shell_workspace_rows(
+    rows: Vec<MachineDockRow>,
+    query: &crate::search::FuzzyQuery,
+) -> Vec<MachineDockRow> {
+    let mut out = Vec::with_capacity(rows.len());
+    let mut index = 0;
+    while index < rows.len() {
+        if !matches!(
+            rows[index],
+            MachineDockRow::LocalWorkspace(_) | MachineDockRow::RemoteWorkspace(_, _)
+        ) {
+            out.push(rows[index].clone());
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let remote = match &rows[index] {
+            MachineDockRow::RemoteWorkspace(endpoint, _) => Some(endpoint.clone()),
+            _ => None,
+        };
+        index += 1;
+        while index < rows.len() && same_workspace_run(&rows[index], remote.as_ref()) {
+            index += 1;
+        }
+        let group = &rows[start..index];
+        let order: Vec<(usize, bool)> = group
+            .iter()
+            .enumerate()
+            .map(|(offset, row)| (offset, shell_row_nested(row)))
+            .collect();
+        for (offset, _) in crate::search::project_workspace_order(&order, |offset| {
+            shell_row_workspace(&group[offset])
+                .is_some_and(|workspace| shell_workspace_matches(query, workspace))
+        }) {
+            out.push(group[offset].clone());
+        }
+    }
+    out
+}
+
+fn same_workspace_run(row: &MachineDockRow, remote: Option<&Endpoint>) -> bool {
+    match (row, remote) {
+        (MachineDockRow::LocalWorkspace(_), None) => true,
+        (MachineDockRow::RemoteWorkspace(endpoint, _), Some(expected)) => endpoint == expected,
+        _ => false,
+    }
+}
+
+fn shell_row_workspace(row: &MachineDockRow) -> Option<&protocol::ShellWorkspace> {
+    match row {
+        MachineDockRow::LocalWorkspace(workspace)
+        | MachineDockRow::RemoteWorkspace(_, workspace) => Some(workspace),
+        _ => None,
+    }
+}
+
+fn shell_row_nested(row: &MachineDockRow) -> bool {
+    shell_row_workspace(row).is_some_and(|workspace| workspace.nested)
 }
 
 fn shell_workspace_matches(
@@ -6929,6 +6980,47 @@ mod tests {
                 },
                 0,
             )),
+        );
+    }
+
+    #[test]
+    fn federated_filter_keeps_the_parent_of_a_matching_worktree() {
+        let parent = shell_workspace(0, "repo");
+        let mut child = shell_workspace(1, "repo-feature");
+        child.nested = true;
+        let other = shell_workspace(2, "other");
+        let remote_parent = shell_workspace(0, "remote-repo");
+        let mut remote_child = shell_workspace(1, "remote-feature");
+        remote_child.nested = true;
+        let mut machine = machine_with_sessions("box", &["default"], MachineState::Online);
+        machine.runtime.workspaces = vec![remote_parent, remote_child];
+        let machines = HashMap::from([("box".into(), machine)]);
+        let mut dock = DockState {
+            local_workspaces: vec![other, parent, child],
+            ..DockState::default()
+        };
+        dock.workspace_query.begin();
+        dock.workspace_query.append("feature");
+        dock.workspace_query.commit();
+        let rows = visible_dock_rows(&machines, &Endpoint::Local, &dock);
+        let names: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                MachineDockRow::LocalWorkspace(workspace)
+                | MachineDockRow::RemoteWorkspace(_, workspace) => {
+                    Some((workspace.name.as_str(), workspace.nested))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("repo", false),
+                ("repo-feature", true),
+                ("remote-repo", false),
+                ("remote-feature", true),
+            ]
         );
     }
 
