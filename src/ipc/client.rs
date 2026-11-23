@@ -591,12 +591,14 @@ impl InputRoute {
         }
     }
 
-    fn finish_write(&self, generation: u64, mut writer: Box<dyn Write + Send>) {
+    /// Write every clipboard receipt queued while this generation owned the
+    /// writer, then put the writer back. Returns false when the route moved on.
+    fn release_writer(&self, generation: u64, mut writer: Box<dyn Write + Send>) -> bool {
         loop {
             let pending = {
                 let mut route = self.writer.lock().unwrap_or_else(|e| e.into_inner());
                 if route.generation != generation || self.closed.load(Ordering::Acquire) {
-                    return;
+                    return false;
                 }
                 if let Some(pending) = route.pending_clipboard_ack.take() {
                     pending
@@ -604,15 +606,19 @@ impl InputRoute {
                     route.active = Some(writer);
                     route.writing = false;
                     self.writer_ready.notify_all();
-                    drop(route);
-                    self.flush_pending_terminal_colors();
-                    return;
+                    return true;
                 }
             };
             if protocol::write_message(&mut writer, &pending).is_err() {
                 self.retire_failed_write(generation);
-                return;
+                return false;
             }
+        }
+    }
+
+    fn finish_write(&self, generation: u64, writer: Box<dyn Write + Send>) {
+        if self.release_writer(generation, writer) {
+            self.flush_pending_terminal_colors();
         }
     }
 
@@ -658,6 +664,9 @@ impl InputRoute {
         self.send_message(message)
     }
 
+    /// Unix input reports host colors. Windows tests call it directly; the
+    /// Windows host-input loop does not.
+    #[cfg(any(not(windows), test))]
     fn publish_terminal_colors(
         &self,
         generation: u64,
@@ -719,11 +728,11 @@ impl InputRoute {
                     return;
                 }
                 let Some((color_generation, colors)) = route.pending_terminal_colors.clone() else {
-                    if let Some((generation, writer)) = held.take() {
-                        if route.generation == generation {
-                            route.active = Some(writer);
-                            route.writing = false;
-                            self.writer_ready.notify_all();
+                    let restore = held.take();
+                    drop(route);
+                    if let Some((generation, writer)) = restore {
+                        if self.release_writer(generation, writer) {
+                            continue;
                         }
                     }
                     return;
@@ -2346,6 +2355,72 @@ mod render_tests {
             }
             assert_eq!(cursor.position(), cursor.get_ref().len() as u64);
         }
+    }
+
+    #[test]
+    fn color_flush_sends_the_queued_clipboard_receipt_without_another_key() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct HeldWriter {
+            bytes: Arc<Mutex<Vec<u8>>>,
+            entered: Option<mpsc::Sender<()>>,
+            release: mpsc::Receiver<()>,
+        }
+        impl Write for HeldWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+                self.bytes.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let route = InputRoute::default();
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        route.replace(Some(Box::new(HeldWriter {
+            bytes: bytes.clone(),
+            entered: Some(entered_tx),
+            release: release_rx,
+        })));
+        let generation = route.generation();
+        let publishing = route.clone();
+        let publish = thread::spawn(move || {
+            publishing.publish_terminal_colors(
+                1,
+                Some(crate::terminal::theme_probe::TerminalColors {
+                    fg: [1, 1, 1],
+                    bg: [2, 2, 2],
+                    palette: [[0; 3]; 16],
+                    palette_mask: 0,
+                }),
+            )
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        route.send_if_generation(generation, ClientMessage::ClipboardSucceeded { receipt: 9 });
+        release_tx.send(()).unwrap();
+        assert!(publish.join().unwrap());
+        let captured = bytes.lock().unwrap().clone();
+        let mut cursor = std::io::Cursor::new(captured);
+        assert!(matches!(
+            protocol::read_message(&mut cursor).unwrap(),
+            ClientMessage::TerminalColors(Some(colors)) if colors.bg == [2, 2, 2]
+        ));
+        assert!(
+            matches!(
+                protocol::read_message(&mut cursor).unwrap(),
+                ClientMessage::ClipboardSucceeded { receipt: 9 }
+            ),
+            "a clipboard receipt queued during the color write must leave with that writer"
+        );
+        assert_eq!(cursor.position(), cursor.get_ref().len() as u64);
     }
 
     #[test]
