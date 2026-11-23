@@ -760,6 +760,16 @@ impl App {
                 );
                 return true;
             }
+            AppEvent::DiffProgressSaved { result } => {
+                self.diff.progress_save_worker.take();
+                self.diff.progress_save_inflight = false;
+                self.schedule_diff_progress_save();
+                if let Err(error) = result {
+                    log_worker_failed(crate::logging::Worker::Diff, "progress_save");
+                    self.show_toast(format!("review progress not saved: {error}"));
+                }
+                return true;
+            }
             other => other,
         };
         // Control-API requests and parked `wait.output` replies must be answered
@@ -1311,11 +1321,15 @@ impl App {
                 }
                 self.apply_diff_loaded(id, token, result)
             }
-            AppEvent::DiffNotesLoaded { review_id, result } => {
+            AppEvent::DiffNotesLoaded {
+                review_id,
+                generation,
+                result,
+            } => {
                 if result.is_err() {
                     log_worker_failed(crate::logging::Worker::Diff, "notes");
                 }
-                self.apply_diff_notes_loaded(review_id, result)
+                self.apply_diff_notes_loaded(review_id, generation, result)
             }
             AppEvent::DiffNoteSaved { note, result } => {
                 if result.is_err() {
@@ -1328,13 +1342,6 @@ impl App {
                     log_worker_failed(crate::logging::Worker::Diff, "note_remove");
                 }
                 self.apply_diff_note_removed(id, result)
-            }
-            AppEvent::DiffProgressSaved { result } => {
-                if let Err(error) = result {
-                    log_worker_failed(crate::logging::Worker::Diff, "progress_save");
-                    self.show_toast(format!("review progress not saved: {error}"));
-                }
-                true
             }
             AppEvent::FileChanges {
                 id,
@@ -1398,8 +1405,8 @@ impl App {
                 self.git_data(view, payload);
                 true
             }
-            AppEvent::TaskGateFinished { .. } => {
-                unreachable!("task gate completions are handled before workspace routing")
+            AppEvent::TaskGateFinished { .. } | AppEvent::DiffProgressSaved { .. } => {
+                unreachable!("ledger completions are handled before workspace routing")
             }
             AppEvent::TaskMergeFinished {
                 task,
