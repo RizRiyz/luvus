@@ -1031,6 +1031,9 @@ impl App {
     }
 
     fn clear_retained_file_filter(&mut self) {
+        if self.file_tree.filter.is_none() {
+            return;
+        }
         self.file_tree.clear_filter();
         self.note_file_search_move();
     }
@@ -1944,6 +1947,48 @@ mod tests {
             loading: false,
         }];
         app.handle_file_tree_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn canceling_a_file_menu_does_not_adopt_a_replacement_row() {
+        let _env = crate::persist::test_env("files-menu-cancel-selection");
+        let mut app = App::new(80, 24, std::sync::mpsc::channel().0).unwrap();
+        let root = seed_keyboard_tree(&mut app);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let notes = root.join("notes.txt");
+        app.handle_file_tree_key(key(KeyCode::Down));
+        app.handle_file_tree_key(key(KeyCode::Down));
+        assert_eq!(app.file_located.as_deref(), Some(notes.as_path()));
+        app.handle_file_tree_key(key(KeyCode::Char('a')));
+        assert!(app.file_menu.is_some());
+        app.file_tree.apply_dir(
+            root.clone(),
+            vec![
+                crate::files::Entry {
+                    name: "src".into(),
+                    is_dir: true,
+                },
+                crate::files::Entry {
+                    name: "README.md".into(),
+                    is_dir: false,
+                },
+                crate::files::Entry {
+                    name: "replacement.txt".into(),
+                    is_dir: false,
+                },
+            ],
+        );
+        app.handle_file_menu_key(key(KeyCode::Esc));
+        assert!(app.file_menu.is_none());
+        assert_eq!(app.file_located.as_deref(), Some(notes.as_path()));
+        app.handle_file_tree_key(key(KeyCode::Enter));
+        app.handle_file_tree_key(key(KeyCode::Char('a')));
+        assert!(app.files_focused);
+        assert!(app.file_menu.is_none());
+        assert!(!matches!(
+            app.views.get(&app.layout().focus),
+            Some(crate::app::ViewKind::File(_))
+        ));
     }
 
     #[test]
