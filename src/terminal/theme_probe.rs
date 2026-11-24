@@ -344,8 +344,9 @@ fn parse_component(value: &str) -> Option<u8> {
     })
 }
 
-/// Compatibility defaults for UI derivation only. Do not mark these as
-/// reported host slots or expose them to child color queries.
+/// Compatibility defaults for the historical UI derivation test. Do not mark
+/// these as reported host slots or expose them to child color queries.
+#[cfg(test)]
 pub(crate) fn default_ansi_palette(fg: [u8; 3], bg: [u8; 3]) -> [[u8; 3]; 16] {
     let luminance =
         |rgb: [u8; 3]| 0.2126 * rgb[0] as f32 + 0.7152 * rgb[1] as f32 + 0.0722 * rgb[2] as f32;

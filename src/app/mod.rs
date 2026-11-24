@@ -4621,10 +4621,9 @@ impl App {
 
     /// Apply colors reported by the terminal displaying the foreground client.
     ///
-    /// Terminal derives UI accents and selection layers from the probe while
-    /// preserving Reset primary backgrounds. A manual theme is left alone
-    /// unless `theme_follow.auto_switch` selects a known theme. Pane queries
-    /// retain the actual host colors, independently of UI compatibility defaults.
+    /// The Terminal UI theme stays on Reset and ANSI indexes so the host palette
+    /// can redraw it. A manual theme is left alone unless `theme_follow.auto_switch`
+    /// selects a known theme. Pane queries retain the probed host colors.
     pub fn apply_terminal_colors(
         &mut self,
         colors: &crate::terminal::theme_probe::TerminalColors,
@@ -4677,18 +4676,18 @@ impl App {
             return self.install_configured_theme(colors);
         }
         if self.config.theme == "terminal" {
-            return self.set_effective_theme("terminal", Theme::from_terminal(colors));
+            return self.set_effective_theme("terminal", Theme::terminal_native());
         }
         false
     }
 
     fn install_configured_theme(
         &mut self,
-        colors: &crate::terminal::theme_probe::TerminalColors,
+        _colors: &crate::terminal::theme_probe::TerminalColors,
     ) -> bool {
         let theme_id = self.config.theme.clone();
         if theme_id == "terminal" {
-            return self.set_effective_theme("terminal", Theme::from_terminal(colors));
+            return self.set_effective_theme("terminal", Theme::terminal_native());
         }
         let Some(theme) = self.theme_registry.theme(&theme_id) else {
             return false;
@@ -4733,9 +4732,9 @@ impl App {
             self.followed_theme = None;
         }
         if theme_id == "terminal" {
-            if let Some(colors) = self.host_terminal_colors.as_ref() {
-                theme = Theme::from_terminal(colors);
-            }
+            // Indexed and Reset colors follow the host palette immediately.
+            // A probed RGB snapshot would stay on screen until the next redraw.
+            theme = Theme::terminal_native();
         }
         if self.host_terminal_colors.is_none() {
             let appearance = child_appearance(

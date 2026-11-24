@@ -1,14 +1,17 @@
 //! Color palette. "luvus vr46" — a near-black dark UI with a fluorescent
 //! stabilo/Valentino-Rossi green accent for active/selected elements.
 
+#[cfg(test)]
 use crate::terminal::theme_probe::TerminalColors;
 use ratatui::style::Color;
 
+#[cfg(test)]
 fn blend_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> Color {
     let f = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).clamp(0.0, 255.0) as u8;
     Color::Rgb(f(0), f(1), f(2))
 }
 
+#[cfg(test)]
 fn pal(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
@@ -27,8 +30,9 @@ impl Theme {
         }
     }
 
-    /// Zero-probe fallback for the Terminal theme. Primary backgrounds stay
-    /// Reset; a successful host probe restores the derived UI palette.
+    /// UI palette for the Terminal theme. These stay Reset or ANSI indexes so
+    /// the host can redraw them when its palette changes. A probe must not
+    /// replace them with a baked RGB snapshot.
     pub fn terminal_native() -> Self {
         let ansi = Color::Indexed;
         Theme {
@@ -53,6 +57,9 @@ impl Theme {
         }
     }
 
+    /// Historical RGB derivation. It is not installed as the Terminal UI theme:
+    /// explicit RGB does not follow a later host-palette change.
+    #[cfg(test)]
     pub fn from_terminal(c: &TerminalColors) -> Self {
         // UI-only compatibility defaults must never become host/pane colors.
         let mut resolved = c.clone();
@@ -103,6 +110,7 @@ impl Theme {
         }
     }
 
+    #[cfg(test)]
     fn from_terminal_base(c: &TerminalColors) -> Self {
         let (bg, fg) = (c.bg, c.fg);
         Theme {

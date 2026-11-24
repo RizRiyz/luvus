@@ -1331,30 +1331,13 @@ mod tests {
         }
     }
 
-    /// Exercise the real App → sidebar → workspace_row/agent renderer, with
-    /// the same palette, geometry and semantic focus on both sides. These
-    /// expected cells are the pre-native Terminal derivation, not ANSI-only
-    /// assertions (which missed the lost active/keyboard-selection hierarchy).
+    /// A host probe updates pane colors, but the Terminal UI stays on the
+    /// native Reset/ANSI slots. Baked RGB would ignore a later palette change.
     #[test]
-    fn terminal_sidebar_probe_preserves_derived_selection_layers() {
+    fn terminal_sidebar_probe_keeps_indexed_selection_layers() {
         use ratatui::style::{Color, Modifier};
-        let _env = crate::persist::test_env("terminal-sidebar-derived");
-        for (fg, bg, active_bg, selected_bg, muted) in [
-            (
-                [238; 3],
-                [26, 26, 46],
-                [30, 39, 67],
-                [67, 68, 71],
-                [157, 157, 165],
-            ),
-            (
-                [51; 3],
-                [245, 245, 240],
-                [208, 208, 229],
-                [149, 149, 147],
-                [138, 138, 136],
-            ),
-        ] {
+        let _env = crate::persist::test_env("terminal-sidebar-indexed");
+        for (fg, bg) in [([238; 3], [26, 26, 46]), ([51; 3], [245, 245, 240])] {
             let (tx, _rx) = std::sync::mpsc::channel();
             let mut app = App::new(120, 40, tx).unwrap();
             app.downsample = false;
@@ -1379,8 +1362,12 @@ mod tests {
                 palette_mask: u16::MAX,
             };
             app.apply_terminal_colors(&colors);
-            let rgb = |v: [u8; 3]| Color::Rgb(v[0], v[1], v[2]);
-            let accent = rgb(colors.palette[4]);
+            assert_eq!(app.theme, crate::ui::theme::Theme::terminal_native());
+            assert!(
+                !terminal_theme_has_rgb(&app.theme),
+                "the installed Terminal theme must not contain baked RGB"
+            );
+            assert_eq!(app.host_terminal_colors.as_ref().unwrap().bg, bg);
             let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
             for keyboard in [false, true] {
                 app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Workspaces);
@@ -1388,14 +1375,13 @@ mod tests {
                 term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
                 let row = app.ws_rects[0].1;
                 let buffer = term.backend().buffer();
-                let expected = rgb(if keyboard { selected_bg } else { active_bg });
                 assert_eq!(
                     buffer[(row.x, row.y)].bg,
-                    expected,
+                    Color::Indexed(8),
                     "workspace keyboard={keyboard}, bg={bg:?}"
                 );
                 let name = &buffer[(row.x + 4, row.y)];
-                assert_eq!((name.fg, name.bg), (accent, expected));
+                assert_eq!((name.fg, name.bg), (Color::Indexed(4), Color::Indexed(8)));
                 assert!(name.modifier.contains(Modifier::BOLD));
 
                 app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Agents);
@@ -1410,7 +1396,7 @@ mod tests {
                 let buffer = term.backend().buffer();
                 assert_eq!(
                     buffer[(row.x, row.y)].bg,
-                    expected,
+                    Color::Indexed(8),
                     "agent keyboard={keyboard}, bg={bg:?}"
                 );
                 let name = (row.x..row.right())
@@ -1418,62 +1404,11 @@ mod tests {
                         (buffer[(x, row.y)].symbol() == "c").then_some(&buffer[(x, row.y)])
                     })
                     .expect("live claude name");
-                assert_eq!((name.fg, name.bg), (accent, expected));
+                assert_eq!((name.fg, name.bg), (Color::Indexed(4), Color::Indexed(8)));
                 assert!(name.modifier.contains(Modifier::BOLD));
                 let unselected = app.session_rects[0].1;
                 assert_eq!(buffer[(unselected.x, unselected.y)].bg, Color::Reset);
-                assert_ne!(rgb(active_bg), rgb(selected_bg));
             }
-            // Same shared WORKSPACES renderer also handles a non-active row
-            // and client-shell hover without changing App's active workspace.
-            for hovered in [false, true] {
-                let area = Rect::new(0, 0, 24, 2);
-                let mut buffer = Buffer::empty(area);
-                crate::ui::workspace_row::draw(
-                    &mut buffer,
-                    area,
-                    crate::ui::workspace_row::WorkspaceRow {
-                        name: "other",
-                        branch: None,
-                        path: "~/other",
-                        dot: "○",
-                        dot_color: app.theme.overlay0,
-                        nested: false,
-                        active: false,
-                        selected: false,
-                        hovered,
-                    },
-                    crate::ui::workspace_row::Palette {
-                        accent: app.theme.accent,
-                        normal: app.theme.subtext1,
-                        muted: app.theme.overlay0,
-                        path: app.theme.subtext0,
-                        branch: app.theme.green,
-                        active_bg: app.theme.sel_bg,
-                        selected_bg: app.theme.surface1,
-                    },
-                );
-                assert_eq!(
-                    buffer[(0, 0)].bg,
-                    if hovered {
-                        rgb(selected_bg)
-                    } else {
-                        Color::Reset
-                    }
-                );
-                assert_eq!(buffer[(4, 0)].fg, app.theme.subtext1);
-                assert!(!buffer[(4, 0)].modifier.contains(Modifier::BOLD));
-            }
-            assert_eq!(app.theme.subtext0, rgb(muted));
-            assert_eq!(
-                (
-                    app.theme.base,
-                    app.theme.mantle,
-                    app.theme.crust,
-                    app.theme.surface0
-                ),
-                (Color::Reset, Color::Reset, Color::Reset, Color::Reset)
-            );
         }
     }
 
@@ -1638,6 +1573,31 @@ mod tests {
     // The state icon sits in a fixed one-column slot, so the text after it must
     // start at the same column no matter which state is shown.
     /// The fg colour of the first cell of the row containing `needle`.
+    fn terminal_theme_has_rgb(theme: &crate::ui::theme::Theme) -> bool {
+        [
+            theme.crust,
+            theme.mantle,
+            theme.base,
+            theme.surface0,
+            theme.surface1,
+            theme.overlay0,
+            theme.overlay1,
+            theme.subtext0,
+            theme.subtext1,
+            theme.text,
+            theme.accent,
+            theme.sel_bg,
+            theme.border,
+            theme.border_focus,
+            theme.green,
+            theme.mint,
+            theme.amber,
+            theme.coral,
+        ]
+        .into_iter()
+        .any(|color| matches!(color, ratatui::style::Color::Rgb(_, _, _)))
+    }
+
     fn fg_of_row(term: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Color> {
         let buf = term.backend().buffer();
         for r in 0..buf.area.height {

@@ -1541,6 +1541,31 @@ mod tests {
         AppEvent::Key(KeyEvent::new_with_kind(code, modifiers, kind))
     }
 
+    fn terminal_theme_has_rgb(theme: &Theme) -> bool {
+        [
+            theme.crust,
+            theme.mantle,
+            theme.base,
+            theme.surface0,
+            theme.surface1,
+            theme.overlay0,
+            theme.overlay1,
+            theme.subtext0,
+            theme.subtext1,
+            theme.text,
+            theme.accent,
+            theme.sel_bg,
+            theme.border,
+            theme.border_focus,
+            theme.green,
+            theme.mint,
+            theme.amber,
+            theme.coral,
+        ]
+        .into_iter()
+        .any(|color| matches!(color, ratatui::style::Color::Rgb(_, _, _)))
+    }
+
     fn host_colors(bg: [u8; 3]) -> crate::terminal::theme_probe::TerminalColors {
         crate::terminal::theme_probe::TerminalColors {
             fg: [0xee, 0xee, 0xee],
@@ -1598,7 +1623,9 @@ mod tests {
         let dark = host_colors([0x11, 0x11, 0x11]);
         assert!(app.apply_terminal_colors(&dark));
         assert_eq!(app.config.theme, "terminal");
-        assert_eq!(app.theme, Theme::from_terminal(&dark));
+        assert_eq!(app.theme, Theme::terminal_native());
+        assert!(!terminal_theme_has_rgb(&app.theme));
+        assert_eq!(app.pane_appearance.background, dark.bg);
     }
 
     #[test]
@@ -1682,20 +1709,25 @@ mod tests {
         assert_eq!(app.theme, Theme::terminal_native());
         let dark = host_colors([26, 26, 46]);
         app.apply_terminal_colors(&dark);
-        assert_eq!(app.theme, Theme::from_terminal(&dark));
+        assert_eq!(app.theme, Theme::terminal_native());
+        assert!(!terminal_theme_has_rgb(&app.theme));
+        assert_eq!(app.pane_appearance.background, dark.bg);
         app.apply_theme("noir");
         let manual = app.theme.clone();
         let light = host_colors([248; 3]);
         app.apply_terminal_colors(&light);
         assert_eq!(app.theme, manual);
         app.apply_theme("terminal");
-        assert_eq!(app.theme, Theme::from_terminal(&light));
+        assert_eq!(app.theme, Theme::terminal_native());
+        assert!(!terminal_theme_has_rgb(&app.theme));
+        assert_eq!(app.pane_appearance.background, light.bg);
         app.apply_terminal_colors(&dark);
         assert_eq!(
             app.theme,
-            Theme::from_terminal(&dark),
-            "focus query updates derivation"
+            Theme::terminal_native(),
+            "a later probe does not bake RGB into the Terminal UI"
         );
+        assert_eq!(app.pane_appearance.background, dark.bg);
         assert!(
             !app.apply_terminal_colors(&dark),
             "identical replies do not refresh"
