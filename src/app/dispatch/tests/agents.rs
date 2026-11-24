@@ -88,6 +88,11 @@ fn agent_list_labels_a_pane_with_its_node_name() {
     // Rename the node so its label and its cwd basename can't coincide.
     app.workspaces[0].name = "renamed-node".into();
     app.workspaces[0].branch = Some("feat/x".into());
+    app.workspaces[0].worktree = Some(crate::git::WorktreeMembership {
+        common_dir: "/test/repo/.git".into(),
+        directory_identity: None,
+        linked: false,
+    });
 
     // Make the one existing pane look like a live agent.
     let pane = app.layout().focus;
@@ -116,6 +121,9 @@ fn agent_list_labels_a_pane_with_its_node_name() {
     assert_eq!(row["branch"], "feat/x");
     // A plain node is not a linked worktree.
     assert_eq!(row["worktree"], false);
+    app.workspaces[0].worktree.as_mut().unwrap().linked = true;
+    let linked = app.dispatch("agent.list", &json!({})).unwrap();
+    assert_eq!(linked["agents"][0]["worktree"], true);
     // Nothing has reported a session for this pane, so it is explicitly
     // unbound rather than guessed — `agent.list` never invents one.
     assert!(row["session"].is_null(), "unbound session is null");

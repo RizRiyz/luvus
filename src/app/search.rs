@@ -1589,8 +1589,22 @@ mod tests {
     fn legacy_exact_search_uses_shared_folding_and_original_byte_columns() {
         let _env = crate::persist::test_env("exact-search-shared-folding");
         let (tx, _rx) = std::sync::mpsc::channel();
-        let app = App::new(80, 24, tx).unwrap();
+        let mut app = App::new(80, 24, tx).unwrap();
         let pane_id = app.layout().focus;
+        let (response_tx, _response_rx) = std::sync::mpsc::channel();
+        let shell_engine = std::mem::replace(
+            &mut app.panes.get_mut(&pane_id).unwrap().engine,
+            std::sync::Arc::new(std::sync::Mutex::new(
+                crate::terminal::vt::alacritty::AlacrittyEngine::new(
+                    80,
+                    24,
+                    response_tx,
+                    crate::config::SCROLLBACK_BYTES_DEFAULT,
+                ),
+            )),
+        );
+        // Shell output must not reach the fixture's terminal grid.
+        shell_engine.lock().unwrap().advance(b"shell prompt needle");
         let pane = app.panes.get(&pane_id).unwrap();
         pane.engine
             .lock()
