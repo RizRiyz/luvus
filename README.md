@@ -120,7 +120,7 @@ Keyboard → Keyboard Shortcuts → Input Sources** to free `Ctrl+Space`.
 | Cursor | ✓ | resume command | No |
 | Kilo Code | ✓ | exact-ID resume | No |
 | Devin | ✓ | ✓ with integration | session only |
-| Gemini · Aider · Amp · Droid · Qwen · Kiro | ✓ | No | No |
+| Gemini · Aider · Amp · Droid · Qwen · Kiro · Command Code | ✓ | No | No |
 
 Live status needs no agent integration. See the
 [documentation](https://luvus.dev/docs/) for setup, keybindings, modules, and

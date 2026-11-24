@@ -1,0 +1,21 @@
+# Command Code v1.93.0
+# models: deepseek-v4.1-flash-(latest) · taste-1
+# /var/tmp/cmdcap/work/w1
+
+❯ Create a file hello.txt in the current directory containing the
+  single word hi. Then stop.
+
+⠶ I'll create the file.
+
+
+────────────────────────────────────────────────────────────────────────────────
+
+Create File
+
+Do you want to create hello.txt?
+
+❯ 1. Yes
+  2. Yes, allow all edits this session [shift+tab]
+  3. No, tell Command Code what to do differently
+
+↑/↓ navigate · enter select · Run cmd --yolo to bypass all permissions (Docs ↗)

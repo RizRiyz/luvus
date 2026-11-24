@@ -28,6 +28,13 @@ description: What luvus supports per agent, covering live status, session resume
 | Droid | ✓ | no | no | no |
 | Qwen | ✓ | no | no | no |
 | Kiro | ✓ | no | no | no |
+| Command Code (`command-code`) | ✓ | no | no | no |
+
+Command Code is recognized from the `command-code` or `commandcode` program, its
+`command-code` npm package, or its `cmd` and `cmdc` binaries run as the script of
+`node`, `nodejs`, or `bun`. A plain `cmd`, including Windows `cmd.exe`, is never
+taken for it, but any extensionless script named `cmd` run that way is. Luvus reports its idle, working, and
+permission screens; it does not advertise sessions, resume, or fork.
 
 Arc Studio CLI requires Node.js 20 or later. Install it with
 `npm install -g @circle-fin/arc-studio-cli`, then run `arc-studio login`. Luvus

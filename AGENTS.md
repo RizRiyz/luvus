@@ -338,7 +338,8 @@ For a built-in adapter:
 2. Declare identity evidence accurately. Put unmistakable executable names in
    `distinct`, ordinary words in `ambiguous`, versioned executable logic in a
    narrow `binary_matcher`, and exact interpreter package names—including npm
-   scope—in `interpreter_packages`. Use `overlap_priority` only for a reviewed
+   scope—in `interpreter_packages`, and short extensionless script names that
+   only Node or Bun may run in `interpreter_scripts`. Use `overlap_priority` only for a reviewed
    collision such as OMP versus Pi; never rely accidentally on registry order.
 3. Add `sessions.rs` only when the upstream agent has a stable native store.
    Keep reads bounded and offline, match canonical CWDs portably, obtain session

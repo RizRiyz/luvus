@@ -25,6 +25,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ambiguous: &["kilo"],
         binary_matcher: None,
         interpreter_packages: &["@kilocode/cli"],
+        interpreter_scripts: &[],
         overlap_priority: 0,
     },
     sessions: Some(SessionOperations {

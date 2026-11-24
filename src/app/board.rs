@@ -4710,6 +4710,7 @@ mod tests {
             ("antigravity", "agy -p"),
             ("arc-studio", "arc-studio"),
             ("claude", "claude"),
+            ("command-code", "command-code"),
             ("codex", "codex"),
             ("copilot", "copilot --interactive"),
             ("cursor", "cursor-agent"),

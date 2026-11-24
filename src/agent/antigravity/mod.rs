@@ -22,6 +22,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ambiguous: &["agy"],
         binary_matcher: None,
         interpreter_packages: &[],
+        interpreter_scripts: &[],
         overlap_priority: 0,
     },
     sessions: Some(SessionOperations {

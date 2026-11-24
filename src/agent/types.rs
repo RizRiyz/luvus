@@ -14,6 +14,10 @@ pub(crate) struct IdentityDescriptor {
     /// Exact package identities for interpreter-launched agents. Keep the npm
     /// scope so packages with the same basename remain distinct.
     pub interpreter_packages: &'static [&'static str],
+    /// Extensionless script names trusted only as the script Node or Bun
+    /// runs (`node /usr/bin/cmd`), never as a bare executable, title
+    /// or screen text. For a short name that other programs also use.
+    pub interpreter_scripts: &'static [&'static str],
     /// Documents intentional overlap precedence without relying on comments.
     /// Registry order remains stable during the migration to preserve behavior.
     pub overlap_priority: u8,

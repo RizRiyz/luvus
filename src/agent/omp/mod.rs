@@ -44,6 +44,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ambiguous: AMBIGUOUS_IDENTITIES,
         binary_matcher: None,
         interpreter_packages: &["@oh-my-pi/pi-coding-agent"],
+        interpreter_scripts: &[],
         overlap_priority: 20,
     },
     sessions: Some(SessionOperations {
