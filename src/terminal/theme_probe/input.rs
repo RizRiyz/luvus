@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 // Keep the ordinary key path allocation-free; only tentative OSC prefixes need
 // buffering. Windows' host-input decoder remains independent of this Unix path.
@@ -476,7 +476,10 @@ mod tests {
         let mut filter = ColorReplyFilter::default();
         let mut output = Vec::new();
         let now = Instant::now();
-        let alt_bracket = Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
+        let alt_bracket = Event::Key(ratatui::crossterm::event::KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::ALT,
+        ));
         let ex = Event::Key(KeyCode::Char('x').into());
         filter
             .push(alt_bracket.clone(), now)
