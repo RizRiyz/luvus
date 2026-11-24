@@ -2794,7 +2794,32 @@ mod tests {
         assert_eq!(clients[&2].interest, SurfaceInterest::Suspended);
         assert_eq!(clients[&2].terminal_colors.as_ref(), Some(&light));
         assert_eq!(app.host_terminal_colors.as_ref(), Some(&dark));
-        assert_ne!(app.theme, crate::ui::theme::Theme::terminal_native());
+        assert_eq!(app.theme, crate::ui::theme::Theme::terminal_native());
+        for color in [
+            app.theme.crust,
+            app.theme.mantle,
+            app.theme.base,
+            app.theme.surface0,
+            app.theme.surface1,
+            app.theme.overlay0,
+            app.theme.overlay1,
+            app.theme.subtext0,
+            app.theme.subtext1,
+            app.theme.text,
+            app.theme.accent,
+            app.theme.sel_bg,
+            app.theme.border,
+            app.theme.border_focus,
+            app.theme.green,
+            app.theme.mint,
+            app.theme.amber,
+            app.theme.coral,
+        ] {
+            assert!(
+                !matches!(color, ratatui::style::Color::Rgb(_, _, _)),
+                "terminal UI must stay on Reset or ANSI, not {color:?}"
+            );
+        }
     }
 
     #[test]
