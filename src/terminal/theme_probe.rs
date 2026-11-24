@@ -665,6 +665,106 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn crossterm_adjacent_palette_replies_do_not_become_keys() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        const CHILD: &str = "LUVUS_TEST_ADJACENT_PALETTE_REPLY";
+        const BYTES: &[u8] = b"\x1b]4;12;rgb:0707/6666/7878\x1b\\\x1b]4;6;rgb:6868/9d9d/6a6a\x07";
+        if std::env::var_os(CHILD).is_some() {
+            ratatui::crossterm::terminal::enable_raw_mode().unwrap();
+            print!("INPUT_READY");
+            std::io::stdout().flush().unwrap();
+            let mut keys = Vec::new();
+            run_input_loop(
+                Vec::new(),
+                ColorAccumulator::default(),
+                |event| {
+                    let done = matches!(
+                        event,
+                        Event::Key(KeyEvent {
+                            code: KeyCode::Char('!'),
+                            ..
+                        })
+                    );
+                    keys.push(event);
+                    !done
+                },
+                |_| true,
+            );
+            ratatui::crossterm::terminal::disable_raw_mode().unwrap();
+            let text: String = keys
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Key(key) => match key.code {
+                        KeyCode::Char(ch) => Some(ch),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert!(!text.contains("rgb:"), "{text} {keys:?}");
+            assert!(!text.contains("4;12"), "{text}");
+            assert!(!text.contains("4;6"), "{text}");
+            assert_eq!(keys, vec![Event::Key(KeyCode::Char('!').into())]);
+            return;
+        }
+
+        let pair = portable_pty::native_pty_system()
+            .openpty(portable_pty::PtySize::default())
+            .unwrap();
+        let mut command = portable_pty::CommandBuilder::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "terminal::theme_probe::tests::crossterm_adjacent_palette_replies_do_not_become_keys",
+            "--nocapture",
+        ]);
+        command.env(CHILD, "1");
+        command.env_remove("LUVUS_ENV");
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut writer = pair.master.take_writer().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut chunk = [0; 1024];
+            let mut sent = false;
+            while let Ok(n) = reader.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                output.extend_from_slice(&chunk[..n]);
+                if !sent && output.windows(11).any(|window| window == b"INPUT_READY") {
+                    sent = true;
+                    writer.write_all(BYTES).unwrap();
+                    writer.flush().unwrap();
+                    std::thread::sleep(Duration::from_millis(20));
+                    for byte in BYTES {
+                        writer.write_all(&[*byte]).unwrap();
+                        writer.flush().unwrap();
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    writer.write_all(b"!").unwrap();
+                    writer.flush().unwrap();
+                    output.clear();
+                }
+            }
+            let _ = tx.send(output);
+        });
+        let output = match rx.recv_timeout(Duration::from_secs(8)) {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = child.kill();
+                panic!("adjacent palette reply leaked or wedged input: {error}");
+            }
+        };
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{}", String::from_utf8_lossy(&output));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn late_color_replies_do_not_become_pane_input() {
         use std::io::{Read, Write};
         use std::time::Duration;

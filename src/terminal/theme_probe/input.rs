@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 // Keep the ordinary key path allocation-free; only tentative OSC prefixes need
 // buffering. Windows' host-input decoder remains independent of this Unix path.
@@ -36,6 +36,46 @@ const REPLY_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 // Even continuous unterminated traffic cannot hold the input route indefinitely.
 const REPLY_MAX_DURATION: Duration = Duration::from_secs(2);
 
+struct EncodedPress {
+    bytes: [u8; 2],
+    len: usize,
+}
+
+impl EncodedPress {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// Reconstruct only the ASCII controls Crossterm 0.29 exposes for OSC replies:
+/// Alt+] is ESC ], a body character is itself, and ST / BEL are Alt+\ / Ctrl+G.
+fn encode_press(key: &ratatui::crossterm::event::KeyEvent) -> EncodedPress {
+    let mut encoded = EncodedPress {
+        bytes: [0; 2],
+        len: 0,
+    };
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, KeyModifiers::NONE) => {
+            encoded.bytes[0] = 0x1b;
+            encoded.len = 1;
+        }
+        (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+            encoded.bytes[0] = 0x07;
+            encoded.len = 1;
+        }
+        (KeyCode::Char(ch), KeyModifiers::ALT) if ch.is_ascii() => {
+            encoded.bytes = [0x1b, ch as u8];
+            encoded.len = 2;
+        }
+        (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) if ch.is_ascii() => {
+            encoded.bytes[0] = ch as u8;
+            encoded.len = 1;
+        }
+        _ => {}
+    }
+    encoded
+}
+
 #[derive(Default)]
 enum ReplyState {
     #[default]
@@ -63,9 +103,14 @@ struct ColorReplyFilter {
 
 impl ColorReplyFilter {
     /// Expire stale state before processing an arriving event, even when poll
-    /// remains ready continuously. Only tentative prefixes may be replayed.
+    /// remains ready continuously. A late fragment that still continues a color
+    /// reply is not replayed as keys; only a prefix that the new event breaks,
+    /// or a bare Esc / Alt+], may be released.
     fn push(&mut self, event: Event, now: Instant) -> DecodedEvents {
         if self.deadline.is_some_and(|deadline| now >= deadline) {
+            if matches!(self.state, ReplyState::Prefix) && self.event_extends_prefix(&event) {
+                return self.push_current(event, now);
+            }
             let expired = self.expire();
             let current = self.push_current(event, now);
             let mut events = Vec::new();
@@ -74,6 +119,27 @@ impl ColorReplyFilter {
             return DecodedEvents::Many(events);
         }
         self.push_current(event, now)
+    }
+
+    /// True when `event` keeps the held bytes inside a requested color reply.
+    fn event_extends_prefix(&self, event: &Event) -> bool {
+        let Event::Key(key) = event else {
+            return false;
+        };
+        if key.kind != KeyEventKind::Press {
+            return false;
+        }
+        let encoded = encode_press(key);
+        let bytes = encoded.as_slice();
+        if bytes.is_empty() {
+            return false;
+        }
+        let mut next = self.bytes.clone();
+        next.extend_from_slice(bytes);
+        super::requested_reply_prefixes().iter().any(|prefix| {
+            let prefix = prefix.as_bytes();
+            prefix.starts_with(&next) || next.starts_with(prefix)
+        })
     }
 
     /// Reconstruct only ASCII control traffic exposed by Crossterm 0.29.
@@ -90,20 +156,8 @@ impl ColorReplyFilter {
         if key.kind != KeyEventKind::Press {
             return self.passthrough(event);
         }
-        let mut encoded = [0; 2];
-        let bytes: &[u8] = match (key.code, key.modifiers) {
-            (KeyCode::Esc, KeyModifiers::NONE) => b"\x1b",
-            (KeyCode::Char('g'), KeyModifiers::CONTROL) => b"\x07",
-            (KeyCode::Char(ch), KeyModifiers::ALT) if ch.is_ascii() => {
-                encoded = [0x1b, ch as u8];
-                &encoded
-            }
-            (KeyCode::Char(ch), KeyModifiers::NONE | KeyModifiers::SHIFT) if ch.is_ascii() => {
-                encoded[0] = ch as u8;
-                &encoded[..1]
-            }
-            _ => &[],
-        };
+        let encoded = encode_press(key);
+        let bytes = encoded.as_slice();
         if let ReplyState::Reply { escape, until } = &mut self.state {
             if bytes.is_empty() {
                 return self.passthrough(event);
@@ -166,6 +220,40 @@ impl ColorReplyFilter {
             }
         }
         self.replay()
+    }
+
+    /// A poll timeout. Once the held bytes can only be a requested color reply,
+    /// keep them out of the pane and wait for the terminator. Esc and Alt+] stay
+    /// releasable so a real key is not held for the reply idle limit.
+    fn expire_deadline(&mut self, now: Instant) -> DecodedEvents {
+        if matches!(self.state, ReplyState::Prefix) && self.held_prefix_is_committed() {
+            self.commit_prefix_as_reply(now);
+            return DecodedEvents::None;
+        }
+        self.expire()
+    }
+
+    fn held_prefix_is_committed(&self) -> bool {
+        let bytes = self.bytes.as_slice();
+        bytes.len() > b"\x1b]".len()
+            && super::requested_reply_prefixes().iter().any(|prefix| {
+                let prefix = prefix.as_bytes();
+                prefix.starts_with(bytes) || bytes.starts_with(prefix)
+            })
+    }
+
+    /// Move an unambiguous color introducer into the reply body without
+    /// emitting the keys that carried it.
+    fn commit_prefix_as_reply(&mut self, now: Instant) {
+        self.reply_prefix = std::mem::take(&mut self.bytes);
+        let escape = self.reply_prefix.last() == Some(&0x1b);
+        self.reply_body.clear();
+        self.pending.clear();
+        self.state = ReplyState::Reply {
+            escape,
+            until: now + REPLY_MAX_DURATION,
+        };
+        self.deadline = Some(now + REPLY_IDLE_TIMEOUT);
     }
 
     /// Abandon confirmed control traffic, or release an unconfirmed key prefix.
@@ -252,7 +340,7 @@ pub(crate) fn run_input_loop(
                     Ok(false) => {
                         let mut keep_going = true;
                         filter
-                            .expire()
+                            .expire_deadline(Instant::now())
                             .for_each(|event| keep_going = keep_going && send(event));
                         if !keep_going || !emit_colors(&mut filter, &mut send_colors) {
                             return;
@@ -321,6 +409,109 @@ mod tests {
         }
         filter.expire().for_each(|event| output.push(event));
         output
+    }
+
+    fn key_text(events: &[Event]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Key(key) => match key.code {
+                    KeyCode::Char(ch) => Some(ch),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn adjacent_palette_replies_do_not_leak_into_keys() {
+        let bytes = b"\x1b]4;12;rgb:0707/6666/7878\x1b\\\x1b]4;6;rgb:6868/9d9d/6a6a\x07";
+        let assert_clean = |events: &[Event]| {
+            let text = key_text(events);
+            assert!(!text.contains("rgb:"), "{text:?} from {events:?}");
+            assert!(!text.contains("4;12"), "{text:?}");
+            assert!(!text.contains("4;6"), "{text:?}");
+        };
+        assert_clean(&filter_bytes(bytes));
+        let mut filter = ColorReplyFilter::default();
+        let now = Instant::now();
+        for event in super::super::decode_pending_input(bytes) {
+            filter.push(event, now).for_each(|_| {});
+        }
+        assert_eq!(filter.colors.palette[12], [0x07, 0x66, 0x78]);
+        assert_eq!(filter.colors.palette[6], [0x68, 0x9d, 0x6a]);
+        assert_eq!(filter.colors.mask, (1 << 12) | (1 << 6));
+
+        let events = super::super::decode_pending_input(bytes);
+        for width in 1..=events.len() {
+            let mut filter = ColorReplyFilter::default();
+            let mut output = Vec::new();
+            let now = Instant::now();
+            for chunk in events.chunks(width) {
+                for event in chunk {
+                    filter
+                        .push(event.clone(), now)
+                        .for_each(|event| output.push(event));
+                }
+            }
+            filter.expire().for_each(|event| output.push(event));
+            assert_clean(&output);
+        }
+
+        let mut filter = ColorReplyFilter::default();
+        let mut output = Vec::new();
+        let mut now = Instant::now();
+        for event in &events {
+            filter
+                .push(event.clone(), now)
+                .for_each(|event| output.push(event));
+            now += PREFIX_TIMEOUT;
+        }
+        filter.expire().for_each(|event| output.push(event));
+        assert_clean(&output);
+        assert_eq!(filter.colors.palette[12], [0x07, 0x66, 0x78]);
+        assert_eq!(filter.colors.palette[6], [0x68, 0x9d, 0x6a]);
+
+        let mut filter = ColorReplyFilter::default();
+        let mut output = Vec::new();
+        let now = Instant::now();
+        let alt_bracket = Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
+        let ex = Event::Key(KeyCode::Char('x').into());
+        filter
+            .push(alt_bracket.clone(), now)
+            .for_each(|event| output.push(event));
+        filter
+            .push(ex.clone(), now + PREFIX_TIMEOUT)
+            .for_each(|event| output.push(event));
+        assert_eq!(
+            output,
+            vec![alt_bracket, ex],
+            "Alt+] followed by a normal key must not be eaten"
+        );
+
+        assert_eq!(
+            filter_bytes(b"az"),
+            super::super::decode_pending_input(b"az"),
+            "ordinary keys must survive the palette filter"
+        );
+
+        for split in 0..=bytes.len() {
+            let mut filter = ColorReplyFilter::default();
+            let mut output = Vec::new();
+            let now = Instant::now();
+            for part in [&bytes[..split], &bytes[split..]] {
+                for event in super::super::decode_pending_input(part) {
+                    filter.push(event, now).for_each(|event| output.push(event));
+                }
+            }
+            filter.expire().for_each(|event| output.push(event));
+            assert!(
+                output.is_empty(),
+                "split {split} leaked {}",
+                key_text(&output)
+            );
+        }
     }
 
     #[test]
