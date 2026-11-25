@@ -28,7 +28,8 @@ impl DecodedEvents {
     }
 }
 
-// Tentative Esc/Alt+] prefixes must not delay normal keys for long.
+// A bare Esc is released quickly. ESC ] is a color-reply prefix and uses
+// the reply idle limit instead, so a late body is not typed into the pane.
 const PREFIX_TIMEOUT: Duration = Duration::from_millis(40);
 // Prefer normal input after an abandoned reply, as Herdr does. This is an idle
 // limit, not a startup sleep; only an unfinished reply arms the one-shot wait.
@@ -95,6 +96,9 @@ struct ColorReplyFilter {
     bytes: Vec<u8>,
     pending: Vec<Event>,
     deadline: Option<Instant>,
+    // ESC ] is a real color-reply prefix. Hold it until this instant instead of
+    // replaying it when the 40ms prefix poll fires before the body arrives.
+    hold_limit: Option<Instant>,
     reply_prefix: Vec<u8>,
     reply_body: Vec<u8>,
     colors: super::ColorAccumulator,
@@ -104,8 +108,8 @@ struct ColorReplyFilter {
 impl ColorReplyFilter {
     /// Expire stale state before processing an arriving event, even when poll
     /// remains ready continuously. A late fragment that still continues a color
-    /// reply is not replayed as keys; only a prefix that the new event breaks,
-    /// or a bare Esc / Alt+], may be released.
+    /// reply is not replayed as keys. A bare Esc may be released; ESC ] waits
+    /// for the reply idle limit unless the next byte cannot continue a reply.
     fn push(&mut self, event: Event, now: Instant) -> DecodedEvents {
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             if matches!(self.state, ReplyState::Prefix) && self.event_extends_prefix(&event) {
@@ -203,6 +207,7 @@ impl ColorReplyFilter {
                 self.reply_prefix = std::mem::take(&mut self.bytes);
                 self.reply_body.clear();
                 self.pending.clear();
+                self.hold_limit = None;
                 self.state = ReplyState::Reply {
                     escape: false,
                     until: now + REPLY_MAX_DURATION,
@@ -215,45 +220,48 @@ impl ColorReplyFilter {
                 .any(|prefix| prefix.as_bytes().starts_with(&self.bytes))
             {
                 self.state = ReplyState::Prefix;
-                self.deadline = Some(now + PREFIX_TIMEOUT);
+                if self.bytes.starts_with(b"\x1b]") {
+                    self.arm_color_hold(now);
+                } else {
+                    self.deadline = Some(now + PREFIX_TIMEOUT);
+                }
                 return DecodedEvents::None;
             }
         }
         self.replay()
     }
 
-    /// A poll timeout. Once the held bytes can only be a requested color reply,
-    /// keep them out of the pane and wait for the terminator. Esc and Alt+] stay
-    /// releasable so a real key is not held for the reply idle limit.
-    fn expire_deadline(&mut self, now: Instant) -> DecodedEvents {
-        if matches!(self.state, ReplyState::Prefix) && self.held_prefix_is_committed() {
-            self.commit_prefix_as_reply(now);
-            return DecodedEvents::None;
+    /// Keep ESC ] and any shorter-or-equal requested color prefix until the
+    /// reply idle limit. A bare Esc still uses the short timeout. The next byte
+    /// that cannot continue a reply replays the held prefix.
+    fn arm_color_hold(&mut self, now: Instant) {
+        if self.hold_limit.is_none() {
+            self.hold_limit = Some(now + REPLY_IDLE_TIMEOUT);
         }
-        self.expire()
+        let limit = self.hold_limit.unwrap_or(now + REPLY_IDLE_TIMEOUT);
+        self.deadline = Some((now + REPLY_IDLE_TIMEOUT).min(limit));
     }
 
-    fn held_prefix_is_committed(&self) -> bool {
+    fn holds_color_prefix(&self) -> bool {
         let bytes = self.bytes.as_slice();
-        bytes.len() > b"\x1b]".len()
+        bytes.starts_with(b"\x1b]")
             && super::requested_reply_prefixes().iter().any(|prefix| {
                 let prefix = prefix.as_bytes();
                 prefix.starts_with(bytes) || bytes.starts_with(prefix)
             })
     }
 
-    /// Move an unambiguous color introducer into the reply body without
-    /// emitting the keys that carried it.
-    fn commit_prefix_as_reply(&mut self, now: Instant) {
-        self.reply_prefix = std::mem::take(&mut self.bytes);
-        let escape = self.reply_prefix.last() == Some(&0x1b);
-        self.reply_body.clear();
-        self.pending.clear();
-        self.state = ReplyState::Reply {
-            escape,
-            until: now + REPLY_MAX_DURATION,
-        };
-        self.deadline = Some(now + REPLY_IDLE_TIMEOUT);
+    /// A poll timeout. ESC ] is not replayed when the body has not arrived yet;
+    /// the wait extends to the reply idle limit. A lone Esc is released.
+    fn expire_deadline(&mut self, now: Instant) -> DecodedEvents {
+        if matches!(self.state, ReplyState::Prefix)
+            && self.holds_color_prefix()
+            && self.hold_limit.is_some_and(|limit| now < limit)
+        {
+            self.deadline = Some(self.hold_limit.unwrap_or(now + REPLY_IDLE_TIMEOUT));
+            return DecodedEvents::None;
+        }
+        self.expire()
     }
 
     /// Abandon confirmed control traffic, or release an unconfirmed key prefix.
@@ -303,6 +311,7 @@ impl ColorReplyFilter {
         self.bytes.clear();
         self.pending.clear();
         self.deadline = None;
+        self.hold_limit = None;
         self.reply_prefix.clear();
         self.reply_body.clear();
     }
@@ -312,6 +321,7 @@ impl ColorReplyFilter {
         self.state = ReplyState::Input;
         self.bytes.clear();
         self.deadline = None;
+        self.hold_limit = None;
         DecodedEvents::Many(std::mem::take(&mut self.pending))
     }
 }
@@ -422,6 +432,124 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn has_ctrl_g(events: &[Event]) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Key(key)
+                    if key.code == KeyCode::Char('g')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+            )
+        })
+    }
+
+    fn assert_no_palette_text(events: &[Event]) {
+        let text = key_text(events);
+        assert!(!text.contains("rgb:"), "{text:?} from {events:?}");
+        assert!(!text.contains("4;1"), "{text:?}");
+        assert!(!has_ctrl_g(events), "BEL leaked as Ctrl-G: {events:?}");
+    }
+
+    /// Poll can time out after Alt+] and before the body. That timeout must not
+    /// turn the later palette text or its BEL into pane input.
+    #[test]
+    fn introducer_timeout_does_not_leak_the_following_palette_body() {
+        let body = b"4;1;rgb:cccc/2424/1d1d\x07";
+        let mut filter = ColorReplyFilter::default();
+        let mut output = Vec::new();
+        let now = Instant::now();
+        for event in super::super::decode_pending_input(b"\x1b]") {
+            filter.push(event, now).for_each(|event| output.push(event));
+        }
+        filter
+            .expire_deadline(now + PREFIX_TIMEOUT + Duration::from_millis(1))
+            .for_each(|event| output.push(event));
+        assert_no_palette_text(&output);
+        for event in super::super::decode_pending_input(body) {
+            filter
+                .push(event, now + PREFIX_TIMEOUT + Duration::from_millis(5))
+                .for_each(|event| output.push(event));
+        }
+        filter.expire().for_each(|event| output.push(event));
+        assert_no_palette_text(&output);
+
+        for terminator in [b"\x07".as_slice(), b"\x1b\\"] {
+            let replies = [
+                format!(
+                    "\x1b]4;1;rgb:cccc/2424/1d1d{}",
+                    std::str::from_utf8(terminator).unwrap()
+                ),
+                format!(
+                    "\x1b]4;12;rgb:b1b1/6262/8686{}",
+                    std::str::from_utf8(terminator).unwrap()
+                ),
+            ];
+            let mut filter = ColorReplyFilter::default();
+            let mut output = Vec::new();
+            let mut now = Instant::now();
+            for reply in &replies {
+                let events = super::super::decode_pending_input(reply.as_bytes());
+                filter
+                    .push(events[0].clone(), now)
+                    .for_each(|event| output.push(event));
+                now += PREFIX_TIMEOUT + Duration::from_millis(1);
+                filter
+                    .expire_deadline(now)
+                    .for_each(|event| output.push(event));
+                for event in events.into_iter().skip(1) {
+                    filter.push(event, now).for_each(|event| output.push(event));
+                }
+                now += Duration::from_millis(1);
+            }
+            filter.expire().for_each(|event| output.push(event));
+            assert_no_palette_text(&output);
+            assert!(!key_text(&output).contains("4;12"), "{output:?}");
+        }
+
+        let mut filter = ColorReplyFilter::default();
+        let mut output = Vec::new();
+        let now = Instant::now();
+        for event in super::super::decode_pending_input(b"\x1b") {
+            filter.push(event, now).for_each(|event| output.push(event));
+        }
+        filter
+            .expire_deadline(now + PREFIX_TIMEOUT + Duration::from_millis(1))
+            .for_each(|event| output.push(event));
+        assert_eq!(output, super::super::decode_pending_input(b"\x1b"));
+
+        let mut filter = ColorReplyFilter::default();
+        let mut output = Vec::new();
+        let now = Instant::now();
+        let alt_bracket = Event::Key(ratatui::crossterm::event::KeyEvent::new(
+            KeyCode::Char(']'),
+            KeyModifiers::ALT,
+        ));
+        let ex = Event::Key(KeyCode::Char('x').into());
+        filter
+            .push(alt_bracket.clone(), now)
+            .for_each(|event| output.push(event));
+        filter
+            .push(ex.clone(), now)
+            .for_each(|event| output.push(event));
+        assert_eq!(output, vec![alt_bracket, ex]);
+
+        let mut filter = ColorReplyFilter::default();
+        let mut output = Vec::new();
+        let now = Instant::now();
+        for event in super::super::decode_pending_input(b"\x1b]4;1;rgb:cccc/2424/1d1d") {
+            filter.push(event, now).for_each(|event| output.push(event));
+        }
+        assert!(matches!(filter.state, ReplyState::Reply { .. }));
+        for event in super::super::decode_pending_input(b"\x07") {
+            filter.push(event, now).for_each(|event| output.push(event));
+        }
+        assert!(
+            !has_ctrl_g(&output),
+            "Ctrl-G inside a reply must end it: {output:?}"
+        );
+        assert!(matches!(filter.state, ReplyState::Input));
     }
 
     #[test]
