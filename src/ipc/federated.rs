@@ -1950,6 +1950,13 @@ fn handle_surface_message(
                 && (!dock.overlay_open() || dock.machine_form_backdrop_pending) =>
         {
             apply_pending_shell_rect(dock);
+            if matches!(endpoint, Endpoint::Local)
+                && resample_dock_base_from_diff(dock, &diff, truecolor)
+            {
+                // The diff already painted the new sidebar color. Repaint
+                // Workspaces with that sample now; the next full frame is too late.
+                dock.dirty = true;
+            }
             let dock_changed = dock.rect.is_some_and(|rect| {
                 frame_diff_intersects_rect(
                     &diff,
@@ -2114,6 +2121,62 @@ fn cache_dock_projection(
             dock.owner_base = Some(dock.base.clone());
         }
     }
+}
+
+/// Theme changes usually arrive as a diff, not a full frame. Sample the dock
+/// background from that diff so Workspaces does not repaint the previous theme.
+fn resample_dock_base_from_diff(
+    dock: &mut DockState,
+    diff: &protocol::FrameDiff,
+    truecolor: bool,
+) -> bool {
+    let Some(rect) = dock.rect else {
+        return false;
+    };
+    let width = u32::from(diff.width);
+    if width == 0 || rect.width == 0 || rect.height == 0 {
+        return false;
+    }
+    let mut preferred = None;
+    let mut fallback = None;
+    for run in &diff.runs {
+        for (offset, symbol) in run.symbols.iter().enumerate() {
+            if symbol.is_empty() {
+                continue;
+            }
+            let index = run.start.saturating_add(offset as u32);
+            let x = (index % width) as u16;
+            let y = (index / width) as u16;
+            if x < rect.x
+                || y < rect.y
+                || x >= rect.x.saturating_add(rect.width)
+                || y >= rect.y.saturating_add(rect.height)
+            {
+                continue;
+            }
+            let cell = super::client::make_cell(symbol, run.fg, run.bg, run.mods, truecolor);
+            if fallback.is_none() {
+                fallback = Some(cell.clone());
+            }
+            if symbol == " " {
+                preferred = Some(cell);
+                break;
+            }
+        }
+        if preferred.is_some() {
+            break;
+        }
+    }
+    let Some(sampled) = preferred.or(fallback) else {
+        return false;
+    };
+    if dock.base == sampled && dock.owner_base.as_ref() == Some(&sampled) {
+        return false;
+    }
+    dock.base = sampled.clone();
+    dock.owner_base = Some(sampled);
+    dock.dirty = true;
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6131,6 +6194,67 @@ mod tests {
         assert!(frame_diff_intersects_rect(&diff(195, 10), dock));
         assert!(!frame_diff_intersects_rect(&diff(250, 20), dock));
         assert!(!frame_diff_intersects_rect(&diff(1_500, 20), dock));
+    }
+
+    #[test]
+    fn frame_diff_resamples_a_light_space_over_the_previous_owner_base() {
+        let mut dock = DockState::default();
+        dock.rect = Some(ShellDockRect {
+            resize: None,
+            session_slot: None,
+            session_button: None,
+            overlay: None,
+            overlay_dims_background: false,
+            workspace_focused: false,
+            workspace_modal: false,
+            x: 0,
+            y: 2,
+            width: 24,
+            height: 12,
+            show_paths: false,
+            normal_fg: 0,
+            secondary_fg: 0,
+            active_fg: 0,
+            active_secondary_fg: 0,
+            active_bg: 0,
+            branch_fg: 0,
+            chrome: protocol::MachineFormTheme {
+                surface: 0,
+                border: 0,
+                text: 0,
+                subtext0: 0,
+                subtext1: 0,
+                accent: 0,
+                accent_text: 0,
+                divider: 0,
+                rule: 0,
+                error: 0,
+            },
+        });
+        let mut dark = Cell::default();
+        dark.set_bg(Color::Rgb(20, 20, 20));
+        dock.base = dark.clone();
+        dock.owner_base = Some(dark);
+        dock.dirty = false;
+        let light = Color::Rgb(250, 240, 220);
+        let diff = protocol::FrameDiff {
+            width: 100,
+            height: 30,
+            runs: vec![protocol::DiffRun {
+                start: 2 * 100,
+                fg: protocol::pack(Color::Reset),
+                bg: protocol::pack(light),
+                mods: 0,
+                symbols: vec![" ".to_string()],
+            }],
+            cursor: None,
+            cursor_visible: false,
+            cursor_style: protocol::HostCursorStyle::default(),
+        };
+        assert!(resample_dock_base_from_diff(&mut dock, &diff, true));
+        assert_eq!(dock.owner_base.as_ref().map(|cell| cell.bg), Some(light));
+        assert_eq!(dock.base.bg, light);
+        assert!(dock.dirty);
     }
 
     #[test]
