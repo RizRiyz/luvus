@@ -76,8 +76,7 @@ fn list_capacity(rows: u16, row_stride: u16) -> usize {
 /// A scrollbar on the sidebar's right edge, shown only when the list overflows
 /// its area. Thin block glyphs keep the indicator lighter than a full-cell
 /// background strip while remaining terminal-native: a faint one-eighth-cell
-/// track carries a brighter thumb of the same narrow width, sized to the
-/// visible fraction.
+/// track carries a brighter half-cell thumb, sized to the visible fraction.
 fn draw_scrollbar(
     f: &mut RenderTarget,
     track: Rect,
@@ -1242,8 +1241,8 @@ mod tests {
             .collect();
         assert_eq!(
             symbols,
-            vec!["▕", "▕", "▕", "▕", "▕", "▕"],
-            "the proportional thumb and track stay one-eighth of a cell wide"
+            vec!["▐", "▐", "▕", "▕", "▕", "▕"],
+            "a half-cell proportional thumb on a one-eighth-cell track"
         );
         assert_eq!(buffer.cell((0, 0)).expect("thumb cell").fg, theme.overlay1);
         assert_eq!(buffer.cell((0, 2)).expect("track cell").fg, theme.surface1);
