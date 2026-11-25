@@ -2137,11 +2137,10 @@ fn resample_dock_base_from_diff(
     if width == 0 || rect.width == 0 || rect.height == 0 {
         return false;
     }
-    let mut preferred = None;
-    let mut fallback = None;
+    let mut sampled = None;
     for run in &diff.runs {
         for (offset, symbol) in run.symbols.iter().enumerate() {
-            if symbol.is_empty() {
+            if symbol != " " {
                 continue;
             }
             let index = run.start.saturating_add(offset as u32);
@@ -2154,20 +2153,22 @@ fn resample_dock_base_from_diff(
             {
                 continue;
             }
-            let cell = super::client::make_cell(symbol, run.fg, run.bg, run.mods, truecolor);
-            if fallback.is_none() {
-                fallback = Some(cell.clone());
+            if rect
+                .overlay
+                .is_some_and(|overlay| shell_block_contains(overlay, x, y))
+            {
+                continue;
             }
-            if symbol == " " {
-                preferred = Some(cell);
-                break;
-            }
+            sampled = Some(super::client::make_cell(
+                symbol, run.fg, run.bg, run.mods, truecolor,
+            ));
+            break;
         }
-        if preferred.is_some() {
+        if sampled.is_some() {
             break;
         }
     }
-    let Some(sampled) = preferred.or(fallback) else {
+    let Some(sampled) = sampled else {
         return false;
     };
     if dock.base == sampled && dock.owner_base.as_ref() == Some(&sampled) {
@@ -6255,6 +6256,75 @@ mod tests {
         assert_eq!(dock.owner_base.as_ref().map(|cell| cell.bg), Some(light));
         assert_eq!(dock.base.bg, light);
         assert!(dock.dirty);
+    }
+
+    #[test]
+    fn frame_diff_ignores_spaces_inside_the_workspace_popup() {
+        let mut dock = DockState::default();
+        dock.rect = Some(ShellDockRect {
+            resize: None,
+            session_slot: None,
+            session_button: None,
+            overlay: Some(protocol::ShellDockBlock {
+                x: 2,
+                y: 4,
+                width: 10,
+                height: 4,
+            }),
+            overlay_dims_background: true,
+            workspace_focused: false,
+            workspace_modal: true,
+            x: 0,
+            y: 2,
+            width: 24,
+            height: 12,
+            show_paths: false,
+            normal_fg: 0,
+            secondary_fg: 0,
+            active_fg: 0,
+            active_secondary_fg: 0,
+            active_bg: 0,
+            branch_fg: 0,
+            chrome: protocol::MachineFormTheme {
+                surface: 0,
+                border: 0,
+                text: 0,
+                subtext0: 0,
+                subtext1: 0,
+                accent: 0,
+                accent_text: 0,
+                divider: 0,
+                rule: 0,
+                error: 0,
+            },
+        });
+        let mut dark = Cell::default();
+        dark.set_bg(Color::Rgb(20, 20, 20));
+        dock.base = dark.clone();
+        dock.owner_base = Some(dark.clone());
+        dock.dirty = false;
+        let light = Color::Rgb(250, 240, 220);
+        let diff = protocol::FrameDiff {
+            width: 100,
+            height: 30,
+            runs: vec![protocol::DiffRun {
+                start: 4 * 100 + 2,
+                fg: protocol::pack(Color::Reset),
+                bg: protocol::pack(light),
+                mods: 0,
+                symbols: vec![" ".to_string()],
+            }],
+            cursor: None,
+            cursor_visible: false,
+            cursor_style: protocol::HostCursorStyle::default(),
+        };
+        assert!(!resample_dock_base_from_diff(&mut dock, &diff, true));
+        assert_eq!(
+            dock.owner_base.as_ref().map(|cell| cell.bg),
+            Some(Color::Rgb(20, 20, 20))
+        );
+        assert_eq!(dock.base.bg, Color::Rgb(20, 20, 20));
+        assert!(!dock.dirty);
     }
 
     #[test]
