@@ -1919,13 +1919,17 @@ fn unwrap_leading_env(tokens: &[String]) -> &[String] {
 /// the script; later arguments are not scanned.
 fn interpreter_script_slot(runtime: &str, args: &[String]) -> Option<usize> {
     let js = matches!(runtime, "node" | "nodejs" | "bun");
+    let stdin_dash = js || matches!(runtime, "python" | "python3" | "py" | "ruby" | "perl");
+    let stdin_s = matches!(runtime, "sh" | "bash" | "zsh");
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
-        if js
-            && (matches!(arg, "-" | "-e" | "--eval" | "-p" | "--print")
-                || arg.starts_with("--eval=")
-                || arg.starts_with("--print="))
+        if (stdin_dash && arg == "-")
+            || (stdin_s && arg == "-s")
+            || (js
+                && (matches!(arg, "-e" | "--eval" | "-p" | "--print")
+                    || arg.starts_with("--eval=")
+                    || arg.starts_with("--print=")))
         {
             return None;
         }
@@ -3084,6 +3088,39 @@ Would you like to proceed?
             m.launch_args_for(&[cmd.into()], "pi"),
             Some(vec!["--yes".into()])
         );
+    }
+
+    #[test]
+    fn stdin_script_forms_do_not_make_arguments_the_script() {
+        let m = Manifests::builtin();
+        for cmd in [
+            "python3 - claude",
+            "python - claude --yolo",
+            "py - claude",
+            "ruby - claude",
+            "perl - claude",
+            "node - claude",
+            "bun - claude",
+            "bash -s claude",
+            "sh -s claude",
+            "zsh -s claude",
+            "bash -s -- claude",
+        ] {
+            let procs = [cmd.to_string()];
+            assert_eq!(m.agent_in_processes(&procs), None, "{cmd}");
+            assert_eq!(m.launch_args_for(&procs, "claude"), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn shell_dash_and_npx_package_flag_still_find_the_script() {
+        let m = Manifests::builtin();
+        let bash = [String::from("bash -e /usr/bin/claude --yolo")];
+        assert_eq!(m.agent_in_processes(&bash), Some("claude".into()));
+        let dash = [String::from("bash - /usr/bin/claude --yolo")];
+        assert_eq!(m.agent_in_processes(&dash), Some("claude".into()));
+        let npx = [String::from("npx -p /usr/bin/claude --yolo")];
+        assert_eq!(m.agent_in_processes(&npx), Some("claude".into()));
     }
 
     #[test]
