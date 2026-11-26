@@ -2111,6 +2111,16 @@ fn cache_dock_projection(
     truecolor: bool,
     owner_local: bool,
 ) {
+    // A server picker dims the whole frame, including sidebar spaces outside
+    // the popup. Those cells are not the Workspace background.
+    if owner_local
+        && [dock.owner_style, dock.rect]
+            .into_iter()
+            .flatten()
+            .any(|rect| rect.overlay_dims_background)
+    {
+        return;
+    }
     let (x, y) = dock.rect.map_or((0, 0), |rect| (rect.x, rect.y));
     let index = usize::from(y)
         .saturating_mul(usize::from(frame.width))
@@ -2133,6 +2143,11 @@ fn resample_dock_base_from_diff(
     let Some(rect) = dock.rect else {
         return false;
     };
+    // The same dim covers every server cell outside the popup, so none of
+    // those spaces can replace the saved sidebar background.
+    if rect.overlay_dims_background {
+        return false;
+    }
     let width = u32::from(diff.width);
     if width == 0 || rect.width == 0 || rect.height == 0 {
         return false;
@@ -6197,17 +6212,15 @@ mod tests {
         assert!(!frame_diff_intersects_rect(&diff(1_500, 20), dock));
     }
 
-    #[test]
-    fn frame_diff_resamples_a_light_space_over_the_previous_owner_base() {
-        let mut dock = DockState::default();
-        dock.rect = Some(ShellDockRect {
+    fn shell_rect(overlay: Option<protocol::ShellDockBlock>, dims: bool) -> ShellDockRect {
+        ShellDockRect {
             resize: None,
             session_slot: None,
             session_button: None,
-            overlay: None,
-            overlay_dims_background: false,
+            overlay,
+            overlay_dims_background: dims,
             workspace_focused: false,
-            workspace_modal: false,
+            workspace_modal: overlay.is_some(),
             x: 0,
             y: 2,
             width: 24,
@@ -6231,12 +6244,25 @@ mod tests {
                 rule: 0,
                 error: 0,
             },
-        });
+        }
+    }
+
+    fn dark_owner_base() -> Cell {
         let mut dark = Cell::default();
         dark.set_bg(Color::Rgb(20, 20, 20));
-        dock.base = dark.clone();
-        dock.owner_base = Some(dark);
-        dock.dirty = false;
+        dark
+    }
+
+    #[test]
+    fn frame_diff_resamples_a_light_space_over_the_previous_owner_base() {
+        let dark = dark_owner_base();
+        let mut dock = DockState {
+            rect: Some(shell_rect(None, false)),
+            base: dark.clone(),
+            owner_base: Some(dark),
+            dirty: false,
+            ..Default::default()
+        };
         let light = Color::Rgb(250, 240, 220);
         let diff = protocol::FrameDiff {
             width: 100,
@@ -6260,49 +6286,22 @@ mod tests {
 
     #[test]
     fn frame_diff_ignores_spaces_inside_the_workspace_popup() {
-        let mut dock = DockState::default();
-        dock.rect = Some(ShellDockRect {
-            resize: None,
-            session_slot: None,
-            session_button: None,
-            overlay: Some(protocol::ShellDockBlock {
-                x: 2,
-                y: 4,
-                width: 10,
-                height: 4,
-            }),
-            overlay_dims_background: true,
-            workspace_focused: false,
-            workspace_modal: true,
-            x: 0,
-            y: 2,
-            width: 24,
-            height: 12,
-            show_paths: false,
-            normal_fg: 0,
-            secondary_fg: 0,
-            active_fg: 0,
-            active_secondary_fg: 0,
-            active_bg: 0,
-            branch_fg: 0,
-            chrome: protocol::MachineFormTheme {
-                surface: 0,
-                border: 0,
-                text: 0,
-                subtext0: 0,
-                subtext1: 0,
-                accent: 0,
-                accent_text: 0,
-                divider: 0,
-                rule: 0,
-                error: 0,
-            },
-        });
-        let mut dark = Cell::default();
-        dark.set_bg(Color::Rgb(20, 20, 20));
-        dock.base = dark.clone();
-        dock.owner_base = Some(dark.clone());
-        dock.dirty = false;
+        let dark = dark_owner_base();
+        let mut dock = DockState {
+            rect: Some(shell_rect(
+                Some(protocol::ShellDockBlock {
+                    x: 2,
+                    y: 4,
+                    width: 10,
+                    height: 4,
+                }),
+                false,
+            )),
+            base: dark.clone(),
+            owner_base: Some(dark),
+            dirty: false,
+            ..Default::default()
+        };
         let light = Color::Rgb(250, 240, 220);
         let diff = protocol::FrameDiff {
             width: 100,
@@ -6325,6 +6324,96 @@ mod tests {
         );
         assert_eq!(dock.base.bg, Color::Rgb(20, 20, 20));
         assert!(!dock.dirty);
+    }
+
+    #[test]
+    fn frame_diff_ignores_dimmed_sidebar_spaces_outside_the_popup() {
+        let dark = dark_owner_base();
+        let mut dock = DockState {
+            rect: Some(shell_rect(
+                Some(protocol::ShellDockBlock {
+                    x: 2,
+                    y: 4,
+                    width: 10,
+                    height: 4,
+                }),
+                true,
+            )),
+            base: dark.clone(),
+            owner_base: Some(dark),
+            dirty: false,
+            ..Default::default()
+        };
+        let light = Color::Rgb(250, 240, 220);
+        let diff = protocol::FrameDiff {
+            width: 100,
+            height: 30,
+            runs: vec![protocol::DiffRun {
+                start: 2 * 100,
+                fg: protocol::pack(Color::Reset),
+                bg: protocol::pack(light),
+                mods: 0,
+                symbols: vec![" ".to_string()],
+            }],
+            cursor: None,
+            cursor_visible: false,
+            cursor_style: protocol::HostCursorStyle::default(),
+        };
+        assert!(!resample_dock_base_from_diff(&mut dock, &diff, true));
+        assert_eq!(
+            dock.owner_base.as_ref().map(|cell| cell.bg),
+            Some(Color::Rgb(20, 20, 20))
+        );
+        assert_eq!(dock.base.bg, Color::Rgb(20, 20, 20));
+        assert!(!dock.dirty);
+    }
+
+    #[test]
+    fn full_frame_keeps_the_owner_base_while_the_sidebar_is_dimmed() {
+        let dark = dark_owner_base();
+        let rect = shell_rect(None, true);
+        let mut dock = DockState {
+            rect: Some(rect),
+            owner_style: Some(rect),
+            base: dark.clone(),
+            owner_base: Some(dark),
+            ..Default::default()
+        };
+        let light = Color::Rgb(250, 240, 220);
+        let frame = protocol::FrameData {
+            width: 1,
+            height: 3,
+            cells: vec![
+                protocol::CellData {
+                    symbol: " ".into(),
+                    fg: 0,
+                    bg: 0,
+                    mods: 0,
+                },
+                protocol::CellData {
+                    symbol: " ".into(),
+                    fg: 0,
+                    bg: 0,
+                    mods: 0,
+                },
+                protocol::CellData {
+                    symbol: " ".into(),
+                    fg: 0,
+                    bg: protocol::pack(light),
+                    mods: 0,
+                },
+            ],
+            hyperlinks: Vec::new(),
+            cursor: None,
+            cursor_visible: false,
+            cursor_style: protocol::HostCursorStyle::default(),
+        };
+        cache_dock_projection(&mut dock, &frame, true, true);
+        assert_eq!(
+            dock.owner_base.as_ref().map(|cell| cell.bg),
+            Some(Color::Rgb(20, 20, 20))
+        );
+        assert_eq!(dock.base.bg, Color::Rgb(20, 20, 20));
     }
 
     #[test]
