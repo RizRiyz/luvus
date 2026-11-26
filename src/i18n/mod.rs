@@ -4829,4 +4829,29 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn sidebar_agent_state_help_uses_localized_all_active_labels() {
+        let dock = settings::KEY_REFERENCE_KEYS.len() - 1;
+        let state = settings::KEY_REFERENCE_KEYS[dock]
+            .iter()
+            .position(|key| *key == "f")
+            .unwrap();
+        for (code, all, active) in [
+            ("es", "Todos", "Activos"),
+            ("pt", "Todos", "Ativos"),
+            ("fr", "Tous", "Actifs"),
+            ("de", "Alle", "Aktiv"),
+            ("id", "Semua", "Aktif"),
+        ] {
+            let text = by_code(code).settings.key_reference_descriptions[dock][state];
+            assert!(!text.contains("All / Active"), "{code}: {text}");
+            assert!(text.contains(all), "{code}: {text}");
+            assert!(text.contains(active), "{code}: {text}");
+        }
+        for code in ["en", "zh", "ja", "ko"] {
+            let text = by_code(code).settings.key_reference_descriptions[dock][state];
+            assert!(text.contains("All / Active"), "{code}: {text}");
+        }
+    }
 }
