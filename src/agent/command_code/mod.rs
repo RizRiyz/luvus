@@ -178,6 +178,32 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_and_stdin_modes_do_not_run_a_script() {
+        let manifests = Manifests::builtin();
+        for command in [
+            "node --eval=setInterval(()=>{},1000) cmd",
+            "node -e setInterval(()=>{},1000) cmd",
+            "node --eval setInterval(()=>{},1000) cmd",
+            "node -p 1 cmd",
+            "node --print=1 cmd",
+            "node - cmd",
+        ] {
+            let running = vec![command.to_string()];
+            assert_eq!(manifests.agent_in_processes(&running), None, "{command}");
+            assert_eq!(
+                manifests.launch_args_for(&running, "command-code"),
+                None,
+                "{command}"
+            );
+        }
+        let after = vec!["node /usr/bin/cmd -e --yolo".to_string()];
+        assert_eq!(
+            manifests.launch_args_for(&after, "command-code"),
+            Some(vec!["-e".to_string(), "--yolo".to_string()])
+        );
+    }
+
+    #[test]
     fn finished_turn_needs_the_glyph() {
         let screen = IDLE_AFTER_TURN.replace("✻ Worked for", "Worked for");
         let found = detect(&screen);
@@ -296,6 +322,19 @@ mod tests {
         let found = detect(&screen);
         assert_eq!(found.state, State::Blocked);
         assert_eq!(found.rule_priority, Some(310));
+    }
+
+    #[test]
+    fn quoted_permission_footer_above_an_idle_input_is_not_blocked() {
+        let footer =
+            "↑/↓ navigate · enter select · Run cmd --yolo to bypass all permissions (Docs ↗)";
+        let screen = IDLE_STARTED.replace(
+            "# /var/tmp/cmdcap/work/w1",
+            &format!("# /var/tmp/cmdcap/work/w1\n{footer}"),
+        );
+        let found = detect(&screen);
+        assert_ne!(found.rule_priority, Some(310));
+        assert_eq!(found.state, State::Idle);
     }
 
     #[test]

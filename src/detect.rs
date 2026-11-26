@@ -574,7 +574,10 @@ fn builtin_rules() -> Vec<Rule> {
             State::Blocked,
             310,
             Region::Screen,
-            vec![all(&["enter select", "to bypass all permissions"])],
+            vec![
+                Cond::LastTwoLines(vec!["enter select".to_string()]),
+                Cond::LastTwoLines(vec!["to bypass all permissions".to_string()]),
+            ],
         ),
         // OMP publishes its state in the OSC title as `π <state> label`.
         // Current builds use `:` while working, `!` for attention, and `>` for
@@ -1918,6 +1921,12 @@ fn interpreter_script_slot(args: &[String]) -> Option<usize> {
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
+        if matches!(arg, "-" | "-e" | "--eval" | "-p" | "--print")
+            || arg.starts_with("--eval=")
+            || arg.starts_with("--print=")
+        {
+            return None;
+        }
         if arg.starts_with('-') {
             if matches!(arg, "-r" | "--require" | "--loader") {
                 i += 2;
