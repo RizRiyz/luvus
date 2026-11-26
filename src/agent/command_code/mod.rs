@@ -204,6 +204,28 @@ mod tests {
     }
 
     #[test]
+    fn errexit_and_preload_flags_do_not_hide_the_script() {
+        let manifests = Manifests::builtin();
+        let bash = vec!["bash -e /usr/bin/command-code --yolo".to_string()];
+        assert_eq!(
+            manifests.launch_args_for(&bash, "command-code"),
+            Some(vec!["--yolo".to_string()])
+        );
+        assert_eq!(
+            manifests.agent_in_processes(&bash),
+            Some("command-code".to_string())
+        );
+        let preload = vec!["node --import ./hooks.mjs /usr/bin/cmd --yolo".to_string()];
+        assert_eq!(
+            manifests.launch_args_for(&preload, "command-code"),
+            Some(vec!["--yolo".to_string()])
+        );
+        let unrelated = vec!["node --import ./cmd ./server.mjs".to_string()];
+        assert_eq!(manifests.agent_in_processes(&unrelated), None);
+        assert_eq!(manifests.launch_args_for(&unrelated, "command-code"), None);
+    }
+
+    #[test]
     fn finished_turn_needs_the_glyph() {
         let screen = IDLE_AFTER_TURN.replace("✻ Worked for", "Worked for");
         let found = detect(&screen);

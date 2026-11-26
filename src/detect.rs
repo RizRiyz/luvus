@@ -1579,7 +1579,7 @@ impl Manifests {
         // is `node` / `python` and the real name is the script slot. Nothing
         // later counts -- `cargo test --example amp` must not resolve to amp.
         if is_interpreter(first) {
-            if let Some(i) = interpreter_script_slot(rest) {
+            if let Some(i) = interpreter_script_slot(first, rest) {
                 if let Some(name) = self.match_interpreter_script(first, &rest[i]) {
                     return Some(name);
                 }
@@ -1609,7 +1609,7 @@ impl Manifests {
             // Interpreter form: the agent token is the script slot, and nothing
             // before it is a launch flag.
             if is_interpreter(binary_name(&first_low)) {
-                if let Some(i) = interpreter_script_slot(rest) {
+                if let Some(i) = interpreter_script_slot(binary_name(&first_low), rest) {
                     let t_low = rest[i].to_lowercase();
                     if self
                         .match_interpreter_script(binary_name(&first_low), &t_low)
@@ -1917,18 +1917,20 @@ fn unwrap_leading_env(tokens: &[String]) -> &[String] {
 /// argv[0]. Flags are skipped. Values consumed by `-r`, `--require`, and
 /// `--loader` are skipped with their option. The first remaining argument is
 /// the script; later arguments are not scanned.
-fn interpreter_script_slot(args: &[String]) -> Option<usize> {
+fn interpreter_script_slot(runtime: &str, args: &[String]) -> Option<usize> {
+    let js = matches!(runtime, "node" | "nodejs" | "bun");
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
-        if matches!(arg, "-" | "-e" | "--eval" | "-p" | "--print")
-            || arg.starts_with("--eval=")
-            || arg.starts_with("--print=")
+        if js
+            && (matches!(arg, "-" | "-e" | "--eval" | "-p" | "--print")
+                || arg.starts_with("--eval=")
+                || arg.starts_with("--print="))
         {
             return None;
         }
         if arg.starts_with('-') {
-            if matches!(arg, "-r" | "--require" | "--loader") {
+            if matches!(arg, "-r" | "--require" | "--loader") || (js && arg == "--import") {
                 i += 2;
             } else {
                 i += 1;
