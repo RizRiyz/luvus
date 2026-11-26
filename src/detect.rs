@@ -1930,7 +1930,11 @@ fn interpreter_script_slot(runtime: &str, args: &[String]) -> Option<usize> {
             return None;
         }
         if arg.starts_with('-') {
-            if matches!(arg, "-r" | "--require" | "--loader") || (js && arg == "--import") {
+            if matches!(
+                arg,
+                "-r" | "--require" | "--loader" | "--experimental-loader"
+            ) || (js && arg == "--import")
+            {
                 i += 2;
             } else {
                 i += 1;

@@ -220,9 +220,21 @@ mod tests {
             manifests.launch_args_for(&preload, "command-code"),
             Some(vec!["--yolo".to_string()])
         );
-        let unrelated = vec!["node --import ./cmd ./server.mjs".to_string()];
-        assert_eq!(manifests.agent_in_processes(&unrelated), None);
-        assert_eq!(manifests.launch_args_for(&unrelated, "command-code"), None);
+        for flag in ["--import", "--loader", "--experimental-loader"] {
+            let unrelated = vec![format!("node {flag} ./cmd ./server.mjs")];
+            assert_eq!(manifests.agent_in_processes(&unrelated), None, "{flag}");
+            assert_eq!(
+                manifests.launch_args_for(&unrelated, "command-code"),
+                None,
+                "{flag}"
+            );
+            let real = vec![format!("node {flag} ./hooks.mjs /usr/bin/cmd --yolo")];
+            assert_eq!(
+                manifests.launch_args_for(&real, "command-code"),
+                Some(vec!["--yolo".to_string()]),
+                "{flag}"
+            );
+        }
     }
 
     #[test]
