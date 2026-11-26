@@ -1864,7 +1864,7 @@ fn render_client(
                             width: overlay.width,
                             height: overlay.height,
                         }),
-                        overlay_dims_background: app.picker.is_some(),
+                        overlay_dims_background: ui::shell_overlay_dims_background(app),
                         workspace_focused: app.sidebar_focus
                             == Some(crate::app::SidebarListFocus::Workspaces),
                         workspace_modal: app.mode != crate::app::Mode::Normal
