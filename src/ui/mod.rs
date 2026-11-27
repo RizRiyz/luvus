@@ -83,6 +83,7 @@ mod borders;
 pub(crate) mod changelog;
 mod cmdinfo;
 mod diff;
+pub(crate) use diff::{stack_jump_scroll, stack_note_index};
 mod files;
 mod git;
 mod help;
