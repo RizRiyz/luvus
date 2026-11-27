@@ -27,6 +27,7 @@ cleanly across versions because unknown fields get defaults.
 | Key | Effect |
 |---|---|
 | `theme` | active bundled, installed, or virtual theme ID. A missing installed ID falls back visually without erasing the stored value. |
+| `theme_follow` | optional `{ auto_switch, dark, light }`. Off by default. When `auto_switch` is true, Luvus selects the named dark or light theme as the host terminal appearance changes. Empty or unknown names do not replace the current theme. |
 | `session.persist_pane_screen` | persist each pane's visible terminal screen for instant restart rendering; defaults to `true`. Set to `false` to retain layout, cwd, and agent resume metadata without writing terminal content to `session.json`. Existing saved screens are ignored and removed when the session starts. Scrollback outside the visible screen is never stored. |
 | `allow_nested` | allow opening an interactive Luvus client from a Luvus pane; defaults to `false` because nested clients compete for terminal input |
 | `layout.scrollback_bytes` | approximate memory budget per pane's retained history; defaults to `10485760` (10 MiB). The legacy `layout.scrollback` line count is read for compatibility. (See [Scrollback](/docs/guides/scrollback/).) |

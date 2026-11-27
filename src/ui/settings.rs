@@ -330,7 +330,7 @@ fn draw_content(
             // more palettes than fit a short modal).
             let avail = area.height.max(1) as usize;
             let themes = app.theme_registry.entries();
-            let total = themes.len();
+            let total = themes.len() + crate::app::THEME_FOLLOW_ROWS;
             let scroll = cursor
                 .saturating_sub(avail.saturating_sub(1))
                 .min(total.saturating_sub(avail));
@@ -343,7 +343,51 @@ fn draw_content(
                 .max()
                 .unwrap_or(9);
             for (vi, i) in (scroll..total).take(avail).enumerate() {
-                let entry = &themes[i];
+                if i < crate::app::THEME_FOLLOW_ROWS {
+                    let y = area.y + vi as u16;
+                    match i {
+                        0 => ctls.push(ctl_row(
+                            f,
+                            area,
+                            y,
+                            i,
+                            cursor,
+                            cat.set_theme_follow,
+                            toggle(app.config.theme_follow.auto_switch, t),
+                            t,
+                        )),
+                        1 => {
+                            let row = slider_row(
+                                f,
+                                area,
+                                y,
+                                i,
+                                cursor == i,
+                                cat.set_theme_follow_dark,
+                                app.theme_follow_label(true),
+                                t,
+                                &mut arrows,
+                            );
+                            ctls.push((i, row));
+                        }
+                        _ => {
+                            let row = slider_row(
+                                f,
+                                area,
+                                y,
+                                i,
+                                cursor == i,
+                                cat.set_theme_follow_light,
+                                app.theme_follow_label(false),
+                                t,
+                                &mut arrows,
+                            );
+                            ctls.push((i, row));
+                        }
+                    }
+                    continue;
+                }
+                let entry = &themes[i - crate::app::THEME_FOLLOW_ROWS];
                 let name = entry.id.as_str();
                 let row = Rect::new(area.x, area.y + vi as u16, area.width, 1);
                 let sel = i == cursor;

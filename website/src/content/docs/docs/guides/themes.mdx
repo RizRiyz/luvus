@@ -186,10 +186,26 @@ the same palette. **Terminal** remains special and client-derived. A custom
 palette containing `reset` may also depend on the foreground terminal and is
 reported with a warning unless its appearance is `terminal`.
 
-Programs running inside panes can query that pane background with OSC 11
-(`ESC]11;?`, BEL or ST). Luvus replies with the active theme's mantle color. If
-the Terminal theme keeps that color as `reset`, Luvus uses the last host-terminal
-probe when available and otherwise its bundled fallback palette. DEC private
-mode 2031 is supported: `CSI ? 996 n` queries the current scheme,
-`CSI ? 2031 h/l` subscribes, DECRQM reports set or reset, and a theme change
-sends `CSI ? 997;1n` (dark) or `CSI ? 997;2n` (light) to subscribed panes.
+Programs running inside panes can query the background with OSC 11, the
+foreground with OSC 10, and ANSI slots 0–15 with OSC 4 (`ESC]…;?`, BEL or ST).
+Until the host reports colors, OSC 11 uses the active theme's mantle. After a
+foreground client reports host colors, queries follow that host palette.
+Colors the child sets itself keep winning over later host updates. The
+**Terminal** UI theme uses only `reset` and ANSI indexes, including selection
+and sidebar surfaces, so the host can redraw those cells when its own palette
+changes. A probe does not bake those UI colors into RGB. Startup and
+focus-return queries still refresh the palette reported to programs inside
+panes. Host DEC 2031 notifications are not enabled.
+
+Settings → Theme can opt in to **Follow terminal theme**. It is off by default,
+so a probe never replaces a theme you chose. When it is on, Luvus switches
+between the named dark and light themes as the host appearance changes. An
+empty or unknown name leaves the current theme in place. The same fields are
+`theme_follow.auto_switch`, `theme_follow.dark`, and `theme_follow.light` in
+config.
+
+DEC private mode 2031 is supported: `CSI ? 996 n` queries the current scheme,
+`CSI ? 2031 h/l` subscribes, DECRQM reports set or reset, and a host or theme
+appearance change sends `CSI ? 997;1n` (dark) or `CSI ? 997;2n` (light) to
+subscribed panes. Luvus does not enable the host's own DEC 2031 mode. The
+existing input reader re-queries OSC 10/11/4 when the terminal gains focus.

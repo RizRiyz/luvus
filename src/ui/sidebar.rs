@@ -1331,6 +1331,129 @@ mod tests {
         }
     }
 
+    /// A host probe updates pane colors, but the Terminal UI stays on the
+    /// native Reset/ANSI slots. Baked RGB would ignore a later palette change.
+    #[test]
+    fn terminal_sidebar_probe_keeps_indexed_selection_layers() {
+        use ratatui::style::{Color, Modifier};
+        let _env = crate::persist::test_env("terminal-sidebar-indexed");
+        for (fg, bg) in [([238; 3], [26, 26, 46]), ([51; 3], [245, 245, 240])] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(120, 40, tx).unwrap();
+            app.downsample = false;
+            app.config.theme = "terminal".into();
+            app.config.theme_follow.auto_switch = false;
+            app.theme = crate::ui::theme::Theme::terminal_native();
+            app.hover = None;
+            app.workspaces[0].name = "fixture-workspace".into();
+            app.workspaces[0].branch = None;
+            let pane = app.layout().focus;
+            app.status.get_mut(&pane).unwrap().agent = "claude".into();
+            app.resumable = vec![crate::agent::SessionInfo {
+                agent: "claude".into(),
+                session_id: "fixture-session".into(),
+                cwd: app.workspaces[0].cwd.clone(),
+                updated: std::time::UNIX_EPOCH,
+            }];
+            let colors = crate::terminal::theme_probe::TerminalColors {
+                fg,
+                bg,
+                palette: crate::terminal::theme_probe::default_ansi_palette(fg, bg),
+                palette_mask: u16::MAX,
+            };
+            app.apply_terminal_colors(&colors);
+            assert_eq!(app.theme, crate::ui::theme::Theme::terminal_native());
+            assert!(
+                !terminal_theme_has_rgb(&app.theme),
+                "the installed Terminal theme must not contain baked RGB"
+            );
+            assert_eq!(app.host_terminal_colors.as_ref().unwrap().bg, bg);
+            let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            for keyboard in [false, true] {
+                app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Workspaces);
+                app.workspace_cursor = 0;
+                term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+                let row = app.ws_rects[0].1;
+                let buffer = term.backend().buffer();
+                assert_eq!(
+                    buffer[(row.x, row.y)].bg,
+                    Color::Indexed(8),
+                    "workspace keyboard={keyboard}, bg={bg:?}"
+                );
+                let name = &buffer[(row.x + 4, row.y)];
+                assert_eq!((name.fg, name.bg), (Color::Indexed(4), Color::Indexed(8)));
+                assert!(name.modifier.contains(Modifier::BOLD));
+
+                app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Agents);
+                app.agent_cursor = 0;
+                term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+                let row = app
+                    .agent_rects
+                    .iter()
+                    .find(|(id, _)| *id == pane)
+                    .unwrap()
+                    .1;
+                let buffer = term.backend().buffer();
+                assert_eq!(
+                    buffer[(row.x, row.y)].bg,
+                    Color::Indexed(8),
+                    "agent keyboard={keyboard}, bg={bg:?}"
+                );
+                let name = (row.x..row.right())
+                    .find_map(|x| {
+                        (buffer[(x, row.y)].symbol() == "c").then_some(&buffer[(x, row.y)])
+                    })
+                    .expect("live claude name");
+                assert_eq!((name.fg, name.bg), (Color::Indexed(4), Color::Indexed(8)));
+                assert!(name.modifier.contains(Modifier::BOLD));
+                let unselected = app.session_rects[0].1;
+                assert_eq!(buffer[(unselected.x, unselected.y)].bg, Color::Reset);
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_sidebar_without_probe_keeps_native_fallback() {
+        let _env = crate::persist::test_env("terminal-sidebar-no-probe");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(120, 40, tx).unwrap();
+        app.config.theme = "terminal".into();
+        app.theme = crate::ui::theme::Theme::terminal_native();
+        let pane = app.layout().focus;
+        app.status.get_mut(&pane).unwrap().agent = "claude".into();
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        for keyboard in [false, true] {
+            app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Workspaces);
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let row = app.ws_rects[0].1;
+            assert_eq!(
+                term.backend().buffer()[(row.x, row.y)].bg,
+                ratatui::style::Color::Indexed(8)
+            );
+            app.sidebar_focus = keyboard.then_some(crate::app::SidebarListFocus::Agents);
+            term.draw(|f| crate::ui::render(f, &mut app)).unwrap();
+            let row = app
+                .agent_rects
+                .iter()
+                .find(|(id, _)| *id == pane)
+                .unwrap()
+                .1;
+            assert_eq!(
+                term.backend().buffer()[(row.x, row.y)].bg,
+                ratatui::style::Color::Indexed(8)
+            );
+            assert_eq!(
+                fg_of_row(&term, "claude"),
+                Some(ratatui::style::Color::Indexed(4))
+            );
+        }
+        assert_eq!(
+            app.theme,
+            crate::ui::theme::Theme::terminal_native(),
+            "no-probe fallback never had derived layers"
+        );
+    }
+
     #[test]
     fn keyboard_focus_highlights_workspace_and_agent_rows() {
         let _env = crate::persist::test_env("sidebar-keyboard-highlight");
@@ -1450,6 +1573,31 @@ mod tests {
     // The state icon sits in a fixed one-column slot, so the text after it must
     // start at the same column no matter which state is shown.
     /// The fg colour of the first cell of the row containing `needle`.
+    fn terminal_theme_has_rgb(theme: &crate::ui::theme::Theme) -> bool {
+        [
+            theme.crust,
+            theme.mantle,
+            theme.base,
+            theme.surface0,
+            theme.surface1,
+            theme.overlay0,
+            theme.overlay1,
+            theme.subtext0,
+            theme.subtext1,
+            theme.text,
+            theme.accent,
+            theme.sel_bg,
+            theme.border,
+            theme.border_focus,
+            theme.green,
+            theme.mint,
+            theme.amber,
+            theme.coral,
+        ]
+        .into_iter()
+        .any(|color| matches!(color, ratatui::style::Color::Rgb(_, _, _)))
+    }
+
     fn fg_of_row(term: &Terminal<TestBackend>, needle: &str) -> Option<ratatui::style::Color> {
         let buf = term.backend().buffer();
         for r in 0..buf.area.height {
@@ -1470,6 +1618,9 @@ mod tests {
         let _env = crate::persist::test_env("agent-mention");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        // This test exercises delegation metadata, not shell titles or a long checkout name.
+        app.config.layout.agent_title = false;
+        app.workspaces[0].name = "fixture".into();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
@@ -1546,6 +1697,9 @@ mod tests {
         let _env = crate::persist::test_env("agent-meta-colour");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(120, 40, tx).unwrap();
+        // Shell titles and checkout-name truncation are outside this color fixture.
+        app.config.layout.agent_title = false;
+        app.workspaces[0].name = "fixture".into();
         let id = app.layout().focus;
         app.status.get_mut(&id).unwrap().agent = "claude".into();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();

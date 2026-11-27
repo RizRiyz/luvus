@@ -1578,15 +1578,13 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     // local session that never resizes would split on the fallback aspect.
     let (cell_width_px, cell_height_px) = ipc::protocol::local_cell_pixels();
     app.set_client_cell_pixels(cell_width_px, cell_height_px);
-    let pending = if app.config.theme == "terminal" {
-        let probe = terminal::theme_probe::probe();
-        if let Some(colors) = probe.colors.as_ref() {
-            app.apply_terminal_colors(colors);
-        }
-        probe.pending
-    } else {
-        Vec::new()
-    };
+    let probe = terminal::theme_probe::probe();
+    if let Some(colors) = probe.colors.as_ref() {
+        app.apply_terminal_colors(colors);
+    }
+    #[cfg(not(windows))]
+    let partial = probe.partial;
+    let pending = probe.pending;
     // Match the client path: query colors before enabling input protocols, so
     // any interleaved bytes are ordinary keys that can be replayed losslessly.
     let _ = execute!(
@@ -1601,7 +1599,10 @@ fn run(terminal: &mut DefaultTerminal) -> Result<bool> {
     push_key_protocol();
     {
         let tx = tx.clone();
+        #[cfg(windows)]
         thread::spawn(move || input_loop(tx, pending));
+        #[cfg(not(windows))]
+        thread::spawn(move || input_loop(tx, pending, partial));
     }
     ipc::api::start_server(api_listener, tx.clone(), events);
     drop(startup_lock);
@@ -1741,7 +1742,11 @@ fn remove_unbound_socket(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
+fn input_loop(
+    tx: Sender<AppEvent>,
+    pending: Vec<Event>,
+    #[cfg(not(windows))] partial: terminal::theme_probe::ColorAccumulator,
+) {
     #[cfg(windows)]
     {
         crate::terminal::host_input::run_input_loop(pending, |event| send_input_event(&tx, event));
@@ -1749,7 +1754,12 @@ fn input_loop(tx: Sender<AppEvent>, pending: Vec<Event>) {
 
     #[cfg(not(windows))]
     {
-        terminal::theme_probe::run_input_loop(pending, |event| send_input_event(&tx, event));
+        terminal::theme_probe::run_input_loop(
+            pending,
+            partial,
+            |event| send_input_event(&tx, event),
+            |colors| tx.send(AppEvent::HostTerminalColors(colors)).is_ok(),
+        );
     }
 }
 

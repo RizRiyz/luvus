@@ -1,16 +1,17 @@
 //! Color palette. "luvus vr46" — a near-black dark UI with a fluorescent
 //! stabilo/Valentino-Rossi green accent for active/selected elements.
 
+#[cfg(test)]
 use crate::terminal::theme_probe::TerminalColors;
 use ratatui::style::Color;
 
-// ── Theme derivation from terminal colors ───────────────────────────────────
-
+#[cfg(test)]
 fn blend_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> Color {
     let f = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).clamp(0.0, 255.0) as u8;
     Color::Rgb(f(0), f(1), f(2))
 }
 
+#[cfg(test)]
 fn pal(c: [u8; 3]) -> Color {
     Color::Rgb(c[0], c[1], c[2])
 }
@@ -29,10 +30,9 @@ impl Theme {
         }
     }
 
-    /// A zero-probe terminal theme. `Reset` follows the terminal's configured
-    /// foreground/background and ANSI indices follow its palette, so selecting
-    /// Terminal never flashes or falls back to a bundled luvus theme. A
-    /// successful OSC probe replaces this with the richer derived palette.
+    /// UI palette for the Terminal theme. These stay Reset or ANSI indexes so
+    /// the host can redraw them when its palette changes. A probe must not
+    /// replace them with a baked RGB snapshot.
     pub fn terminal_native() -> Self {
         let ansi = Color::Indexed;
         Theme {
@@ -57,9 +57,22 @@ impl Theme {
         }
     }
 
+    /// Historical RGB derivation. It is not installed as the Terminal UI theme:
+    /// explicit RGB does not follow a later host-palette change.
+    #[cfg(test)]
     pub fn from_terminal(c: &TerminalColors) -> Self {
+        // UI-only compatibility defaults must never become host/pane colors.
+        let mut resolved = c.clone();
+        let defaults = crate::terminal::theme_probe::default_ansi_palette(c.fg, c.bg);
+        for (index, fallback) in defaults.into_iter().enumerate() {
+            if c.palette_mask & (1 << index) == 0 {
+                resolved.palette[index] = fallback;
+            }
+        }
+        let c = &resolved;
         let (bg, fg) = (c.bg, c.fg);
-        let is_dark = crate::terminal::appearance::ColorScheme::from_terminal_colors(c).is_dark();
+        let is_dark = crate::terminal::appearance::ColorScheme::from_terminal_colors(c)
+            == crate::terminal::appearance::ColorScheme::Dark;
         // palette[8] (bright black) is the terminal designer's chosen "dim/elevated"
         // color — blend toward it for surfaces so the tint matches the scheme.
         let dim = c.palette[8];
@@ -97,6 +110,7 @@ impl Theme {
         }
     }
 
+    #[cfg(test)]
     fn from_terminal_base(c: &TerminalColors) -> Self {
         let (bg, fg) = (c.bg, c.fg);
         Theme {
@@ -880,32 +894,94 @@ mod tests {
     }
 
     #[test]
-    fn from_terminal_preserves_the_default_background() {
-        let dark = TerminalColors {
-            fg: [0xee, 0xee, 0xee],
-            bg: [0x1a, 0x1a, 0x2e],
-            palette: crate::terminal::theme_probe::default_ansi_palette(
-                [0xee; 3],
-                [0x1a, 0x1a, 0x2e],
-            ),
-        };
-        let light = TerminalColors {
-            fg: [0x33, 0x33, 0x33],
-            bg: [0xf5, 0xf5, 0xf0],
-            palette: crate::terminal::theme_probe::default_ansi_palette(
-                [0x33; 3],
-                [0xf5, 0xf5, 0xf0],
-            ),
-        };
+    fn terminal_without_probe_uses_native_colors() {
+        let theme = Theme::terminal_native();
+        assert_eq!(theme.crust, Color::Reset);
+        assert_eq!(theme.mantle, Color::Reset);
+        assert_eq!(theme.base, Color::Reset);
+        assert_eq!(theme.surface0, Color::Reset);
+        assert_eq!(theme.text, Color::Reset);
+        assert_eq!(theme.accent, Color::Indexed(4));
+        assert_eq!(theme.green, Color::Indexed(2));
+    }
 
-        for colors in [&dark, &light] {
-            let theme = Theme::from_terminal(colors);
-            assert_eq!(theme.crust, Color::Reset);
-            assert_eq!(theme.mantle, Color::Reset);
-            assert_eq!(theme.base, Color::Reset);
-            assert_eq!(theme.surface0, Color::Reset);
-            assert_eq!(theme.text, pal(colors.fg));
-            assert_eq!(theme.accent, pal(colors.palette[4]));
+    #[test]
+    fn terminal_derivation_preserves_original_roles_and_missing_slot_fallback() {
+        for (fg, bg, surface, selection, sub0, sub1, border, focus) in [
+            (
+                [238; 3],
+                [26, 26, 46],
+                [67, 68, 71],
+                [30, 39, 67],
+                [157, 157, 165],
+                [191, 191, 195],
+                [79, 80, 79],
+                [106, 106, 118],
+            ),
+            (
+                [51; 3],
+                [245, 245, 240],
+                [149, 149, 147],
+                [208, 208, 229],
+                [138, 138, 136],
+                [109, 109, 107],
+                [109, 109, 108],
+                [157, 157, 154],
+            ),
+        ] {
+            let mut colors = TerminalColors {
+                fg,
+                bg,
+                palette: crate::terminal::theme_probe::default_ansi_palette(fg, bg),
+                palette_mask: u16::MAX,
+            };
+            let t = Theme::from_terminal(&colors);
+            let rgb = |c: [u8; 3]| Color::Rgb(c[0], c[1], c[2]);
+            assert_eq!(
+                (
+                    t.surface1,
+                    t.sel_bg,
+                    t.subtext0,
+                    t.subtext1,
+                    t.border,
+                    t.border_focus
+                ),
+                (
+                    rgb(surface),
+                    rgb(selection),
+                    rgb(sub0),
+                    rgb(sub1),
+                    rgb(border),
+                    rgb(focus)
+                )
+            );
+            assert_eq!(t.text, rgb(fg));
+            assert_eq!(t.accent, rgb(colors.palette[4]));
+            assert_eq!(
+                (t.green, t.mint, t.amber, t.coral),
+                (
+                    rgb(colors.palette[2]),
+                    rgb(colors.palette[6]),
+                    rgb(colors.palette[3]),
+                    rgb(colors.palette[1])
+                )
+            );
+            assert_eq!(
+                (t.base, t.crust, t.mantle, t.surface0),
+                (Color::Reset, Color::Reset, Color::Reset, Color::Reset)
+            );
+            colors.palette = [[0; 3]; 16];
+            colors.palette_mask = 0;
+            assert_eq!(
+                Theme::from_terminal(&colors),
+                t,
+                "UI fallback matches the former missing-slot behavior"
+            );
+            assert_eq!(
+                colors.palette_mask, 0,
+                "UI defaults never become host reports"
+            );
+            assert_eq!(colors.palette[4], [0; 3]);
         }
     }
 

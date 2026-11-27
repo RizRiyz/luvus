@@ -254,6 +254,39 @@ pub(crate) fn shell_overlay_rect(app: &App, area: Rect) -> Option<Rect> {
     unbounded_overlay.then_some(area)
 }
 
+/// Whether the rendered frame dims every cell behind the modal, including the
+/// Workspaces dock. Context menus and the bar overflow do not; their outside
+/// cells keep the real sidebar background.
+///
+/// Help, command inspect, search, the switcher, and board/mission forms dim
+/// the whole frame too. Their shell overlay is the full viewport, so dock
+/// cells already fall inside it. Settings, the changelog, the folder picker,
+/// and a session-delete confirm publish a smaller rectangle, so the dimmed
+/// sidebar spaces outside that rectangle must be rejected by this flag.
+pub(crate) fn shell_overlay_dims_background(app: &App) -> bool {
+    app.picker.is_some()
+        || app.settings.is_some()
+        || app.help_open
+        || app.changelog_open
+        || app.cmd_inspect.is_some()
+        || app.worktree_prompt.is_some()
+        || app.worktree_open.is_some()
+        || app.tab_rename.is_some()
+        || app.ws_rename.is_some()
+        || app.pane_rename.is_some()
+        || app.file_prompt.is_some()
+        || app.file_delete.is_some()
+        || app.worktree_delete.is_some()
+        || app.switcher
+        || app.search.is_some()
+        || app.orch_form.is_some()
+        || app.orch_start.is_some()
+        || app.orch_detail.is_some()
+        || app.session_delete_confirm.is_some()
+        || (app.active_is_mission()
+            && (app.mission_detail.is_some() || app.mission_answer.is_some()))
+}
+
 pub(crate) fn workspace_picker_modal_rect(area: Rect, mobile: bool) -> Rect {
     picker::workspace_picker_modal_rect(area, mobile)
 }
@@ -2734,6 +2767,47 @@ mod dock_projection_tests {
             "the owner-local dock remains visible outside the picker"
         );
         assert_ne!(projection.shell_overlay, Some(area));
+    }
+
+    #[test]
+    fn settings_dims_sidebar_cells_outside_its_modal() {
+        let _env = crate::persist::test_env("settings-whole-frame-dim");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        assert!(!shell_overlay_dims_background(&app));
+
+        app.open_settings();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buffer = Buffer::empty(area);
+        let projection = render_projection(&mut RenderTarget::new(&mut buffer, area), &mut app);
+        let overlay = projection
+            .shell_overlay
+            .expect("settings publishes its modal, not the whole frame");
+        assert!(overlay.width < area.width || overlay.height < area.height);
+        assert!(shell_overlay_dims_background(&app));
+
+        app.settings = None;
+        app.help_open = true;
+        assert!(shell_overlay_dims_background(&app));
+        assert_eq!(shell_overlay_rect(&app, area), Some(area));
+
+        app.help_open = false;
+        app.changelog_open = true;
+        assert!(shell_overlay_dims_background(&app));
+
+        app.changelog_open = false;
+        app.orch_form = Some(crate::app::OrchForm::for_kind(
+            crate::app::OrchFormKind::Task,
+        ));
+        assert!(
+            shell_overlay_dims_background(&app),
+            "a board form dims the frame behind its modal"
+        );
+        app.orch_form = None;
+        assert!(
+            !shell_overlay_dims_background(&app),
+            "a closed board form leaves sidebar spaces sampleable"
+        );
     }
 }
 
