@@ -133,6 +133,17 @@ removal. Before removal starts, Luvus checks again for other workspaces or panes
 using the checkout. If one opened while validation was running, deletion is
 cancelled and the checkout is preserved.
 
+**Delete Worktree** is hidden if the checkout's directory identity could not be
+captured. Built-in removal first moves the checkout to a private staging path
+and verifies its identity there before deleting it. A replacement created at
+the original path is left untouched. The Git branch is still kept.
+
+If removal fails, Luvus attempts to restore the checkout without replacing
+anything newly created at its original path. If restoration cannot be done
+safely, the error reports the retained staging path; its files are not discarded.
+Automatic restoration requires exclusive-rename support on macOS, Linux, or
+Windows. Other platforms retain the staged checkout for manual recovery.
+
 ## Why it's great with agents
 
 Each agent works in its own worktree, with its own files on disk, so two agents

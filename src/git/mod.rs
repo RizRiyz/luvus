@@ -11,6 +11,7 @@
 pub mod github;
 pub mod local;
 pub mod model;
+pub(crate) mod removal;
 
 use std::collections::HashMap;
 use std::ops::Range;
