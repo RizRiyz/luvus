@@ -29,6 +29,7 @@ pub struct RenderTarget<'a> {
     cursor: Option<(u16, u16)>,
     cursor_visible: bool,
     cursor_style: crate::terminal::vt::CursorAppearance,
+    occlusion: crate::terminal::kitty_graphics::Occlusion,
 }
 
 impl<'a> RenderTarget<'a> {
@@ -40,6 +41,7 @@ impl<'a> RenderTarget<'a> {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::terminal::vt::CursorAppearance::default(),
+            occlusion: crate::terminal::kitty_graphics::Occlusion::default(),
         }
     }
     pub fn area(&self) -> Rect {
@@ -50,6 +52,17 @@ impl<'a> RenderTarget<'a> {
     }
     pub fn render_widget<W: Widget>(&mut self, widget: W, area: Rect) {
         widget.render(area, self.buf);
+    }
+    /// Record opaque drawing at its actual per-client render geometry.
+    pub(crate) fn cover_graphics(&mut self, area: Rect) {
+        self.occlusion.cover(area.intersection(self.area));
+    }
+    pub(crate) fn clear_overlay(&mut self, area: Rect) {
+        self.cover_graphics(area);
+        self.render_widget(ratatui::widgets::Clear, area);
+    }
+    pub(crate) fn graphics_occlusion(&self) -> crate::terminal::kitty_graphics::Occlusion {
+        self.occlusion.clone()
     }
     pub fn set_cursor_position<P: Into<Position>>(&mut self, position: P) {
         let p = position.into();
@@ -114,6 +127,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
             cursor: None,
             cursor_visible: false,
             cursor_style: crate::terminal::vt::CursorAppearance::default(),
+            occlusion: crate::terminal::kitty_graphics::Occlusion::default(),
         };
         render_into(&mut target, app);
         (target.cursor, target.cursor_visible)
@@ -626,6 +640,16 @@ pub(crate) fn patch_terminal_damage(
 }
 
 fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
+    f.occlusion = crate::terminal::kitty_graphics::Occlusion::default();
+    // Cell-style overlays do not yet publish individual painted spans. Treat
+    // these conservatively as opaque, independently of retained-render eligibility.
+    if app.selection.is_some()
+        || app.copy_mode.is_some()
+        || app.search_flash.is_some()
+        || app.pane_search.is_some()
+    {
+        f.cover_graphics(f.area());
+    }
     let t = app.theme.clone();
     // The active i18n catalog (Copy `&'static`), passed to draw fns that don't
     // get the whole `App` (picker, git tab) so all chrome is localized (docs/21).
@@ -659,6 +683,7 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // drawing degraded fragments. (Every draw fn is underflow-safe regardless;
     // this is purely the friendlier message.)
     if area.width < 24 || area.height < 6 {
+        f.cover_graphics(area);
         if area.height > 0 {
             let msg = "◱ enlarge terminal";
             let y = area.y + area.height / 2;
@@ -2016,7 +2041,7 @@ pub(crate) fn clip_columns(s: &str, max: usize) -> String {
 /// A small centered toast box near the bottom (e.g. "✓ Copied"). Drawn last, so
 /// it floats over everything; the loop clears it after ~1.4s.
 fn draw_toast(f: &mut RenderTarget, area: Rect, text: &str, t: &Theme) {
-    use ratatui::widgets::{Borders, Clear};
+    use ratatui::widgets::Borders;
     let w = (display_width(text) as u16 + 6).min(area.width);
     let h = 3u16;
     if w < 6 || area.height < h + 3 {
@@ -2025,7 +2050,7 @@ fn draw_toast(f: &mut RenderTarget, area: Rect, text: &str, t: &Theme) {
     let x = area.x + area.width.saturating_sub(w) / 2;
     let y = area.bottom().saturating_sub(h + 2); // just above the status line
     let rect = Rect::new(x, y, w, h);
-    f.render_widget(Clear, rect);
+    f.clear_overlay(rect);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.accent).bg(t.surface0))

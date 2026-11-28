@@ -150,6 +150,12 @@ pub enum AppEvent {
         cell_width_px: u16,
         cell_height_px: u16,
     },
+    /// The display finished its Kitty graphics query. Only `supported` may
+    /// receive placements or make a foreground `a=q` succeed.
+    ClientHostGraphics {
+        id: u64,
+        supported: bool,
+    },
     /// Input from a binary display client. The server unwraps this only after
     /// activating the correct per-client viewport; it never reaches `App`.
     ClientInput {

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::sound::SoundSignal;
 use crate::terminal::theme_probe::TerminalColors;
 
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 24;
 /// v0.14.1 shipped protocol 17 with `Welcome` accidentally moved to enum
 /// variant one. Its mismatch reply must use that released position.
 const V0141_PROTOCOL_VERSION: u32 = 17;
@@ -96,6 +96,12 @@ pub enum ClientMessage {
     /// Native clipboard success for the exact copy sent to this attachment.
     ClipboardSucceeded {
         receipt: u64,
+    },
+    /// This display's one-pixel Kitty graphics query. `supported` is true only
+    /// when the host answered OK. Silence and errors stay false, and the server
+    /// then neither places images here nor acknowledges a child's `a=q`.
+    HostGraphics {
+        supported: bool,
     },
 }
 
@@ -440,6 +446,10 @@ pub struct FrameData {
     /// one hardware cursor. Unset (`explicit == false`) is CSI 0 q; an explicit
     /// steady block is CSI 2 q.
     pub cursor_style: HostCursorStyle,
+    /// Kitty graphics commands for this client's host terminal. Empty when the
+    /// visible placements are unchanged. Never contains Unicode placeholders.
+    #[serde(default)]
+    pub graphics: Vec<u8>,
 }
 
 /// A sparse update sent instead of a full `FrameData` when the dimensions are
@@ -456,6 +466,9 @@ pub struct FrameDiff {
     #[serde(default)]
     pub cursor_visible: bool,
     pub cursor_style: HostCursorStyle,
+    /// Kitty graphics delta for this client's host terminal.
+    #[serde(default)]
+    pub graphics: Vec<u8>,
 }
 
 /// A maximal run of adjacent changed cells that share `fg`/`bg`/`mods`. `symbols`
@@ -634,6 +647,7 @@ pub fn frame_from_buffer(
         cursor,
         cursor_visible: cursor.is_some() && cursor_visible,
         cursor_style,
+        graphics: Vec::new(),
     }
 }
 
@@ -978,6 +992,7 @@ mod tests {
             cursor: Some((1, 0)),
             cursor_visible: true,
             cursor_style: HostCursorStyle::default(),
+            graphics: Vec::new(),
         });
         let mut buf = Vec::new();
         write_message(&mut buf, &msg).unwrap();
@@ -1292,6 +1307,7 @@ mod tests {
             cursor: Some((0, 0)),
             cursor_visible: true,
             cursor_style: HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let mut new = old.clone();
         new.cells[1] = cell("X"); // one cell changed
@@ -1313,6 +1329,7 @@ mod tests {
                 cursor: new.cursor,
                 cursor_visible: new.cursor_visible,
                 cursor_style: HostCursorStyle::default(),
+                graphics: Vec::new(),
             },
         );
         assert!(rebuilt == new, "diff reconstructs the new frame");
@@ -1338,6 +1355,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let links = [crate::app::RenderedHyperlink {
             pane: crate::ids::PaneId(7),
@@ -1398,6 +1416,7 @@ mod tests {
             cursor: None,
             cursor_visible: false,
             cursor_style: HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let mut new = old.clone();
         // "hi" same color at 1..3, then a different-color "X" at 3.
@@ -1433,6 +1452,7 @@ mod tests {
             cursor: Some((0, 0)),
             cursor_visible: true,
             cursor_style: HostCursorStyle::default(),
+            graphics: Vec::new(),
         };
         let mut f2 = f1.clone();
         f2.cells[3] = cell("Z", 9);
@@ -1447,6 +1467,7 @@ mod tests {
             cursor: f2.cursor,
             cursor_visible: f2.cursor_visible,
             cursor_style: HostCursorStyle::default(),
+            graphics: Vec::new(),
         });
         let mut wire = Vec::new();
         write_message(&mut wire, &frame_msg).unwrap();

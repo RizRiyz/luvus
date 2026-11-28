@@ -7,7 +7,7 @@ use crate::app::{
     PaneMenuItem, PopupId, TabMenuItem, WsMenuItem,
 };
 use crate::i18n::Catalog;
-use ratatui::widgets::{Borders, Clear};
+use ratatui::widgets::Borders;
 
 /// One row of a context-menu popup.
 struct MenuRow {
@@ -86,7 +86,7 @@ fn render_popup(
     };
     let popup = Rect::new(x, y, w, h);
 
-    f.render_widget(Clear, popup);
+    f.clear_overlay(popup);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(t.border_focus).bg(t.surface0))

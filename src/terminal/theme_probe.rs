@@ -157,6 +157,175 @@ pub fn probe() -> ProbeResult {
     ProbeResult::default()
 }
 
+#[cfg(unix)]
+const GRAPHICS_QUERY: &[u8] = b"\x1b_Gi=1917,a=q,t=d,f=24,s=1,v=1;AAAA\x1b\\";
+#[cfg(unix)]
+const CELL_SIZE_QUERY: &[u8] = b"\x1b[16t";
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostReport {
+    Graphics(bool),
+}
+
+#[cfg(unix)]
+type HostReportHandler = Box<dyn Fn(HostReport) + Send>;
+
+#[cfg(unix)]
+fn host_report_slot() -> &'static std::sync::Mutex<Option<HostReportHandler>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<HostReportHandler>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(unix)]
+pub(crate) fn set_host_report_handler(handler: impl Fn(HostReport) + Send + 'static) {
+    *host_report_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(Box::new(handler));
+}
+
+#[cfg(unix)]
+fn notify_host_report(report: HostReport) {
+    let handler = host_report_slot()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    if let Some(handler) = handler {
+        handler(report);
+        *host_report_slot()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(handler);
+    }
+}
+
+/// The one-pixel query is `i=1917`. Other Kitty replies are still swallowed so
+/// they cannot become keys, but only this id changes host support.
+#[cfg(any(unix, test))]
+pub(crate) fn parse_probe_graphics(data: &[u8]) -> Option<bool> {
+    let marker = b"\x1b_Gi=1917;";
+    let start = data
+        .windows(marker.len())
+        .position(|window| window == marker)?;
+    let body = &data[start + marker.len()..];
+    let end = body
+        .iter()
+        .position(|byte| *byte == 0x07)
+        .or_else(|| body.windows(2).position(|window| window == b"\x1b\\"))?;
+    let body = &body[..end];
+    if body.starts_with(b"OK") {
+        Some(true)
+    } else if body.is_empty() {
+        None
+    } else {
+        Some(false)
+    }
+}
+
+/// `CSI 6 ; height ; width t`. Zero and implausible sizes are not a cell size.
+#[cfg(any(unix, test))]
+pub(crate) fn parse_cell_size_report(data: &[u8]) -> Option<(u16, u16)> {
+    let marker = b"\x1b[6;";
+    let start = data
+        .windows(marker.len())
+        .position(|window| window == marker)?;
+    let body = &data[start + marker.len()..];
+    let end = body.iter().position(|byte| *byte == b't')?;
+    let text = std::str::from_utf8(&body[..end]).ok()?;
+    let mut parts = text.split(';');
+    let height: u16 = parts.next()?.parse().ok()?;
+    let width: u16 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || width == 0 || height == 0 || width > 1024 || height > 1024 {
+        return None;
+    }
+    Some((width, height))
+}
+
+#[cfg(unix)]
+pub(crate) fn note_graphics_reply(bytes: &[u8]) {
+    if let Some(supported) = parse_probe_graphics(bytes) {
+        notify_host_report(HostReport::Graphics(supported));
+    }
+}
+
+/// Ask this display whether it draws Kitty graphics. `None` means there was no
+/// answer. Pending events are ordinary input that arrived beside the reply.
+pub fn probe_kitty_graphics() -> (Option<bool>, Vec<Event>) {
+    #[cfg(unix)]
+    {
+        let Some(bytes) =
+            read_host_query(GRAPHICS_QUERY, |data| parse_probe_graphics(data).is_some())
+        else {
+            return (None, Vec::new());
+        };
+        (parse_probe_graphics(&bytes), decode_pending_input(&bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        (None, Vec::new())
+    }
+}
+
+/// Measure cell pixels. Call this only when graphics are available and ioctl
+/// reported no size. This does not guess a size.
+pub fn probe_host_cell_size() -> (Option<(u16, u16)>, Vec<Event>) {
+    #[cfg(unix)]
+    {
+        let Some(bytes) = read_host_query(CELL_SIZE_QUERY, |data| {
+            parse_cell_size_report(data).is_some()
+        }) else {
+            return (None, Vec::new());
+        };
+        (parse_cell_size_report(&bytes), decode_pending_input(&bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        (None, Vec::new())
+    }
+}
+
+#[cfg(unix)]
+fn read_host_query(query: &[u8], settled: impl Fn(&[u8]) -> bool) -> Option<Vec<u8>> {
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    if std::env::var_os("LUVUS_ENV").is_some() {
+        return None;
+    }
+    let stdin_fd = std::io::stdin().as_raw_fd();
+    if fd_readable(stdin_fd, 0) {
+        return None;
+    }
+    let mut stdout = std::io::stdout();
+    if stdout.write_all(query).is_err() || stdout.flush().is_err() {
+        return None;
+    }
+    let deadline = Instant::now() + Duration::from_millis(PROBE_TIMEOUT_MS);
+    let mut bytes = Vec::new();
+    while bytes.len() < 4096 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let wait_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        if !fd_readable(stdin_fd, wait_ms) {
+            break;
+        }
+        let mut chunk = [0u8; 256];
+        match std::io::stdin().read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                bytes.extend_from_slice(&chunk[..read]);
+                if settled(&bytes) {
+                    break;
+                }
+            }
+        }
+    }
+    Some(bytes)
+}
+
 #[cfg(any(unix, test))]
 fn is_color_response_start(data: &[u8]) -> bool {
     requested_reply_prefixes()
@@ -492,6 +661,20 @@ fn xterm_modifiers(value: u16) -> KeyModifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graphics_probe_and_cell_size_reports_are_explicit() {
+        assert_eq!(parse_probe_graphics(b"\x1b_Gi=1917;OK\x1b\\"), Some(true));
+        assert_eq!(
+            parse_probe_graphics(b"\x1b_Gi=1917;ENOTSUPPORTED\x07"),
+            Some(false)
+        );
+        assert_eq!(parse_probe_graphics(b"\x1b_Gi=1917;OK"), None);
+        assert_eq!(parse_probe_graphics(b"\x1b_Gi=4;OK\x1b\\"), None);
+        assert_eq!(parse_cell_size_report(b"\x1b[6;20;10t"), Some((10, 20)));
+        assert_eq!(parse_cell_size_report(b"\x1b[6;0;10t"), None);
+        assert_eq!(parse_cell_size_report(b"\x1b[6;20;10"), None);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -712,6 +712,69 @@ impl<T> Term<T> {
         &mut self.grid
     }
 
+    /// Visit graphics anchors still attached to either screen buffer.
+    ///
+    /// Placements whose rows were reset or dropped from history disappear
+    /// here, while anchors on the inactive alternate or primary grid remain.
+    pub fn for_each_graphics_anchor(&self, mut visit: impl FnMut(u64)) {
+        Self::visit_grid_anchors(&self.grid, &mut visit);
+        Self::visit_grid_anchors(&self.inactive_grid, &mut visit);
+    }
+
+    /// Inclusive line range of one screen buffer. `0` is the active grid.
+    pub fn graphics_line_span(&self, grid_index: u8) -> (i32, i32) {
+        let grid = if grid_index == 0 {
+            &self.grid
+        } else {
+            &self.inactive_grid
+        };
+        (grid.topmost_line().0, grid.bottommost_line().0)
+    }
+
+    pub fn graphics_anchor_on(&self, grid_index: u8, line: i32) -> Option<u64> {
+        let grid = if grid_index == 0 {
+            &self.grid
+        } else {
+            &self.inactive_grid
+        };
+        let (start, end) = (grid.topmost_line().0, grid.bottommost_line().0);
+        if line < start || line > end {
+            return None;
+        }
+        Some(grid[Line(line)].graphics_anchor())
+    }
+
+    pub fn take_graphics_reflow(&mut self) -> Vec<crate::grid::GraphicsReflow> {
+        let mut events = self.grid.take_graphics_reflow();
+        events.extend(self.inactive_grid.take_graphics_reflow());
+        events
+    }
+
+    pub fn replace_graphics_anchor(&mut self, from: u64, to: u64) {
+        self.grid.replace_graphics_anchor(from, to);
+        self.inactive_grid.replace_graphics_anchor(from, to);
+    }
+
+    /// Scroll-region origin added by CUP while origin mode is on, or zero.
+    pub fn origin_line(&self) -> u32 {
+        if self.mode.contains(TermMode::ORIGIN) {
+            self.scroll_region.start.0.max(0) as u32
+        } else {
+            0
+        }
+    }
+
+    fn visit_grid_anchors(grid: &Grid<Cell>, visit: &mut impl FnMut(u64)) {
+        let start = grid.topmost_line().0;
+        let end = grid.bottommost_line().0;
+        for line in start..=end {
+            let anchor = grid[Line(line)].graphics_anchor();
+            if anchor != 0 {
+                visit(anchor);
+            }
+        }
+    }
+
     /// Release inactive cached rows in both the primary and alternate grids.
     pub fn compact_history(&mut self) {
         self.grid.compact_history();

@@ -93,12 +93,31 @@ impl<T> PackedBlock<T> {
 #[derive(Clone, Debug)]
 enum RowStorage<T> {
     Dense(Vec<T>),
+    /// Only image-bearing rows pay for an anchor allocation. Ordinary terminal
+    /// rows retain their compact descriptor. The wrapped storage is unanchored.
+    Anchored(Box<(u64, RowStorage<T>)>),
     Uniform(Arc<T>),
     Packed {
         block: Arc<PackedBlock<T>>,
         start: u32,
         len: u32,
     },
+}
+
+impl<T> RowStorage<T> {
+    fn cells(&self) -> &Self {
+        match self {
+            Self::Anchored(row) => &row.1,
+            storage => storage,
+        }
+    }
+
+    fn cells_mut(&mut self) -> &mut Self {
+        match self {
+            Self::Anchored(row) => &mut row.1,
+            storage => storage,
+        }
+    }
 }
 
 impl<T> Default for RowStorage<T> {
@@ -126,6 +145,7 @@ pub struct Row<T> {
 
     /// Logical column count. This differs from `inner.len()` while compacted.
     columns: u32,
+
 }
 
 // Keep Alacritty's established `{ inner, occ }` wire shape. The compact form
@@ -267,6 +287,7 @@ impl<T: Default> Row<T> {
         D: PartialEq,
     {
         debug_assert!(self.columns != 0);
+        self.set_graphics_anchor(0);
         let occupied = self.occ as usize;
         let mut fill = self.last().expect("terminal row must contain a cell").clone();
         fill.reset(template);
@@ -276,7 +297,7 @@ impl<T: Default> Row<T> {
         )
         .max(1);
 
-        if let RowStorage::Dense(dense) = &mut self.inner {
+        if let RowStorage::Dense(dense) = self.inner.cells_mut() {
             let reset_all = dense
                 .last()
                 .is_some_and(|suffix| suffix.discriminant() != template.discriminant());
@@ -305,10 +326,11 @@ impl<T: Default> Row<T> {
             RowStorage::Uniform(_) | RowStorage::Packed { .. } => reusable
                 .pop()
                 .unwrap_or_else(|| Vec::with_capacity(self.len().min(COMPACT_ROW_REUSE_CELLS))),
+            RowStorage::Anchored(_) => unreachable!("reset cleared the anchor"),
         };
         dense.clear();
         dense.resize(reusable_prefix, fill);
-        self.inner = RowStorage::Dense(dense);
+        *self.inner.cells_mut() = RowStorage::Dense(dense);
         self.occ = 0;
     }
 }
@@ -322,6 +344,38 @@ impl<T> Row<T> {
             inner: RowStorage::Dense(vec),
             occ: u32::try_from(occ.min(columns)).expect("terminal row occupancy exceeds u32"),
             columns: u32::try_from(columns).expect("terminal row width exceeds u32"),
+        }
+    }
+
+    /// Identity of a Kitty graphics placement anchored to this row.
+    ///
+    /// Zero means the row has no placement. The value survives scrolling
+    /// because the row storage moves with the text, and [`Self::reset`]
+    /// clears it when the row is reused.
+    #[inline]
+    pub fn graphics_anchor(&self) -> u64 {
+        match &self.inner {
+            RowStorage::Anchored(row) => row.0,
+            _ => 0,
+        }
+    }
+
+    /// Attach a graphics placement to this row. `0` clears the anchor.
+    #[inline]
+    pub fn set_graphics_anchor(&mut self, anchor: u64) {
+        match &mut self.inner {
+            RowStorage::Anchored(row) if anchor != 0 => row.0 = anchor,
+            RowStorage::Anchored(_) => {
+                let RowStorage::Anchored(row) = std::mem::take(&mut self.inner) else {
+                    unreachable!()
+                };
+                self.inner = row.1;
+            },
+            _ if anchor != 0 => {
+                let storage = std::mem::take(&mut self.inner);
+                self.inner = RowStorage::Anchored(Box::new((anchor, storage)));
+            },
+            _ => (),
         }
     }
 
@@ -340,12 +394,16 @@ impl<T> Row<T> {
     /// data inside individual cells is intentionally not included.
     #[inline]
     pub(crate) fn heap_storage_bytes(&self) -> usize {
-        match &self.inner {
+        let anchor_bytes = if matches!(self.inner, RowStorage::Anchored(_)) {
+            std::mem::size_of::<(u64, RowStorage<T>)>()
+        } else { 0 };
+        anchor_bytes.saturating_add(match self.inner.cells() {
             RowStorage::Dense(inner) => {
                 inner.capacity().saturating_mul(std::mem::size_of::<T>())
             },
             RowStorage::Uniform(_) | RowStorage::Packed { .. } => 0,
-        }
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
+        })
     }
 
     #[inline]
@@ -357,34 +415,36 @@ impl<T> Row<T> {
     /// Return the physical cell capacity retained by this row.
     #[inline]
     pub(crate) fn allocated_cells(&self) -> usize {
-        match &self.inner {
+        match self.inner.cells() {
             RowStorage::Dense(inner) => inner.capacity(),
             RowStorage::Uniform(_) | RowStorage::Packed { .. } => 0,
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         }
     }
 
     #[inline]
     pub(crate) fn is_packed(&self) -> bool {
-        matches!(self.inner, RowStorage::Packed { .. })
+        matches!(self.inner.cells(), RowStorage::Packed { .. })
     }
 
     #[inline]
     pub(crate) fn is_uniform(&self) -> bool {
-        matches!(self.inner, RowStorage::Uniform(_))
+        matches!(self.inner.cells(), RowStorage::Uniform(_))
     }
 
     #[inline]
     pub(crate) fn physical_len(&self) -> usize {
-        match &self.inner {
+        match self.inner.cells() {
             RowStorage::Dense(inner) => inner.len(),
             RowStorage::Uniform(_) => 1,
             RowStorage::Packed { len, .. } => *len as usize,
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         }
     }
 
     #[inline]
     pub(crate) fn physical_cell(&self, index: usize) -> &T {
-        match &self.inner {
+        match self.inner.cells() {
             RowStorage::Dense(inner) => &inner[index],
             RowStorage::Uniform(fill) => {
                 debug_assert_eq!(index, 0);
@@ -394,22 +454,25 @@ impl<T> Row<T> {
                 debug_assert!(index < *len as usize);
                 block.cell(*start as usize + index)
             },
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         }
     }
 
     #[inline]
     pub(crate) fn packed_block(&self) -> Option<&Arc<PackedBlock<T>>> {
-        match &self.inner {
+        match self.inner.cells() {
             RowStorage::Packed { block, .. } => Some(block),
             RowStorage::Dense(_) | RowStorage::Uniform(_) => None,
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         }
     }
 
     #[inline]
     pub(crate) fn uniform_fill(&self) -> Option<&Arc<T>> {
-        match &self.inner {
+        match self.inner.cells() {
             RowStorage::Uniform(fill) => Some(fill),
             RowStorage::Dense(_) | RowStorage::Packed { .. } => None,
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         }
     }
 
@@ -421,7 +484,7 @@ impl<T> Row<T> {
         len: usize,
     ) -> Option<Vec<T>> {
         debug_assert!(!self.is_packed());
-        let previous = std::mem::replace(&mut self.inner, RowStorage::Packed {
+        let previous = std::mem::replace(self.inner.cells_mut(), RowStorage::Packed {
             block,
             start: u32::try_from(start).expect("packed block offset exceeds u32"),
             len: u32::try_from(len).expect("packed row length exceeds u32"),
@@ -432,6 +495,7 @@ impl<T> Row<T> {
                 Some(dense)
             },
             RowStorage::Dense(_) | RowStorage::Uniform(_) | RowStorage::Packed { .. } => None,
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         }
     }
 
@@ -455,21 +519,23 @@ impl<T> Row<T> {
 
     #[inline]
     fn dense(&self) -> &[T] {
-        match &self.inner {
+        match self.inner.cells() {
             RowStorage::Dense(inner) => inner,
             RowStorage::Uniform(_) | RowStorage::Packed { .. } => {
                 panic!("compact row requires logical indexing")
             },
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         }
     }
 
     #[inline]
     fn dense_mut(&mut self) -> &mut Vec<T> {
-        match &mut self.inner {
+        match self.inner.cells_mut() {
             RowStorage::Dense(inner) => inner,
             RowStorage::Uniform(_) | RowStorage::Packed { .. } => {
                 unreachable!("compact row must be inflated before mutation")
             },
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         }
     }
 }
@@ -481,7 +547,7 @@ impl<T: Clone> Row<T> {
         let columns = self.len();
         debug_assert!(index < columns);
         let target_len = (index + 2).min(columns);
-        let dense = match &mut self.inner {
+        let dense = match self.inner.cells_mut() {
             RowStorage::Dense(inner) if inner.len() < target_len => {
                 let fill = inner.last().expect("compacted row must have a suffix cell").clone();
                 inner.resize(target_len, fill);
@@ -504,15 +570,16 @@ impl<T: Clone> Row<T> {
                 }
                 dense
             },
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         };
-        self.inner = RowStorage::Dense(dense);
+        *self.inner.cells_mut() = RowStorage::Dense(dense);
     }
 
     /// Restore a compact scrollback row to ordinary dense Alacritty storage.
     #[inline]
     fn inflate(&mut self) {
         let columns = self.len();
-        let dense = match &mut self.inner {
+        let dense = match self.inner.cells_mut() {
             RowStorage::Dense(inner) if inner.len() < columns => {
                 let fill = inner.pop().expect("compacted row must have a suffix cell");
                 inner.resize(columns, fill);
@@ -529,8 +596,9 @@ impl<T: Clone> Row<T> {
                 }
                 dense
             },
+            RowStorage::Anchored(_) => unreachable!("nested row anchor"),
         };
-        self.inner = RowStorage::Dense(dense);
+        *self.inner.cells_mut() = RowStorage::Dense(dense);
     }
 
     /// Return a mutable contiguous cell range while retaining a compact suffix.
@@ -615,7 +683,7 @@ impl<T: Clone> Row<T> {
 
         vec.append(self.dense_mut());
         self.columns = vec.len() as u32;
-        self.inner = RowStorage::Dense(vec);
+        *self.inner.cells_mut() = RowStorage::Dense(vec);
     }
 
     /// Check if all cells in the row are empty.
@@ -824,6 +892,28 @@ mod tests {
     #[test]
     fn row_descriptor_stays_compact() {
         assert!(std::mem::size_of::<Row<char>>() <= 32);
+    }
+
+    #[test]
+    fn graphics_anchor_survives_storage_changes_without_growing_descriptor() {
+        let mut row = Row::<Cell>::new(8);
+        row.set_graphics_anchor(17);
+        row[Column(0)].c = 'x';
+        row.compact_trailing();
+        let block = Row::new_direct_block(vec![Cell::default(); 2]);
+        row.install_packed(block, 0, 2);
+        assert_eq!(row.graphics_anchor(), 17);
+        row[Column(7)].c = 'z';
+        row.append_front(vec![Cell::default()]);
+        assert_eq!(row.graphics_anchor(), 17);
+        let clone = row.clone();
+        row.set_graphics_anchor(0);
+        assert_eq!(clone.graphics_anchor(), 17);
+        assert_eq!(row.graphics_anchor(), 0);
+        row.set_graphics_anchor(18);
+        row.reset(&Cell::default());
+        assert_eq!(row.graphics_anchor(), 0);
+        assert!(std::mem::size_of::<Row<Cell>>() <= 32);
     }
 
     #[test]

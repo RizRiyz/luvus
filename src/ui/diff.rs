@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::diff::{
     DiffAgentPicker, DiffColorMode, DiffLayoutPreference, DiffLine, DiffLineKind, DiffLoad,
@@ -870,7 +870,7 @@ fn draw_agent_picker(f: &mut RenderTarget, area: Rect, picker: &DiffAgentPicker,
         width,
         height,
     );
-    f.render_widget(Clear, rect);
+    f.clear_overlay(rect);
     f.render_widget(
         Block::new()
             .borders(Borders::ALL)
