@@ -33,6 +33,7 @@ pub const KEY_REFERENCE_KEYS: &[&[&str]] = &[
     &["j / k", "→ / ←", "⏎", "n  w", "esc"],
     &["drag", "shift+drag", "⌘V  Ctrl+⇧V"],
     &["click", "right-click", "wheel", "drag divider", "tap pane"],
+    &["/", "\\", "f", "s", "n / N", "esc", "enter / a"],
 ];
 
 pub struct Catalog {
@@ -88,8 +89,8 @@ pub struct Catalog {
     pub key_drag_divider: &'static str,
     pub key_tap_pane: &'static str,
     pub keys_sections: [&'static str; 5],
-    pub key_reference_headings: [&'static str; 9],
-    pub key_reference_descriptions: [&'static [&'static str]; 9],
+    pub key_reference_headings: [&'static str; 10],
+    pub key_reference_descriptions: [&'static [&'static str]; 10],
     pub modules_empty: &'static str,
     pub module_unavailable: &'static str,
     pub module_action: &'static str,
@@ -173,6 +174,7 @@ pub static EN: Catalog = Catalog {
         "Folder picker (after prefix + N)",
         "Copy & paste",
         "Mouse",
+        "Sidebar docks",
     ],
     key_reference_descriptions: [
         &[
@@ -245,6 +247,15 @@ pub static EN: Catalog = Catalog {
             "resize the split",
             "zoom it on touch / mobile",
         ],
+        &[
+            "search the focused list without hiding other rows",
+            "hide rows that do not match",
+            "toggle AGENTS All / Active, or cycle DIFF state (shown below selector)",
+            "toggle AGENTS workspace scope",
+            "next / previous search match (wrap); FILES Tab retains filter results",
+            "clear search, then the text filter, then leave",
+            "open the row / open its actions",
+        ],
     ],
     modules_empty: "No modules installed. Run `luvus module link <dir>`.",
     module_unavailable: "unavailable",
@@ -273,7 +284,7 @@ pub static ES: Catalog = Catalog {
     keys_command_mode: "Modo de comandos", keys_direct_shortcuts: "Atajos directos", keys_prefix_commands: "Comandos con prefijo", keys_prefix: "Prefijo", keys_preset: "Preajuste", keys_capture_again: "pulsa {key} otra vez…", keys_capture_prefix: "pulsa F1-F12 o un atajo Ctrl/Alt…", keys_capture_key: "pulsa una tecla…", keys_invalid_prefix: "Usa F1-F12 o un atajo Ctrl/Alt", keys_confirm_prefix: "Pulsa {key} otra vez para confirmar", keys_copy_terminal_text: "Copiar texto del terminal",
     key_prefix_twice: "{prefix} ×2", key_space: "Espacio", key_arrows: "flechas", key_shift_arrow: "Shift+flecha", key_drag: "arrastrar", key_shift_drag: "Shift+arrastrar", key_click: "clic", key_right_click: "clic derecho", key_wheel: "rueda", key_drag_divider: "arrastrar divisor", key_tap_pane: "tocar panel",
     keys_sections: ["Paneles", "Pestañas", "Espacios y worktrees", "Vistas y paneles", "Sesión"],
-    key_reference_headings: ["Siempre activos", "Historial (sin prefijo)", "Modo copia (tras Copiar texto del terminal)", "Modo redimensionar (tras prefijo + r)", "Pestaña Git (tras prefijo + g)", "Tablero de tareas (tras prefijo + o)", "Selector de carpetas (tras prefijo + N)", "Copiar y pegar", "Ratón"],
+    key_reference_headings: ["Siempre activos", "Historial (sin prefijo)", "Modo copia (tras Copiar texto del terminal)", "Modo redimensionar (tras prefijo + r)", "Pestaña Git (tras prefijo + g)", "Tablero de tareas (tras prefijo + o)", "Selector de carpetas (tras prefijo + N)", "Copiar y pegar", "Ratón", "Paneles laterales"],
     key_reference_descriptions: [
 &["enfocar paneles (alias de vim)", "desconectar y dejar el servidor activo", "cerrar panel", "dividir abajo", "pestaña siguiente / anterior", "enviar el prefijo configurado literalmente"],
         &["entrar al historial del panel enfocado", "línea abajo / arriba", "página abajo / arriba", "inicio del historial / volver al vivo", "saltar por el historial (1 más antiguo, 9 más nuevo)", "volver al vivo"],
@@ -283,7 +294,9 @@ pub static ES: Catalog = Catalog {
 &["nueva tarea", "iniciar / terminar / fusionar", "liberar / eliminar", "detalle / ir al panel del trabajador", "mover el cursor", "cerrar el tablero"],
 &["mover", "entrar en carpeta / subir", "abrir la carpeta como espacio", "nueva carpeta / abrir como worktree", "cancelar"],
 &["seleccionar texto y copiar al soltar", "seleccionar dentro de una app que usa el ratón, como un agente", "pegado del terminal en el panel enfocado"],
-&["enfocar un panel o activar una fila / botón", "menú contextual de panel, espacio, agente o pestaña", "desplazar historial del panel o una lista", "redimensionar la división", "ampliar con toque / móvil"],],
+&["enfocar un panel o activar una fila / botón", "menú contextual de panel, espacio, agente o pestaña", "desplazar historial del panel o una lista", "redimensionar la división", "ampliar con toque / móvil"],
+&["buscar en la lista enfocada sin ocultar otras filas", "ocultar filas que no coinciden", "alternar Todos / Activos de AGENTS o el estado DIFF (visible bajo el selector)", "alternar el ámbito de espacio de AGENTS",
+            "coincidencia siguiente / anterior; Tab conserva el filtro FILES", "borrar la búsqueda, luego el filtro, y salir", "abrir la fila / abrir sus acciones"],],
     modules_empty: "No hay módulos instalados. Ejecuta `luvus module link <dir>`.", module_unavailable: "no disponible", module_action: "acción", module_actions: "acciones", module_pane: "panel", module_panes: "paneles", module_dock: "panel acoplado", module_docks: "paneles acoplados", module_setting: "ajuste", module_settings: "ajustes", module_edit_hint: "Enter guardar · Esc cancelar",
     theme_bundled: "El tema {id} viene incluido y no se puede eliminar", theme_removing: "Eliminando tema {id}…", theme_removed: "Tema {id} eliminado", theme_remove_failed: "No se pudo eliminar {id}: {error}",
 };
@@ -296,7 +309,7 @@ pub static PT: Catalog = Catalog {
     keys_command_mode: "Modo de comando", keys_direct_shortcuts: "Atalhos diretos", keys_prefix_commands: "Comandos com prefixo", keys_prefix: "Prefixo", keys_preset: "Predefinição", keys_capture_again: "pressione {key} novamente…", keys_capture_prefix: "pressione F1-F12 ou um atalho Ctrl/Alt…", keys_capture_key: "pressione uma tecla…", keys_invalid_prefix: "Use F1-F12 ou um atalho Ctrl/Alt", keys_confirm_prefix: "Pressione {key} novamente para confirmar", keys_copy_terminal_text: "Copiar texto do terminal",
     key_prefix_twice: "{prefix} ×2", key_space: "Espaço", key_arrows: "setas", key_shift_arrow: "Shift+seta", key_drag: "arrastar", key_shift_drag: "Shift+arrastar", key_click: "clique", key_right_click: "clique direito", key_wheel: "roda", key_drag_divider: "arrastar divisor", key_tap_pane: "tocar painel",
     keys_sections: ["Painéis", "Abas", "Espaços e worktrees", "Vistas e painéis", "Sessão"],
-    key_reference_headings: ["Sempre ativos", "Histórico (sem prefixo)", "Modo de cópia (após Copiar texto do terminal)", "Modo de redimensionar (após prefixo + r)", "Aba Git (após prefixo + g)", "Quadro de tarefas (após prefixo + o)", "Seletor de pastas (após prefixo + N)", "Copiar e colar", "Mouse"],
+    key_reference_headings: ["Sempre ativos", "Histórico (sem prefixo)", "Modo de cópia (após Copiar texto do terminal)", "Modo de redimensionar (após prefixo + r)", "Aba Git (após prefixo + g)", "Quadro de tarefas (após prefixo + o)", "Seletor de pastas (após prefixo + N)", "Copiar e colar", "Mouse", "Painéis laterais"],
     key_reference_descriptions: [
 &["focar painéis (aliases do vim)", "desconectar e manter o servidor ativo", "fechar painel", "dividir abaixo", "aba seguinte / anterior", "enviar o prefixo configurado literalmente"],
         &["entrar no histórico do painel focado", "linha abaixo / acima", "página abaixo / acima", "início do histórico / voltar ao vivo", "saltar pelo histórico (1 mais antigo, 9 mais novo)", "voltar ao vivo"],
@@ -306,7 +319,9 @@ pub static PT: Catalog = Catalog {
 &["nova tarefa", "iniciar / concluir / mesclar", "liberar / excluir", "detalhe / ir ao painel do agente", "mover o cursor", "fechar o quadro"],
 &["mover", "entrar na pasta / subir", "abrir a pasta como espaço", "nova pasta / abrir como worktree", "cancelar"],
 &["selecionar texto e copiar ao soltar", "selecionar dentro de um app que usa o mouse, como um agente", "colar do terminal no painel focado"],
-&["focar um painel ou ativar uma linha / botão", "menu de contexto de painel, espaço, agente ou aba", "rolar histórico do painel ou uma lista", "redimensionar a divisão", "ampliar por toque / móvel"],],
+&["focar um painel ou ativar uma linha / botão", "menu de contexto de painel, espaço, agente ou aba", "rolar histórico do painel ou uma lista", "redimensionar a divisão", "ampliar por toque / móvel"],
+&["buscar na lista em foco sem ocultar as outras linhas", "ocultar linhas que não coincidem", "alternar Todos / Ativos de AGENTS ou o estado DIFF (mostrado sob o seletor)", "alternar o escopo de espaço de AGENTS",
+            "próxima / anterior coincidência; Tab mantém o filtro FILES", "limpar a busca, depois o filtro, e sair", "abrir a linha / abrir suas ações"],],
     modules_empty: "Nenhum módulo instalado. Execute `luvus module link <dir>`.", module_unavailable: "indisponível", module_action: "ação", module_actions: "ações", module_pane: "painel", module_panes: "painéis", module_dock: "painel acoplado", module_docks: "painéis acoplados", module_setting: "configuração", module_settings: "configurações", module_edit_hint: "Enter salvar · Esc cancelar",
     theme_bundled: "O tema {id} vem incluído e não pode ser removido", theme_removing: "Removendo tema {id}…", theme_removed: "Tema {id} removido", theme_remove_failed: "Não foi possível remover {id}: {error}",
 };
@@ -319,7 +334,7 @@ pub static FR: Catalog = Catalog {
     keys_command_mode: "Mode commande", keys_direct_shortcuts: "Raccourcis directs", keys_prefix_commands: "Commandes avec préfixe", keys_prefix: "Préfixe", keys_preset: "Préréglage", keys_capture_again: "appuyez encore sur {key}…", keys_capture_prefix: "appuyez sur F1-F12 ou un raccourci Ctrl/Alt…", keys_capture_key: "appuyez sur une touche…", keys_invalid_prefix: "Utilisez F1-F12 ou un raccourci Ctrl/Alt", keys_confirm_prefix: "Appuyez encore sur {key} pour confirmer", keys_copy_terminal_text: "Copier le texte du terminal",
     key_prefix_twice: "{prefix} ×2", key_space: "Espace", key_arrows: "flèches", key_shift_arrow: "Shift+flèche", key_drag: "glisser", key_shift_drag: "Shift+glisser", key_click: "clic", key_right_click: "clic droit", key_wheel: "molette", key_drag_divider: "glisser le séparateur", key_tap_pane: "toucher le volet",
     keys_sections: ["Volets", "Onglets", "Espaces et worktrees", "Vues et panneaux", "Session"],
-    key_reference_headings: ["Toujours actifs", "Historique (sans préfixe)", "Mode copie (après Copier le texte du terminal)", "Mode redimensionnement (après préfixe + r)", "Onglet Git (après préfixe + g)", "Tableau des tâches (après préfixe + o)", "Sélecteur de dossiers (après préfixe + N)", "Copier et coller", "Souris"],
+    key_reference_headings: ["Toujours actifs", "Historique (sans préfixe)", "Mode copie (après Copier le texte du terminal)", "Mode redimensionnement (après préfixe + r)", "Onglet Git (après préfixe + g)", "Tableau des tâches (après préfixe + o)", "Sélecteur de dossiers (après préfixe + N)", "Copier et coller", "Souris", "Panneaux latéraux"],
     key_reference_descriptions: [
 &["cibler les volets (alias vim)", "se détacher en laissant le serveur actif", "fermer le volet", "diviser vers le bas", "onglet suivant / précédent", "envoyer littéralement le préfixe configuré"],
         &["ouvrir l'historique du volet ciblé", "ligne suivante / précédente", "page suivante / précédente", "début de l'historique / retour au direct", "parcourir l'historique (1 ancien, 9 récent)", "retour au direct"],
@@ -329,7 +344,9 @@ pub static FR: Catalog = Catalog {
 &["nouvelle tâche", "démarrer / terminer / fusionner", "libérer / supprimer", "détail / aller au volet de l'agent", "déplacer le curseur", "fermer le tableau"],
 &["déplacer", "entrer dans le dossier / remonter", "ouvrir le dossier comme espace", "nouveau dossier / ouvrir comme worktree", "annuler"],
 &["sélectionner le texte et copier au relâchement", "sélectionner dans une app qui gère la souris, comme un agent", "coller depuis le terminal dans le volet ciblé"],
-&["cibler un volet ou activer une ligne / un bouton", "menu contextuel de volet, espace, agent ou onglet", "faire défiler l'historique du volet ou une liste", "redimensionner la division", "agrandir par toucher / mobile"],],
+&["cibler un volet ou activer une ligne / un bouton", "menu contextuel de volet, espace, agent ou onglet", "faire défiler l'historique du volet ou une liste", "redimensionner la division", "agrandir par toucher / mobile"],
+&["chercher dans la liste active sans masquer les autres lignes", "masquer les lignes qui ne correspondent pas", "basculer Tous / Actifs d'AGENTS ou l'état DIFF (affiché sous le sélecteur)", "basculer la portée d'espace d'AGENTS",
+            "résultat suivant / précédent ; Tab garde le filtre FILES", "effacer la recherche, puis le filtre, puis quitter", "ouvrir la ligne / ouvrir ses actions"],],
     modules_empty: "Aucun module installé. Exécutez `luvus module link <dir>`.", module_unavailable: "indisponible", module_action: "action", module_actions: "actions", module_pane: "volet", module_panes: "volets", module_dock: "panneau ancré", module_docks: "panneaux ancrés", module_setting: "paramètre", module_settings: "paramètres", module_edit_hint: "Entrée enregistrer · Échap annuler",
     theme_bundled: "Le thème {id} est inclus et ne peut pas être supprimé", theme_removing: "Suppression du thème {id}…", theme_removed: "Thème {id} supprimé", theme_remove_failed: "Impossible de supprimer {id} : {error}",
 };
@@ -342,7 +359,7 @@ pub static DE: Catalog = Catalog {
     keys_command_mode: "Befehlsmodus", keys_direct_shortcuts: "Direkte Tastenkürzel", keys_prefix_commands: "Präfixbefehle", keys_prefix: "Präfix", keys_preset: "Voreinstellung", keys_capture_again: "{key} erneut drücken…", keys_capture_prefix: "F1-F12 oder eine Ctrl/Alt-Kombination drücken…", keys_capture_key: "Taste drücken…", keys_invalid_prefix: "F1-F12 oder eine Ctrl/Alt-Kombination verwenden", keys_confirm_prefix: "{key} zur Bestätigung erneut drücken", keys_copy_terminal_text: "Terminaltext kopieren",
     key_prefix_twice: "{prefix} ×2", key_space: "Leertaste", key_arrows: "Pfeile", key_shift_arrow: "Shift+Pfeil", key_drag: "ziehen", key_shift_drag: "Shift+ziehen", key_click: "Klick", key_right_click: "Rechtsklick", key_wheel: "Mausrad", key_drag_divider: "Teiler ziehen", key_tap_pane: "Bereich antippen",
     keys_sections: ["Bereiche", "Tabs", "Arbeitsbereiche und Worktrees", "Ansichten und Panels", "Sitzung"],
-    key_reference_headings: ["Immer aktiv", "Verlauf (ohne Präfix)", "Kopiermodus (nach Terminaltext kopieren)", "Größenmodus (nach Präfix + r)", "Git-Tab (nach Präfix + g)", "Aufgabenboard (nach Präfix + o)", "Ordnerauswahl (nach Präfix + N)", "Kopieren und Einfügen", "Maus"],
+    key_reference_headings: ["Immer aktiv", "Verlauf (ohne Präfix)", "Kopiermodus (nach Terminaltext kopieren)", "Größenmodus (nach Präfix + r)", "Git-Tab (nach Präfix + g)", "Aufgabenboard (nach Präfix + o)", "Ordnerauswahl (nach Präfix + N)", "Kopieren und Einfügen", "Maus", "Seitenleisten"],
     key_reference_descriptions: [
 &["Bereiche fokussieren (vim-Aliasse)", "trennen und Server weiterlaufen lassen", "Bereich schließen", "nach unten teilen", "nächster / vorheriger Tab", "konfigurierten Präfix wörtlich senden"],
         &["Verlauf des fokussierten Bereichs öffnen", "Zeile ab / auf", "Seite ab / auf", "Verlaufsanfang / zurück zu live", "im Verlauf springen (1 älteste, 9 neueste)", "zurück zu live"],
@@ -352,7 +369,9 @@ pub static DE: Catalog = Catalog {
 &["neue Aufgabe", "starten / erledigen / mergen", "freigeben / löschen", "Details / zum Worker-Bereich", "Cursor bewegen", "Board schließen"],
 &["bewegen", "Ordner öffnen / nach oben", "Ordner als Arbeitsbereich öffnen", "neuer Ordner / als Worktree öffnen", "abbrechen"],
 &["Text auswählen und beim Loslassen kopieren", "in einer mausfähigen App wie einem Agenten auswählen", "Terminalinhalt in den fokussierten Bereich einfügen"],
-&["Bereich fokussieren oder Zeile / Schaltfläche aktivieren", "Kontextmenü für Bereich, Arbeitsbereich, Agent oder Tab", "Bereichsverlauf oder Liste scrollen", "Teilung vergrößern", "per Touch / mobil zoomen"],],
+&["Bereich fokussieren oder Zeile / Schaltfläche aktivieren", "Kontextmenü für Bereich, Arbeitsbereich, Agent oder Tab", "Bereichsverlauf oder Liste scrollen", "Teilung vergrößern", "per Touch / mobil zoomen"],
+&["fokussierte Liste durchsuchen, ohne andere Zeilen zu verbergen", "nicht passende Zeilen ausblenden", "AGENTS Alle / Aktiv oder DIFF-Status wechseln (unter dem Umschalter sichtbar)", "AGENTS-Arbeitsbereichsumfang umschalten",
+            "nächster / voriger Suchtreffer; Tab behält FILES-Filter", "Suche löschen, dann den Textfilter, dann verlassen", "Zeile öffnen / Aktionen öffnen"],],
     modules_empty: "Keine Module installiert. Führe `luvus module link <dir>` aus.", module_unavailable: "nicht verfügbar", module_action: "Aktion", module_actions: "Aktionen", module_pane: "Bereich", module_panes: "Bereiche", module_dock: "Dock", module_docks: "Docks", module_setting: "Einstellung", module_settings: "Einstellungen", module_edit_hint: "Eingabe speichern · Esc abbrechen",
     theme_bundled: "Theme {id} ist integriert und kann nicht entfernt werden", theme_removing: "Theme {id} wird entfernt…", theme_removed: "Theme {id} entfernt", theme_remove_failed: "{id} konnte nicht entfernt werden: {error}",
 };
@@ -422,7 +441,8 @@ pub static ID: Catalog = Catalog {
         "Papan tugas (setelah prefiks + o)",
         "Pemilih folder (setelah prefiks + N)",
         "Salin dan tempel",
-        "Mouse",],
+        "Mouse",
+        "Panel samping",],
     key_reference_descriptions: [
 &[
             "fokus panel (alias vim)",
@@ -492,6 +512,15 @@ pub static ID: Catalog = Catalog {
             "gulir riwayat panel atau daftar",
             "ubah ukuran pembagian",
             "zoom dengan sentuhan / seluler",
+        ],
+        &[
+            "cari di daftar yang fokus tanpa menyembunyikan baris lain",
+            "sembunyikan baris yang tidak cocok",
+            "alihkan Semua / Aktif AGENTS atau status DIFF (terlihat di bawah pemilih)",
+            "alihkan cakupan ruang kerja AGENTS",
+            "hasil berikut / sebelumnya; Tab mempertahankan filter FILES",
+            "hapus pencarian, lalu filter teks, lalu keluar",
+            "buka baris / buka tindakannya",
         ],],
     modules_empty: "Belum ada modul terpasang. Jalankan `luvus module link <dir>`.",
     module_unavailable: "tidak tersedia",
@@ -569,6 +598,7 @@ pub static ZH: Catalog = Catalog {
         "文件夹选择器（前缀 + N 后）",
         "复制与粘贴",
         "鼠标",
+        "侧边栏",
     ],
     key_reference_descriptions: [
         &[
@@ -640,6 +670,15 @@ pub static ZH: Catalog = Catalog {
             "滚动窗格历史或列表",
             "调整分隔线",
             "触摸 / 移动端缩放",
+        ],
+        &[
+            "在当前列表中搜索，不隐藏其他行",
+            "隐藏不匹配的行",
+            "切换 AGENTS 的 All / Active，或循环 DIFF 状态（显示在切换栏下方）",
+            "切换 AGENTS 的工作区范围",
+            "下一个 / 上一个搜索匹配（循环）；FILES 的 Tab 保留过滤结果",
+            "先清除搜索，再清除文字过滤，然后离开",
+            "打开该行 / 打开其操作",
         ],
     ],
     modules_empty: "未安装模块。运行 `luvus module link <dir>`。",
@@ -726,6 +765,7 @@ pub static JA: Catalog = Catalog {
         "フォルダ選択（プレフィックス + N の後）",
         "コピーと貼り付け",
         "マウス",
+        "サイドバー",
     ],
     key_reference_descriptions: [
         &[
@@ -797,6 +837,15 @@ pub static JA: Catalog = Catalog {
             "ペイン履歴または一覧をスクロール",
             "分割位置をリサイズ",
             "タッチ / モバイルでズーム",
+        ],
+        &[
+            "フォーカス中の一覧を検索し、他の行は隠さない",
+            "一致しない行を隠す",
+            "AGENTS の All / Active または DIFF 状態を切替（セレクター下に表示）",
+            "AGENTS のワークスペース範囲を切り替え",
+            "次 / 前の検索一致へ循環。FILES の Tab はフィルタ結果を保持",
+            "検索を消し、次に文字フィルタを消してから離れる",
+            "行を開く / 操作を開く",
         ],
     ],
     modules_empty:
@@ -884,6 +933,7 @@ pub static KO: Catalog = Catalog {
         "폴더 선택기 (접두사 + N 이후)",
         "복사 & 붙여넣기",
         "마우스",
+        "사이드바",
     ],
     key_reference_descriptions: [
         &[
@@ -955,6 +1005,15 @@ pub static KO: Catalog = Catalog {
             "패널 기록 또는 목록 스크롤",
             "분할 크기 조정",
             "터치 / 모바일에서 확대",
+        ],
+        &[
+            "포커스된 목록을 검색하고 다른 행은 숨기지 않음",
+            "일치하지 않는 행 숨기기",
+            "AGENTS All / Active 또는 DIFF 상태 전환 (선택기 아래에 표시)",
+            "AGENTS 작업 공간 범위 전환",
+            "다음 / 이전 검색 일치 순환; FILES Tab은 필터 결과 유지",
+            "검색을 지우고, 텍스트 필터를 지운 뒤 나가기",
+            "행 열기 / 동작 열기",
         ],
     ],
     modules_empty: "설치된 모듈이 없습니다. `luvus module link <dir>` 를 실행하세요.",

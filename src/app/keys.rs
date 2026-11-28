@@ -1845,6 +1845,8 @@ mod tests {
         assert_eq!(app.sidebar_focus, Some(SidebarListFocus::Agents));
         assert!(!app.agents_active_only, "focus does not change the filter");
 
+        app.handle_agents_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE));
+        assert!(!app.agents_active_only, "Shift+F is not the state filter");
         app.handle_agents_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
         assert!(app.agents_active_only);
         assert_eq!(app.agents_scroll, 0);
@@ -1860,11 +1862,338 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_text_filter_keeps_identity_and_swallows_editing_keys() {
+        let _env = crate::persist::test_env("sidebar-text-filter");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.config
+            .direct_keybindings
+            .insert("j".into(), "next_pane".into());
+        app.direct_keymap = build_direct_keymap(&app.config.direct_keybindings);
+        let cwd = std::env::current_dir().unwrap();
+        for name in ["one", "two", "three"] {
+            app.workspaces.push(Workspace {
+                id: crate::ids::public_id("workspace"),
+                name: name.into(),
+                cwd: cwd.clone(),
+                branch: Some(format!("{name}-branch")),
+                git_ahead_behind: None,
+                worktree: None,
+                tabs: vec![Tab::panes(TileLayout::new(app.layout().focus))],
+                active_tab: 0,
+                pinned: false,
+            });
+        }
+        let focused = app.layout().focus;
+        app.run_cmd(Cmd::FocusWorkspaces);
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::NONE,
+        )));
+        assert!(
+            !app.workspace_query.editing(),
+            "f is not the workspace text filter"
+        );
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::NONE,
+        )));
+        assert!(app.workspace_query.editing());
+        assert!(!app.workspace_search.editing());
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.workspace_query.text(), "j");
+        assert_eq!(
+            app.layout().focus,
+            focused,
+            "editing does not leak to the pane"
+        );
+        app.handle_event(crate::event::AppEvent::Paste("t\u{0001}hree".into()));
+        assert_eq!(app.workspace_query.text(), "jthree");
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.workspace_query.text(), "");
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char('你'),
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        for ch in ['t', 'h', 'r', 'e', 'e'] {
+            app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.workspace_query.editing());
+        assert_eq!(app.active_ws, 0, "committing the query does not switch");
+        app.handle_workspaces_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.workspaces[0].name = "tent".into();
+        app.handle_workspaces_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_workspaces_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.workspaces[app.active_ws].name, "three");
+
+        app.run_cmd(Cmd::ToggleAgents);
+        let mut repeat = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        repeat.kind = ratatui::crossterm::event::KeyEventKind::Repeat;
+        app.handle_agents_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.agents_active_only);
+        app.handle_agents_key(repeat);
+        assert!(app.agents_active_only, "a repeated f does not toggle again");
+        app.handle_agents_key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::NONE));
+        app.handle_event(crate::event::AppEvent::Paste("f/s".into()));
+        assert_eq!(app.agent_query.text(), "f/s");
+        assert!(!app.agent_search.editing());
+        assert!(app.sidebar_focus.is_some());
+        app.handle_agents_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.agent_query.text(),
+            "",
+            "editing Esc restores the checkpoint"
+        );
+        assert!(app.sidebar_focus.is_some());
+    }
+
+    #[test]
+    fn slash_text_filter_does_not_capture_pty_scroll_or_prefix_search() {
+        let _env = crate::persist::test_env("slash-filter-priority");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(80, 24, tx).unwrap();
+        let pane = app.layout().focus;
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
+        app.panes
+            .get_mut(&pane)
+            .unwrap()
+            .replace_input_sender_for_test(input_tx);
+        let key = |code| crate::event::AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE));
+
+        app.handle_event(key(KeyCode::Char('/')));
+        let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.try_recv().unwrap() else {
+            panic!("normal / must reach the pty");
+        };
+        assert_eq!(bytes, b"/");
+        app.handle_event(key(KeyCode::Char('\\')));
+        let crate::terminal::pty::InputAction::Bytes(bytes) = input_rx.try_recv().unwrap() else {
+            panic!("normal \\ must reach the pty");
+        };
+        assert_eq!(bytes, b"\\");
+        assert!(!app.workspace_query.editing());
+        assert!(!app.workspace_search.editing());
+        assert!(app.file_tree.filter.is_none());
+
+        app.run_cmd(Cmd::FocusWorkspaces);
+        let before_rows = app.filtered_workspace_rows().len();
+        app.handle_event(key(KeyCode::Char('/')));
+        assert!(app.workspace_search.editing());
+        assert!(!app.workspace_query.editing());
+        assert!(input_rx.try_recv().is_err());
+        app.workspace_search.cancel_edit();
+        app.handle_event(key(KeyCode::Char('\\')));
+        assert!(app.workspace_query.editing());
+        assert_eq!(app.filtered_workspace_rows().len(), before_rows);
+        app.workspace_query.cancel_edit();
+        app.sidebar_focus = None;
+
+        app.run_cmd(Cmd::ToggleAgents);
+        app.handle_event(key(KeyCode::Char('/')));
+        assert!(app.agent_search.editing());
+        assert!(!app.agents_active_only, "/ does not toggle All/Active");
+        app.agent_search.cancel_edit();
+        app.handle_event(key(KeyCode::Char('\\')));
+        assert!(app.agent_query.editing());
+        app.agent_query.cancel_edit();
+        app.sidebar_focus = None;
+
+        app.files_focused = true;
+        app.handle_event(key(KeyCode::Char('/')));
+        assert!(
+            app.file_search.editing(),
+            "FILES / searches and does not hide"
+        );
+        assert!(app.file_tree.filter.is_none());
+        app.file_search.cancel_edit();
+        app.handle_event(key(KeyCode::Char('\\')));
+        assert!(app.file_tree.filter.is_some());
+        app.file_tree.clear_filter();
+        app.files_mode = crate::diff::FilesMode::Diff;
+        let before = app.diff.filter;
+        app.handle_event(key(KeyCode::Char('f')));
+        assert_ne!(app.diff.filter, before, "DIFF f still cycles state");
+        let cycled = app.diff.filter;
+        app.handle_event(key(KeyCode::Char('/')));
+        assert!(app.diff.list_search.editing());
+        assert_eq!(app.diff.filter, cycled, "DIFF / does not cycle state");
+        app.diff.list_search.cancel_edit();
+        app.handle_event(key(KeyCode::Char('\\')));
+        assert!(app.diff.list_query.editing());
+        assert_eq!(app.diff.filter, cycled);
+        app.diff.list_query.cancel_edit();
+        assert!(app.file_tree.filter.is_none());
+        app.files_focused = false;
+
+        app.scroll_pane = Some(pane);
+        app.handle_event(key(KeyCode::Char('/')));
+        assert!(
+            app.pane_search.is_some(),
+            "scroll / stays pane history search"
+        );
+        assert!(app.search.is_none());
+        app.handle_event(key(KeyCode::Char('\\')));
+        assert!(
+            app.pane_search.is_some(),
+            "scroll \\ does not leave history search"
+        );
+        assert!(!app.workspace_query.editing());
+        app.scroll_pane = None;
+        app.pane_search = None;
+
+        app.handle_event(crate::event::AppEvent::Key(KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(key(KeyCode::Char('/')));
+        assert!(app.search.is_some(), "prefix / stays the global finder");
+        assert!(!app.workspace_query.editing());
+        assert!(!app.workspace_search.editing());
+        assert!(app.file_tree.filter.is_none());
+    }
+
+    #[test]
+    fn slash_searches_without_hiding_and_backslash_filters_inside_scope() {
+        let _env = crate::persist::test_env("slash-search-vs-filter");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(100, 30, tx).unwrap();
+        app.workspaces[0].worktree = None;
+        app.workspaces[0].name = "root".into();
+        let pane = app.layout().focus;
+        for name in ["beta-one", "beta-two", "gamma"] {
+            app.workspaces.push(Workspace {
+                id: crate::ids::public_id("workspace"),
+                name: name.into(),
+                cwd: std::path::PathBuf::from(format!("/{name}")),
+                branch: None,
+                git_ahead_behind: None,
+                worktree: None,
+                tabs: vec![Tab::panes(TileLayout::new(pane))],
+                active_tab: 0,
+                pinned: false,
+            });
+        }
+        let total = app.filtered_workspace_rows().len();
+        app.run_cmd(Cmd::FocusWorkspaces);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_workspaces_key(key(KeyCode::Char('\\')));
+        for ch in ['b', 'e', 't', 'a'] {
+            app.handle_workspaces_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_workspaces_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            app.workspace_query.text(),
+            "betan",
+            "n is text while editing"
+        );
+        app.handle_workspaces_key(key(KeyCode::Backspace));
+        app.handle_workspaces_key(key(KeyCode::Enter));
+        let filtered = app.filtered_workspace_rows();
+        assert!(filtered.len() < total);
+        assert!(filtered
+            .iter()
+            .all(|(index, _)| app.workspaces[*index].name.contains("beta")));
+        app.handle_workspaces_key(key(KeyCode::Esc));
+        assert!(!app.workspace_query.active());
+        assert_eq!(app.filtered_workspace_rows().len(), total);
+
+        app.handle_workspaces_key(key(KeyCode::Char('/')));
+        for ch in ['b', 'e', 't', 'a'] {
+            app.handle_workspaces_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_workspaces_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.filtered_workspace_rows().len(),
+            total,
+            "search keeps every row"
+        );
+        let selected = app.workspace_selected_id.clone().unwrap();
+        let selected_name = app
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == selected)
+            .unwrap()
+            .name
+            .clone();
+        assert!(selected_name.contains("beta"), "{selected_name}");
+        app.handle_workspaces_key(key(KeyCode::Char('n')));
+        let next = app.workspace_selected_id.clone().unwrap();
+        assert_ne!(next, selected);
+        app.handle_workspaces_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            app.workspace_selected_id.as_deref(),
+            Some(selected.as_str())
+        );
+        app.handle_workspaces_key(key(KeyCode::Char('N')));
+        assert_eq!(app.workspace_selected_id.as_deref(), Some(next.as_str()));
+        let stayed = app.workspace_selected_id.clone();
+        app.handle_workspaces_key(key(KeyCode::Char('/')));
+        for ch in ['z', 'z', 'z'] {
+            app.handle_workspaces_key(key(KeyCode::Char(ch)));
+        }
+        assert!(app.workspace_search_miss);
+        assert_eq!(
+            app.workspace_selected_id, stayed,
+            "a miss does not retarget"
+        );
+        app.handle_workspaces_key(key(KeyCode::Esc));
+        assert_eq!(app.workspace_search.text(), "beta");
+
+        app.workspace_query.begin();
+        app.workspace_query.append("gamma");
+        app.workspace_query.commit();
+        let hidden = app.filtered_workspace_rows();
+        assert!(hidden
+            .iter()
+            .all(|(index, _)| app.workspaces[*index].name.contains("gamma")));
+        app.handle_workspaces_key(key(KeyCode::Char('n')));
+        assert!(
+            app.workspace_search_miss,
+            "beta search cannot select hidden beta rows"
+        );
+        app.handle_workspaces_key(key(KeyCode::Home));
+        let remove = app
+            .workspaces
+            .iter()
+            .position(|workspace| {
+                app.workspace_selected_id
+                    .as_ref()
+                    .is_some_and(|id| workspace.id == *id)
+            })
+            .unwrap();
+        app.workspaces.remove(remove);
+        app.handle_workspaces_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.active_ws, 0,
+            "search must not activate the row that slid in"
+        );
+    }
+
+    #[test]
     fn workspace_focus_navigates_without_switching_until_enter() {
         let _env = crate::persist::test_env("focus-workspaces-command");
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(80, 24, tx).unwrap();
         let pane = app.layout().focus;
+        // This checkout may itself be a linked worktree. The test is about
+        // creation order, so clear that grouping before adding the next row.
+        app.workspaces[0].worktree = None;
         app.workspaces.push(Workspace {
             id: crate::ids::public_id("workspace"),
             name: "second".into(),

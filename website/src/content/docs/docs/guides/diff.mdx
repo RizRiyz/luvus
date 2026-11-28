@@ -18,8 +18,15 @@ the layer shown on each row.
 Click a row to reuse the native preview. **Shift+click** opens it in a permanent
 pane. Right-click for explicit Preview, Pane, Tab, and Copy Path actions. The
 list begins immediately below the FILES/DIFF selector without repeating the
-workspace or branch. Press `f` in an open DIFF view to cycle **All**,
-**Unviewed**, **Changed**, and **Notes** filters.
+workspace or branch. Press `f` in the DIFF file list or an open DIFF view to
+cycle **All**, **Unviewed**, **Changed**, and **Notes**. Press `/` in the file
+list to search paths without hiding rows, and `\` to hide paths that do not
+match. `\` composes with `f`. The fixed `f: …` line directly below the
+FILES/DIFF selector always shows the current state, including **All**. It stays
+visible while searching paths, filtering paths, loading, or showing no matches.
+It is separate from the `/` and `\` query lines, not a header button. Narrow
+docks clip the state line without overwriting the selector. Neither list key
+changes the native diff text search.
 
 | List key | Action |
 |---|---|
@@ -29,9 +36,11 @@ workspace or branch. Press `f` in an open DIFF view to cycle **All**,
 | Enter | open or reuse the native preview |
 | Shift+Enter | open in a permanent pane |
 | `a` | open the selected row actions; use `j` / `k` and Enter |
-| `f` | cycle All, Unviewed, Changed, and Notes filters |
+| `/` | search visible paths; `n` / `N` wrap after Enter. Does not hide rows |
+| `\` | hide paths that do not match; composes with `f`. Enter commits, Esc restores the checkpoint, then clears |
+| `f` | cycle All, Unviewed, Modified since review, and Has notes; the line below the selector shows the current state |
 | `r` | refresh the Git status snapshot |
-| `q` / `Esc` | return keyboard input to the terminal pane |
+| `q` / `Esc` | `Esc` clears search, then the path filter, then returns to the terminal. `q` returns immediately |
 
 Selection follows the WORKSPACES and AGENTS lists: focusing DIFF starts at the
 currently open diff when its row is visible. Moving with `j` / `k` only
@@ -91,8 +100,8 @@ The query, result count, case state, and search shortcuts replace the DIFF
 footer while search is active, including on mobile. A `+` after a 10,000-match
 count indicates additional matches beyond the bounded navigable set. Outside
 search, the footer returns to review status and note information. This is
-separate from the DIFF sidebar's `f` state filter and from the global fuzzy
-finder.
+separate from the DIFF file list. In that list, `/` only moves the selection
+and `\` hides non-matching paths. Content search does not use `\`.
 
 Binary files and conflicts show an explicit summary instead of misleading
 text. Large patches and lines are bounded and visibly marked **TRUNCATED**.

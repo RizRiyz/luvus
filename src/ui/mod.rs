@@ -279,6 +279,17 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     let mission_refresh_rect = app.mission_refresh_rect;
     let changelog_scroll = app.changelog_scroll;
     let file_tree_scroll = app.file_tree.scroll;
+    let dock_query_geometry = (
+        app.workspace_clear_rect,
+        app.workspace_clear_is_search,
+        app.agent_clear_rect,
+        app.agent_clear_is_search,
+        app.file_search_clear_rect,
+        app.file_filter_clear_rect,
+        app.file_clear_is_search,
+        app.diff_clear_rect,
+        app.diff_clear_is_search,
+    );
     // Popup scroll offsets and geometry are recorded by an ordinary draw, and a
     // projection renders at its own size — so keep them out of its way.
     let menu_scroll = std::mem::take(&mut app.menu_scroll);
@@ -292,6 +303,8 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     let tab_rects = std::mem::take(&mut app.tab_rects);
     let tab_close_rects = std::mem::take(&mut app.tab_close_rects);
     let ws_rects = std::mem::take(&mut app.ws_rects);
+    let workspace_hit_ids = std::mem::take(&mut app.workspace_hit_ids);
+    let session_hit_ids = std::mem::take(&mut app.session_hit_ids);
     let git_section_rects = std::mem::take(&mut app.git_section_rects);
     let agents_filter_rects = std::mem::take(&mut app.agents_filter_rects);
     let agents_elsewhere_rect = app.agents_elsewhere_rect;
@@ -299,8 +312,10 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     let automation_rects = std::mem::take(&mut app.automation_rects);
     let session_rects = std::mem::take(&mut app.session_rects);
     let file_tree_rects = std::mem::take(&mut app.file_tree_rects);
+    let file_hit_paths = std::mem::take(&mut app.file_hit_paths);
     let files_mode_rects = std::mem::take(&mut app.files_mode_rects);
     let diff_row_rects = std::mem::take(&mut app.diff_row_rects);
+    let diff_hit_keys = std::mem::take(&mut app.diff_hit_keys);
     let diff_source_rects = std::mem::take(&mut app.diff_source_rects);
     let diff_note_rects = std::mem::take(&mut app.diff_note_rects);
     let preview_link_rects = std::mem::take(&mut app.preview_link_rects);
@@ -448,6 +463,8 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     app.tab_rects = tab_rects;
     app.tab_close_rects = tab_close_rects;
     app.ws_rects = ws_rects;
+    app.workspace_hit_ids = workspace_hit_ids;
+    app.session_hit_ids = session_hit_ids;
     app.git_section_rects = git_section_rects;
     app.agents_filter_rects = agents_filter_rects;
     app.agents_elsewhere_rect = agents_elsewhere_rect;
@@ -455,8 +472,21 @@ pub(crate) fn render_projection(f: &mut RenderTarget, app: &mut App) -> ClientPr
     app.automation_rects = automation_rects;
     app.session_rects = session_rects;
     app.file_tree_rects = file_tree_rects;
+    app.file_hit_paths = file_hit_paths;
     app.files_mode_rects = files_mode_rects;
     app.diff_row_rects = diff_row_rects;
+    app.diff_hit_keys = diff_hit_keys;
+    (
+        app.workspace_clear_rect,
+        app.workspace_clear_is_search,
+        app.agent_clear_rect,
+        app.agent_clear_is_search,
+        app.file_search_clear_rect,
+        app.file_filter_clear_rect,
+        app.file_clear_is_search,
+        app.diff_clear_rect,
+        app.diff_clear_is_search,
+    ) = dock_query_geometry;
     app.diff_source_rects = diff_source_rects;
     app.diff_note_rects = diff_note_rects;
     app.preview_link_rects = preview_link_rects;
@@ -644,6 +674,11 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     // a frame that bails out (window too small, no workspace yet) must not
     // leave a dock divider behind as a live drag target.
     app.dock_dividers.clear();
+    app.workspace_clear_rect = None;
+    app.agent_clear_rect = None;
+    app.file_search_clear_rect = None;
+    app.file_filter_clear_rect = None;
+    app.diff_clear_rect = None;
     app.agents_elsewhere_rect = None;
     app.client_shell_dock_rect = None;
     app.left_seam = None;
@@ -834,6 +869,15 @@ fn render_into_mode(f: &mut RenderTarget, app: &mut App, resize_panes: bool) {
     app.version_rect = None;
     app.workspaces_area = Rect::ZERO;
     app.agents_area = Rect::ZERO;
+    app.workspace_clear_rect = None;
+    app.agent_clear_rect = None;
+    app.file_search_clear_rect = None;
+    app.file_filter_clear_rect = None;
+    app.diff_clear_rect = None;
+    app.file_hit_paths.clear();
+    app.workspace_hit_ids.clear();
+    app.session_hit_ids.clear();
+    app.diff_hit_keys.clear();
     app.agents_filter_rects.clear();
     app.agents_elsewhere_rect = None;
     app.module_dock_rects.clear();
@@ -2155,6 +2199,24 @@ pub(crate) fn short_path(p: &Path, max: u16) -> String {
 #[cfg(test)]
 mod path_tests {
     use super::*;
+
+    #[test]
+    fn small_window_drops_stale_query_clear_targets() {
+        use crate::app::App;
+        let _env = crate::persist::test_env("small-window-clear-targets");
+        let mut app = App::new(80, 24, std::sync::mpsc::channel().0).unwrap();
+        app.workspace_clear_rect = Some(Rect::new(4, 4, 8, 1));
+        app.agent_clear_rect = Some(Rect::new(4, 5, 8, 1));
+        app.file_search_clear_rect = Some(Rect::new(4, 6, 8, 1));
+        app.file_filter_clear_rect = Some(Rect::new(4, 7, 8, 1));
+        app.diff_clear_rect = Some(Rect::new(4, 8, 8, 1));
+        let area = Rect::new(0, 0, 20, 5);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        render_into_mode(&mut RenderTarget::new(&mut buffer, area), &mut app, false);
+        assert!(app.workspace_clear_rect.is_none() && app.agent_clear_rect.is_none());
+        assert!(app.file_search_clear_rect.is_none() && app.file_filter_clear_rect.is_none());
+        assert!(app.diff_clear_rect.is_none());
+    }
 
     #[test]
     fn short_path_keeps_a_wide_paths_tail_within_its_column_budget() {
