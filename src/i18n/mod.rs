@@ -47,6 +47,10 @@ pub struct Catalog {
     pub agents: &'static str,
     pub no_active_agents: &'static str,
     pub no_agents_or_sessions: &'static str,
+    pub dock_clear: &'static str,
+    pub dock_no_matches: &'static str,
+    /// All, Unviewed, ModifiedSinceReview, HasNotes (DIFF's existing cycle order).
+    pub diff_filter_labels: [&'static str; 4],
     pub no_agents_waiting: &'static str,
     pub no_agents_working: &'static str,
     pub no_agents_done: &'static str,
@@ -134,6 +138,8 @@ pub struct Catalog {
     pub act_open: &'static str,
     pub act_new: &'static str,
     pub act_filter: &'static str,
+    pub act_state: &'static str,
+    pub act_scope: &'static str,
     pub act_view: &'static str,
     pub act_log: &'static str,
     pub act_checkout: &'static str,
@@ -517,6 +523,9 @@ pub static EN: Catalog = Catalog {
     session_open_failed: "Could not open session",
     no_active_agents: "no active agents",
     no_agents_or_sessions: "no agents or sessions",
+    dock_clear: "clear",
+    dock_no_matches: "no matches",
+    diff_filter_labels: ["All", "Unviewed", "Modified since review", "Has notes"],
     no_agents_waiting: "no agents waiting",
     no_agents_working: "no running agents",
     no_agents_done: "no finished agents",
@@ -599,6 +608,8 @@ pub static EN: Catalog = Catalog {
     act_open: "open on github",
     act_new: "new",
     act_filter: "filter",
+    act_state: "state",
+    act_scope: "scope",
     act_view: "view",
     act_log: "log",
     act_checkout: "checkout",
@@ -968,6 +979,14 @@ static ES: Catalog = Catalog {
     session_open_failed: "No se pudo abrir la sesión",
     no_active_agents: "sin agentes activos",
     no_agents_or_sessions: "sin agentes ni sesiones",
+    dock_clear: "borrar",
+    dock_no_matches: "sin coincidencias",
+    diff_filter_labels: [
+        "Todos",
+        "Sin revisar",
+        "Modificados desde revisión",
+        "Con notas",
+    ],
     no_agents_waiting: "no hay agentes esperando",
     no_agents_working: "no hay agentes en ejecución",
     no_agents_done: "no hay agentes terminados",
@@ -1051,6 +1070,8 @@ static ES: Catalog = Catalog {
     act_open: "abrir en github",
     act_new: "nuevo",
     act_filter: "filtrar",
+    act_state: "estado",
+    act_scope: "ámbito",
     act_view: "ver",
     act_log: "historial",
     act_checkout: "cambiar",
@@ -1420,6 +1441,14 @@ static PT: Catalog = Catalog {
     session_open_failed: "Não foi possível abrir a sessão",
     no_active_agents: "nenhum agente ativo",
     no_agents_or_sessions: "nenhum agente ou sessão",
+    dock_clear: "limpar",
+    dock_no_matches: "sem resultados",
+    diff_filter_labels: [
+        "Todos",
+        "Não revisados",
+        "Modificados desde a revisão",
+        "Com notas",
+    ],
     no_agents_waiting: "nenhum agente aguardando",
     no_agents_working: "nenhum agente em execução",
     no_agents_done: "nenhum agente concluído",
@@ -1503,6 +1532,8 @@ static PT: Catalog = Catalog {
     act_open: "abrir no github",
     act_new: "novo",
     act_filter: "filtrar",
+    act_state: "estado",
+    act_scope: "escopo",
     act_view: "ver",
     act_log: "histórico",
     act_checkout: "trocar",
@@ -1872,6 +1903,9 @@ static FR: Catalog = Catalog {
     session_open_failed: "Impossible d’ouvrir la session",
     no_active_agents: "aucun agent actif",
     no_agents_or_sessions: "aucun agent ni session",
+    dock_clear: "effacer",
+    dock_no_matches: "aucun résultat",
+    diff_filter_labels: ["Tous", "Non vus", "Modifiés depuis la revue", "Avec notes"],
     no_agents_waiting: "aucun agent en attente",
     no_agents_working: "aucun agent en cours",
     no_agents_done: "aucun agent terminé",
@@ -1955,6 +1989,8 @@ static FR: Catalog = Catalog {
     act_open: "ouvrir sur github",
     act_new: "nouveau",
     act_filter: "filtrer",
+    act_state: "état",
+    act_scope: "portée",
     act_view: "voir",
     act_log: "journal",
     act_checkout: "basculer",
@@ -2324,6 +2360,9 @@ static DE: Catalog = Catalog {
     session_open_failed: "Sitzung konnte nicht geöffnet werden",
     no_active_agents: "keine aktiven Agenten",
     no_agents_or_sessions: "keine Agenten oder Sitzungen",
+    dock_clear: "löschen",
+    dock_no_matches: "keine Treffer",
+    diff_filter_labels: ["Alle", "Ungesehen", "Seit Prüfung geändert", "Mit Notizen"],
     no_agents_waiting: "keine wartenden Agenten",
     no_agents_working: "keine laufenden Agenten",
     no_agents_done: "keine abgeschlossenen Agenten",
@@ -2407,6 +2446,8 @@ static DE: Catalog = Catalog {
     act_open: "auf github öffnen",
     act_new: "neu",
     act_filter: "filtern",
+    act_state: "Status",
+    act_scope: "Bereich",
     act_view: "ansehen",
     act_log: "Verlauf",
     act_checkout: "wechseln",
@@ -2776,6 +2817,14 @@ static ID: Catalog = Catalog {
     session_open_failed: "Sesi tidak dapat dibuka",
     no_active_agents: "tidak ada agen aktif",
     no_agents_or_sessions: "tidak ada agen atau sesi",
+    dock_clear: "hapus",
+    dock_no_matches: "tidak ada hasil",
+    diff_filter_labels: [
+        "Semua",
+        "Belum ditinjau",
+        "Berubah sejak tinjauan",
+        "Ada catatan",
+    ],
     no_agents_waiting: "tidak ada agen menunggu",
     no_agents_working: "tidak ada agen berjalan",
     no_agents_done: "tidak ada agen selesai",
@@ -2858,6 +2907,8 @@ static ID: Catalog = Catalog {
     act_open: "buka di github",
     act_new: "baru",
     act_filter: "filter",
+    act_state: "status",
+    act_scope: "cakupan",
     act_view: "lihat",
     act_log: "log",
     act_checkout: "checkout",
@@ -3227,6 +3278,9 @@ static ZH: Catalog = Catalog {
     session_open_failed: "无法打开会话",
     no_active_agents: "无活动代理",
     no_agents_or_sessions: "无代理或会话",
+    dock_clear: "清除",
+    dock_no_matches: "无匹配",
+    diff_filter_labels: ["全部", "未查看", "查看后已修改", "有批注"],
     no_agents_waiting: "没有等待的代理",
     no_agents_working: "没有正在运行的代理",
     no_agents_done: "没有已完成的代理",
@@ -3309,6 +3363,8 @@ static ZH: Catalog = Catalog {
     act_open: "在 github 打开",
     act_new: "新建",
     act_filter: "筛选",
+    act_state: "状态",
+    act_scope: "范围",
     act_view: "查看",
     act_log: "日志",
     act_checkout: "检出",
@@ -3678,6 +3734,9 @@ static JA: Catalog = Catalog {
     session_open_failed: "セッションを開けませんでした",
     no_active_agents: "アクティブなエージェントなし",
     no_agents_or_sessions: "エージェント・セッションなし",
+    dock_clear: "クリア",
+    dock_no_matches: "一致なし",
+    diff_filter_labels: ["すべて", "未確認", "レビュー後に変更", "ノートあり"],
     no_agents_waiting: "待機中のエージェントなし",
     no_agents_working: "実行中のエージェントなし",
     no_agents_done: "完了したエージェントなし",
@@ -3760,6 +3819,8 @@ static JA: Catalog = Catalog {
     act_open: "github で開く",
     act_new: "新規",
     act_filter: "絞り込み",
+    act_state: "状態",
+    act_scope: "範囲",
     act_view: "表示",
     act_log: "ログ",
     act_checkout: "チェックアウト",
@@ -4129,6 +4190,9 @@ static KO: Catalog = Catalog {
     session_open_failed: "세션을 열 수 없습니다",
     no_active_agents: "활성 에이전트 없음",
     no_agents_or_sessions: "에이전트나 세션 없음",
+    dock_clear: "지우기",
+    dock_no_matches: "일치 없음",
+    diff_filter_labels: ["전체", "미확인", "검토 후 수정됨", "메모 있음"],
     no_agents_waiting: "대기 중인 에이전트 없음",
     no_agents_working: "실행 중인 에이전트 없음",
     no_agents_done: "완료된 에이전트 없음",
@@ -4211,6 +4275,8 @@ static KO: Catalog = Catalog {
     act_open: "GitHub에서 열기",
     act_new: "새로 만들기",
     act_filter: "필터",
+    act_state: "상태",
+    act_scope: "범위",
     act_view: "보기",
     act_log: "기록",
     act_checkout: "체크아웃",
@@ -4761,6 +4827,31 @@ mod tests {
                     "{code} reference section {section} has no blank descriptions"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn sidebar_agent_state_help_uses_localized_all_active_labels() {
+        let dock = settings::KEY_REFERENCE_KEYS.len() - 1;
+        let state = settings::KEY_REFERENCE_KEYS[dock]
+            .iter()
+            .position(|key| *key == "f")
+            .unwrap();
+        for (code, all, active) in [
+            ("es", "Todos", "Activos"),
+            ("pt", "Todos", "Ativos"),
+            ("fr", "Tous", "Actifs"),
+            ("de", "Alle", "Aktiv"),
+            ("id", "Semua", "Aktif"),
+        ] {
+            let text = by_code(code).settings.key_reference_descriptions[dock][state];
+            assert!(!text.contains("All / Active"), "{code}: {text}");
+            assert!(text.contains(all), "{code}: {text}");
+            assert!(text.contains(active), "{code}: {text}");
+        }
+        for code in ["en", "zh", "ja", "ko"] {
+            let text = by_code(code).settings.key_reference_descriptions[dock][state];
+            assert!(text.contains("All / Active"), "{code}: {text}");
         }
     }
 }

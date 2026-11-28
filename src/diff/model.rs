@@ -127,6 +127,16 @@ pub enum DiffFilter {
 }
 
 impl DiffFilter {
+    pub fn label(self, catalog: &crate::i18n::Catalog) -> &'static str {
+        let index = match self {
+            Self::All => 0,
+            Self::Unviewed => 1,
+            Self::ModifiedSinceReview => 2,
+            Self::HasNotes => 3,
+        };
+        catalog.diff_filter_labels[index]
+    }
+
     pub fn cycle(self) -> Self {
         match self {
             Self::All => Self::Unviewed,
@@ -375,6 +385,14 @@ pub struct DiffState {
     pub cursor: usize,
     pub scroll: usize,
     pub filter: DiffFilter,
+    /// `\` path filter. Runtime only; it is not serialized or exposed on the API.
+    pub list_query: crate::search::DockTextQuery,
+    /// `/` path search within the rows that survive `filter` and `list_query`.
+    pub list_search: crate::search::DockTextQuery,
+    pub search_origin: Option<DiffKey>,
+    /// Set when the selected file disappeared. Enter/a must not use the new occupant.
+    pub activation_blocked: bool,
+    pub list_search_miss: bool,
     pub selected_key: Option<DiffKey>,
     pub rows: Vec<DiffListRow>,
     pub status_generation: u64,
@@ -398,6 +416,11 @@ impl Default for DiffState {
             cursor: 0,
             scroll: 0,
             filter: DiffFilter::All,
+            list_query: crate::search::DockTextQuery::default(),
+            list_search: crate::search::DockTextQuery::default(),
+            search_origin: None,
+            activation_blocked: false,
+            list_search_miss: false,
             selected_key: None,
             rows: Vec::new(),
             status_generation: 0,
@@ -457,10 +480,37 @@ pub struct DiffAgentPicker {
     pub scope: DiffSendScope,
 }
 
+pub(crate) fn diff_path_matches(file: &DiffFile, query: &crate::search::FuzzyQuery) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let mut fields = Vec::new();
+    if let Some(path) = &file.key.new_path {
+        fields.push(crate::search::PreparedText::new(&path.display));
+    }
+    if let Some(path) = &file.key.old_path {
+        let same = file
+            .key
+            .new_path
+            .as_ref()
+            .is_some_and(|new_path| new_path.display == path.display);
+        if !same {
+            fields.push(crate::search::PreparedText::new(&path.display));
+        }
+    }
+    if fields.is_empty() {
+        fields.push(crate::search::PreparedText::new(file.key.display_path()));
+    }
+    crate::search::prepared_hit(query, &fields)
+}
+
 impl DiffState {
     pub fn rebuild_rows(&mut self) {
         let old_cursor = self.cursor;
         let old_selected = self.selected_key.clone().or_else(|| {
+            if self.activation_blocked {
+                return None;
+            }
             let index = match self.rows.get(self.cursor)? {
                 DiffListRow::File(index) => *index,
                 DiffListRow::Group(_) => return None,
@@ -477,6 +527,7 @@ impl DiffState {
             self.scroll_detached = false;
             return;
         };
+        let query = self.list_query.fuzzy();
         for layer in [
             DiffLayer::Staged,
             DiffLayer::Worktree,
@@ -488,13 +539,13 @@ impl DiffState {
                 if file.key.layer != layer {
                     continue;
                 }
-                let visible = match self.filter {
+                let state_visible = match self.filter {
                     DiffFilter::All => true,
                     DiffFilter::Unviewed => !file.viewed(),
                     DiffFilter::ModifiedSinceReview => file.modified_since_review(),
                     DiffFilter::HasNotes => file.unresolved_notes > 0,
                 };
-                if visible {
+                if state_visible && diff_path_matches(file, &query) {
                     group.push(index);
                 }
             }
@@ -516,6 +567,13 @@ impl DiffState {
         });
         if let Some(position) = restored {
             self.cursor = position;
+            self.activation_blocked = false;
+        } else if old_selected.is_some() {
+            // The file left the projection. Keep the numeric cursor for display
+            // but do not remember the row that now occupies it.
+            self.selected_key = None;
+            self.activation_blocked = true;
+            self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
         } else {
             self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
             if matches!(self.rows.get(self.cursor), Some(DiffListRow::Group(_))) {
@@ -524,6 +582,9 @@ impl DiffState {
         }
         if self.cursor != old_cursor || old_selected.is_some() && restored.is_none() {
             self.scroll_detached = false;
+        }
+        if !self.activation_blocked {
+            self.selected_key = self.selected_file().map(|file| file.key.clone());
         }
         self.ensure_cursor_visible();
     }

@@ -1779,7 +1779,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(40, 12, tx).unwrap();
         app.create_workspace_at(std::env::temp_dir().join("luvus-git-repeat-other"));
-        for workspace in 0..2 {
+        for workspace in app.workspaces.iter_mut().take(2) {
             let mut view = GitView::new(std::path::PathBuf::from("/tmp"));
             view.status = Load::Loaded(RepoStatus {
                 unstaged: (0..20)
@@ -1791,7 +1791,7 @@ mod tests {
                 ..Default::default()
             });
             view.section = Section::Status;
-            app.workspaces[workspace].tabs.push(Tab {
+            workspace.tabs.push(Tab {
                 id: crate::ids::public_id("tab"),
                 layout: TileLayout::new(PaneId::alloc()),
                 git: Some(Box::new(view)),
@@ -1799,7 +1799,7 @@ mod tests {
                 mission: false,
                 name: None,
             });
-            app.workspaces[workspace].active_tab = app.workspaces[workspace].tabs.len() - 1;
+            workspace.active_tab = workspace.tabs.len() - 1;
         }
         let scroll = |app: &App, workspace: usize| {
             let tab = app.workspaces[workspace].active_tab;

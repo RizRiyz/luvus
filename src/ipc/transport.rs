@@ -381,17 +381,17 @@ pub fn validate_peer(_conn: &Conn) -> io::Result<()> {
 /// `ERROR_NO_DATA` for a connected PIPE_NOWAIT stream with no input available,
 /// and Rust maps that code to `BrokenPipe` rather than `WouldBlock`.
 pub fn nonblocking_read_pending(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32)
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    error.kind() == io::ErrorKind::WouldBlock || windows_pipe_has_no_data(error)
+}
+
+#[cfg(windows)]
+fn windows_pipe_has_no_data(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32)
+}
+
+#[cfg(not(windows))]
+fn windows_pipe_has_no_data(_error: &io::Error) -> bool {
+    false
 }
 
 /// Windows byte-mode named pipes can return a successful zero-byte read while
