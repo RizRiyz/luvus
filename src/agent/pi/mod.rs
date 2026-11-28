@@ -24,6 +24,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ambiguous: &["pi"],
         binary_matcher: None,
         interpreter_packages: &["@earendil-works/pi-coding-agent"],
+        interpreter_scripts: &[],
         overlap_priority: 10,
     },
     sessions: Some(SessionOperations {

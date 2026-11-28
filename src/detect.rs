@@ -45,6 +45,7 @@ struct AgentIdent {
     /// the agent's identity.
     argv_script: Option<crate::agent::cursor::ArgvScript>,
     interpreter_packages: Vec<String>,
+    interpreter_scripts: Vec<String>,
     overlap_priority: u8,
 }
 
@@ -78,6 +79,12 @@ fn builtin_agents() -> Vec<AgentIdent> {
             interpreter_packages: agent
                 .identity
                 .interpreter_packages
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            interpreter_scripts: agent
+                .identity
+                .interpreter_scripts
                 .iter()
                 .map(|value| value.to_string())
                 .collect(),
@@ -296,6 +303,13 @@ impl Manifests {
             rules.extend(mf.into_rules());
         }
         Manifests { rules, agents }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_manifest_for_test(&mut self, toml: &str) {
+        toml::from_str::<ManifestFile>(toml)
+            .unwrap()
+            .apply_identity(&mut self.agents);
     }
 
     /// Total detection rules in effect (built-in + managed + user), for the
@@ -540,6 +554,30 @@ fn builtin_rules() -> Vec<Rule> {
             105,
             Region::Screen,
             vec![any(&["ctrl+c to stop"])],
+        ),
+        // Command Code keeps the last answer line, which starts with a braille
+        // cell, above its input box after a turn ends, so the generic spinner
+        // rule would read a finished turn as work. A finished turn prints
+        // `✻ Worked for Ns`; the interrupt hint exists only while one runs.
+        per(
+            "command-code",
+            State::Idle,
+            115,
+            Region::Screen,
+            vec![
+                all(&["✻ worked for", "❯ ask your question"]),
+                Cond::Not(vec!["esc to interrupt".to_string()]),
+            ],
+        ),
+        per(
+            "command-code",
+            State::Blocked,
+            310,
+            Region::Screen,
+            vec![
+                Cond::LastTwoLines(vec!["enter select".to_string()]),
+                Cond::LastTwoLines(vec!["to bypass all permissions".to_string()]),
+            ],
         ),
         // OMP publishes its state in the OSC title as `π <state> label`.
         // Current builds use `:` while working, `!` for attention, and `>` for
@@ -1058,6 +1096,7 @@ impl ManifestFile {
                     binary_matcher: None,
                     argv_script: None,
                     interpreter_packages: Vec::new(),
+                    interpreter_scripts: Vec::new(),
                     overlap_priority: 0,
                 });
                 agents.last_mut().expect("just pushed")
@@ -1069,6 +1108,7 @@ impl ManifestFile {
             entry.binary_matcher = None;
             entry.argv_script = None;
             entry.interpreter_packages.clear();
+            entry.interpreter_scripts.clear();
         }
         entry.distinct.extend(lc(&id.distinct));
         entry.ambiguous.extend(lc(&id.ambiguous));
@@ -1539,8 +1579,8 @@ impl Manifests {
         // is `node` / `python` and the real name is the script slot. Nothing
         // later counts -- `cargo test --example amp` must not resolve to amp.
         if is_interpreter(first) {
-            if let Some(i) = interpreter_script_slot(rest) {
-                if let Some(name) = self.match_interpreter_script(&rest[i]) {
+            if let Some(i) = interpreter_script_slot(first, rest) {
+                if let Some(name) = self.match_interpreter_script(first, &rest[i]) {
                     return Some(name);
                 }
             }
@@ -1569,9 +1609,13 @@ impl Manifests {
             // Interpreter form: the agent token is the script slot, and nothing
             // before it is a launch flag.
             if is_interpreter(binary_name(&first_low)) {
-                if let Some(i) = interpreter_script_slot(rest) {
+                if let Some(i) = interpreter_script_slot(binary_name(&first_low), rest) {
                     let t_low = rest[i].to_lowercase();
-                    if self.match_interpreter_script(&t_low).as_deref() == Some(agent) {
+                    if self
+                        .match_interpreter_script(binary_name(&first_low), &t_low)
+                        .as_deref()
+                        == Some(agent)
+                    {
                         return Some(rest[(i + 1)..].iter().map(|s| s.to_string()).collect());
                     }
                 }
@@ -1656,7 +1700,7 @@ impl Manifests {
     /// Scoped package identity is checked before the basename because OMP and
     /// Pi intentionally ship the same `pi-coding-agent` package name under
     /// different owners.
-    fn match_interpreter_script(&self, token: &str) -> Option<String> {
+    fn match_interpreter_script(&self, runtime: &str, token: &str) -> Option<String> {
         let normalized = token.to_lowercase().replace('\\', "/");
         let segments: Vec<&str> = normalized.split('/').collect();
         let script = strip_script_extension(segments.last().copied()?);
@@ -1692,6 +1736,19 @@ impl Manifests {
             .or_else(|| {
                 let (_, basename) = package.as_ref()?;
                 self.best_agent(|agent| agent.distinct.iter().any(|pattern| pattern == basename))
+                    .map(|agent| agent.name.clone())
+            })
+            .or_else(|| {
+                matches!(runtime, "node" | "nodejs" | "bun")
+                    .then(|| {
+                        self.best_agent(|agent| {
+                            agent
+                                .interpreter_scripts
+                                .iter()
+                                .any(|pattern| pattern == segments.last().unwrap_or(&""))
+                        })
+                    })
+                    .flatten()
                     .map(|agent| agent.name.clone())
             })
     }
@@ -1860,12 +1917,28 @@ fn unwrap_leading_env(tokens: &[String]) -> &[String] {
 /// argv[0]. Flags are skipped. Values consumed by `-r`, `--require`, and
 /// `--loader` are skipped with their option. The first remaining argument is
 /// the script; later arguments are not scanned.
-fn interpreter_script_slot(args: &[String]) -> Option<usize> {
+fn interpreter_script_slot(runtime: &str, args: &[String]) -> Option<usize> {
+    let js = matches!(runtime, "node" | "nodejs" | "bun");
+    let stdin_dash = js || matches!(runtime, "python" | "python3" | "py" | "ruby" | "perl");
+    let stdin_s = matches!(runtime, "sh" | "bash" | "zsh");
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].as_str();
+        if (stdin_dash && arg == "-")
+            || (stdin_s && arg == "-s")
+            || (js
+                && (matches!(arg, "-e" | "--eval" | "-p" | "--print")
+                    || arg.starts_with("--eval=")
+                    || arg.starts_with("--print=")))
+        {
+            return None;
+        }
         if arg.starts_with('-') {
-            if matches!(arg, "-r" | "--require" | "--loader") {
+            if matches!(
+                arg,
+                "-r" | "--require" | "--loader" | "--experimental-loader"
+            ) || (js && arg == "--import")
+            {
                 i += 2;
             } else {
                 i += 1;
@@ -3015,6 +3088,39 @@ Would you like to proceed?
             m.launch_args_for(&[cmd.into()], "pi"),
             Some(vec!["--yes".into()])
         );
+    }
+
+    #[test]
+    fn stdin_script_forms_do_not_make_arguments_the_script() {
+        let m = Manifests::builtin();
+        for cmd in [
+            "python3 - claude",
+            "python - claude --yolo",
+            "py - claude",
+            "ruby - claude",
+            "perl - claude",
+            "node - claude",
+            "bun - claude",
+            "bash -s claude",
+            "sh -s claude",
+            "zsh -s claude",
+            "bash -s -- claude",
+        ] {
+            let procs = [cmd.to_string()];
+            assert_eq!(m.agent_in_processes(&procs), None, "{cmd}");
+            assert_eq!(m.launch_args_for(&procs, "claude"), None, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn shell_dash_and_npx_package_flag_still_find_the_script() {
+        let m = Manifests::builtin();
+        let bash = [String::from("bash -e /usr/bin/claude --yolo")];
+        assert_eq!(m.agent_in_processes(&bash), Some("claude".into()));
+        let dash = [String::from("bash - /usr/bin/claude --yolo")];
+        assert_eq!(m.agent_in_processes(&dash), Some("claude".into()));
+        let npx = [String::from("npx -p /usr/bin/claude --yolo")];
+        assert_eq!(m.agent_in_processes(&npx), Some("claude".into()));
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ambiguous: &["letta"],
         binary_matcher: None,
         interpreter_packages: &["@letta-ai/letta-code"],
+        interpreter_scripts: &[],
         overlap_priority: 0,
     },
     sessions: Some(SessionOperations {

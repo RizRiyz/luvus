@@ -85,6 +85,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ambiguous: &["myagent"],
         binary_matcher: None,
         interpreter_packages: &["@vendor/myagent-cli"],
+        interpreter_scripts: &[],
         overlap_priority: 0,
     },
     sessions: None,
@@ -112,6 +113,11 @@ Identity must be conservative because process evidence outranks text:
   be represented by fixed strings, such as a versioned binary name.
 - `interpreter_packages`: exact package identities for CLIs executed by Node,
   Bun, or another supported interpreter. Preserve the complete scope.
+- `interpreter_scripts`: extensionless script names that are too short to trust
+  elsewhere, such as `cmd`. They count only as the script that `node`,
+  `nodejs`, or `bun` runs, never as a bare executable, title, or screen text,
+  and any such script with that exact name matches. A manifest with
+  `replace = true` drops them with the rest of the built-in identity.
 - `overlap_priority`: an explicit tie-breaker for a reviewed collision, not a
   general ranking system.
 

@@ -21,6 +21,7 @@ pub(crate) mod antigravity;
 pub(crate) mod arc_studio;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod command_code;
 pub(crate) mod copilot;
 pub(crate) mod cursor;
 pub(crate) mod devin;

@@ -18,6 +18,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ambiguous: &["arc studio"],
         binary_matcher: None,
         interpreter_packages: &["@circle-fin/arc-studio-cli"],
+        interpreter_scripts: &[],
         overlap_priority: 0,
     },
     // The TUI only exposes --continue (which can select a different session).

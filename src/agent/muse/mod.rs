@@ -53,6 +53,7 @@ pub(super) const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
         ambiguous: AMBIGUOUS_IDENTITIES,
         binary_matcher: Some(is_versioned_binary),
         interpreter_packages: &[],
+        interpreter_scripts: &[],
         overlap_priority: 0,
     },
     sessions: Some(SessionOperations {

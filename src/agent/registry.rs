@@ -24,6 +24,7 @@ pub(crate) static BUILTINS: &[&AgentDescriptor] = &[
     &super::pi::DESCRIPTOR,
     &super::fx::DESCRIPTOR,
     &super::devin::DESCRIPTOR,
+    &super::command_code::DESCRIPTOR,
 ];
 
 // Preserve the current Settings and CLI presentation order independently of
@@ -278,6 +279,11 @@ mod tests {
             ("pi", &["pi-coding-agent"][..], &["pi"][..]),
             ("fx", &[][..], &["fx"][..]),
             ("devin", &[][..], &["devin"][..]),
+            (
+                "command-code",
+                &["command-code", "commandcode"][..],
+                &[][..],
+            ),
         ];
         assert_eq!(actual, expected);
         assert!(BUILTINS.iter().all(|descriptor| {
