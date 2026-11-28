@@ -25,8 +25,14 @@ fn diff_note_count(count: usize) -> String {
 pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t: &Theme) {
     app.files_area = area;
     app.file_tree_rects.clear();
+    app.file_hit_paths.clear();
     app.files_mode_rects.clear();
     app.diff_row_rects.clear();
+    app.diff_hit_keys.clear();
+    app.file_search_clear_rect = None;
+    app.file_filter_clear_rect = None;
+    app.diff_clear_rect = None;
+    app.diff_clear_is_search = false;
 
     let cx = area.x + 2;
     let cw = area.width.saturating_sub(3);
@@ -76,11 +82,24 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
     );
 
     // Workspace and branch are already present in Luvus chrome, so the dock
-    // spends no row repeating that identity and DIFF progress. Content starts
-    // immediately below the selector, like the other dock lists.
+    // spends no row repeating that identity and DIFF progress. DIFF does keep
+    // its review-state filter fixed below the selector, before query/loading/
+    // empty rows. This is a label, not another header control or hit target.
     let mut list_top = area.y + crate::ui::DOCK_HEADER_ROWS;
     let mut cap = area.height.saturating_sub(crate::ui::DOCK_HEADER_ROWS) as usize;
     if app.files_mode == crate::diff::FilesMode::Diff {
+        if list_top < area.bottom() {
+            line_at(
+                f,
+                list_top,
+                Line::from(Span::styled(
+                    format!("f: {}", app.diff.filter.label(app.catalog)),
+                    Style::new().fg(t.accent),
+                )),
+            );
+            list_top = list_top.saturating_add(1);
+            cap = cap.saturating_sub(1);
+        }
         draw_diff_list(f, area, list_top, cap, app, t, &line_at);
         return;
     }
@@ -95,6 +114,24 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         );
         return;
     }
+    if app.file_search.editing() || app.file_search.active() {
+        let status = if app.file_search_miss {
+            format!(" {}", app.catalog.dock_no_matches)
+        } else {
+            String::new()
+        };
+        app.file_clear_is_search = true;
+        app.file_search_clear_rect = crate::ui::sidebar::draw_dock_query(
+            f,
+            area,
+            list_top,
+            &crate::search::query_label("/", app.file_search.text(), &status),
+            app.catalog.dock_clear,
+            t,
+        );
+        list_top = list_top.saturating_add(1);
+        cap = cap.saturating_sub(1);
+    }
     if let Some(filter) = &app.file_tree.filter {
         let status = if filter.loading {
             " …"
@@ -103,19 +140,23 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
         } else {
             ""
         };
-        line_at(
+        app.file_clear_is_search = false;
+        app.file_filter_clear_rect = crate::ui::sidebar::draw_dock_query(
             f,
+            area,
             list_top,
-            Line::from(Span::styled(
-                format!("f: {}{}", filter.query, status),
-                Style::new().fg(t.accent),
-            )),
+            &crate::search::query_label("\\", &filter.query, status),
+            app.catalog.dock_clear,
+            t,
         );
         line_at(
             f,
             list_top.saturating_add(1),
             Line::from(Span::styled(
-                "Enter: actions · Esc: cancel",
+                format!(
+                    "Enter {} · Tab {} · Esc {}",
+                    app.catalog.act_right_click, app.catalog.act_move, app.catalog.act_back
+                ),
                 Style::new().fg(t.overlay1),
             )),
         );
@@ -126,7 +167,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
                 f,
                 list_top,
                 Line::from(Span::styled(
-                    "No matching files",
+                    app.catalog.dock_no_matches,
                     Style::new().fg(t.overlay1),
                 )),
             );
@@ -250,6 +291,7 @@ pub(super) fn draw_files_dock(f: &mut RenderTarget, area: Rect, app: &mut App, t
             );
         }
         line_at(f, y, Line::from(spans));
+        app.file_hit_paths.insert(i, row.path.clone());
         app.file_tree_rects.push((i, rect));
     }
 }
@@ -284,20 +326,54 @@ fn draw_diff_list(
         );
         return;
     }
+    let search_line = app.diff.list_search.editing()
+        || (app.diff.list_search.active() && !app.diff.list_query.editing());
+    let filter_line =
+        !search_line && (app.diff.list_query.editing() || app.diff.list_query.active());
+    let mut list_top = list_top;
+    let mut cap = cap;
+    if (search_line || filter_line) && list_top < area.bottom() {
+        let (prompt, text, miss) = if search_line {
+            ("/", app.diff.list_search.text(), app.diff.list_search_miss)
+        } else {
+            ("\\", app.diff.list_query.text(), false)
+        };
+        let status = if miss {
+            format!(" {}", app.catalog.dock_no_matches)
+        } else {
+            String::new()
+        };
+        app.diff_clear_is_search = search_line;
+        app.diff_clear_rect = crate::ui::sidebar::draw_dock_query(
+            f,
+            area,
+            list_top,
+            &crate::search::query_label(prompt, text, &status),
+            app.catalog.dock_clear,
+            t,
+        );
+        list_top = list_top.saturating_add(1);
+        cap = cap.saturating_sub(1);
+    }
     if app.diff.rows.is_empty() {
+        let filtered =
+            app.diff.list_query.active() || app.diff.filter != crate::diff::model::DiffFilter::All;
+        let message = if filtered {
+            app.catalog.dock_no_matches
+        } else {
+            "working tree clean"
+        };
         line_at(
             f,
             list_top,
-            Line::from(Span::styled(
-                "working tree clean",
-                Style::new().fg(t.overlay1),
-            )),
+            Line::from(Span::styled(message, Style::new().fg(t.overlay1))),
         );
         return;
     }
     let max_scroll = app.diff.rows.len().saturating_sub(cap);
     app.diff.scroll = app.diff.scroll.min(max_scroll);
     app.diff.viewport = cap;
+    app.diff.ensure_cursor_visible();
     let snapshot = app.diff.snapshot.as_ref().expect("rows require snapshot");
     // Like WORKSPACES/AGENTS, the active view and keyboard preselection are
     // independent. Rendering never changes the cursor or its stable key.
@@ -328,7 +404,14 @@ fn draw_diff_list(
                 let Some(file) = snapshot.files.get(*file_index) else {
                     continue;
                 };
-                let selected = app.files_focused && row_index == app.diff.cursor;
+                let selected = app.files_focused
+                    && !app.diff.activation_blocked
+                    && row_index == app.diff.cursor
+                    && app
+                        .diff
+                        .selected_key
+                        .as_ref()
+                        .is_none_or(|key| key == &file.key);
                 let active = active_diff_key == Some(&file.key);
                 let rect = Rect::new(area.x, y, area.width, 1);
                 let hovered = app
@@ -404,6 +487,7 @@ fn draw_diff_list(
                         }),
                     );
                 }
+                app.diff_hit_keys.insert(row_index, file.key.clone());
                 app.diff_row_rects.push((row_index, rect));
             }
         }
@@ -931,6 +1015,89 @@ mod tests {
     use crate::ids::PaneId;
     use crate::ui::{theme::Theme, RenderTarget};
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn diff_state_label_is_localized_fixed_and_safe_in_small_docks() {
+        use crate::app::App;
+        use crate::diff::model::DiffFilter;
+        let _env = crate::persist::test_env("diff-state-label-geometry");
+        let mut app = App::new(100, 30, std::sync::mpsc::channel().0).unwrap();
+        app.files_mode = crate::diff::FilesMode::Diff;
+        let theme = app.theme.clone();
+        for code in ["en", "es", "pt", "fr", "de", "id", "zh", "ja", "ko"] {
+            app.catalog = crate::i18n::by_code(code);
+            for state in [
+                DiffFilter::All,
+                DiffFilter::Unviewed,
+                DiffFilter::ModifiedSinceReview,
+                DiffFilter::HasNotes,
+            ] {
+                app.diff.filter = state;
+                for width in [4, 8, 16, 26, 48] {
+                    for height in [1, 2, 3, 8] {
+                        let area = Rect::new(0, 0, width, height);
+                        let mut buffer = Buffer::empty(area);
+                        super::draw_files_dock(
+                            &mut RenderTarget::new(&mut buffer, area),
+                            area,
+                            &mut app,
+                            &theme,
+                        );
+                        if width >= 16 {
+                            let header: String =
+                                (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+                            assert!(
+                                header.contains("FILES") && header.contains("DIFF"),
+                                "{header}"
+                            );
+                        }
+                        if height > crate::ui::DOCK_HEADER_ROWS && width == 48 {
+                            let row: String = (0..width)
+                                .map(|x| buffer[(x, crate::ui::DOCK_HEADER_ROWS)].symbol())
+                                .collect();
+                            let compact: String =
+                                row.chars().filter(|ch| !ch.is_whitespace()).collect();
+                            let expected: String = state
+                                .label(app.catalog)
+                                .chars()
+                                .filter(|ch| !ch.is_whitespace())
+                                .collect();
+                            assert!(compact.contains(&expected), "{code}: {row}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn files_search_and_filter_clear_targets_are_independent() {
+        use crate::app::App;
+        use crate::files::filter::FileFilter;
+        let _env = crate::persist::test_env("files-two-clear-targets");
+        let mut app = App::new(100, 30, std::sync::mpsc::channel().0).unwrap();
+        app.files_mode = crate::diff::FilesMode::Files;
+        app.file_tree.filter = Some(FileFilter::start(
+            app.file_tree.root().to_path_buf(),
+            std::sync::mpsc::channel().0,
+            (0, 0),
+        ));
+        app.file_tree.filter.as_mut().unwrap().editing = false;
+        app.file_search.begin();
+        app.file_search.append("src");
+        let theme = app.theme.clone();
+        let area = Rect::new(0, 0, 48, 12);
+        let mut buffer = Buffer::empty(area);
+        super::draw_files_dock(
+            &mut RenderTarget::new(&mut buffer, area),
+            area,
+            &mut app,
+            &theme,
+        );
+        let search = app.file_search_clear_rect.expect("search clear");
+        let filter = app.file_filter_clear_rect.expect("filter clear");
+        assert_ne!(search, filter);
+    }
 
     #[test]
     fn files_tree_distinguishes_open_file_from_keyboard_preselection() {

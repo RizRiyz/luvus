@@ -294,11 +294,9 @@ fn draw_stack(
             break;
         }
         let selected = index == view.selected || line_in_note_selection(view, line);
-        let old = line.old_line.map_or(String::new(), |n| n.to_string());
-        let new = line.new_line.map_or(String::new(), |n| n.to_string());
         let (bar, symbol) = gutter_markers(line.kind, options.marker_style);
         let numbers = if view.show_line_numbers {
-            format!("{old:>5} {new:>5} ")
+            stack_number_text(line)
         } else {
             String::new()
         };
@@ -345,14 +343,7 @@ fn draw_stack(
                 f.buffer_mut()
                     .set_line(area.x, y, &Line::from(spans), area.width);
                 if hits.interactive {
-                    if let Some((side, _)) = line_anchor(line) {
-                        hits.source.push((
-                            hits.pane,
-                            index,
-                            side,
-                            Rect::new(area.x, y, area.width, 1),
-                        ));
-                    }
+                    record_stack_source_hit(hits, index, line, Rect::new(area.x, y, area.width, 1));
                 }
                 y = y.saturating_add(1);
                 fragment_byte_start = fragment_byte_end;
@@ -377,10 +368,7 @@ fn draw_stack(
             f.buffer_mut()
                 .set_line(area.x, y, &Line::from(spans), area.width);
             if hits.interactive {
-                if let Some((side, _)) = line_anchor(line) {
-                    hits.source
-                        .push((hits.pane, index, side, Rect::new(area.x, y, area.width, 1)));
-                }
+                record_stack_source_hit(hits, index, line, Rect::new(area.x, y, area.width, 1));
             }
             y = y.saturating_add(1);
         }
@@ -402,15 +390,8 @@ fn draw_split(
 ) {
     let notes = DiffNotes { view, state };
     let selected_anchor = view.stack_rows.get(view.selected).and_then(line_anchor);
-    let scroll_anchor = view.stack_rows.get(view.scroll).and_then(line_anchor);
-    let start = scroll_anchor
-        .and_then(|anchor| {
-            view.split_rows.iter().position(|row| {
-                row.old.as_ref().and_then(line_anchor) == Some(anchor)
-                    || row.new.as_ref().and_then(line_anchor) == Some(anchor)
-            })
-        })
-        .unwrap_or(0);
+    // Includes hunk headers, which deliberately have no source-line anchor.
+    let start = view.split_row_for_stack(view.scroll);
     let half = area.width.saturating_sub(1) / 2;
     let mut y = area.y;
     for (split_index, row) in view.split_rows.iter().enumerate().skip(start) {
@@ -504,18 +485,22 @@ fn draw_split(
                 t,
             );
             if hits.interactive {
-                if let Some(number) = row.old.as_ref().and_then(|line| line.old_line) {
-                    if let Some(index) = view.stack_indices.get(&(DiffSide::Old, number)) {
-                        hits.source
-                            .push((hits.pane, *index, DiffSide::Old, old_rect));
-                    }
-                }
-                if let Some(number) = row.new.as_ref().and_then(|line| line.new_line) {
-                    if let Some(index) = view.stack_indices.get(&(DiffSide::New, number)) {
-                        hits.source
-                            .push((hits.pane, *index, DiffSide::New, new_rect));
-                    }
-                }
+                record_split_source_hit(
+                    hits,
+                    view,
+                    row.old.as_ref(),
+                    DiffSide::Old,
+                    old_stack_index,
+                    old_rect,
+                );
+                record_split_source_hit(
+                    hits,
+                    view,
+                    row.new.as_ref(),
+                    DiffSide::New,
+                    new_stack_index,
+                    new_rect,
+                );
             }
             y = y.saturating_add(1);
             fragment_index += 1;
@@ -557,6 +542,62 @@ fn draw_split(
         if selected_here && view.note_draft.is_some() {
             y = draw_note_composer(f, area, y, view, t);
         }
+    }
+}
+
+fn record_stack_source_hit(
+    hits: &mut DiffInteractionHits<'_>,
+    index: usize,
+    line: &DiffLine,
+    rect: Rect,
+) {
+    if let Some((side, _)) = line_anchor(line) {
+        hits.source.push((hits.pane, index, side, rect));
+        return;
+    }
+    if matches!(line.kind, DiffLineKind::Header | DiffLineKind::NoNewline) {
+        // Structural rows have no source side. Keep them out of the source-side
+        // hit stream by using a zero-width rect at the rendered row.
+        hits.source.push((
+            hits.pane,
+            index,
+            DiffSide::New,
+            Rect::new(rect.x, rect.y, 0, rect.height),
+        ));
+    }
+}
+
+fn record_split_source_hit(
+    hits: &mut DiffInteractionHits<'_>,
+    view: &DiffView,
+    line: Option<&DiffLine>,
+    side: DiffSide,
+    mapped_index: Option<usize>,
+    rect: Rect,
+) {
+    let Some(line) = line else { return };
+    let structural = matches!(line.kind, DiffLineKind::Header | DiffLineKind::NoNewline);
+    // A source-less row is drawn on both split columns, but it has one stack
+    // identity. Record that identity once on the old column so it cannot hide
+    // a real source hit occupying the same screen row on the new column.
+    if structural && side != DiffSide::Old {
+        return;
+    }
+    let index = line
+        .old_line
+        .filter(|_| side == DiffSide::Old)
+        .or_else(|| line.new_line.filter(|_| side == DiffSide::New))
+        .and_then(|number| view.stack_indices.get(&(side, number)).copied())
+        .or(structural.then_some(mapped_index).flatten());
+    if let Some(index) = index {
+        // Structural rows are not note anchors. A zero-width rect still tells
+        // keyboard follow that the row was drawn, without accepting a click.
+        let rect = if structural {
+            Rect::new(rect.x, rect.y, 0, rect.height)
+        } else {
+            rect
+        };
+        hits.source.push((hits.pane, index, side, rect));
     }
 }
 
@@ -1220,6 +1261,144 @@ impl<'a> Iterator for WrappedText<'a> {
         self.offset = end;
         Some(&self.text[start..end])
     }
+}
+
+pub(crate) fn stack_note_index(
+    view: &DiffView,
+    notes: &[crate::diff::ReviewNote],
+    width: u16,
+) -> std::collections::HashMap<(DiffSide, u32), usize> {
+    let mut rows = std::collections::HashMap::new();
+    if notes.is_empty() {
+        return rows;
+    }
+    for note in notes {
+        if note.anchor.diff_key != view.key
+            || view.note_edit_id.as_deref() == Some(note.id.as_str())
+        {
+            continue;
+        }
+        let card_width = width.saturating_sub(6);
+        let height = if card_width < 20 {
+            1
+        } else {
+            let body_width = card_width.saturating_sub(4).max(1);
+            note_editor_lines(&note.body, body_width)
+                .len()
+                .min(6)
+                .saturating_add(2)
+        };
+        *rows
+            .entry((note.anchor.side, note.anchor.end_line))
+            .or_insert(0) += height;
+    }
+    rows
+}
+
+/// Scroll that keeps the selected Stack row, including its wrap and note card,
+/// inside the viewport.
+///
+/// A one-line row still uses one screen row, so an unwrapped `G` leaves the
+/// last row at the bottom. Taller rows reserve their full height when it fits.
+pub(crate) fn stack_jump_scroll(
+    view: &DiffView,
+    note_rows: &std::collections::HashMap<(DiffSide, u32), usize>,
+    viewport: usize,
+    width: u16,
+    marker_style: DiffMarkerStyle,
+) -> usize {
+    let last = view.stack_rows.len().saturating_sub(1);
+    let selected = view.selected.min(last);
+    let scroll = view.scroll.min(last);
+    if viewport == 0 || view.stack_rows.is_empty() {
+        return selected;
+    }
+    if selected < scroll {
+        return selected;
+    }
+    let mut height = |index: usize| -> usize {
+        let notes = view
+            .stack_rows
+            .get(index)
+            .and_then(line_anchor)
+            .and_then(|anchor| note_rows.get(&anchor).copied())
+            .unwrap_or(0);
+        stack_source_rows(view, index, width, marker_style)
+            .saturating_add(notes)
+            .max(1)
+    };
+    let selected_height = height(selected);
+    let mut y = 0usize;
+    for index in scroll..selected {
+        y = y.saturating_add(height(index));
+        if y >= viewport {
+            return bottom_aligned_scroll(selected, viewport, &mut height);
+        }
+    }
+    if y.saturating_add(selected_height.min(viewport)) <= viewport {
+        scroll
+    } else {
+        bottom_aligned_scroll(selected, viewport, &mut height)
+    }
+}
+
+fn bottom_aligned_scroll(
+    selected: usize,
+    viewport: usize,
+    height: &mut impl FnMut(usize) -> usize,
+) -> usize {
+    let selected_height = height(selected);
+    if selected_height >= viewport {
+        return selected;
+    }
+    let mut start = selected;
+    let mut used = selected_height;
+    while start > 0 {
+        let previous = height(start - 1);
+        if used.saturating_add(previous) > viewport {
+            break;
+        }
+        used += previous;
+        start -= 1;
+    }
+    start
+}
+
+fn stack_source_rows(
+    view: &DiffView,
+    index: usize,
+    width: u16,
+    marker_style: DiffMarkerStyle,
+) -> usize {
+    let Some(line) = view.stack_rows.get(index) else {
+        return 1;
+    };
+    if !view.effective_wrap(width) {
+        return 1;
+    }
+    let gutter = stack_gutter_columns(line, view.show_line_numbers, marker_style);
+    let text_width = width.saturating_sub(gutter as u16).max(1);
+    wrapped_text(&line.text, text_width).count().max(1)
+}
+
+fn stack_number_text(line: &DiffLine) -> String {
+    let old = line.old_line.map_or(String::new(), |n| n.to_string());
+    let new = line.new_line.map_or(String::new(), |n| n.to_string());
+    format!("{old:>5} {new:>5} ")
+}
+
+fn stack_gutter_columns(
+    line: &DiffLine,
+    show_line_numbers: bool,
+    marker_style: DiffMarkerStyle,
+) -> usize {
+    let (bar, symbol) = gutter_markers(line.kind, marker_style);
+    let numbers = if show_line_numbers {
+        stack_number_text(line).chars().count()
+    } else {
+        0
+    };
+    bar.chars().count() + numbers + symbol.chars().count()
 }
 
 fn wrapped_text(text: &str, width: u16) -> WrappedText<'_> {

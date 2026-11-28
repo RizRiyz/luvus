@@ -155,23 +155,37 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
     }
     if let Some(focus) = app.sidebar_focus {
         let agents = focus == SidebarListFocus::Agents;
-        left.push(mode_label(
-            if agents {
-                app.catalog.agents
-            } else {
-                app.catalog.workspaces
-            },
-            t,
-        ));
-        left.push(Span::raw("  "));
-        left.extend(hint("j/k", cat.act_move, t));
-        left.extend(hint("Enter", cat.act_open_menu, t));
-        left.extend(hint("a", cat.act_right_click, t));
+        // Drop the least important hint first. Esc stays: it is how the dock
+        // is left. A narrow status row clips by omitting hints, never by
+        // wrapping or panicking.
+        let mut optional = vec![("/", cat.act_search), ("\\", cat.act_filter)];
         if agents {
-            left.extend(hint("f", cat.act_filter, t));
+            optional.push(("f", cat.act_state));
+            optional.push(("s", cat.act_scope));
         }
-        left.extend(hint("Esc", cat.act_back, t));
-        return (Line::from(left), false);
+        optional.push(("a", cat.act_right_click));
+        let mut keep = optional.len();
+        loop {
+            let mut row = vec![
+                Span::raw(" "),
+                mode_label(if agents { cat.agents } else { cat.workspaces }, t),
+                Span::raw("  "),
+            ];
+            row.extend(hint("j/k", cat.act_move, t));
+            row.extend(hint("Enter", cat.act_open_menu, t));
+            for (key, word) in &optional[..keep] {
+                row.extend(hint(key, word, t));
+            }
+            row.extend(hint("Esc", cat.act_back, t));
+            let line = Line::from(row);
+            if line.width() <= usize::from(budget) {
+                return (line, false);
+            }
+            if keep == 0 {
+                return (escape_guidance(cat, t, budget), false);
+            }
+            keep -= 1;
+        }
     }
     if app.files_focused {
         let diff = app.files_mode == crate::diff::FilesMode::Diff;
@@ -183,12 +197,33 @@ fn fixed_guidance(app: &App, t: &Theme, budget: u16) -> (Line<'static>, bool) {
             left.extend(hint("Esc", cat.act_back, t));
             return (Line::from(left), false);
         }
-        left.extend(hint(if diff { "j/k" } else { "hjkl" }, cat.act_move, t));
-        left.extend(hint("Enter", cat.act_open_menu, t));
-        left.extend(hint("a", cat.act_right_click, t));
-        left.extend(hint("f", cat.act_filter, t));
-        left.extend(hint("Esc", cat.act_back, t));
-        return (Line::from(left), false);
+        let mut optional = vec![("/", cat.act_search), ("\\", cat.act_filter)];
+        if diff {
+            optional.push(("f", cat.act_state));
+        }
+        optional.push(("a", cat.act_right_click));
+        let mut keep = optional.len();
+        loop {
+            let mut row = vec![
+                Span::raw(" "),
+                mode_label(if diff { "DIFF" } else { "FILES" }, t),
+                Span::raw("  "),
+            ];
+            row.extend(hint(if diff { "j/k" } else { "hjkl" }, cat.act_move, t));
+            row.extend(hint("Enter", cat.act_open_menu, t));
+            for (key, word) in &optional[..keep] {
+                row.extend(hint(key, word, t));
+            }
+            row.extend(hint("Esc", cat.act_back, t));
+            let line = Line::from(row);
+            if line.width() <= usize::from(budget) {
+                return (line, false);
+            }
+            if keep == 0 {
+                return (escape_guidance(cat, t, budget), false);
+            }
+            keep -= 1;
+        }
     }
     let focused_view = app
         .workspaces
@@ -315,6 +350,18 @@ fn local_search_guidance<M>(
     }
     row.extend(hint("Esc", cat.act_cancel, t));
     Line::from(row)
+}
+
+fn escape_guidance(cat: &crate::i18n::Catalog, t: &Theme, budget: u16) -> Line<'static> {
+    let full = Line::from(hint("Esc", cat.act_back, t));
+    if full.width() <= usize::from(budget) {
+        full
+    } else {
+        Line::from(Span::styled(
+            crate::ui::truncate("Esc", usize::from(budget)),
+            Style::new().fg(t.accent),
+        ))
+    }
 }
 
 fn mode_label(label: &str, t: &Theme) -> Span<'static> {
@@ -572,7 +619,7 @@ mod tests {
             text.contains("Enter open"),
             "unexpected DIFF legend: {text}"
         );
-        assert!(text.contains("f filter"), "unexpected DIFF legend: {text}");
+        assert!(text.contains("f state"), "unexpected DIFF legend: {text}");
 
         app.files_focused = false;
         let pane = app.layout().focus;
@@ -848,6 +895,7 @@ mod tests {
             .collect();
         assert!(text.contains("WORKSPACES"));
         assert!(text.contains("Enter open"));
+        assert!(text.contains("/ search"));
         assert!(text.contains("a right click"));
 
         app.sidebar_focus = Some(SidebarListFocus::Agents);
@@ -858,8 +906,30 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert!(text.contains("AGENTS"));
-        assert!(text.contains("f filter"));
+        assert!(text.contains("/ search"));
+        assert!(text.contains("f state"));
+        assert!(text.contains("s scope"));
         assert!(text.contains("a right click"));
+        assert!(text.contains("Esc back"));
+
+        let (narrow, _) = fixed_guidance(&app, &theme, 24);
+        assert!(
+            narrow.width() <= 24
+                || !narrow
+                    .spans
+                    .iter()
+                    .any(|span| span.content.contains("s scope")),
+            "a narrow status row drops hints instead of overflowing"
+        );
+        let narrow_text: String = narrow
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            narrow_text.contains("Esc"),
+            "leave stays available:\n{narrow_text}"
+        );
     }
 
     #[test]

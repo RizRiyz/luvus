@@ -70,7 +70,7 @@ session must first be opened in that session before using its FILES actions.
 
 ## Filter the FILES dock
 
-Focus FILES with **`Ctrl+Space e`**, then press **`f`**. The dock lists fuzzy
+Focus FILES with **`Ctrl+Space e`**, then press **`\`**. The dock lists fuzzy
 matches by workspace-relative path, including files in collapsed folders.
 Discovery uses the same bounded index as the finder: tracked and unignored
 Git files, or a bounded filesystem walk outside Git. It does not read file
@@ -83,6 +83,21 @@ pick up newly created files (catalogs can be cached for two seconds).
    The search clears and the original tree position is restored.
 4. **`Esc`** cancels the search from either the query or the action menu and
    restores the original tree. A further `Esc` returns focus to the pane.
+
+Press **`Tab`** to retain the filter results and return to list navigation.
+Then `/` searches only those results, without hiding any more rows; `Enter`
+commits the search and `n` / `N` wrap through its matches. `\` returns to
+filter editing. While editing either query, `/`, `\`, `f`, `s`, `n`, `a`,
+`j`, and `q` are text. `Esc` cancels a search edit to its checkpoint; outside
+editing it clears search before the FILES filter restores `saved_position`.
+Without a FILES filter, `/` searches existing tree rows by name or
+workspace-relative path, including directory rows outside the current viewport.
+A collapsed directory itself can match, but its hidden descendants cannot.
+Matches scroll into view; `n` / `N` wrap through matching files and directories.
+After committing a search, Enter on a directory expands or collapses it; it does
+not open a file action menu. Search does not expand the whole tree or start a
+filesystem worker. Search and filter are keyboard entries, not extra title-bar
+buttons; the active query line still offers a clear control.
 
 While typing, letters such as `a`, `j`, and `q` are query text. The dock shows
 loading, empty, and partial-result states. At most 200 results are displayed
